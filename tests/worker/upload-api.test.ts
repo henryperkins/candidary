@@ -3,7 +3,9 @@ import { applyD1Migrations, reset } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
+import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
+import { getOrCreatePreview } from '../../worker/storage/previews';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -199,11 +201,63 @@ describe('upload finalization and private delivery', () => {
     const guestSecret = await (await import('../../worker/security/crypto')).decryptGuestSecret(guestToken.secret_ciphertext, testEnv.GUEST_TOKEN_ENCRYPTION_KEY);
     const otherExchange = await createApp().request(`/join/${guestToken.id}.${guestSecret}`, { redirect: 'manual' }, testEnv);
     const other = cookiesFrom(otherExchange);
-    const pending = await createApp().request(`/api/media/${reserved.id}/content`, { headers: { cookie: other.cookie } }, testEnv);
+    const ownPreview = await createApp().request(`/api/media/${reserved.id}/preview`, { headers: { cookie: access.cookie } }, testEnv);
+    const pending = await createApp().request(`/api/media/${reserved.id}/preview`, { headers: { cookie: other.cookie } }, testEnv);
+    const guestOriginal = await createApp().request(`/api/media/${reserved.id}/original`, { headers: { cookie: access.cookie } }, testEnv);
+    const managerOriginal = await createApp().request(`/api/media/${reserved.id}/original`, { headers: { cookie: access.manager.cookie } }, testEnv);
+    expect(ownPreview.status).toBe(200);
     expect(pending.status).toBe(403);
+    expect(guestOriginal.status).toBe(403);
+    expect(managerOriginal.status).toBe(200);
+
+    await env.DB.batch([
+      env.DB.prepare("UPDATE media SET publication_status = 'published', published_at = ? WHERE id = ?").bind(new Date().toISOString(), reserved.id),
+      env.DB.prepare('UPDATE events SET gallery_visible = 1 WHERE id = ?').bind(access.event.id),
+    ]);
+    const published = await createApp().request(`/api/media/${reserved.id}/preview`, { headers: { cookie: other.cookie } }, testEnv);
+    expect(published.status).toBe(200);
 
     await env.DB.prepare("UPDATE media SET publication_status = 'hidden' WHERE id = ?").bind(reserved.id).run();
-    const rejected = await createApp().request(`/api/media/${reserved.id}/content`, { headers: { cookie: access.cookie } }, testEnv);
-    expect(rejected.status).toBe(403);
+    const hidden = await createApp().request(`/api/media/${reserved.id}/preview`, { headers: { cookie: other.cookie } }, testEnv);
+    expect(hidden.status).toBe(403);
+  });
+
+  it('transforms a preview once, persists it, and serves the cached derivative', async () => {
+    const access = await guestAccess();
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename: 'cache.png', mimeType: 'image/png', byteSize: 128, idempotencyKey: 'preview-cache', guestName: 'Avery' }),
+    }, testEnv);
+    const reserved = (await initiated.json<any>()).data.media;
+    await env.MEDIA_BUCKET.put(reserved.objectKey, png(400, 300), { httpMetadata: { contentType: 'image/png' } });
+    const finalizedResponse = await createApp().request(`/api/event/${access.event.slug}/uploads/${reserved.id}/finalize`, {
+      method: 'POST', headers: writeHeaders(access), body: '{}',
+    }, testEnv);
+    const finalized = (await finalizedResponse.json<any>()).data.media;
+
+    let transforms = 0;
+    const transformedBytes = new TextEncoder().encode('deterministic-webp-preview');
+    const transformer = {
+      transform() { return this; },
+      async output() {
+        transforms += 1;
+        return { image: () => new Response(transformedBytes).body! };
+      },
+    };
+    const previewEnv = {
+      DB: env.DB,
+      MEDIA_BUCKET: env.MEDIA_BUCKET,
+      IMAGES: { input: () => transformer },
+    } as unknown as AppEnv;
+    const repository = new MediaRepository(env.DB);
+    const first = await getOrCreatePreview(previewEnv, finalized, repository);
+    const cachedMedia = await repository.getById(finalized.id);
+    await env.MEDIA_BUCKET.delete(finalized.objectKey);
+    const second = await getOrCreatePreview(previewEnv, cachedMedia!, repository);
+
+    expect(await first.text()).toBe('deterministic-webp-preview');
+    expect(await second.text()).toBe('deterministic-webp-preview');
+    expect(cachedMedia?.previewObjectKey).toMatch(/\/previews\/.+\.webp$/u);
+    expect(transforms).toBe(1);
   });
 });

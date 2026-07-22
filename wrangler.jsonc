@@ -24,6 +24,9 @@
       "bucket_name": "candidary-media"
     }
   ],
+  "images": {
+    "binding": "IMAGES"
+  },
   "workflows": [
     {
       "name": "candidary-export",

@@ -1,10 +1,11 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
+import { getOrCreatePreview } from '../storage/previews';
 
 export const contentRoutes = new Hono<AppBindings>();
 
@@ -21,23 +22,49 @@ contentRoutes.get('/event/:slug/cover', async (context) => {
   } });
 });
 
-contentRoutes.get('/media/:mediaId/content', async (context) => {
+async function previewResponse(context: Context<AppBindings>) {
   const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
-  const media = await new MediaRepository(context.env.DB).getById(context.req.param('mediaId'));
+  const repository = new MediaRepository(context.env.DB);
+  const media = await repository.getById(context.req.param('mediaId')!);
   if (!media || media.eventId !== auth.event.id || media.uploadState !== 'stored' || media.deletedAt) {
     throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
   }
   const manager = auth.session.role === 'manager';
-  const guestCanRead = media.publicationStatus === 'published'
-    || (media.publicationStatus === 'unpublished' && media.uploaderSessionId === auth.session.id);
+  const guestCanRead = media.uploaderSessionId === auth.session.id
+    || (media.publicationStatus === 'published' && auth.event.galleryVisible);
   if (!manager && !guestCanRead) throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
 
+  const object = await getOrCreatePreview(context.env, media, repository);
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': object.httpMetadata?.contentType ?? 'image/webp',
+      'Content-Length': String(object.size),
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+}
+
+contentRoutes.get('/media/:mediaId/preview', previewResponse);
+contentRoutes.get('/media/:mediaId/content', previewResponse);
+
+contentRoutes.get('/media/:mediaId/original', async (context) => {
+  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
+  if (auth.session.role !== 'manager') {
+    throw new ApiError('ROLE_FORBIDDEN', 'Only the event host can download original photos.', 403);
+  }
+  const media = await new MediaRepository(context.env.DB).getById(context.req.param('mediaId'));
+  if (!media || media.eventId !== auth.event.id || media.uploadState !== 'stored' || media.deletedAt) {
+    throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
+  }
   const object = await context.env.MEDIA_BUCKET.get(media.objectKey);
-  if (!object?.body) throw new ApiError('UPLOAD_OBJECT_MISSING', 'This photo is temporarily unavailable.', 404);
+  if (!object?.body) throw new ApiError('UPLOAD_OBJECT_MISSING', 'This original photo is temporarily unavailable.', 404);
+  const filename = encodeURIComponent(media.originalFilename);
   return new Response(object.body, {
     headers: {
       'Content-Type': media.mimeType,
       'Content-Length': String(object.size),
+      'Content-Disposition': `attachment; filename*=UTF-8''${filename}`,
       'Cache-Control': 'private, no-store',
       'X-Content-Type-Options': 'nosniff',
     },
