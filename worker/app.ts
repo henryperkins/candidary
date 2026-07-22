@@ -6,6 +6,9 @@ import { securityHeaders } from './http/security-headers';
 import { eventRoutes } from './routes/event';
 import { exchangeRoutes } from './routes/exchange';
 import { contentRoutes } from './routes/content';
+import { galleryRoutes } from './routes/gallery';
+import { manageRoutes } from './routes/manage';
+import { messageRoutes } from './routes/messages';
 import { publicRoutes } from './routes/public';
 import { uploadRoutes } from './routes/uploads';
 
@@ -22,6 +25,9 @@ export function createApp() {
   app.route('/api', eventRoutes);
   app.route('/api', uploadRoutes);
   app.route('/api', contentRoutes);
+  app.route('/api', galleryRoutes);
+  app.route('/api', manageRoutes);
+  app.route('/api', messageRoutes);
 
   app.notFound((context) => context.json({
     code: 'EVENT_NOT_FOUND',

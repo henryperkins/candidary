@@ -72,6 +72,39 @@ export class MediaRepository {
     return row ? mapMedia(row) : null;
   }
 
+  async listForManager(eventId: string, status?: ModerationStatus): Promise<MediaRecord[]> {
+    const result = status
+      ? await this.db.prepare(`
+          SELECT * FROM media
+          WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL AND moderation_status = ?
+          ORDER BY created_at ASC
+        `).bind(eventId, status).all<MediaRow>()
+      : await this.db.prepare(`
+          SELECT * FROM media
+          WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+          ORDER BY created_at ASC
+        `).bind(eventId).all<MediaRow>();
+    return result.results.map(mapMedia);
+  }
+
+  async listGallery(eventId: string): Promise<MediaRecord[]> {
+    const result = await this.db.prepare(`
+      SELECT * FROM media
+      WHERE event_id = ? AND upload_state = 'stored' AND moderation_status = 'approved' AND deleted_at IS NULL
+      ORDER BY approved_at ASC, created_at ASC
+    `).bind(eventId).all<MediaRow>();
+    return result.results.map(mapMedia);
+  }
+
+  async listContributions(eventId: string, sessionId: string): Promise<MediaRecord[]> {
+    const result = await this.db.prepare(`
+      SELECT * FROM media
+      WHERE event_id = ? AND uploader_session_id = ? AND deleted_at IS NULL
+      ORDER BY created_at ASC
+    `).bind(eventId, sessionId).all<MediaRow>();
+    return result.results.map(mapMedia);
+  }
+
   private async getIdempotent(input: ReserveMediaRecord): Promise<MediaRecord | null> {
     const row = await this.db.prepare(`
       SELECT * FROM media WHERE event_id = ? AND uploader_session_id = ? AND idempotency_key = ?

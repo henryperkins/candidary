@@ -64,5 +64,17 @@ export class TokensRepository {
     await this.db.prepare('UPDATE event_access_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
       .bind(revokedAt, id).run();
   }
-}
 
+  async revokeRole(eventId: string, role: Role, revokedAt: string): Promise<void> {
+    await this.db.batch([
+      this.db.prepare(`
+        UPDATE event_access_tokens SET revoked_at = ?
+        WHERE event_id = ? AND role = ? AND revoked_at IS NULL
+      `).bind(revokedAt, eventId, role),
+      this.db.prepare(`
+        UPDATE event_sessions SET revoked_at = ?
+        WHERE event_id = ? AND role = ? AND revoked_at IS NULL
+      `).bind(revokedAt, eventId, role),
+    ]);
+  }
+}

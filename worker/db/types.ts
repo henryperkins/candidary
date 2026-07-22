@@ -83,3 +83,24 @@ export interface ExportRecord {
   expiresAt: string | null;
 }
 
+export interface MessageRecord {
+  id: string;
+  eventId: string;
+  guestSessionId: string;
+  guestName: string | null;
+  body: string;
+  moderationStatus: ModerationStatus;
+  createdAt: string;
+  approvedAt: string | null;
+  deletedAt: string | null;
+}
+
+export interface FeedItem {
+  id: string;
+  kind: 'message' | 'caption';
+  guestName: string | null;
+  body: string;
+  moderationStatus: ModerationStatus;
+  createdAt: string;
+  mediaId: string | null;
+}

@@ -88,5 +88,34 @@ export class EventsRepository {
     const row = await this.db.prepare('SELECT * FROM events WHERE slug = ?').bind(slug).first<EventRow>();
     return row ? mapEvent(row) : null;
   }
-}
 
+  async updateSettings(
+    id: string,
+    input: {
+      name?: string;
+      welcomeMessage?: string;
+      uploadsEnabled: boolean;
+      galleryVisible: boolean;
+      moderationRequired: boolean;
+    },
+  ): Promise<EventRecord> {
+    const result = await this.db.prepare(`
+      UPDATE events SET
+        name = COALESCE(?, name),
+        welcome_message = COALESCE(?, welcome_message),
+        uploads_enabled = ?,
+        gallery_visible = ?,
+        moderation_required = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).bind(
+      input.name ?? null,
+      input.welcomeMessage ?? null,
+      input.uploadsEnabled ? 1 : 0,
+      input.galleryVisible ? 1 : 0,
+      input.moderationRequired ? 1 : 0,
+      id,
+    ).run();
+    if ((result.meta.changes ?? 0) !== 1) throw new Error('Event settings were not updated.');
+    return (await this.getById(id))!;
+  }
+}

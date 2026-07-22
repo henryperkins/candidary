@@ -67,15 +67,15 @@ export class AuthService {
     const parsed = parseSecretToken(rawSession);
     const session = await this.sessions.getById(parsed.id);
     if (!session) throw new ApiError('SESSION_REQUIRED', 'Open a valid event link to continue.', 401);
-    if (session.revokedAt || Date.parse(session.expiresAt) <= now.getTime()) {
-      throw new ApiError('SESSION_EXPIRED', 'Your session expired. Open your event link again.', 401);
-    }
     const suppliedDigest = await digestSecret(parsed.secret, this.env.SESSION_HMAC_KEY);
     if (!constantTimeEqual(suppliedDigest, session.secretDigest)) {
       throw new ApiError('SESSION_REQUIRED', 'Open a valid event link to continue.', 401);
     }
     const token = await this.tokens.getById(session.accessTokenId);
     if (!token || token.revokedAt) throw new ApiError('TOKEN_REVOKED', 'This access link has been replaced or revoked.', 401);
+    if (session.revokedAt || Date.parse(session.expiresAt) <= now.getTime()) {
+      throw new ApiError('SESSION_EXPIRED', 'Your session expired. Open your event link again.', 401);
+    }
     if (Date.parse(token.expiresAt) <= now.getTime()) throw new ApiError('EVENT_EXPIRED', 'This event access has expired.', 410);
     const event = await this.events.getById(session.eventId);
     if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
@@ -83,4 +83,3 @@ export class AuthService {
     return { event, session, token };
   }
 }
-
