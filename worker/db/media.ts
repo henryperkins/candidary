@@ -213,6 +213,23 @@ export class MediaRepository {
     return (await this.getById(id))!;
   }
 
+  async failReservation(id: string): Promise<MediaRecord> {
+    const current = await this.getById(id);
+    if (!current) throw new ApiError('UPLOAD_OBJECT_MISSING', 'The upload reservation no longer exists.', 404);
+    if (current.uploadState !== 'reserved') return current;
+    const results = await this.db.batch([
+      this.db.prepare("UPDATE media SET upload_state = 'failed' WHERE id = ? AND upload_state = 'reserved'").bind(id),
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - 1,
+            reserved_bytes = reserved_bytes - ?
+        WHERE id = ? AND changes() = 1
+      `).bind(current.declaredByteSize, current.eventId),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) return (await this.getById(id))!;
+    return (await this.getById(id))!;
+  }
+
   async delete(id: string, deletedAt: string): Promise<MediaRecord> {
     const current = await this.getById(id);
     if (!current) throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo no longer exists.', 404);
@@ -246,4 +263,3 @@ export class MediaRepository {
     return (await this.getById(id))!;
   }
 }
-

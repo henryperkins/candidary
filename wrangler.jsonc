@@ -35,10 +35,10 @@
   },
   "vars": {
     "APP_ORIGIN": "http://127.0.0.1:5173",
-    "R2_ACCOUNT_ID": "local"
+    "R2_ACCOUNT_ID": "local",
+    "R2_BUCKET_NAME": "candidary-media"
   },
   "observability": {
     "enabled": true
   }
 }
-

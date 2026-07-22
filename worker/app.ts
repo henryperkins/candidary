@@ -5,7 +5,9 @@ import type { AppBindings } from './env';
 import { securityHeaders } from './http/security-headers';
 import { eventRoutes } from './routes/event';
 import { exchangeRoutes } from './routes/exchange';
+import { contentRoutes } from './routes/content';
 import { publicRoutes } from './routes/public';
+import { uploadRoutes } from './routes/uploads';
 
 export function createApp() {
   const app = new Hono<AppBindings>();
@@ -18,6 +20,8 @@ export function createApp() {
   app.route('/api', publicRoutes);
   app.route('/', exchangeRoutes);
   app.route('/api', eventRoutes);
+  app.route('/api', uploadRoutes);
+  app.route('/api', contentRoutes);
 
   app.notFound((context) => context.json({
     code: 'EVENT_NOT_FOUND',
