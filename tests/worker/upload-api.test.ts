@@ -82,16 +82,58 @@ describe('upload initiation', () => {
     const access = await guestAccess();
     const unsupported = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST', headers: writeHeaders(access),
-      body: JSON.stringify({ filename: 'clip.gif', mimeType: 'image/gif', byteSize: 100, idempotencyKey: 'bad-1' }),
+      body: JSON.stringify({ filename: 'clip.gif', mimeType: 'image/gif', byteSize: 100, idempotencyKey: 'bad-1', guestName: 'Avery' }),
     }, testEnv);
     const oversized = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST', headers: writeHeaders(access),
-      body: JSON.stringify({ filename: 'huge.jpg', mimeType: 'image/jpeg', byteSize: 10 * 1024 * 1024 + 1, idempotencyKey: 'bad-2' }),
+      body: JSON.stringify({ filename: 'huge.jpg', mimeType: 'image/jpeg', byteSize: 20 * 1024 * 1024 + 1, idempotencyKey: 'bad-2', guestName: 'Avery' }),
     }, testEnv);
 
     expect((await unsupported.json<any>()).code).toBe('FILE_TYPE_UNSUPPORTED');
     expect((await oversized.json<any>()).code).toBe('FILE_TOO_LARGE');
     expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media').first<{ count: number }>())?.count).toBe(0);
+  });
+
+  it('requires one trimmed guest-name field before reserving any file', async () => {
+    const access = await guestAccess();
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename: 'moment.jpg', mimeType: 'image/jpeg', byteSize: 100, idempotencyKey: 'nameless', guestName: '   ' }),
+    }, testEnv);
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).fieldErrors).toEqual({ guestName: 'Your name is required.' });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media').first<{ count: number }>())?.count).toBe(0);
+  });
+
+  it('reserves a batch in order and returns stable per-file success or failure', async () => {
+    const access = await guestAccess();
+    await env.DB.prepare('UPDATE events SET stored_media_count = 9999 WHERE id = ?').bind(access.event.id).run();
+    const payload = {
+      guestName: '  Avery  ',
+      files: [
+        { filename: 'phone.heic', mimeType: '', byteSize: 2048, idempotencyKey: 'batch-1' },
+        { filename: 'second.jpg', mimeType: 'image/jpeg', byteSize: 2048, idempotencyKey: 'batch-2' },
+        { filename: 'clip.gif', mimeType: 'image/gif', byteSize: 2048, idempotencyKey: 'batch-3' },
+      ],
+    };
+    const send = () => createApp().request(`/api/event/${access.event.slug}/uploads/batch`, {
+      method: 'POST', headers: writeHeaders(access), body: JSON.stringify(payload),
+    }, testEnv);
+
+    const first = await send();
+    const firstItems = (await first.json<any>()).data.items;
+    const repeatedItems = (await (await send()).json<any>()).data.items;
+
+    expect(first.status).toBe(201);
+    expect(firstItems.map((item: any) => [item.idempotencyKey, item.status, item.error?.code])).toEqual([
+      ['batch-1', 'accepted', undefined],
+      ['batch-2', 'rejected', 'EVENT_MEDIA_LIMIT'],
+      ['batch-3', 'rejected', 'FILE_TYPE_UNSUPPORTED'],
+    ]);
+    expect(firstItems[0].media).toMatchObject({ mimeType: 'image/heic', guestName: 'Avery', publicationStatus: 'unpublished' });
+    expect(repeatedItems[0].media.id).toBe(firstItems[0].media.id);
+    expect((await env.DB.prepare('SELECT reserved_media_count FROM events WHERE id = ?').bind(access.event.id).first<any>()).reserved_media_count).toBe(1);
   });
 });
 
@@ -100,7 +142,7 @@ describe('upload finalization and private delivery', () => {
     const access = await guestAccess();
     const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST', headers: writeHeaders(access),
-      body: JSON.stringify({ filename: 'moment.png', mimeType: 'image/png', byteSize: 128, idempotencyKey: 'final-1' }),
+      body: JSON.stringify({ filename: 'moment.png', mimeType: 'image/png', byteSize: 128, idempotencyKey: 'final-1', guestName: 'Avery' }),
     }, testEnv);
     const reserved = (await initiated.json<any>()).data.media;
     await env.MEDIA_BUCKET.put(reserved.objectKey, png(1600, 900), { httpMetadata: { contentType: 'image/png' } });
@@ -113,7 +155,7 @@ describe('upload finalization and private delivery', () => {
     const repeated = await finalize();
 
     expect(first.status).toBe(200);
-    expect(firstBody.data.media).toMatchObject({ uploadState: 'stored', moderationStatus: 'pending', width: 1600, height: 900, byteSize: 64 });
+    expect(firstBody.data.media).toMatchObject({ uploadState: 'stored', publicationStatus: 'unpublished', width: 1600, height: 900, byteSize: 64 });
     expect((await repeated.json<any>()).data.media.id).toBe(reserved.id);
 
     const ownContent = await createApp().request(`/api/media/${reserved.id}/content`, { headers: { cookie: access.cookie } }, testEnv);
@@ -126,7 +168,7 @@ describe('upload finalization and private delivery', () => {
     const access = await guestAccess();
     const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST', headers: writeHeaders(access),
-      body: JSON.stringify({ filename: 'small.png', mimeType: 'image/png', byteSize: 32, idempotencyKey: 'final-bad' }),
+      body: JSON.stringify({ filename: 'small.png', mimeType: 'image/png', byteSize: 32, idempotencyKey: 'final-bad', guestName: 'Avery' }),
     }, testEnv);
     const reserved = (await initiated.json<any>()).data.media;
     await env.MEDIA_BUCKET.put(reserved.objectKey, png(20, 20, 64), { httpMetadata: { contentType: 'image/png' } });
@@ -145,7 +187,7 @@ describe('upload finalization and private delivery', () => {
     const access = await guestAccess();
     const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST', headers: writeHeaders(access),
-      body: JSON.stringify({ filename: 'private.png', mimeType: 'image/png', byteSize: 128, idempotencyKey: 'privacy-1' }),
+      body: JSON.stringify({ filename: 'private.png', mimeType: 'image/png', byteSize: 128, idempotencyKey: 'privacy-1', guestName: 'Avery' }),
     }, testEnv);
     const reserved = (await initiated.json<any>()).data.media;
     await env.MEDIA_BUCKET.put(reserved.objectKey, png(400, 300), { httpMetadata: { contentType: 'image/png' } });
@@ -160,9 +202,8 @@ describe('upload finalization and private delivery', () => {
     const pending = await createApp().request(`/api/media/${reserved.id}/content`, { headers: { cookie: other.cookie } }, testEnv);
     expect(pending.status).toBe(403);
 
-    await env.DB.prepare("UPDATE media SET moderation_status = 'rejected' WHERE id = ?").bind(reserved.id).run();
+    await env.DB.prepare("UPDATE media SET publication_status = 'hidden' WHERE id = ?").bind(reserved.id).run();
     const rejected = await createApp().request(`/api/media/${reserved.id}/content`, { headers: { cookie: access.cookie } }, testEnv);
     expect(rejected.status).toBe(403);
   });
 });
-

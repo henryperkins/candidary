@@ -41,11 +41,32 @@ function webp(width: number, height: number) {
   return bytes;
 }
 
+function isoBmff(brand: 'heic' | 'mif1', width: number, height: number) {
+  const bytes = new Uint8Array(40);
+  const view = new DataView(bytes.buffer);
+  const encoder = new TextEncoder();
+
+  view.setUint32(0, 20);
+  bytes.set(encoder.encode('ftyp'), 4);
+  bytes.set(encoder.encode(brand), 8);
+  view.setUint32(12, 0);
+  bytes.set(encoder.encode(brand), 16);
+
+  view.setUint32(20, 20);
+  bytes.set(encoder.encode('ispe'), 24);
+  view.setUint32(28, 0);
+  view.setUint32(32, width);
+  view.setUint32(36, height);
+  return bytes;
+}
+
 describe('image header inspection', () => {
   it.each([
     [png(1600, 900), 'image/png', 1600, 900],
     [jpeg(1200, 800), 'image/jpeg', 1200, 800],
     [webp(1080, 1350), 'image/webp', 1080, 1350],
+    [isoBmff('heic', 4032, 3024), 'image/heic', 4032, 3024],
+    [isoBmff('mif1', 3024, 4032), 'image/heif', 3024, 4032],
   ] as const)('recognizes supported signatures and dimensions', (bytes, mimeType, width, height) => {
     expect(inspectImageHeader(bytes)).toEqual({ mimeType, width, height });
   });
@@ -53,6 +74,6 @@ describe('image header inspection', () => {
   it('rejects unsupported and truncated data', () => {
     expect(() => inspectImageHeader(new TextEncoder().encode('GIF89a'))).toThrow('unsupported');
     expect(() => inspectImageHeader(new Uint8Array([0x89, 0x50, 0x4e]))).toThrow('truncated');
+    expect(() => inspectImageHeader(isoBmff('heic', 0, 0))).toThrow('dimensions');
   });
 });
-

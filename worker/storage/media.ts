@@ -8,7 +8,6 @@ export async function finalizeStoredMedia(
   bucket: R2Bucket,
   repository: MediaRepository,
   media: MediaRecord,
-  moderationRequired: boolean,
   now = new Date(),
 ): Promise<MediaRecord> {
   if (media.uploadState === 'stored') return media;
@@ -45,7 +44,10 @@ export async function finalizeStoredMedia(
     await repository.failReservation(media.id);
     throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded file is not a supported image.', 415);
   }
-  if (metadata.mimeType !== media.mimeType) {
+  const signatureMatches = metadata.mimeType === media.mimeType
+    || (media.mimeType === 'image/heic-sequence' && metadata.mimeType === 'image/heic')
+    || (media.mimeType === 'image/heif-sequence' && metadata.mimeType === 'image/heif');
+  if (!signatureMatches) {
     await bucket.delete(media.objectKey);
     await repository.failReservation(media.id);
     throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded image signature does not match its type.', 415);
