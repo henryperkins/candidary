@@ -71,20 +71,20 @@ describe('guest event experience', () => {
 });
 
 describe('manager experience', () => {
-  it('loads the management summary and moderates selected pending media only', async () => {
+  it('opens on live intake, filters by guest name, and keeps gallery publishing secondary', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-        welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: true,
+        welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: false,
         moderationRequired: true, storedMediaCount: 2, storedBytes: 128,
         guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
       } });
       if (url.includes('/media')) {
         if (init?.method === 'POST') return json({ changed: ['media-a'] });
         return json({ media: [
-          { id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'The toast', moderationStatus: 'pending', uploadState: 'stored' },
-          { id: 'media-b', originalFilename: 'dance.png', guestName: 'Jamie', caption: 'First dance', moderationStatus: 'pending', uploadState: 'stored' },
+          { id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'The toast', publicationStatus: 'unpublished', uploadState: 'stored' },
+          { id: 'media-b', originalFilename: 'dance.png', guestName: 'Jamie', caption: 'First dance', publicationStatus: 'unpublished', uploadState: 'stored' },
         ] });
       }
       if (url.includes('/messages')) return json({ messages: [] });
@@ -95,9 +95,21 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     expect(await screen.findByRole('heading', { name: 'Maya & Theo' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByText('From Avery')).toBeVisible();
+    expect(screen.getByRole('link', { name: /download original toast.png/i })).toHaveAttribute('href', '/api/media/media-a/original');
     const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('guestName=Avery'),
+      expect.anything(),
+    ));
+
+    await user.click(screen.getByRole('button', { name: /gallery/i }));
+    expect(screen.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
     await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
-    await user.click(screen.getByRole('button', { name: 'Approve selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/manage/events/event-a/media/bulk',
       expect.objectContaining({ body: expect.stringContaining('media-a') }),

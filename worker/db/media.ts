@@ -82,13 +82,13 @@ export class MediaRepository {
           WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
             AND publication_status = ?
             AND (? IS NULL OR guest_name LIKE '%' || ? || '%' COLLATE NOCASE)
-          ORDER BY created_at ASC
+          ORDER BY created_at DESC, id DESC
         `).bind(eventId, status, normalizedName, normalizedName).all<MediaRow>()
       : await this.db.prepare(`
           SELECT * FROM media
           WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
             AND (? IS NULL OR guest_name LIKE '%' || ? || '%' COLLATE NOCASE)
-          ORDER BY created_at ASC
+          ORDER BY created_at DESC, id DESC
         `).bind(eventId, normalizedName, normalizedName).all<MediaRow>();
     return result.results.map(mapMedia);
   }

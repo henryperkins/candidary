@@ -13,7 +13,7 @@ import {
 
 beforeEach(resetDatabase);
 
-describe('manager settings and media moderation', () => {
+describe('manager settings and private photo intake', () => {
   it('uploads and serves an event cover only to event sessions', async () => {
     const access = await eventAccess();
     const initiated = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
@@ -35,19 +35,19 @@ describe('manager settings and media moderation', () => {
     expect(cover.headers.get('cache-control')).toBe('private, no-store');
   });
 
-  it('updates event toggles and exposes only approved media in the guest gallery', async () => {
+  it('keeps every delivery in intake, filters by guest name, and publishes separately', async () => {
     const access = await eventAccess();
-    const media = await uploadPending(access, 'review-1');
-    const pending = await createApp().request(`/api/manage/events/${access.event.id}/media?status=pending`, {
+    const avery = await uploadPending(access, 'review-1', null, 'Avery Stone');
+    const jordan = await uploadPending(access, 'review-2', null, 'Jordan Lee');
+    const all = await createApp().request(`/api/manage/events/${access.event.id}/media`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
-    expect((await pending.json<any>()).data.media.map((item: any) => item.id)).toContain(media.id);
-
-    const hidden = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
-      method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ galleryVisible: false, uploadsEnabled: true, moderationRequired: true }),
+    expect((await all.json<any>()).data.media.map((item: any) => item.id)).toEqual(expect.arrayContaining([avery.id, jordan.id]));
+    const filtered = await createApp().request(`/api/manage/events/${access.event.id}/media?guestName=avery`, {
+      headers: { cookie: access.manager.cookie },
     }, testEnv);
-    expect(hidden.status).toBe(200);
+    expect((await filtered.json<any>()).data.media.map((item: any) => item.id)).toEqual([avery.id]);
+
     const hiddenGallery = await createApp().request(`/api/event/${access.event.slug}/gallery`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
@@ -57,30 +57,40 @@ describe('manager settings and media moderation', () => {
       method: 'PATCH', headers: writeHeaders(access.manager),
       body: JSON.stringify({ galleryVisible: true, uploadsEnabled: true, moderationRequired: true }),
     }, testEnv);
-    const approved = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+    const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${avery.id}`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ action: 'approve', expectedStatus: 'pending' }),
+      body: JSON.stringify({ action: 'publish', expectedStatus: 'unpublished' }),
     }, testEnv);
-    expect(approved.status).toBe(200);
+    expect(published.status).toBe(200);
+    expect((await published.json<any>()).data.media.publicationStatus).toBe('published');
     const gallery = await createApp().request(`/api/event/${access.event.slug}/gallery`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
-    expect((await gallery.json<any>()).data.media.map((item: any) => item.id)).toEqual([media.id]);
+    expect((await gallery.json<any>()).data.media.map((item: any) => item.id)).toEqual([avery.id]);
+
+    await createApp().request(`/api/manage/events/${access.event.id}/media/${avery.id}`, {
+      method: 'PATCH', headers: writeHeaders(access.manager),
+      body: JSON.stringify({ action: 'hide', expectedStatus: 'published' }),
+    }, testEnv);
+    const intakeAfterHide = await createApp().request(`/api/manage/events/${access.event.id}/media?status=hidden`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect((await intakeAfterHide.json<any>()).data.media.map((item: any) => item.id)).toEqual([avery.id]);
   });
 
-  it('bulk-moderates only the selected pending items', async () => {
+  it('bulk-publishes only the selected unpublished items', async () => {
     const access = await eventAccess();
     const first = await uploadPending(access, 'bulk-1');
     const second = await uploadPending(access, 'bulk-2');
     const untouched = await uploadPending(access, 'bulk-3');
     const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
       method: 'POST', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ ids: [first.id, second.id], action: 'approve', expectedStatus: 'pending' }),
+      body: JSON.stringify({ ids: [first.id, second.id], action: 'publish', expectedStatus: 'unpublished' }),
     }, testEnv);
     expect(response.status).toBe(200);
-    const rows = await env.DB.prepare('SELECT id, moderation_status FROM media ORDER BY id').all<any>();
-    const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.moderation_status]));
-    expect(states).toMatchObject({ [first.id]: 'approved', [second.id]: 'approved', [untouched.id]: 'pending' });
+    const rows = await env.DB.prepare('SELECT id, publication_status FROM media ORDER BY id').all<any>();
+    const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.publication_status]));
+    expect(states).toMatchObject({ [first.id]: 'published', [second.id]: 'published', [untouched.id]: 'unpublished' });
   });
 });
 

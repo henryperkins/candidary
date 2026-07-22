@@ -218,3 +218,36 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .selection-grid { gap: 6px; }
   .selection-add-actions { grid-template-columns: 1fr; }
 }
+
+/* Live host intake */
+.manager-shell--intake { grid-template-columns: 184px minmax(620px, 1fr) 330px; }
+.intake-search { margin: 24px 0 20px; display: flex; align-items: center; gap: 9px; }
+.intake-search label { min-width: 220px; max-width: 430px; flex: 1; position: relative; }
+.intake-search label > svg { position: absolute; top: 50%; left: 13px; z-index: 1; transform: translateY(-50%); color: var(--muted); }
+.intake-search input { width: 100%; min-height: 48px; padding: 10px 13px 10px 42px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
+.intake-grid .intake-photo { position: relative; padding: 0; }
+.intake-grid .intake-photo > img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }
+.intake-select { position: absolute !important; inset: 0; z-index: 1; cursor: pointer; }
+.intake-select input { top: 10px; left: 10px; }
+.publication { width: fit-content; margin: 0 0 7px; padding: 4px 7px; display: block; border-radius: 999px; font-size: .6rem; font-weight: 700; letter-spacing: .04em; line-height: 1; text-transform: uppercase; }
+.publication--unpublished { background: var(--apricot-soft); color: var(--aubergine); }
+.publication--published { background: var(--moss-soft); color: #4e5b28; }
+.publication--hidden { background: #eee8eb; color: #6e5d67; }
+.moderation-grid article > div > .intake-card-actions { margin-top: 10px; display: flex; gap: 5px; }
+.intake-card-actions a, .intake-card-actions button { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--aubergine); cursor: pointer; }
+.intake-card-actions a { text-decoration: none; }
+.intake-card-actions button:last-child { color: var(--danger); }
+.manager-notice { margin: 20px 0 0; padding: 12px 14px; border-left: 3px solid var(--apricot); background: #fff4e8; color: #665860; font-size: .84rem; }
+.intake-qr { width: min(100%, 220px); margin: 18px auto; border: 1px solid var(--border); }
+.manager-utility .button--wide { width: 100%; }
+
+@media (max-width: 1100px) {
+  .manager-shell--intake { grid-template-columns: 80px 1fr; }
+}
+
+@media (max-width: 760px) {
+  .manager-shell--intake { display: block; }
+  .intake-search { align-items: stretch; flex-wrap: wrap; }
+  .intake-search label { min-width: 100%; }
+  .intake-search .button { flex: 1; }
+}

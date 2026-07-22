@@ -62,7 +62,7 @@ manageRoutes.get('/manage/events/:eventId/links', async (context) => {
 manageRoutes.post('/manage/events/:eventId/cover', async (context) => {
   const auth = await managerForEvent(context, true);
   const parsed = coverSchema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Choose a JPEG, PNG, or WebP image up to 10 MB.', 422);
+  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Choose a JPG, PNG, WebP, HEIC, or HEIF image up to 20 MB.', 422);
   const objectKey = `events/${auth.event.id}/cover/${crypto.randomUUID()}-${sanitizeFilename(parsed.data.filename)}`;
   const signed = await presignUpload(context.env, objectKey, parsed.data.mimeType);
   return context.json({ data: { objectKey, ...signed }, requestId: context.get('requestId') }, 201);
@@ -119,7 +119,8 @@ manageRoutes.get('/manage/events/:eventId/media', async (context) => {
   const status = rawStatus && ['unpublished', 'published', 'hidden'].includes(rawStatus)
     ? rawStatus as PublicationStatus
     : undefined;
-  const media = await new MediaRepository(context.env.DB).listForManager(context.req.param('eventId'), status);
+  const guestName = context.req.query('guestName');
+  const media = await new MediaRepository(context.env.DB).listForManager(context.req.param('eventId'), status, guestName);
   return context.json({ data: { media }, requestId: context.get('requestId') });
 });
 

@@ -67,12 +67,13 @@ export async function uploadPending(
   access: Awaited<ReturnType<typeof eventAccess>>,
   key: string,
   caption: string | null = null,
+  guestName = 'Avery',
 ) {
   const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
     method: 'POST', headers: writeHeaders(access.guest),
     body: JSON.stringify({
       filename: `${key}.png`, mimeType: 'image/png', byteSize: 128,
-      idempotencyKey: key, guestName: 'Avery', caption,
+      idempotencyKey: key, guestName, caption,
     }),
   }, testEnv);
   const media = (await initiated.json<any>()).data.media;
@@ -82,4 +83,3 @@ export async function uploadPending(
   }, testEnv);
   return (await finalized.json<any>()).data.media;
 }
-
