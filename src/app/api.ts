@@ -24,6 +24,12 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload.data;
 }
 
-export function mediaContent(id: string): string {
-  return `/api/media/${encodeURIComponent(id)}/content`;
+export function mediaPreview(id: string): string {
+  return `/api/media/${encodeURIComponent(id)}/preview`;
 }
+
+export function mediaOriginal(id: string): string {
+  return `/api/media/${encodeURIComponent(id)}/original`;
+}
+
+export const mediaContent = mediaPreview;

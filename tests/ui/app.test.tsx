@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +11,7 @@ function json(data: unknown, status = 200) {
   }));
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('public Candidary experience', () => {
   it('presents the approved value proposition and workflow', () => {
@@ -41,7 +41,7 @@ describe('public Candidary experience', () => {
 });
 
 describe('guest event experience', () => {
-  it('loads the event, upload invitation, approved gallery, and notes', async () => {
+  it('loads the private photo drop first and keeps the gallery and notes secondary', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: {
@@ -51,16 +51,21 @@ describe('guest event experience', () => {
       }, role: 'guest' });
       if (url.endsWith('/gallery')) return json({ media: [{
         id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'Golden hour',
-        moderationStatus: 'approved', uploadState: 'stored', width: 800, height: 600,
+        publicationStatus: 'published', uploadState: 'stored', width: 800, height: 600,
       }] });
       if (url.endsWith('/contributions')) return json({ media: [] });
       if (url.endsWith('/messages')) return json({ items: [{ id: 'note-a', kind: 'message', guestName: 'Sam', body: 'To many happy years.', createdAt: '2026-09-19T20:00:00Z', moderationStatus: 'approved' }] });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
-    expect(await screen.findByRole('heading', { name: 'Maya & Theo' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Add photos' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+    expect(screen.getByText(/Maya & Theo/, { selector: '.photo-drop__event' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Choose recent photos' })).toBeVisible();
+    const user = userEvent.setup();
+    await user.click(screen.getByText(/Shared gallery/, { selector: 'span' }));
     expect(await screen.findByAltText('Golden hour')).toBeVisible();
+    await user.click(screen.getByText(/Leave a note/, { selector: 'span' }));
     expect(screen.getByText('To many happy years.')).toBeVisible();
   });
 });

@@ -1,13 +1,12 @@
-import { ArrowRight, Expand, ImagePlus, MessageCircle, Upload, X } from 'lucide-react';
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { ArrowRight, ChevronDown, Expand, ImagePlus, MessageCircle, X } from 'lucide-react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { api, mediaContent } from '../app/api';
+import { api, mediaPreview } from '../app/api';
 import type { EventView, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { ErrorState, LoadingState } from '../components/States';
-
-interface UploadItem { file: File; id: string; state: 'ready' | 'uploading' | 'done' | 'error'; error?: string }
+import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
 
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const { slug = '' } = useParams();
@@ -15,69 +14,97 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const [gallery, setGallery] = useState<MediaView[]>([]);
   const [contributions, setContributions] = useState<MediaView[]>([]);
   const [messages, setMessages] = useState<MessageView[]>([]);
-  const [name, setName] = useState(() => localStorage.getItem('candidary_guest_name') ?? '');
-  const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [error, setError] = useState('');
-  const input = useRef<HTMLInputElement>(null);
+  const [terminal, setTerminal] = useState(false);
 
-  async function refresh() {
-    try {
-      const shell = await api<{ event: EventView; role: string }>(`/api/event/${slug}`);
-      setEvent(shell.event);
-      const [galleryData, contributionData, messageData] = await Promise.all([
-        shell.event.galleryVisible ? api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`) : Promise.resolve({ media: [] }),
-        api<{ media: MediaView[] }>(`/api/event/${slug}/contributions`),
-        api<{ items: MessageView[] }>(`/api/event/${slug}/messages`),
-      ]);
-      setGallery(galleryData.media); setContributions(contributionData.media); setMessages(messageData.items);
-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'This event could not be loaded.'); }
-  }
-  useEffect(() => { void refresh(); }, [slug]);
+  const loadSecondary = useCallback(async (eventView: EventView) => {
+    const [galleryResult, contributionResult, messageResult] = await Promise.allSettled([
+      eventView.galleryVisible
+        ? api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`)
+        : Promise.resolve({ media: [] }),
+      api<{ media: MediaView[] }>(`/api/event/${slug}/contributions`),
+      api<{ items: MessageView[] }>(`/api/event/${slug}/messages`),
+    ]);
+    if (galleryResult.status === 'fulfilled') setGallery(galleryResult.value.media);
+    if (contributionResult.status === 'fulfilled') setContributions(contributionResult.value.media);
+    if (messageResult.status === 'fulfilled') setMessages(messageResult.value.items);
+  }, [slug]);
 
-  function choose(files: FileList | null) {
-    if (!files) return;
-    setUploads((current) => [...current, ...[...files].map((file) => ({ file, id: crypto.randomUUID(), state: 'ready' as const }))]);
-  }
-  async function sendUploads() {
-    for (const item of uploads.filter(({ state }) => state === 'ready' || state === 'error')) {
-      setUploads((all) => all.map((entry) => entry.id === item.id ? { ...entry, state: 'uploading' } : entry));
-      try {
-        const result = await api<{ media: MediaView & { objectKey: string }; uploadUrl: string }>(`/api/event/${slug}/uploads`, { method: 'POST', body: JSON.stringify({
-          filename: item.file.name, mimeType: item.file.type, byteSize: item.file.size,
-          idempotencyKey: item.id, guestName: name || null, caption: null,
-        }) });
-        const uploaded = await fetch(result.uploadUrl, { method: 'PUT', headers: { 'content-type': item.file.type }, body: item.file });
-        if (!uploaded.ok) throw new Error('Transfer failed.');
-        await api(`/api/event/${slug}/uploads/${result.media.id}/finalize`, { method: 'POST', body: '{}' });
-        setUploads((all) => all.map((entry) => entry.id === item.id ? { ...entry, state: 'done' } : entry));
-      } catch (caught) { setUploads((all) => all.map((entry) => entry.id === item.id ? { ...entry, state: 'error', error: caught instanceof Error ? caught.message : 'Upload failed.' } : entry)); }
-    }
-    await refresh();
-  }
+  useEffect(() => {
+    let active = true;
+    void api<{ event: EventView; role: string }>(`/api/event/${slug}`)
+      .then(async ({ event: eventView }) => {
+        if (!active) return;
+        setEvent(eventView);
+        await loadSecondary(eventView);
+      })
+      .catch((caught: unknown) => {
+        if (active) setError(caught instanceof Error ? caught.message : 'This event could not be loaded.');
+      });
+    return () => { active = false; };
+  }, [loadSecondary, slug]);
+
   async function leaveNote(eventForm: FormEvent<HTMLFormElement>) {
-    eventForm.preventDefault(); const form = new FormData(eventForm.currentTarget);
-    await api(`/api/event/${slug}/messages`, { method: 'POST', body: JSON.stringify({ guestName: name || null, body: form.get('body') }) });
-    eventForm.currentTarget.reset(); await refresh();
+    eventForm.preventDefault();
+    const form = new FormData(eventForm.currentTarget);
+    const guestName = localStorage.getItem('candidary_guest_name')?.trim() || null;
+    await api(`/api/event/${slug}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ guestName, body: form.get('body') }),
+    });
+    eventForm.currentTarget.reset();
+    if (event) await loadSecondary(event);
   }
 
   if (error) return <main className="centered-state"><Brand /><ErrorState message={error} /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState /></main>;
-  if (fullscreen) return <main className="fullscreen"><div className="fullscreen__bar"><Brand compact /><Link to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>{gallery.length ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaContent(item.id)} alt={item.caption || item.originalFilename} /><figcaption>{item.caption || item.originalFilename}</figcaption></figure>)}</div> : <p>No approved photos yet.</p>}</main>;
+  if (fullscreen) return <main className="fullscreen">
+    <div className="fullscreen__bar"><Brand compact /><Link to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
+    {gallery.length
+      ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption>{item.caption || item.originalFilename}</figcaption></figure>)}</div>
+      : <p>No shared photos yet.</p>}
+  </main>;
 
-  return <div className="guest-shell">
-    <header className="guest-header"><Brand /><nav aria-label="Event sections"><a href="#add">Add photos</a><a href="#gallery">Gallery</a><a href="#notes">Notes</a></nav></header>
-    <main>
-      <section className="event-welcome"><div><time dateTime={event.eventDate}>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</time><h1>{event.name}</h1><p>{event.welcomeMessage}</p><button className="button button--primary" onClick={() => input.current?.click()} disabled={!event.uploadsEnabled}><Upload aria-hidden="true" /> Add photos</button></div><img src={event.coverObjectKey ? `/api/event/${slug}/cover` : '/assets/candidary-hero.png'} alt={`Cover for ${event.name}`} /></section>
-      <section className="upload-band" id="add"><div className="upload-drop"><ImagePlus aria-hidden="true" /><div><h2>Add what you noticed.</h2><p>JPEG, PNG, or WebP · up to 10 MB each</p></div><button className="button button--secondary" onClick={() => input.current?.click()}>Choose photos</button><input ref={input} className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(e) => choose(e.target.files)} /></div>
-        <label className="guest-name">What should we call you?<input value={name} maxLength={80} placeholder="Your name (optional)" onChange={(e) => { setName(e.target.value); localStorage.setItem('candidary_guest_name', e.target.value); }} /></label>
-        {uploads.length > 0 && <div className="upload-tray"><ul>{uploads.map((item) => <li key={item.id}><span>{item.file.name}</span><em>{item.state}</em>{item.error && <small>{item.error}</small>}</li>)}</ul><button className="button button--primary" onClick={() => void sendUploads()}>Upload {uploads.filter(({ state }) => state !== 'done').length} photos</button></div>}
-      </section>
-      <section className="gallery-section" id="gallery"><div className="section-heading"><div><p className="section-label">The shared view</p><h2>Moments so far</h2></div>{gallery.length > 0 && <Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link>}</div>
-        {gallery.length ? <div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaContent(item.id)} alt={item.caption || item.originalFilename} /><figcaption><span>{item.caption}</span>{item.guestName && <small>by {item.guestName}</small>}</figcaption></figure>)}</div> : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>The gallery is waiting for its first moment.</h3><p>Approved photos will appear here.</p></div>}
-      </section>
-      <section className="contributions"><div><p className="section-label">Just yours</p><h2>My contributions</h2></div>{contributions.length ? <ul>{contributions.map((item) => <li key={item.id}><img src={mediaContent(item.id)} alt={item.originalFilename} /><span>{item.originalFilename}</span><em className={`status status--${item.moderationStatus}`}>{item.moderationStatus}</em></li>)}</ul> : <p>You haven’t added any photos from this device yet.</p>}</section>
-      <section className="notes-section" id="notes"><div className="notes-intro"><MessageCircle aria-hidden="true" /><p className="section-label">Leave a little something</p><h2>Notes from the day</h2><p>Share a wish, a memory, or the thing you’ll remember.</p></div><div><form className="note-form" onSubmit={(e) => void leaveNote(e)}><textarea name="body" rows={3} maxLength={500} required placeholder="Write a note…" /><button className="button button--primary">Leave a note <ArrowRight aria-hidden="true" /></button></form><ul className="notes-feed">{messages.map((item) => <li key={item.id}><p>{item.body}</p><small>{item.guestName || 'A guest'}</small></li>)}</ul></div></section>
+  return <div className="guest-shell guest-shell--drop">
+    <main className="guest-drop-main">
+      <GuestUploadFlow
+        event={event}
+        slug={slug}
+        onDelivered={() => setTerminal(true)}
+      />
+
+      {!terminal && <section className="guest-secondary" aria-labelledby="more-from-event">
+        <div className="guest-secondary__heading">
+          <p className="section-label">More from the event</p>
+          <h2 id="more-from-event">Here when you want it.</h2>
+          <p>Photos are delivered privately first. The shared gallery and notes stay out of your way until you choose them.</p>
+        </div>
+
+        <details className="event-extra">
+          <summary><span>Shared gallery <small>{event.galleryVisible ? `${gallery.length} shared` : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>
+          <div className="event-extra__content">
+            {event.galleryVisible && gallery.length > 0
+              ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption><span>{item.caption || item.originalFilename}</span><small>by {item.guestName}</small></figcaption></figure>)}</div></>
+              : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>{event.galleryVisible ? 'The shared gallery is still quiet.' : 'The host is keeping the gallery private.'}</h3><p>Your delivery still goes straight to the host.</p></div>}
+          </div>
+        </details>
+
+        <details className="event-extra">
+          <summary><span>My deliveries <small>{contributions.filter(({ uploadState }) => uploadState === 'stored').length} received</small></span><ChevronDown aria-hidden="true" /></summary>
+          <div className="event-extra__content contributions contributions--compact">
+            {contributions.length ? <ul>{contributions.map((item) => <li key={item.id}><img src={mediaPreview(item.id)} alt="" /><span>{item.originalFilename}</span><em className={`status status--${item.uploadState === 'stored' ? 'approved' : 'pending'}`}>{item.uploadState === 'stored' ? 'Delivered' : 'Not delivered'}</em></li>)}</ul> : <p>No earlier deliveries from this device.</p>}
+          </div>
+        </details>
+
+        <details className="event-extra">
+          <summary><span>Leave a note <small>Optional</small></span><ChevronDown aria-hidden="true" /></summary>
+          <div className="event-extra__content notes-secondary">
+            <div><MessageCircle aria-hidden="true" /><h3>A few words for {event.name}</h3><p>Share a wish or memory whenever you have a moment.</p></div>
+            <div><form className="note-form" onSubmit={(formEvent) => void leaveNote(formEvent)}><textarea name="body" rows={3} maxLength={500} required placeholder="Write a note…" /><button className="button button--primary">Leave a note <ArrowRight aria-hidden="true" /></button></form>{messages.length > 0 && <ul className="notes-feed">{messages.map((item) => <li key={item.id}><p>{item.body}</p><small>{item.guestName || 'A guest'}</small></li>)}</ul>}</div>
+          </div>
+        </details>
+      </section>}
     </main>
-    <footer><Brand compact /><p>Private moments, held together.</p></footer>
+    {!terminal && <footer><Brand compact /><p>Private moments, held together.</p></footer>}
   </div>;
 }

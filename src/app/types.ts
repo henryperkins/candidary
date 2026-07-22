@@ -18,10 +18,11 @@ export interface EventView {
 export interface MediaView {
   id: string;
   originalFilename: string;
-  guestName: string | null;
+  guestName: string;
   caption: string | null;
-  moderationStatus: 'pending' | 'approved' | 'rejected';
+  publicationStatus: 'unpublished' | 'published' | 'hidden';
   uploadState: 'reserved' | 'stored' | 'failed' | 'deleted';
+  previewObjectKey?: string | null;
   width?: number | null;
   height?: number | null;
   createdAt?: string;
