@@ -1,0 +1,92 @@
+import type { EventRecord } from './types';
+
+interface EventRow {
+  id: string;
+  slug: string;
+  name: string;
+  event_date: string;
+  welcome_message: string;
+  cover_object_key: string | null;
+  uploads_enabled: number;
+  gallery_visible: number;
+  moderation_required: number;
+  reserved_media_count: number;
+  stored_media_count: number;
+  reserved_bytes: number;
+  stored_bytes: number;
+  guest_access_expires_at: string;
+  management_access_expires_at: string;
+  purge_after: string;
+  created_at: string;
+  deleted_at: string | null;
+}
+
+export interface CreateEventRecord {
+  id: string;
+  slug: string;
+  name: string;
+  eventDate: string;
+  welcomeMessage: string;
+  guestAccessExpiresAt: string;
+  managementAccessExpiresAt: string;
+  purgeAfter: string;
+  createdAt: string;
+}
+
+function mapEvent(row: EventRow): EventRecord {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    eventDate: row.event_date,
+    welcomeMessage: row.welcome_message,
+    coverObjectKey: row.cover_object_key,
+    uploadsEnabled: row.uploads_enabled === 1,
+    galleryVisible: row.gallery_visible === 1,
+    moderationRequired: row.moderation_required === 1,
+    reservedMediaCount: row.reserved_media_count,
+    storedMediaCount: row.stored_media_count,
+    reservedBytes: row.reserved_bytes,
+    storedBytes: row.stored_bytes,
+    guestAccessExpiresAt: row.guest_access_expires_at,
+    managementAccessExpiresAt: row.management_access_expires_at,
+    purgeAfter: row.purge_after,
+    createdAt: row.created_at,
+    deletedAt: row.deleted_at,
+  };
+}
+
+export class EventsRepository {
+  constructor(private readonly db: D1Database) {}
+
+  async create(input: CreateEventRecord): Promise<EventRecord> {
+    await this.db.prepare(`
+      INSERT INTO events (
+        id, slug, name, event_date, welcome_message,
+        guest_access_expires_at, management_access_expires_at, purge_after, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      input.id,
+      input.slug,
+      input.name,
+      input.eventDate,
+      input.welcomeMessage,
+      input.guestAccessExpiresAt,
+      input.managementAccessExpiresAt,
+      input.purgeAfter,
+      input.createdAt,
+    ).run();
+    return (await this.getById(input.id))!;
+  }
+
+  async getById(id: string): Promise<EventRecord | null> {
+    const row = await this.db.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
+    return row ? mapEvent(row) : null;
+  }
+
+  async getBySlug(slug: string): Promise<EventRecord | null> {
+    const row = await this.db.prepare('SELECT * FROM events WHERE slug = ?').bind(slug).first<EventRow>();
+    return row ? mapEvent(row) : null;
+  }
+}
+
