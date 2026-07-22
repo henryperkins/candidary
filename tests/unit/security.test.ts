@@ -1,0 +1,72 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  constantTimeEqual,
+  createSecretToken,
+  decryptGuestSecret,
+  digestSecret,
+  encryptGuestSecret,
+} from '../../worker/security/crypto';
+import { calculateLifecycle } from '../../worker/security/lifecycle';
+import { sanitizeFilename } from '../../worker/security/filenames';
+
+const encryptionKey = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY';
+
+describe('secret token security', () => {
+  it('creates separate public ids and 256-bit base64url secrets', () => {
+    const token = createSecretToken();
+
+    expect(token.id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(token.secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(token.token).toBe(`${token.id}.${token.secret}`);
+  });
+
+  it('digests secrets deterministically and distinguishes inputs', async () => {
+    const first = await digestSecret('secret-one', 'hmac-key');
+    const repeated = await digestSecret('secret-one', 'hmac-key');
+    const second = await digestSecret('secret-two', 'hmac-key');
+
+    expect(first).toBe(repeated);
+    expect(first).not.toBe(second);
+    expect(constantTimeEqual(first, repeated)).toBe(true);
+    expect(constantTimeEqual(first, second)).toBe(false);
+    expect(constantTimeEqual(first, `${first}x`)).toBe(false);
+  });
+
+  it('encrypts guest secrets with a unique IV and decrypts them', async () => {
+    const first = await encryptGuestSecret('guest-secret', encryptionKey);
+    const second = await encryptGuestSecret('guest-secret', encryptionKey);
+
+    expect(first).toMatch(/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    expect(first).not.toBe(second);
+    await expect(decryptGuestSecret(first, encryptionKey)).resolves.toBe('guest-secret');
+    await expect(decryptGuestSecret(`${first}tampered`, encryptionKey)).rejects.toThrow();
+  });
+});
+
+describe('fixed lifecycle', () => {
+  it('anchors future-event expiry to the event date', () => {
+    const lifecycle = calculateLifecycle('2026-09-19', new Date('2026-07-21T12:00:00.000Z'));
+
+    expect(lifecycle.guestAccessExpiresAt).toBe('2026-10-19T23:59:59.999Z');
+    expect(lifecycle.managementAccessExpiresAt).toBe('2026-12-18T23:59:59.999Z');
+    expect(lifecycle.purgeAfter).toBe('2027-01-17T23:59:59.999Z');
+  });
+
+  it('keeps the minimum lifetime when the event date is in the past', () => {
+    const lifecycle = calculateLifecycle('2026-07-01', new Date('2026-07-21T12:00:00.000Z'));
+
+    expect(lifecycle.guestAccessExpiresAt).toBe('2026-08-20T12:00:00.000Z');
+    expect(lifecycle.managementAccessExpiresAt).toBe('2026-10-19T12:00:00.000Z');
+    expect(lifecycle.purgeAfter).toBe('2026-11-18T12:00:00.000Z');
+  });
+});
+
+describe('display filenames', () => {
+  it('removes paths, controls, unsafe punctuation, and excessive length', () => {
+    expect(sanitizeFilename('..\\secret/<wedding>\u0000 photo.JPG')).toBe('wedding photo.JPG');
+    expect(sanitizeFilename('   ...   ')).toBe('image');
+    expect(sanitizeFilename(`${'a'.repeat(180)}.jpg`).length).toBeLessThanOrEqual(120);
+  });
+});
+
