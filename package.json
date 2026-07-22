@@ -14,6 +14,7 @@
     "test:unit:watch": "vitest --config vitest.config.ts",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
+    "test:load:wedding": "node scripts/wedding-load-harness.mjs",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

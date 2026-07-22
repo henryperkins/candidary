@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": [
+          "https://candidary.example.com"
+        ],
+        "methods": [
+          "PUT"
+        ],
+        "headers": [
+          "content-type"
+        ]
+      },
+      "exposeHeaders": [
+        "etag"
+      ],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}

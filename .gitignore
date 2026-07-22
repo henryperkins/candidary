@@ -4,8 +4,10 @@ dist/
 .dev.vars
 playwright-report/
 test-results/
+output/
 coverage/
 *.log
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
+.superpowers/

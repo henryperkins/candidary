@@ -2,10 +2,10 @@
 
 ## Accepted concept references
 
+- `.superpowers/brainstorm/1543-1784697424/content/camera-selection-flow-v3.html` — controlling guest photo-drop journey: add, review/send, terminal receipt.
 - `design/concepts/public-create-desktop.png` — 1436 × 1103 public/create reference.
-- `design/concepts/guest-desktop.png` — 1504 × 1048 guest reference.
-- `design/concepts/manager-desktop.png` — 1504 × 1048 manager reference.
-- `design/concepts/guest-mobile.png` — 810 × 1950 narrow-mobile reference.
+- `design/concepts/guest-desktop.png` and `design/concepts/guest-mobile.png` — visual-language references; their earlier gallery-first hierarchy is superseded by the controlling photo-drop journey.
+- `design/concepts/manager-desktop.png` — visual-language reference; Live intake replaces moderation as the default manager workspace.
 
 ## Visual contract
 
@@ -29,7 +29,7 @@ Candidary is editorial and intimate rather than celebratory-software generic. Tr
 | Border | `#d9cec2` |
 | Focus | `#8b3f79` |
 
-Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. Guest media areas are open bands; the create form and upload drop zone are the only intentionally framed primary surfaces. The manager uses a 164px navigation rail, open moderation workspace, and 340px utility rail at wide widths.
+Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The manager uses a 184px navigation rail, open Live intake workspace, and 330px utility rail at wide widths.
 
 ### Typography
 
@@ -40,11 +40,11 @@ Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. C
 
 ### Components and states
 
-- Buttons: filled aubergine primary, outlined aubergine secondary, quiet text tertiary, moss approve, danger reject/delete.
+- Buttons: filled aubergine primary, outlined aubergine secondary, quiet text tertiary, moss completion, danger hide/delete.
 - Fields: 48px minimum height, parchment/paper fill, 1px border, 2px focus outline with 2px offset.
 - Toggles: 44px hit area, moss on, warm gray off.
-- Media: 8px radius, natural cover crop, apricot selected outline, visible checkbox.
-- Status: textual state plus icon; never color alone.
+- Media: 8px radius, natural cover crop, apricot selected/new treatment, and an explicit remove control before delivery.
+- Status: textual state plus icon; never color alone. Upload states are selected, preparing, queued, sending, confirming, delivered, and needs attention. Publication states are unpublished, published, and hidden.
 - Motion: 160–220ms for disclosure/selection; disable nonessential transforms under `prefers-reduced-motion`.
 
 ### Icon inventory
@@ -55,9 +55,8 @@ Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCi
 
 Public: `Candidary`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three workflow labels.
 
-Guest: `Candidary`, event name/date/welcome message, `Add photos`, and `What should we call you?`.
+Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt.
 
-Manager: `Candidary`, event name/date, the two lifecycle statements, and the active section title.
+Manager: `Candidary`, event name/date, guest-upload state, capacity/lifecycle facts, and the active section title.
 
 No eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.
-

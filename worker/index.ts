@@ -1,18 +1,21 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 
 import { createApp } from './app';
+import type { AppEnv } from './env';
+import { processExport } from './workflows/export';
+import { scheduledCleanup } from './workflows/cleanup';
 
 const app = createApp();
 
-export class ExportWorkflow extends WorkflowEntrypoint<Env, { jobId?: string }> {
-  async run(event: WorkflowEvent<{ jobId?: string }>, step: WorkflowStep) {
-    return step.do('initialize export', async () => ({
-      jobId: event.payload.jobId ?? null,
-    }));
+export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }> {
+  async run(event: WorkflowEvent<{ jobId: string }>, step: WorkflowStep) {
+    return step.do('prepare private event export', async () => processExport(this.env, event.payload.jobId));
   }
 }
 
 export default {
   fetch: app.fetch,
-} satisfies ExportedHandler<Env>;
-
+  scheduled(_controller: ScheduledController, env: AppEnv, context: ExecutionContext) {
+    context.waitUntil(scheduledCleanup(env));
+  },
+} satisfies ExportedHandler<AppEnv>;
