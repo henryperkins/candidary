@@ -1,0 +1,63 @@
+# Candidary Core Design System
+
+## Accepted concept references
+
+- `design/concepts/public-create-desktop.png` — 1436 × 1103 public/create reference.
+- `design/concepts/guest-desktop.png` — 1504 × 1048 guest reference.
+- `design/concepts/manager-desktop.png` — 1504 × 1048 manager reference.
+- `design/concepts/guest-mobile.png` — 810 × 1950 narrow-mobile reference.
+
+## Visual contract
+
+Candidary is editorial and intimate rather than celebratory-software generic. True warm parchment is the page ground, aubergine anchors actions and typography, apricot marks active/selected states, and moss communicates safe completion. Surfaces use thin warm-gray rules, restrained 8–12px radii, and almost-flat shadows.
+
+### Tokens
+
+| Role | Value |
+| --- | --- |
+| Parchment page | `#f7f1e7` |
+| Paper surface | `#fffaf3` |
+| Ink | `#2b1728` |
+| Muted ink | `#766c70` |
+| Aubergine | `#42103b` |
+| Aubergine strong | `#2c0c2a` |
+| Apricot | `#f3a578` |
+| Apricot soft | `#f9ddc4` |
+| Moss | `#68763d` |
+| Moss soft | `#e8ecd8` |
+| Danger | `#b54033` |
+| Border | `#d9cec2` |
+| Focus | `#8b3f79` |
+
+Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. Guest media areas are open bands; the create form and upload drop zone are the only intentionally framed primary surfaces. The manager uses a 164px navigation rail, open moderation workspace, and 340px utility rail at wide widths.
+
+### Typography
+
+- Display: Manrope, 650–700; compact tracking `-0.045em`; responsive 40–72px.
+- UI/body: DM Sans, 400–650; body 16–18px with 1.55 line height.
+- Control text: 14–16px, 600; never browser-default.
+- Captions/status: 12–14px with explicit line height and color.
+
+### Components and states
+
+- Buttons: filled aubergine primary, outlined aubergine secondary, quiet text tertiary, moss approve, danger reject/delete.
+- Fields: 48px minimum height, parchment/paper fill, 1px border, 2px focus outline with 2px offset.
+- Toggles: 44px hit area, moss on, warm gray off.
+- Media: 8px radius, natural cover crop, apricot selected outline, visible checkbox.
+- Status: textual state plus icon; never color alone.
+- Motion: 160–220ms for disclosure/selection; disable nonessential transforms under `prefers-reduced-motion`.
+
+### Icon inventory
+
+Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCircle`, `Link`, `Copy`, `QrCode`, `Check`, `Ban`, `Trash2`, `Download`, `Settings`, `CalendarDays`, `ShieldCheck`, and `ChevronRight`. Icons remain secondary to text labels except familiar close controls.
+
+### Allowed above-the-fold copy
+
+Public: `Candidary`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three workflow labels.
+
+Guest: `Candidary`, event name/date/welcome message, `Add photos`, and `What should we call you?`.
+
+Manager: `Candidary`, event name/date, the two lifecycle statements, and the active section title.
+
+No eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.
+
