@@ -1,7 +1,7 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api } from '../../app/api';
+import { api, ClientApiError } from '../../app/api';
 import { MAX_IMAGE_BYTES, UPLOAD_BATCH_SIZE } from '../../../shared/constants';
 import {
   getReceiptCount,
@@ -24,8 +24,21 @@ const ALLOWED_IMAGE_TYPES = new Set([
   'image/heif',
   'image/heic-sequence',
   'image/heif-sequence',
-  '',
-  'application/octet-stream',
+]);
+const PROVISIONAL_HEIF_TYPES = new Map([
+  ['', null],
+  ['application/octet-stream', null],
+  ['binary/octet-stream', null],
+  ['image/x-heic', 'heic'],
+  ['image/x-heic-sequence', 'heic'],
+  ['image/x-heif', 'heif'],
+  ['image/x-heif-sequence', 'heif'],
+]);
+const FINALIZE_REUPLOAD_CODES = new Set([
+  'UPLOAD_RESERVATION_EXPIRED',
+  'UPLOAD_FINALIZE_CONFLICT',
+  'FILE_TOO_LARGE',
+  'FILE_TYPE_UNSUPPORTED',
 ]);
 
 interface GuestUploadEvent {
@@ -119,7 +132,21 @@ function createBrowserTransport(slug: string, guestName: string): UploadTranspor
       throw lastError;
     },
     async finalize(_item, reservation) {
-      await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, { method: 'POST', body: '{}' });
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, { method: 'POST', body: '{}' });
+          return;
+        } catch (error) {
+          lastError = error;
+          if (error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code)) throw error;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
+        }
+      }
+      throw lastError;
+    },
+    retryUploadAfterFinalizeError(error) {
+      return error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code);
     },
   };
 }
@@ -128,8 +155,12 @@ function validationMessage(file: File): string | null {
   if (file.size < 1) return 'This photo is empty. Choose it again.';
   if (file.size > MAX_IMAGE_BYTES) return 'This photo is larger than 20 MB.';
   const extension = file.name.toLowerCase().split('.').pop();
-  const provisionalHeif = (!file.type || file.type === 'application/octet-stream') && (extension === 'heic' || extension === 'heif');
-  if (!ALLOWED_IMAGE_TYPES.has(file.type.toLowerCase()) || ((!file.type || file.type === 'application/octet-stream') && !provisionalHeif)) {
+  const normalizedType = file.type.toLowerCase();
+  const expectedExtension = PROVISIONAL_HEIF_TYPES.get(normalizedType);
+  const provisionalHeif = PROVISIONAL_HEIF_TYPES.has(normalizedType)
+    && (extension === 'heic' || extension === 'heif')
+    && (!expectedExtension || extension === expectedExtension);
+  if (!ALLOWED_IMAGE_TYPES.has(normalizedType) && !provisionalHeif) {
     return 'Choose a JPG, PNG, WebP, HEIC, or HEIF photo.';
   }
   return null;

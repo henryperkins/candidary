@@ -41,6 +41,10 @@ export interface ReserveMediaRecord {
   createdAt: string;
 }
 
+export type ReserveMediaBatchResult =
+  | { status: 'accepted'; media: MediaRecord }
+  | { status: 'rejected'; error: ApiError };
+
 function mapMedia(row: MediaRow): MediaRecord {
   return {
     id: row.id,
@@ -140,6 +144,80 @@ export class MediaRepository {
     return mapMedia(row);
   }
 
+  private async capacityError(eventId: string): Promise<ApiError> {
+    const event = await this.db.prepare(`
+      SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes
+      FROM events WHERE id = ?
+    `).bind(eventId).first<{
+      reserved_media_count: number;
+      stored_media_count: number;
+      reserved_bytes: number;
+      stored_bytes: number;
+    }>();
+    if (event && event.reserved_media_count + event.stored_media_count >= MAX_EVENT_MEDIA) {
+      return new ApiError('EVENT_MEDIA_LIMIT', `This event has reached its ${MAX_EVENT_MEDIA}-image limit.`, 409);
+    }
+    return new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its storage limit.', 409);
+  }
+
+  private async refreshIdempotent(input: ReserveMediaRecord, existing: MediaRecord): Promise<MediaRecord> {
+    if (existing.uploadState === 'stored') return existing;
+    if (existing.uploadState === 'deleted') {
+      throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This photo was removed. Choose it again.', 409);
+    }
+
+    if (existing.uploadState === 'reserved') {
+      await this.db.prepare(`
+        UPDATE media
+        SET reservation_expires_at = ?, guest_name = ?, caption = ?
+        WHERE id = ? AND upload_state = 'reserved' AND reservation_expires_at < ?
+      `).bind(
+        input.reservationExpiresAt,
+        input.guestName,
+        input.caption,
+        existing.id,
+        input.reservationExpiresAt,
+      ).run();
+      return (await this.getById(existing.id))!;
+    }
+
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET upload_state = 'reserved', reservation_expires_at = ?,
+            guest_name = ?, caption = ?, original_filename = ?
+        WHERE id = ? AND upload_state = 'failed'
+          AND EXISTS (
+            SELECT 1 FROM events
+            WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
+              AND reserved_media_count + stored_media_count < ?
+              AND reserved_bytes + stored_bytes + ? <= ?
+          )
+      `).bind(
+        input.reservationExpiresAt,
+        input.guestName,
+        input.caption,
+        input.originalFilename,
+        existing.id,
+        input.eventId,
+        MAX_EVENT_MEDIA,
+        input.declaredByteSize,
+        MAX_EVENT_BYTES,
+      ),
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count + 1,
+            reserved_bytes = reserved_bytes + ?
+        WHERE id = ? AND changes() = 1
+      `).bind(input.declaredByteSize, input.eventId),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(existing.id))!;
+
+    const raced = await this.getById(existing.id);
+    if (raced && raced.uploadState !== 'failed') return this.refreshIdempotent(input, raced);
+    throw await this.capacityError(input.eventId);
+  }
+
   async reserve(input: ReserveMediaRecord): Promise<MediaRecord> {
     if (!input.guestName || input.guestName.trim().length < 1 || input.guestName.trim().length > 80) {
       throw new ApiError('VALIDATION_FAILED', 'Enter your name before adding photos.', 422, {
@@ -148,7 +226,7 @@ export class MediaRepository {
     }
     input = { ...input, guestName: input.guestName.trim() };
     const existing = await this.getIdempotent(input);
-    if (existing) return existing;
+    if (existing) return this.refreshIdempotent(input, existing);
 
     let results: D1Result[];
     try {
@@ -193,24 +271,141 @@ export class MediaRepository {
     }
 
     if ((results[0]?.meta.changes ?? 0) !== 1) {
-      const event = await this.db.prepare(`
-        SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes
-        FROM events WHERE id = ?
-      `).bind(input.eventId).first<{
-        reserved_media_count: number;
-        stored_media_count: number;
-        reserved_bytes: number;
-        stored_bytes: number;
-      }>();
-      if (event && event.reserved_media_count + event.stored_media_count >= MAX_EVENT_MEDIA) {
-        throw new ApiError('EVENT_MEDIA_LIMIT', `This event has reached its ${MAX_EVENT_MEDIA}-image limit.`, 409);
-      }
-      throw new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its storage limit.', 409);
+      throw await this.capacityError(input.eventId);
     }
 
     const created = await this.getById(input.id);
     if (!created) throw new Error('Reserved media row was not created.');
     return created;
+  }
+
+  async reserveBatch(inputs: readonly ReserveMediaRecord[]): Promise<ReserveMediaBatchResult[]> {
+    if (inputs.length === 0) return [];
+    const eventId = inputs[0]!.eventId;
+    if (inputs.some((input) => input.eventId !== eventId)) {
+      throw new ApiError('VALIDATION_FAILED', 'Every photo in a batch must belong to the same event.', 422);
+    }
+
+    const results: Array<ReserveMediaBatchResult | undefined> = new Array(inputs.length);
+    const pending: Array<{ index: number; input: ReserveMediaRecord }> = [];
+    for (const [index, rawInput] of inputs.entries()) {
+      if (!rawInput.guestName || rawInput.guestName.trim().length < 1 || rawInput.guestName.trim().length > 80) {
+        results[index] = {
+          status: 'rejected',
+          error: new ApiError('VALIDATION_FAILED', 'Enter your name before adding photos.', 422, {
+            guestName: 'Your name is required.',
+          }),
+        };
+        continue;
+      }
+      const input = { ...rawInput, guestName: rawInput.guestName.trim() };
+      try {
+        const existing = await this.getIdempotent(input);
+        if (existing) {
+          results[index] = { status: 'accepted', media: await this.refreshIdempotent(input, existing) };
+        } else {
+          pending.push({ index, input });
+        }
+      } catch (error) {
+        if (!(error instanceof ApiError)) throw error;
+        results[index] = { status: 'rejected', error };
+      }
+    }
+
+    if (pending.length > 0) {
+      const event = await this.db.prepare(`
+        SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes
+        FROM events WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
+      `).bind(eventId).first<{
+        reserved_media_count: number;
+        stored_media_count: number;
+        reserved_bytes: number;
+        stored_bytes: number;
+      }>();
+      let usedCount = (event?.reserved_media_count ?? MAX_EVENT_MEDIA) + (event?.stored_media_count ?? 0);
+      let usedBytes = (event?.reserved_bytes ?? MAX_EVENT_BYTES) + (event?.stored_bytes ?? 0);
+      let capacityError: ApiError | null = null;
+      const accepted: Array<{ index: number; input: ReserveMediaRecord }> = [];
+      for (const candidate of pending) {
+        if (!capacityError && usedCount + 1 > MAX_EVENT_MEDIA) {
+          capacityError = new ApiError('EVENT_MEDIA_LIMIT', `This event has reached its ${MAX_EVENT_MEDIA}-image limit.`, 409);
+        }
+        if (!capacityError && usedBytes + candidate.input.declaredByteSize > MAX_EVENT_BYTES) {
+          capacityError = new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its storage limit.', 409);
+        }
+        if (capacityError) {
+          results[candidate.index] = { status: 'rejected', error: capacityError };
+          continue;
+        }
+        accepted.push(candidate);
+        usedCount += 1;
+        usedBytes += candidate.input.declaredByteSize;
+      }
+
+      if (accepted.length > 0) {
+        const totalBytes = accepted.reduce((sum, { input }) => sum + input.declaredByteSize, 0);
+        let writes: D1Result[] | null = null;
+        try {
+          writes = await this.db.batch([
+            this.db.prepare(`
+              UPDATE events
+              SET reserved_media_count = reserved_media_count + ?,
+                  reserved_bytes = reserved_bytes + ?
+              WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
+                AND reserved_media_count + stored_media_count + ? <= ?
+                AND reserved_bytes + stored_bytes + ? <= ?
+            `).bind(accepted.length, totalBytes, eventId, accepted.length, MAX_EVENT_MEDIA, totalBytes, MAX_EVENT_BYTES),
+            ...accepted.map(({ input }) => this.db.prepare(`
+              INSERT INTO media (
+                id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+                declared_byte_size, guest_name, caption, upload_state, publication_status,
+                idempotency_key, reservation_expires_at, created_at
+              )
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'unpublished', ?, ?, ?
+              WHERE changes() = 1
+            `).bind(
+              input.id,
+              input.eventId,
+              input.uploaderSessionId,
+              input.objectKey,
+              input.originalFilename,
+              input.mimeType,
+              input.declaredByteSize,
+              input.guestName,
+              input.caption,
+              input.idempotencyKey,
+              input.reservationExpiresAt,
+              input.createdAt,
+            )),
+          ]);
+        } catch {
+          // A concurrent idempotent request can win the unique key race. The
+          // per-item fallback below resolves that row without duplicating it.
+        }
+
+        if ((writes?.[0]?.meta.changes ?? 0) === 1) {
+          for (const candidate of accepted) {
+            const media = await this.getById(candidate.input.id);
+            if (!media) throw new Error('Reserved media batch row was not created.');
+            results[candidate.index] = { status: 'accepted', media };
+          }
+        } else {
+          for (const candidate of accepted) {
+            try {
+              results[candidate.index] = { status: 'accepted', media: await this.reserve(candidate.input) };
+            } catch (error) {
+              if (!(error instanceof ApiError)) throw error;
+              results[candidate.index] = { status: 'rejected', error };
+            }
+          }
+        }
+      }
+    }
+
+    return results.map((result) => result ?? {
+      status: 'rejected',
+      error: new ApiError('INTERNAL_ERROR', 'This photo could not be reserved.', 500),
+    });
   }
 
   async finalize(

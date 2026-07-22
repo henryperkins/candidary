@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   getReceiptCount,
@@ -88,6 +88,27 @@ describe('photo upload queue', () => {
     const delivered = await runUploadQueue(failed, transport);
     expect(delivered[0]).toMatchObject({ id: 'same-id', state: 'delivered' });
     expect(attempts).toBe(2);
+  });
+
+  it('retries a failed finalization without uploading the original again', async () => {
+    let finalizeAttempts = 0;
+    const queueTransport = acceptingTransport({
+      finalize: async () => {
+        finalizeAttempts += 1;
+        if (finalizeAttempts === 1) throw new Error('Confirmation timed out.');
+      },
+    });
+    const reserve = vi.spyOn(queueTransport, 'reserve');
+    const upload = vi.spyOn(queueTransport, 'upload');
+
+    const failed = await runUploadQueue([item('confirm-once')], queueTransport);
+    expect(failed[0]).toMatchObject({ state: 'failed', retryStage: 'finalize' });
+    const delivered = await runUploadQueue(failed, queueTransport);
+
+    expect(delivered[0]).toMatchObject({ state: 'delivered' });
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(finalizeAttempts).toBe(2);
   });
 
   it('never creates a receipt when every photo is removed before delivery', () => {

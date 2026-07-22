@@ -69,6 +69,19 @@ describe('mobile guest photo delivery', () => {
     expect(screen.queryByText(/gallery|note/i)).not.toBeInTheDocument();
   });
 
+  it('accepts vendor HEIC MIME values provisionally for final server inspection', async () => {
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
+    await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['heic'], 'phone.heic', { type: 'image/x-heic' })] },
+    });
+
+    expect(await screen.findByText('1 photo selected')).toBeVisible();
+    expect(screen.queryByText('Needs attention')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send 1 photo' })).toBeEnabled();
+  });
+
   it('lets a returning guest reach the camera with one tap', async () => {
     localStorage.setItem('candidary_guest_name', 'Avery');
     render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);

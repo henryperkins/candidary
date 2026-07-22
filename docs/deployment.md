@@ -50,8 +50,8 @@ Do not describe a deployment as wedding-ready until a dedicated rehearsal event 
 1. Print the actual QR at intended reception size and scan it from normal guest distance.
 2. On current iPhone Safari and Android Chrome, exchange the link and confirm the secret disappears from the address bar.
 3. Enter a name, take a new photo, append recent photos, send, and reach the exact terminal receipt.
-4. Repeat over deliberately degraded reception; recover one partial failure without duplicating a delivery.
-5. Upload JPEG, PNG, WebP, HEIC, and HEIF samples; view private previews while retaining byte-identical originals.
+4. Repeat over deliberately degraded reception; recover one partial failure and one expired signed URL without duplicating a delivery or re-uploading an already transferred original.
+5. Upload JPEG, PNG, WebP, HEIC, and HEIF samples, including vendor-specific phone MIME values; view metadata-free private previews while retaining byte-identical originals. Confirm preview requests fail safely when the Images binding is intentionally unavailable.
 6. Confirm a different guest cannot read unpublished previews or any original, and a host can download every original.
 7. Enable the gallery, publish one preview, hide it again, and confirm hiding never removes it from intake or export.
 8. Run the opt-in load harness against the disposable event at the intended target, monitor Worker/D1/R2/Images/Workflow telemetry, then delete the event.

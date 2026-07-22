@@ -1,6 +1,6 @@
 import { Check, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2 } from 'lucide-react';
 import QRCode from 'qrcode';
-import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 import { api, mediaOriginal, mediaPreview } from '../app/api';
@@ -41,7 +41,7 @@ export function ManagerPage() {
     return `/api/manage/events/${eventId}/media${query ? `?${query}` : ''}`;
   }, [eventId, guestFilter, status]);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
@@ -59,9 +59,29 @@ export function ManagerPage() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The event manager could not be loaded.');
     }
-  }
+  }, [eventId, mediaPath]);
 
-  useEffect(() => { void refresh(); }, [mediaPath]);
+  const refreshIntake = useCallback(async () => {
+    try {
+      const [eventData, mediaData] = await Promise.all([
+        api<{ event: EventView }>(`/api/manage/events/${eventId}`),
+        api<{ media: MediaView[] }>(mediaPath),
+      ]);
+      setEvent(eventData.event);
+      setMedia(mediaData.media);
+    } catch {
+      // Keep the last usable intake visible; the next poll or a host action retries.
+    }
+  }, [eventId, mediaPath]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (section !== 'intake') return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshIntake();
+    }, 5_000);
+    return () => window.clearInterval(interval);
+  }, [refreshIntake, section]);
   useEffect(() => {
     if (guestLink) void QRCode.toDataURL(guestLink, { width: 220, margin: 2, color: { dark: '#42103b', light: '#fffaf3' } }).then(setQr);
   }, [guestLink]);

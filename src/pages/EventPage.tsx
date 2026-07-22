@@ -14,20 +14,22 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const [gallery, setGallery] = useState<MediaView[]>([]);
   const [contributions, setContributions] = useState<MediaView[]>([]);
   const [messages, setMessages] = useState<MessageView[]>([]);
+  const [opened, setOpened] = useState({ gallery: false, contributions: false, notes: false });
+  const [loaded, setLoaded] = useState({ gallery: false, contributions: false, notes: false });
   const [error, setError] = useState('');
   const [terminal, setTerminal] = useState(false);
 
-  const loadSecondary = useCallback(async (eventView: EventView) => {
-    const [galleryResult, contributionResult, messageResult] = await Promise.allSettled([
-      eventView.galleryVisible
-        ? api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`)
-        : Promise.resolve({ media: [] }),
-      api<{ media: MediaView[] }>(`/api/event/${slug}/contributions`),
-      api<{ items: MessageView[] }>(`/api/event/${slug}/messages`),
-    ]);
-    if (galleryResult.status === 'fulfilled') setGallery(galleryResult.value.media);
-    if (contributionResult.status === 'fulfilled') setContributions(contributionResult.value.media);
-    if (messageResult.status === 'fulfilled') setMessages(messageResult.value.items);
+  const loadGallery = useCallback(async () => {
+    const result = await api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`);
+    setGallery(result.media);
+  }, [slug]);
+  const loadContributions = useCallback(async () => {
+    const result = await api<{ media: MediaView[] }>(`/api/event/${slug}/contributions`);
+    setContributions(result.media);
+  }, [slug]);
+  const loadMessages = useCallback(async () => {
+    const result = await api<{ items: MessageView[] }>(`/api/event/${slug}/messages`);
+    setMessages(result.items);
   }, [slug]);
 
   useEffect(() => {
@@ -36,13 +38,28 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       .then(async ({ event: eventView }) => {
         if (!active) return;
         setEvent(eventView);
-        await loadSecondary(eventView);
+        if (fullscreen && eventView.galleryVisible) {
+          await loadGallery();
+          if (active) setLoaded((current) => ({ ...current, gallery: true }));
+        }
       })
       .catch((caught: unknown) => {
         if (active) setError(caught instanceof Error ? caught.message : 'This event could not be loaded.');
       });
     return () => { active = false; };
-  }, [loadSecondary, slug]);
+  }, [fullscreen, loadGallery, slug]);
+
+  function toggleExtra(kind: keyof typeof opened, isOpen: boolean) {
+    setOpened((current) => ({ ...current, [kind]: isOpen }));
+    if (!isOpen || loaded[kind]) return;
+    if (kind === 'gallery' && !event?.galleryVisible) {
+      setLoaded((current) => ({ ...current, gallery: true }));
+      return;
+    }
+    setLoaded((current) => ({ ...current, [kind]: true }));
+    const request = kind === 'gallery' ? loadGallery() : kind === 'contributions' ? loadContributions() : loadMessages();
+    void request.catch(() => setLoaded((current) => ({ ...current, [kind]: false })));
+  }
 
   async function leaveNote(eventForm: FormEvent<HTMLFormElement>) {
     eventForm.preventDefault();
@@ -53,7 +70,8 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       body: JSON.stringify({ guestName, body: form.get('body') }),
     });
     eventForm.currentTarget.reset();
-    if (event) await loadSecondary(event);
+    await loadMessages();
+    setLoaded((current) => ({ ...current, notes: true }));
   }
 
   if (error) return <main className="centered-state"><Brand /><ErrorState message={error} /></main>;
@@ -80,28 +98,28 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
           <p>Photos are delivered privately first. The shared gallery and notes stay out of your way until you choose them.</p>
         </div>
 
-        <details className="event-extra">
-          <summary><span>Shared gallery <small>{event.galleryVisible ? `${gallery.length} shared` : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>
-          <div className="event-extra__content">
+        <details className="event-extra" onToggle={(toggle) => toggleExtra('gallery', toggle.currentTarget.open)}>
+          <summary><span>Shared gallery <small>{event.galleryVisible ? loaded.gallery ? `${gallery.length} shared` : 'Available' : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>
+          {opened.gallery && <div className="event-extra__content">
             {event.galleryVisible && gallery.length > 0
               ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption><span>{item.caption || item.originalFilename}</span><small>by {item.guestName}</small></figcaption></figure>)}</div></>
               : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>{event.galleryVisible ? 'The shared gallery is still quiet.' : 'The host is keeping the gallery private.'}</h3><p>Your delivery still goes straight to the host.</p></div>}
-          </div>
+          </div>}
         </details>
 
-        <details className="event-extra">
-          <summary><span>My deliveries <small>{contributions.filter(({ uploadState }) => uploadState === 'stored').length} received</small></span><ChevronDown aria-hidden="true" /></summary>
-          <div className="event-extra__content contributions contributions--compact">
+        <details className="event-extra" onToggle={(toggle) => toggleExtra('contributions', toggle.currentTarget.open)}>
+          <summary><span>My deliveries <small>{loaded.contributions ? `${contributions.filter(({ uploadState }) => uploadState === 'stored').length} received` : 'From this device'}</small></span><ChevronDown aria-hidden="true" /></summary>
+          {opened.contributions && <div className="event-extra__content contributions contributions--compact">
             {contributions.length ? <ul>{contributions.map((item) => <li key={item.id}><img src={mediaPreview(item.id)} alt="" /><span>{item.originalFilename}</span><em className={`status status--${item.uploadState === 'stored' ? 'approved' : 'pending'}`}>{item.uploadState === 'stored' ? 'Delivered' : 'Not delivered'}</em></li>)}</ul> : <p>No earlier deliveries from this device.</p>}
-          </div>
+          </div>}
         </details>
 
-        <details className="event-extra">
+        <details className="event-extra" onToggle={(toggle) => toggleExtra('notes', toggle.currentTarget.open)}>
           <summary><span>Leave a note <small>Optional</small></span><ChevronDown aria-hidden="true" /></summary>
-          <div className="event-extra__content notes-secondary">
+          {opened.notes && <div className="event-extra__content notes-secondary">
             <div><MessageCircle aria-hidden="true" /><h3>A few words for {event.name}</h3><p>Share a wish or memory whenever you have a moment.</p></div>
             <div><form className="note-form" onSubmit={(formEvent) => void leaveNote(formEvent)}><textarea name="body" rows={3} maxLength={500} required placeholder="Write a note…" /><button className="button button--primary">Leave a note <ArrowRight aria-hidden="true" /></button></form>{messages.length > 0 && <ul className="notes-feed">{messages.map((item) => <li key={item.id}><p>{item.body}</p><small>{item.guestName || 'A guest'}</small></li>)}</ul>}</div>
-          </div>
+          </div>}
         </details>
       </section>}
     </main>

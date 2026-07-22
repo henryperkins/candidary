@@ -130,6 +130,84 @@ describe('media reservation and lifecycle', () => {
     expect(event?.reservedBytes).toBe(1024);
   });
 
+  it('reopens a failed idempotent reservation without duplicating quota', async () => {
+    const events = await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    const input = {
+      id: 'media-retry', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/media-retry', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
+      guestName: 'Avery', caption: null, idempotencyKey: 'idem-retry',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    };
+
+    await media.reserve(input);
+    await media.failReservation(input.id);
+    const retried = await media.reserve({
+      ...input,
+      id: 'must-not-create-a-second-row',
+      objectKey: 'must-not-create-a-second-object',
+      reservationExpiresAt: '2026-07-21T12:45:00.000Z',
+      createdAt: '2026-07-21T12:30:00.000Z',
+    });
+    const event = await events.getById('event-a');
+
+    expect(retried).toMatchObject({
+      id: 'media-retry', uploadState: 'reserved', reservationExpiresAt: '2026-07-21T12:45:00.000Z',
+    });
+    expect(event?.reservedMediaCount).toBe(1);
+    expect(event?.reservedBytes).toBe(1024);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media').first<{ count: number }>())?.count).toBe(1);
+  });
+
+  it('refreshes an expired active reservation without reserving quota twice', async () => {
+    const events = await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    const input = {
+      id: 'media-refresh', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/media-refresh', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
+      guestName: 'Avery', caption: null, idempotencyKey: 'idem-refresh',
+      reservationExpiresAt: '2026-07-21T12:05:00.000Z', createdAt: now,
+    };
+
+    await media.reserve(input);
+    const refreshed = await media.reserve({
+      ...input,
+      id: 'ignored-id',
+      reservationExpiresAt: '2026-07-21T12:45:00.000Z',
+      createdAt: '2026-07-21T12:30:00.000Z',
+    });
+    const event = await events.getById('event-a');
+
+    expect(refreshed).toMatchObject({ id: 'media-refresh', reservationExpiresAt: '2026-07-21T12:45:00.000Z' });
+    expect(event?.reservedMediaCount).toBe(1);
+    expect(event?.reservedBytes).toBe(1024);
+  });
+
+  it('reserves a new metadata batch through one aggregate repository operation', async () => {
+    const events = await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    const makeInput = (suffix: string, bytes: number) => ({
+      id: `media-batch-${suffix}`, eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: `events/event-a/media/media-batch-${suffix}`, originalFilename: `${suffix}.jpg`,
+      mimeType: 'image/jpeg' as const, declaredByteSize: bytes,
+      guestName: 'Avery', caption: null, idempotencyKey: `idem-batch-${suffix}`,
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+
+    const results = await media.reserveBatch([makeInput('a', 100), makeInput('b', 200), makeInput('c', 300)]);
+    const event = await events.getById('event-a');
+
+    expect(results.map((result) => result.status)).toEqual(['accepted', 'accepted', 'accepted']);
+    expect(results.map((result) => result.status === 'accepted' ? result.media.id : null))
+      .toEqual(['media-batch-a', 'media-batch-b', 'media-batch-c']);
+    expect(event).toMatchObject({ reservedMediaCount: 3, reservedBytes: 600 });
+  });
+
   it('rejects count and byte quota overflow without leaving a row', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();

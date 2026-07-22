@@ -4,8 +4,6 @@ import type { MediaRecord } from '../db/types';
 import type { AppEnv } from '../env';
 import { MediaRepository as DefaultMediaRepository } from '../db/media';
 
-const BROWSER_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-
 export async function getOrCreatePreview(
   env: AppEnv,
   media: MediaRecord,
@@ -25,7 +23,6 @@ export async function getOrCreatePreview(
 
   const originalBytes = await original.arrayBuffer();
   let previewBytes: ArrayBuffer | null = null;
-  let contentType = 'image/webp';
   if (env.IMAGES) {
     const transformed = await env.IMAGES
       .input(new Response(originalBytes).body!)
@@ -34,16 +31,12 @@ export async function getOrCreatePreview(
     const transformedBytes = await new Response(transformed.image()).arrayBuffer();
     if (transformedBytes.byteLength > 0) previewBytes = transformedBytes;
   }
-  if (!previewBytes && BROWSER_IMAGE_TYPES.has(media.mimeType)) {
-    previewBytes = originalBytes;
-    contentType = media.mimeType;
-  }
   if (!previewBytes) {
     throw new ApiError('FILE_TYPE_UNSUPPORTED', 'This photo needs the image-preview service before it can be displayed.', 503);
   }
 
   await env.MEDIA_BUCKET.put(previewObjectKey, previewBytes, {
-    httpMetadata: { contentType, cacheControl: 'private, max-age=31536000, immutable' },
+    httpMetadata: { contentType: 'image/webp', cacheControl: 'private, max-age=31536000, immutable' },
     customMetadata: { sourceMediaId: media.id },
   });
   await repository.setPreviewObjectKey(media.id, previewObjectKey);

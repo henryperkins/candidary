@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
+import { MediaRepository } from '../../worker/db/media';
 import {
   eventAccess,
   resetDatabase,
@@ -91,6 +92,23 @@ describe('manager settings and private photo intake', () => {
     const rows = await env.DB.prepare('SELECT id, publication_status FROM media ORDER BY id').all<any>();
     const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.publication_status]));
     expect(states).toMatchObject({ [first.id]: 'published', [second.id]: 'published', [untouched.id]: 'unpublished' });
+  });
+
+  it('deletes the cached preview with an individual private original', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'delete-preview');
+    const previewObjectKey = `events/${access.event.id}/previews/${media.id}.webp`;
+    await testEnv.MEDIA_BUCKET.put(previewObjectKey, new Uint8Array([1, 2, 3]));
+    await new MediaRepository(env.DB).setPreviewObjectKey(media.id, previewObjectKey);
+
+    const deleted = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+      method: 'PATCH', headers: writeHeaders(access.manager),
+      body: JSON.stringify({ action: 'delete', expectedStatus: 'unpublished' }),
+    }, testEnv);
+
+    expect(deleted.status).toBe(200);
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(previewObjectKey)).toBeNull();
   });
 });
 

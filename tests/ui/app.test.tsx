@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +11,7 @@ function json(data: unknown, status = 200) {
   }));
 }
 
-afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('public Candidary experience', () => {
   it('presents the approved value proposition and workflow', () => {
@@ -42,7 +42,7 @@ describe('public Candidary experience', () => {
 
 describe('guest event experience', () => {
   it('loads the private photo drop first and keeps the gallery and notes secondary', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
@@ -56,21 +56,60 @@ describe('guest event experience', () => {
       if (url.endsWith('/contributions')) return json({ media: [] });
       if (url.endsWith('/messages')) return json({ items: [{ id: 'note-a', kind: 'message', guestName: 'Sam', body: 'To many happy years.', createdAt: '2026-09-19T20:00:00Z', moderationStatus: 'approved' }] });
       throw new Error(`Unexpected request ${url}`);
-    }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Maya & Theo/, { selector: '.photo-drop__event' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Choose recent photos' })).toBeVisible();
     const user = userEvent.setup();
     await user.click(screen.getByText(/Shared gallery/, { selector: 'span' }));
     expect(await screen.findByAltText('Golden hour')).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     await user.click(screen.getByText(/Leave a note/, { selector: 'span' }));
     expect(screen.getByText('To many happy years.')).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
 describe('manager experience', () => {
+  it('polls live intake so a new private delivery appears without navigation', async () => {
+    let mediaRequests = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
+        id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
+        welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: false,
+        moderationRequired: true, storedMediaCount: mediaRequests > 0 ? 1 : 0, storedBytes: 128,
+        guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+      } });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        return json({ media: mediaRequests > 1 ? [{
+          id: 'media-new', originalFilename: 'new-arrival.png', guestName: 'Avery',
+          publicationStatus: 'unpublished', uploadState: 'stored',
+        }] : [] });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: '' });
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.queryByText('From Avery')).not.toBeInTheDocument();
+
+    const poll = interval.mock.calls.find(([, delay]) => delay === 5_000)?.[0];
+    expect(poll).toBeTypeOf('function');
+    await act(async () => { (poll as () => void)(); });
+
+    expect(await screen.findByText('From Avery')).toBeVisible();
+  });
+
   it('opens on live intake, filters by guest name, and keeps gallery publishing secondary', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

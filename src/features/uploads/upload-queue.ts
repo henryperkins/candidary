@@ -21,6 +21,7 @@ export interface UploadQueueItem {
   isNewCapture: boolean;
   error?: string;
   validationError?: boolean;
+  retryStage?: 'finalize';
   reservation?: UploadReservation;
   previewUrl?: string;
 }
@@ -33,6 +34,7 @@ export interface UploadTransport {
   reserve(items: readonly UploadQueueItem[]): Promise<readonly ReservationResult[]>;
   upload(item: UploadQueueItem, reservation: UploadReservation, progress: (percent: number) => void): Promise<void>;
   finalize(item: UploadQueueItem, reservation: UploadReservation): Promise<void>;
+  retryUploadAfterFinalizeError?(error: unknown): boolean;
 }
 
 function errorMessage(error: unknown): string {
@@ -46,9 +48,11 @@ export async function runUploadQueue(
   onChange?: (items: UploadQueueItem[]) => void,
 ): Promise<UploadQueueItem[]> {
   let current = items.map((item) => ({ ...item }));
-  const candidates = current.filter(({ state, validationError }) =>
-    !validationError && (state === 'selected' || state === 'failed'));
-  if (candidates.length === 0) return current;
+  const finalizationRetries = current.filter(({ state, retryStage, reservation }) =>
+    state === 'failed' && retryStage === 'finalize' && reservation);
+  const candidates = current.filter(({ state, validationError, retryStage }) =>
+    !validationError && (state === 'selected' || (state === 'failed' && retryStage !== 'finalize')));
+  if (candidates.length === 0 && finalizationRetries.length === 0) return current;
 
   const candidateIds = new Set(candidates.map(({ id }) => id));
   const emit = () => onChange?.(current.map((item) => ({ ...item })));
@@ -58,31 +62,36 @@ export async function runUploadQueue(
   };
 
   current = current.map((item) => candidateIds.has(item.id)
-    ? { ...item, state: 'reserving', progress: 0, error: undefined }
+    ? { ...item, state: 'reserving', progress: 0, error: undefined, retryStage: undefined }
     : item);
   emit();
 
-  let reservations: readonly ReservationResult[];
-  try {
-    reservations = await transport.reserve(candidates);
-  } catch (error) {
-    const message = errorMessage(error);
-    current = current.map((item) => candidateIds.has(item.id)
-      ? { ...item, state: 'failed', error: message }
-      : item);
-    emit();
-    return current;
+  let reservations: readonly ReservationResult[] = [];
+  let reservationRequestFailed = false;
+  if (candidates.length > 0) {
+    try {
+      reservations = await transport.reserve(candidates);
+    } catch (error) {
+      reservationRequestFailed = true;
+      const message = errorMessage(error);
+      current = current.map((item) => candidateIds.has(item.id)
+        ? { ...item, state: 'failed', error: message }
+        : item);
+      emit();
+    }
   }
 
   const resultsById = new Map(reservations.map((result) => [result.id, result]));
-  const readyIds: string[] = [];
+  const ready: Array<{ id: string; stage: 'upload' | 'finalize' }> = finalizationRetries
+    .map(({ id }) => ({ id, stage: 'finalize' }));
   for (const candidate of candidates) {
+    if (reservationRequestFailed) continue;
     const result = resultsById.get(candidate.id);
     if (result?.status === 'accepted') {
       current = current.map((item) => item.id === candidate.id
         ? { ...item, state: 'queued', reservation: result.reservation, error: undefined }
         : item);
-      readyIds.push(candidate.id);
+      ready.push({ id: candidate.id, stage: 'upload' });
     } else {
       current = current.map((item) => item.id === candidate.id
         ? { ...item, state: 'failed', error: result?.error ?? 'This photo could not be reserved.' }
@@ -93,26 +102,33 @@ export async function runUploadQueue(
 
   let cursor = 0;
   const worker = async () => {
-    while (cursor < readyIds.length) {
-      const id = readyIds[cursor++];
-      if (!id) return;
-      const queued = current.find((item) => item.id === id);
+    while (cursor < ready.length) {
+      const task = ready[cursor++];
+      if (!task) return;
+      const queued = current.find((item) => item.id === task.id);
       if (!queued?.reservation) continue;
+      let stage = task.stage;
       try {
-        update(id, { state: 'uploading', progress: 0 });
-        await transport.upload(queued, queued.reservation, (progress) => {
-          update(id, { progress: Math.max(0, Math.min(100, Math.round(progress))) });
-        });
-        update(id, { state: 'finalizing', progress: 100 });
+        if (stage === 'upload') {
+          update(task.id, { state: 'uploading', progress: 0 });
+          await transport.upload(queued, queued.reservation, (progress) => {
+            update(task.id, { progress: Math.max(0, Math.min(100, Math.round(progress))) });
+          });
+          stage = 'finalize';
+        }
+        update(task.id, { state: 'finalizing', progress: 100, retryStage: 'finalize' });
         await transport.finalize(queued, queued.reservation);
-        update(id, { state: 'delivered', progress: 100, error: undefined });
+        update(task.id, { state: 'delivered', progress: 100, error: undefined, retryStage: undefined });
       } catch (error) {
-        update(id, { state: 'failed', error: errorMessage(error) });
+        const retryStage = stage === 'finalize' && !transport.retryUploadAfterFinalizeError?.(error)
+          ? 'finalize'
+          : undefined;
+        update(task.id, { state: 'failed', error: errorMessage(error), retryStage });
       }
     }
   };
 
-  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), readyIds.length));
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), ready.length));
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return current;
 }

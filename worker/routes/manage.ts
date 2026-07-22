@@ -137,7 +137,12 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
   const result = parsed.data.action === 'delete'
     ? await repository.delete(media.id, changedAt)
     : await repository.setPublication(media.id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), changedAt);
-  if (parsed.data.action === 'delete') await context.env.MEDIA_BUCKET.delete(media.objectKey);
+  if (parsed.data.action === 'delete') {
+    await context.env.MEDIA_BUCKET.delete([
+      media.objectKey,
+      ...(media.previewObjectKey ? [media.previewObjectKey] : []),
+    ]);
+  }
   return context.json({ data: { media: result }, requestId: context.get('requestId') });
 });
 

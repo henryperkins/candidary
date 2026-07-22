@@ -25,6 +25,7 @@ test('host creates an event and receives both private access links', async ({ pa
 
 test('guest captures, appends, recovers one failure, and reaches the terminal receipt', async ({ page }) => {
   let batchAttempt = 0;
+  let finalizeAttempt = 0;
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event, role: 'guest' }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
@@ -45,7 +46,13 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
     await route.fulfill({ status: 201, json: { data: { items }, requestId: 'r' } });
   });
   await page.route('**/direct-upload/*', (route) => route.fulfill({ status: 200, body: '' }));
-  await page.route('**/api/event/maya-theo/uploads/*/finalize', (route) => route.fulfill({ json: { data: { media: { uploadState: 'stored' } }, requestId: 'r' } }));
+  await page.route('**/api/event/maya-theo/uploads/*/finalize', (route) => {
+    finalizeAttempt += 1;
+    if (finalizeAttempt === 1) {
+      return route.fulfill({ status: 503, json: { code: 'INTERNAL_ERROR', message: 'Confirmation briefly unavailable.', requestId: 'r' } });
+    }
+    return route.fulfill({ json: { data: { media: { uploadState: 'stored' } }, requestId: 'r' } });
+  });
 
   await page.goto('/event/maya-theo');
   await expect(page.getByRole('heading', { name: event.welcomeMessage })).toBeVisible();
@@ -78,12 +85,14 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   await page.getByRole('button', { name: 'Send 2 photos' }).click();
   await expect(page.getByText('Delivered', { exact: true })).toBeVisible();
   await expect(page.getByText('Needs attention', { exact: true })).toBeVisible();
+  expect(finalizeAttempt).toBe(2);
   await expect(page.getByRole('heading', { name: 'Your 2 photos were sent.' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Retry 1 photo' }).click();
   await expect(page.getByRole('heading', { name: 'Your 2 photos were sent.' })).toBeVisible();
   await expect(page.getByText(/all done and can close this page/i)).toBeVisible();
   await expect(page.getByRole('button')).toHaveCount(0);
   await expect(page.getByText(/Shared gallery/)).toHaveCount(0);
+  expect(finalizeAttempt).toBe(3);
   expect(await page.evaluate(() => localStorage.getItem('candidary_guest_name'))).toBe('Taylor Morgan');
 
   await page.reload();
