@@ -2,7 +2,7 @@ import type { MediaRecord } from '../db/types';
 
 const columns = [
   'media_id', 'original_filename', 'guest_name', 'caption', 'mime_type',
-  'byte_size', 'width', 'height', 'uploaded_at', 'approved_at',
+  'byte_size', 'width', 'height', 'uploaded_at', 'publication_status', 'published_at',
 ] as const;
 
 function cell(value: string | number | null): string {
@@ -13,7 +13,7 @@ function cell(value: string | number | null): string {
 export function buildMediaCsv(media: MediaRecord[]): string {
   const rows = media.map((item) => [
     item.id, item.originalFilename, item.guestName, item.caption, item.mimeType,
-    item.byteSize, item.width, item.height, item.createdAt, item.approvedAt,
+    item.byteSize, item.width, item.height, item.createdAt, item.publicationStatus, item.publishedAt,
   ].map(cell).join(','));
   return `${columns.join(',')}\r\n${rows.join('\r\n')}\r\n`;
 }

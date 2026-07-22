@@ -14,7 +14,7 @@ describe('lifecycle cleanup', () => {
     const media = await repository.reserve({
       id: crypto.randomUUID(), eventId: access.event.id, uploaderSessionId: (await new AuthService(testEnv).resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,
       objectKey: `events/${access.event.id}/media/stale`, originalFilename: 'stale.png', mimeType: 'image/png',
-      declaredByteSize: 64, guestName: null, caption: null, idempotencyKey: 'stale',
+      declaredByteSize: 64, guestName: 'Avery', caption: null, idempotencyKey: 'stale',
       reservationExpiresAt: '2026-07-21T12:00:00.000Z', createdAt: '2026-07-21T11:45:00.000Z',
     });
     await testEnv.MEDIA_BUCKET.put(media.objectKey, png());

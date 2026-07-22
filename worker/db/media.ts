@@ -1,4 +1,4 @@
-import type { ModerationStatus } from '../../shared/contracts';
+import type { PublicationStatus } from '../../shared/contracts';
 import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA, type SupportedImageType } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import type { MediaRecord } from './types';
@@ -14,14 +14,15 @@ interface MediaRow {
   byte_size: number | null;
   width: number | null;
   height: number | null;
-  guest_name: string | null;
+  guest_name: string;
   caption: string | null;
   upload_state: MediaRecord['uploadState'];
-  moderation_status: ModerationStatus;
+  publication_status: PublicationStatus;
   idempotency_key: string;
   reservation_expires_at: string;
   created_at: string;
-  approved_at: string | null;
+  published_at: string | null;
+  preview_object_key: string | null;
   deleted_at: string | null;
 }
 
@@ -33,7 +34,7 @@ export interface ReserveMediaRecord {
   originalFilename: string;
   mimeType: SupportedImageType;
   declaredByteSize: number;
-  guestName: string | null;
+  guestName: string;
   caption: string | null;
   idempotencyKey: string;
   reservationExpiresAt: string;
@@ -55,11 +56,12 @@ function mapMedia(row: MediaRow): MediaRecord {
     guestName: row.guest_name,
     caption: row.caption,
     uploadState: row.upload_state,
-    moderationStatus: row.moderation_status,
+    publicationStatus: row.publication_status,
     idempotencyKey: row.idempotency_key,
     reservationExpiresAt: row.reservation_expires_at,
     createdAt: row.created_at,
-    approvedAt: row.approved_at,
+    publishedAt: row.published_at,
+    previewObjectKey: row.preview_object_key,
     deletedAt: row.deleted_at,
   };
 }
@@ -72,26 +74,30 @@ export class MediaRepository {
     return row ? mapMedia(row) : null;
   }
 
-  async listForManager(eventId: string, status?: ModerationStatus): Promise<MediaRecord[]> {
+  async listForManager(eventId: string, status?: PublicationStatus, guestName?: string): Promise<MediaRecord[]> {
+    const normalizedName = guestName?.trim() || null;
     const result = status
       ? await this.db.prepare(`
           SELECT * FROM media
-          WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL AND moderation_status = ?
+          WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+            AND publication_status = ?
+            AND (? IS NULL OR guest_name LIKE '%' || ? || '%' COLLATE NOCASE)
           ORDER BY created_at ASC
-        `).bind(eventId, status).all<MediaRow>()
+        `).bind(eventId, status, normalizedName, normalizedName).all<MediaRow>()
       : await this.db.prepare(`
           SELECT * FROM media
           WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+            AND (? IS NULL OR guest_name LIKE '%' || ? || '%' COLLATE NOCASE)
           ORDER BY created_at ASC
-        `).bind(eventId).all<MediaRow>();
+        `).bind(eventId, normalizedName, normalizedName).all<MediaRow>();
     return result.results.map(mapMedia);
   }
 
   async listGallery(eventId: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
-      WHERE event_id = ? AND upload_state = 'stored' AND moderation_status = 'approved' AND deleted_at IS NULL
-      ORDER BY approved_at ASC, created_at ASC
+      WHERE event_id = ? AND upload_state = 'stored' AND publication_status = 'published' AND deleted_at IS NULL
+      ORDER BY published_at ASC, created_at ASC
     `).bind(eventId).all<MediaRow>();
     return result.results.map(mapMedia);
   }
@@ -99,10 +105,10 @@ export class MediaRepository {
   async exportSnapshot(eventId: string, snapshotAt: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
-      WHERE event_id = ? AND upload_state = 'stored' AND moderation_status = 'approved'
-        AND deleted_at IS NULL AND approved_at <= ? AND created_at <= ?
-      ORDER BY approved_at ASC, created_at ASC, id ASC
-    `).bind(eventId, snapshotAt, snapshotAt).all<MediaRow>();
+      WHERE event_id = ? AND upload_state = 'stored'
+        AND deleted_at IS NULL AND created_at <= ?
+      ORDER BY created_at ASC, id ASC
+    `).bind(eventId, snapshotAt).all<MediaRow>();
     return result.results.map(mapMedia);
   }
 
@@ -135,6 +141,12 @@ export class MediaRepository {
   }
 
   async reserve(input: ReserveMediaRecord): Promise<MediaRecord> {
+    if (!input.guestName || input.guestName.trim().length < 1 || input.guestName.trim().length > 80) {
+      throw new ApiError('VALIDATION_FAILED', 'Enter your name before adding photos.', 422, {
+        guestName: 'Your name is required.',
+      });
+    }
+    input = { ...input, guestName: input.guestName.trim() };
     const existing = await this.getIdempotent(input);
     if (existing) return existing;
 
@@ -154,10 +166,10 @@ export class MediaRepository {
         this.db.prepare(`
           INSERT INTO media (
             id, event_id, uploader_session_id, object_key, original_filename, mime_type,
-            declared_byte_size, guest_name, caption, upload_state, moderation_status,
+            declared_byte_size, guest_name, caption, upload_state, publication_status,
             idempotency_key, reservation_expires_at, created_at
           )
-          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'pending', ?, ?, ?
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', 'unpublished', ?, ?, ?
           WHERE changes() = 1
         `).bind(
           input.id,
@@ -193,7 +205,7 @@ export class MediaRepository {
       if (event && event.reserved_media_count + event.stored_media_count >= MAX_EVENT_MEDIA) {
         throw new ApiError('EVENT_MEDIA_LIMIT', `This event has reached its ${MAX_EVENT_MEDIA}-image limit.`, 409);
       }
-      throw new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its 300 MB storage limit.', 409);
+      throw new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its storage limit.', 409);
     }
 
     const created = await this.getById(input.id);
@@ -204,7 +216,6 @@ export class MediaRepository {
   async finalize(
     id: string,
     metadata: { byteSize: number; width: number; height: number },
-    moderationRequired: boolean,
   ): Promise<MediaRecord> {
     const current = await this.getById(id);
     if (!current) throw new ApiError('UPLOAD_OBJECT_MISSING', 'The upload reservation no longer exists.', 404);
@@ -220,19 +231,15 @@ export class MediaRepository {
       throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer be finalized.', 409);
     }
 
-    const finalizedAt = new Date().toISOString();
     const results = await this.db.batch([
       this.db.prepare(`
         UPDATE media
-        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored',
-            moderation_status = ?, approved_at = ?
+        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored'
         WHERE id = ? AND upload_state = 'reserved'
       `).bind(
         metadata.byteSize,
         metadata.width,
         metadata.height,
-        moderationRequired ? 'pending' : 'approved',
-        moderationRequired ? null : finalizedAt,
         id,
       ),
       this.db.prepare(`
@@ -244,22 +251,33 @@ export class MediaRepository {
         WHERE id = ? AND changes() = 1
       `).bind(current.declaredByteSize, metadata.byteSize, current.eventId),
     ]);
-    if ((results[0]?.meta.changes ?? 0) !== 1) return this.finalize(id, metadata, moderationRequired);
+    if ((results[0]?.meta.changes ?? 0) !== 1) return this.finalize(id, metadata);
     return (await this.getById(id))!;
   }
 
-  async moderate(
+  async setPublication(
     id: string,
-    expected: ModerationStatus,
-    target: ModerationStatus,
+    expected: PublicationStatus,
+    target: PublicationStatus,
     changedAt: string,
   ): Promise<MediaRecord> {
     const result = await this.db.prepare(`
-      UPDATE media SET moderation_status = ?, approved_at = ?
-      WHERE id = ? AND upload_state = 'stored' AND moderation_status = ? AND deleted_at IS NULL
-    `).bind(target, target === 'approved' ? changedAt : null, id, expected).run();
+      UPDATE media SET publication_status = ?, published_at = ?
+      WHERE id = ? AND upload_state = 'stored' AND publication_status = ? AND deleted_at IS NULL
+    `).bind(target, target === 'published' ? changedAt : null, id, expected).run();
     if ((result.meta.changes ?? 0) !== 1) {
       throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo changed since you last viewed it. Refresh and try again.', 409);
+    }
+    return (await this.getById(id))!;
+  }
+
+  async setPreviewObjectKey(id: string, previewObjectKey: string): Promise<MediaRecord> {
+    const result = await this.db.prepare(`
+      UPDATE media SET preview_object_key = ?
+      WHERE id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+    `).bind(previewObjectKey, id).run();
+    if ((result.meta.changes ?? 0) !== 1) {
+      throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
     }
     return (await this.getById(id))!;
   }

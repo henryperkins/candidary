@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
-import type { ModerationStatus } from '../../shared/contracts';
+import type { PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { EventsRepository } from '../db/events';
@@ -26,8 +26,8 @@ const settingsSchema = z.object({
   moderationRequired: z.boolean(),
 });
 const actionSchema = z.object({
-  action: z.enum(['approve', 'reject', 'delete']),
-  expectedStatus: z.enum(['pending', 'approved', 'rejected']).default('pending'),
+  action: z.enum(['publish', 'hide', 'delete']),
+  expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
 });
 const deleteSchema = z.object({ confirmation: z.string() });
 const coverSchema = z.object({
@@ -44,8 +44,8 @@ async function managerForEvent(context: Context<AppBindings>, write = false) {
   return auth;
 }
 
-function moderationTarget(action: 'approve' | 'reject'): ModerationStatus {
-  return action === 'approve' ? 'approved' : 'rejected';
+function publicationTarget(action: 'publish' | 'hide'): PublicationStatus {
+  return action === 'publish' ? 'published' : 'hidden';
 }
 
 export const manageRoutes = new Hono<AppBindings>();
@@ -116,8 +116,8 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
 manageRoutes.get('/manage/events/:eventId/media', async (context) => {
   await managerForEvent(context);
   const rawStatus = context.req.query('status');
-  const status = rawStatus && ['pending', 'approved', 'rejected'].includes(rawStatus)
-    ? rawStatus as ModerationStatus
+  const status = rawStatus && ['unpublished', 'published', 'hidden'].includes(rawStatus)
+    ? rawStatus as PublicationStatus
     : undefined;
   const media = await new MediaRepository(context.env.DB).listForManager(context.req.param('eventId'), status);
   return context.json({ data: { media }, requestId: context.get('requestId') });
@@ -135,7 +135,7 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
   const changedAt = new Date().toISOString();
   const result = parsed.data.action === 'delete'
     ? await repository.delete(media.id, changedAt)
-    : await repository.moderate(media.id, parsed.data.expectedStatus, moderationTarget(parsed.data.action), changedAt);
+    : await repository.setPublication(media.id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), changedAt);
   if (parsed.data.action === 'delete') await context.env.MEDIA_BUCKET.delete(media.objectKey);
   return context.json({ data: { media: result }, requestId: context.get('requestId') });
 });
@@ -144,8 +144,8 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
   await managerForEvent(context, true);
   const parsed = z.object({
     ids: z.array(z.string().uuid()).min(1).max(50),
-    action: z.enum(['approve', 'reject']),
-    expectedStatus: z.enum(['pending', 'approved', 'rejected']).default('pending'),
+    action: z.enum(['publish', 'hide']),
+    expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
   }).safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Select valid photos to moderate.', 422);
   const repository = new MediaRepository(context.env.DB);
@@ -155,7 +155,7 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
     if (!media || media.eventId !== context.req.param('eventId')) {
       throw new ApiError('ROLE_FORBIDDEN', 'One selected photo belongs to a different event.', 403);
     }
-    await repository.moderate(id, parsed.data.expectedStatus, moderationTarget(parsed.data.action), new Date().toISOString());
+    await repository.setPublication(id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), new Date().toISOString());
     changed.push(id);
   }
   return context.json({ data: { changed }, requestId: context.get('requestId') });

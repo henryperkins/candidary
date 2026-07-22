@@ -3,6 +3,7 @@ import type { ApiErrorBody } from './errors';
 export type Role = 'guest' | 'manager';
 export type UploadState = 'reserved' | 'stored' | 'failed' | 'deleted';
 export type ModerationStatus = 'pending' | 'approved' | 'rejected';
+export type PublicationStatus = 'unpublished' | 'published' | 'hidden';
 export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired';
 
 export interface ApiSuccess<T> {
@@ -11,4 +12,3 @@ export interface ApiSuccess<T> {
 }
 
 export type ApiResult<T> = ApiSuccess<T> | ApiErrorBody;
-

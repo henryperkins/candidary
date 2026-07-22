@@ -28,8 +28,8 @@ contentRoutes.get('/media/:mediaId/content', async (context) => {
     throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
   }
   const manager = auth.session.role === 'manager';
-  const guestCanRead = media.moderationStatus === 'approved'
-    || (media.moderationStatus === 'pending' && media.uploaderSessionId === auth.session.id);
+  const guestCanRead = media.publicationStatus === 'published'
+    || (media.publicationStatus === 'unpublished' && media.uploaderSessionId === auth.session.id);
   if (!manager && !guestCanRead) throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
 
   const object = await context.env.MEDIA_BUCKET.get(media.objectKey);

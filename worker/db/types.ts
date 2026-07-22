@@ -1,4 +1,4 @@
-import type { ExportState, ModerationStatus, Role, UploadState } from '../../shared/contracts';
+import type { ExportState, ModerationStatus, PublicationStatus, Role, UploadState } from '../../shared/contracts';
 import type { SupportedImageType } from '../../shared/constants';
 
 export interface EventRecord {
@@ -56,14 +56,15 @@ export interface MediaRecord {
   byteSize: number | null;
   width: number | null;
   height: number | null;
-  guestName: string | null;
+  guestName: string;
   caption: string | null;
   uploadState: UploadState;
-  moderationStatus: ModerationStatus;
+  publicationStatus: PublicationStatus;
   idempotencyKey: string;
   reservationExpiresAt: string;
   createdAt: string;
-  approvedAt: string | null;
+  publishedAt: string | null;
+  previewObjectKey: string | null;
   deletedAt: string | null;
 }
 

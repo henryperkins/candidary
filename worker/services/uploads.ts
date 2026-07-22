@@ -45,7 +45,7 @@ export class UploadService {
       originalFilename: sanitizeFilename(input.filename),
       mimeType: input.mimeType as SupportedImageType,
       declaredByteSize: input.byteSize,
-      guestName: input.guestName?.trim().slice(0, 80) || null,
+      guestName: input.guestName?.trim().slice(0, 80) || '',
       caption: input.caption?.trim().slice(0, 300) || null,
       idempotencyKey: input.idempotencyKey,
       reservationExpiresAt: new Date(now.getTime() + UPLOAD_RESERVATION_TTL_SECONDS * 1000).toISOString(),
@@ -55,4 +55,3 @@ export class UploadService {
     return { media, uploadUrl: signed.url, uploadUrlExpiresAt: signed.expiresAt };
   }
 }
-

@@ -62,9 +62,9 @@ export class EventsRepository {
   async create(input: CreateEventRecord): Promise<EventRecord> {
     await this.db.prepare(`
       INSERT INTO events (
-        id, slug, name, event_date, welcome_message,
+        id, slug, name, event_date, welcome_message, gallery_visible,
         guest_access_expires_at, management_access_expires_at, purge_after, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `).bind(
       input.id,
       input.slug,

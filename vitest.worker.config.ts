@@ -2,7 +2,10 @@ import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
 
-const migrationSql = readFileSync(new URL('./migrations/0001_core.sql', import.meta.url), 'utf8');
+const migrationSql = [
+  './migrations/0001_core.sql',
+  './migrations/0002_wedding_photo_drop.sql',
+].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8')).join(';\n');
 const migrationQueries = migrationSql
   .split(';')
   .map((query) => query.trim())

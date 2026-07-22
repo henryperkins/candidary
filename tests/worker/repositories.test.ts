@@ -70,9 +70,44 @@ describe('event, token, and session repositories', () => {
     expect((await new SessionsRepository(env.DB).getForEvent('session-a', 'event-a'))?.role).toBe('guest');
     expect(await new SessionsRepository(env.DB).getForEvent('session-a', 'event-b')).toBeNull();
   });
+
+  it('creates new events with the optional gallery hidden', async () => {
+    const events = await seedEvent();
+
+    expect((await events.getById('event-a'))?.galleryVisible).toBe(false);
+  });
 });
 
 describe('media reservation and lifecycle', () => {
+  it('requires a named guest for every new photo', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+
+    await expect(new MediaRepository(env.DB).reserve({
+      id: 'media-nameless', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/nameless', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: null as never, caption: null,
+      idempotencyKey: 'idem-nameless', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('uses wedding-scale count and storage quotas', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    await env.DB.prepare(`
+      UPDATE events SET stored_media_count = 50, stored_bytes = ? WHERE id = ?
+    `).bind(300 * 1024 * 1024, 'event-a').run();
+
+    const reserved = await new MediaRepository(env.DB).reserve({
+      id: 'media-scale', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/scale', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-scale', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+
+    expect(reserved.id).toBe('media-scale');
+  });
+
   it('reserves quota once for an idempotency key', async () => {
     const events = await seedEvent();
     const sessionId = await seedGuestSession();
@@ -98,13 +133,13 @@ describe('media reservation and lifecycle', () => {
   it('rejects count and byte quota overflow without leaving a row', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
-    await env.DB.prepare('UPDATE events SET stored_media_count = 50 WHERE id = ?').bind('event-a').run();
+    await env.DB.prepare('UPDATE events SET stored_media_count = 10000 WHERE id = ?').bind('event-a').run();
     const media = new MediaRepository(env.DB);
 
     await expect(media.reserve({
       id: 'media-over', eventId: 'event-a', uploaderSessionId: sessionId,
       objectKey: 'events/event-a/media/over', originalFilename: 'over.jpg',
-      mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: null, caption: null,
+      mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-over', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
     })).rejects.toMatchObject({ code: 'EVENT_MEDIA_LIMIT' });
 
@@ -122,12 +157,12 @@ describe('media reservation and lifecycle', () => {
       idempotencyKey: 'idem-a', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
     });
 
-    const finalized = await media.finalize('media-a', { byteSize: 1800, width: 1200, height: 800 }, true);
-    const repeated = await media.finalize('media-a', { byteSize: 1800, width: 1200, height: 800 }, true);
-    await expect(media.finalize('media-a', { byteSize: 1700, width: 1200, height: 800 }, true))
+    const finalized = await media.finalize('media-a', { byteSize: 1800, width: 1200, height: 800 });
+    const repeated = await media.finalize('media-a', { byteSize: 1800, width: 1200, height: 800 });
+    await expect(media.finalize('media-a', { byteSize: 1700, width: 1200, height: 800 }))
       .rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT' });
-    const approved = await media.moderate('media-a', 'pending', 'approved', '2026-07-21T12:05:00.000Z');
-    await expect(media.moderate('media-a', 'pending', 'rejected', now))
+    const approved = await media.setPublication('media-a', 'unpublished', 'published', '2026-07-21T12:05:00.000Z');
+    await expect(media.setPublication('media-a', 'unpublished', 'hidden', now))
       .rejects.toMatchObject({ code: 'MEDIA_STATE_CONFLICT' });
     await media.delete('media-a', '2026-07-21T12:06:00.000Z');
     await media.delete('media-a', '2026-07-21T12:07:00.000Z');
@@ -135,9 +170,27 @@ describe('media reservation and lifecycle', () => {
 
     expect(finalized.uploadState).toBe('stored');
     expect(repeated.byteSize).toBe(1800);
-    expect(approved.approvedAt).toBe('2026-07-21T12:05:00.000Z');
+    expect(approved.publishedAt).toBe('2026-07-21T12:05:00.000Z');
     expect(event?.storedMediaCount).toBe(0);
     expect(event?.storedBytes).toBe(0);
+  });
+
+  it('keeps private delivery separate from optional publication and exports every stored original', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    await repository.reserve({
+      id: 'media-private', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/private', originalFilename: 'private.heic',
+      mimeType: 'image/heic' as never, declaredByteSize: 2048, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-private', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+
+    const delivered = await repository.finalize('media-private', { byteSize: 1800, width: 1200, height: 800 });
+    const snapshot = await repository.exportSnapshot('event-a', '2026-07-21T12:30:00.000Z');
+
+    expect((delivered as unknown as { publicationStatus: string }).publicationStatus).toBe('unpublished');
+    expect(snapshot.map(({ id }) => id)).toEqual(['media-private']);
   });
 });
 
