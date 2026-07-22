@@ -22,6 +22,7 @@ const actionSchema = z.object({
   action: z.enum(['approve', 'reject', 'delete']),
   expectedStatus: z.enum(['pending', 'approved', 'rejected']).default('pending'),
 });
+const deleteSchema = z.object({ confirmation: z.string() });
 
 async function managerForEvent(context: Context<AppBindings>, write = false) {
   const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
@@ -37,6 +38,17 @@ function moderationTarget(action: 'approve' | 'reject'): ModerationStatus {
 }
 
 export const manageRoutes = new Hono<AppBindings>();
+
+manageRoutes.delete('/manage/events/:eventId', async (context) => {
+  const auth = await managerForEvent(context, true);
+  const parsed = deleteSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success || parsed.data.confirmation !== auth.event.name) {
+    throw new ApiError('VALIDATION_FAILED', 'Type the event name exactly to delete it.', 422, { confirmation: 'Event name does not match.' });
+  }
+  const { deleteEventData } = await import('../workflows/cleanup');
+  await deleteEventData(context.env, auth.event.id);
+  return context.json({ data: { deleted: true }, requestId: context.get('requestId') });
+});
 
 manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
   await managerForEvent(context, true);
@@ -101,4 +113,3 @@ for (const role of ['guest', 'manager'] as const) {
     return context.json({ data: result, requestId: context.get('requestId') });
   });
 }
-

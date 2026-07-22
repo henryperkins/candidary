@@ -4,6 +4,7 @@ import { toErrorResponse } from '../shared/errors';
 import type { AppBindings } from './env';
 import { securityHeaders } from './http/security-headers';
 import { eventRoutes } from './routes/event';
+import { exportRoutes } from './routes/exports';
 import { exchangeRoutes } from './routes/exchange';
 import { contentRoutes } from './routes/content';
 import { galleryRoutes } from './routes/gallery';
@@ -23,6 +24,7 @@ export function createApp() {
   app.route('/api', publicRoutes);
   app.route('/', exchangeRoutes);
   app.route('/api', eventRoutes);
+  app.route('/api', exportRoutes);
   app.route('/api', uploadRoutes);
   app.route('/api', contentRoutes);
   app.route('/api', galleryRoutes);

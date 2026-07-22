@@ -96,6 +96,24 @@ export class MediaRepository {
     return result.results.map(mapMedia);
   }
 
+  async exportSnapshot(eventId: string, snapshotAt: string): Promise<MediaRecord[]> {
+    const result = await this.db.prepare(`
+      SELECT * FROM media
+      WHERE event_id = ? AND upload_state = 'stored' AND moderation_status = 'approved'
+        AND deleted_at IS NULL AND approved_at <= ? AND created_at <= ?
+      ORDER BY approved_at ASC, created_at ASC, id ASC
+    `).bind(eventId, snapshotAt, snapshotAt).all<MediaRow>();
+    return result.results.map(mapMedia);
+  }
+
+  async listExpiredReservations(now: string, limit = 100): Promise<MediaRecord[]> {
+    const result = await this.db.prepare(`
+      SELECT * FROM media WHERE upload_state = 'reserved' AND reservation_expires_at <= ?
+      ORDER BY reservation_expires_at ASC LIMIT ?
+    `).bind(now, limit).all<MediaRow>();
+    return result.results.map(mapMedia);
+  }
+
   async listContributions(eventId: string, sessionId: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
