@@ -118,4 +118,12 @@ export class EventsRepository {
     if ((result.meta.changes ?? 0) !== 1) throw new Error('Event settings were not updated.');
     return (await this.getById(id))!;
   }
+
+  async setCover(id: string, objectKey: string): Promise<EventRecord> {
+    const result = await this.db.prepare(`
+      UPDATE events SET cover_object_key = ? WHERE id = ? AND deleted_at IS NULL
+    `).bind(objectKey, id).run();
+    if ((result.meta.changes ?? 0) !== 1) throw new Error('Event cover was not updated.');
+    return (await this.getById(id))!;
+  }
 }

@@ -14,6 +14,27 @@ import {
 beforeEach(resetDatabase);
 
 describe('manager settings and media moderation', () => {
+  it('uploads and serves an event cover only to event sessions', async () => {
+    const access = await eventAccess();
+    const initiated = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
+      method: 'POST', headers: writeHeaders(access.manager),
+      body: JSON.stringify({ filename: 'cover.png', mimeType: 'image/png', byteSize: 64 }),
+    }, testEnv);
+    expect(initiated.status).toBe(201);
+    const upload = (await initiated.json<any>()).data;
+    await testEnv.MEDIA_BUCKET.put(upload.objectKey, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 2, 0]), { httpMetadata: { contentType: 'image/png' } });
+    const finalized = await createApp().request(`/api/manage/events/${access.event.id}/cover/finalize`, {
+      method: 'POST', headers: writeHeaders(access.manager),
+      body: JSON.stringify({ objectKey: upload.objectKey, mimeType: 'image/png' }),
+    }, testEnv);
+    expect(finalized.status).toBe(200);
+    const cover = await createApp().request(`/api/event/${access.event.slug}/cover`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(cover.status).toBe(200);
+    expect(cover.headers.get('cache-control')).toBe('private, no-store');
+  });
+
   it('updates event toggles and exposes only approved media in the guest gallery', async () => {
     const access = await eventAccess();
     const media = await uploadPending(access, 'review-1');
@@ -64,6 +85,20 @@ describe('manager settings and media moderation', () => {
 });
 
 describe('access link rotation', () => {
+  it('redisplays the active guest link without exposing it to guests', async () => {
+    const access = await eventAccess();
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.guestLink).toBe(access.guestLink);
+
+    const denied = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(denied.status).toBe(403);
+  });
+
   it('rotates the guest link and invalidates every old guest session immediately', async () => {
     const access = await eventAccess();
     const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/guest/rotate`, {
@@ -98,4 +133,3 @@ describe('access link rotation', () => {
     expect((await oldManager.json<any>()).code).toBe('TOKEN_REVOKED');
   });
 });
-

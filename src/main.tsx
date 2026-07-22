@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { RouterProvider } from 'react-router-dom';
 
 import { createAppRouter } from './app/router';
+import './styles.css';
 
 const root = document.getElementById('root');
 
@@ -15,4 +16,3 @@ ReactDOM.createRoot(root).render(
     <RouterProvider router={createAppRouter()} />
   </React.StrictMode>,
 );
-

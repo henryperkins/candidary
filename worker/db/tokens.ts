@@ -60,6 +60,15 @@ export class TokensRepository {
     return row ? mapToken(row) : null;
   }
 
+  async getActiveForRole(eventId: string, role: Role): Promise<TokenRecord | null> {
+    const row = await this.db.prepare(`
+      SELECT * FROM event_access_tokens
+      WHERE event_id = ? AND role = ? AND revoked_at IS NULL
+      ORDER BY created_at DESC LIMIT 1
+    `).bind(eventId, role).first<TokenRow>();
+    return row ? mapToken(row) : null;
+  }
+
   async revoke(id: string, revokedAt: string): Promise<void> {
     await this.db.prepare('UPDATE event_access_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
       .bind(revokedAt, id).run();
