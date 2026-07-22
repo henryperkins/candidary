@@ -1,3 +1,5 @@
+import { mkdir } from 'node:fs/promises';
+
 import { expect, test } from '@playwright/test';
 
 const event = {
@@ -7,9 +9,12 @@ const event = {
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
 };
 
-test('host creates an event and receives both private access links', async ({ page }) => {
+test('host creates an event and receives both private access links', async ({ page }, testInfo) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ data: {
-    event, guestLink: 'https://candidary.test/join/guest-secret', managementLink: 'https://candidary.test/manage/manager-secret', csrfToken: 'csrf-a',
+    event,
+    guestLink: `https://candidary.test/join/${'guest-secret-'.repeat(8)}`,
+    managementLink: `https://candidary.test/manage/${'manager-secret-'.repeat(8)}`,
+    csrfToken: 'csrf-a',
   }, requestId: 'request-a' }) }));
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Gather the moments you didn’t see.' })).toBeVisible();
@@ -21,6 +26,18 @@ test('host creates an event and receives both private access links', async ({ pa
   await expect(page.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
   await expect(page.getByText('Management link', { exact: true })).toBeVisible();
   await expect(page.getByText(/cannot be recovered/i)).toBeVisible();
+  const overflow = await page.locator('.success-layout').evaluate((layout) => {
+    const viewportWidth = document.documentElement.clientWidth;
+    return Array.from(layout.querySelectorAll<HTMLElement>('*')).flatMap((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && (rect.left < -1 || rect.right > viewportWidth + 1)
+        ? [{ className: element.className, left: rect.left, right: rect.right }]
+        : [];
+    });
+  });
+  expect(overflow).toEqual([]);
+  await mkdir('output/playwright/screenshots', { recursive: true });
+  await page.screenshot({ path: `output/playwright/screenshots/create-success-${testInfo.project.name}.png`, fullPage: true });
 });
 
 test('guest captures, appends, recovers one failure, and reaches the terminal receipt', async ({ page }) => {

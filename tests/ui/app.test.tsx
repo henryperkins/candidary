@@ -38,6 +38,52 @@ describe('public Candidary experience', () => {
     expect(screen.getByText('Management link')).toBeVisible();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
   });
+
+  it('announces a copied link only after the clipboard write succeeds', async () => {
+    let resolveCopy!: () => void;
+    vi.stubGlobal('fetch', vi.fn(() => json({
+      event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+      guestLink: 'https://example.test/join/guest-secret',
+      managementLink: 'https://example.test/manage/manager-secret', csrfToken: 'csrf-a',
+    }, 201)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(
+      () => new Promise<void>((resolve) => { resolveCopy = resolve; }),
+    );
+    await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
+    await user.type(screen.getByLabelText('Event date'), '2026-09-19');
+    await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
+    await user.click(screen.getByRole('button', { name: 'Create private event' }));
+    await screen.findByRole('heading', { name: 'Your event is ready.' });
+
+    await user.click(screen.getByRole('button', { name: 'Copy guest link' }));
+    expect(writeText).toHaveBeenCalledWith('https://example.test/join/guest-secret');
+    expect(screen.queryByText('Copied')).not.toBeInTheDocument();
+
+    await act(async () => { resolveCopy(); });
+    expect(await screen.findByText('Copied')).toBeVisible();
+  });
+
+  it('reports unavailable clipboard writes without claiming success', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => json({
+      event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+      guestLink: 'https://example.test/join/guest-secret',
+      managementLink: 'https://example.test/manage/manager-secret', csrfToken: 'csrf-a',
+    }, 201)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('Permission denied'));
+    await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
+    await user.type(screen.getByLabelText('Event date'), '2026-09-19');
+    await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
+    await user.click(screen.getByRole('button', { name: 'Create private event' }));
+    await screen.findByRole('heading', { name: 'Your event is ready.' });
+
+    await user.click(screen.getByRole('button', { name: 'Copy guest link' }));
+    expect(await screen.findByText('Copy unavailable')).toBeVisible();
+    expect(screen.queryByText('Copied')).not.toBeInTheDocument();
+  });
 });
 
 describe('guest event experience', () => {
@@ -137,6 +183,10 @@ describe('manager experience', () => {
     expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
     expect(screen.getByText('From Avery')).toBeVisible();
     expect(screen.getByRole('link', { name: /download original toast.png/i })).toHaveAttribute('href', '/api/media/media-a/original');
+    const intakeNavigation = screen.getByRole('button', { name: /intake/i });
+    const galleryNavigation = screen.getByRole('button', { name: /gallery/i });
+    expect(intakeNavigation).toHaveAttribute('aria-pressed', 'true');
+    expect(galleryNavigation).toHaveAttribute('aria-pressed', 'false');
     const user = userEvent.setup();
     await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
@@ -145,7 +195,9 @@ describe('manager experience', () => {
       expect.anything(),
     ));
 
-    await user.click(screen.getByRole('button', { name: /gallery/i }));
+    await user.click(galleryNavigation);
+    expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
+    expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
     await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));

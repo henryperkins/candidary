@@ -33,3 +33,36 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await expect(page.getByLabel('Your name')).toBeFocused();
   await expect(page.getByText('Enter your name before adding photos.')).toHaveAttribute('role', 'alert');
 });
+
+test('manager navigation exposes visible labels, selected state, and mobile-sized targets', async ({ page }) => {
+  const event = {
+    id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+    uploadsEnabled: true, galleryVisible: false, moderationRequired: true, storedMediaCount: 0, storedBytes: 0,
+    guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+  };
+  await page.route('**/api/manage/events/event-a', (route) => route.fulfill({ json: { data: { event }, requestId: 'r' } }));
+  await page.route('**/api/manage/events/event-a/media*', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
+  await page.route('**/api/manage/events/event-a/messages', (route) => route.fulfill({ json: { data: { messages: [] }, requestId: 'r' } }));
+  await page.route('**/api/manage/events/event-a/exports', (route) => route.fulfill({ json: { data: { exports: [] }, requestId: 'r' } }));
+  await page.route('**/api/manage/events/event-a/links', (route) => route.fulfill({ json: { data: { guestLink: 'https://candidary.test/join/guest' }, requestId: 'r' } }));
+  await page.goto('/manage/event/event-a');
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+  const intake = page.getByRole('button', { name: 'Intake', exact: true });
+  await expect(intake).toHaveAttribute('aria-pressed', 'true');
+  for (const name of ['Intake', 'Gallery', 'Notes', 'Share', 'Settings']) {
+    const button = page.getByRole('button', { name, exact: true });
+    await expect(button).toBeVisible();
+    const box = await button.boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    const label = button.locator('.manager-nav__label');
+    await expect(label).toBeVisible();
+    expect(await label.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(0);
+    expect((await label.boundingBox())?.height ?? 0).toBeGreaterThan(0);
+  }
+
+  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Share', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(intake).toHaveAttribute('aria-pressed', 'false');
+});

@@ -1,17 +1,13 @@
-import { Check, Copy, ImagePlus, LockKeyhole, QrCode } from 'lucide-react';
+import { Check, ImagePlus, LockKeyhole, QrCode } from 'lucide-react';
 import QRCode from 'qrcode';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
 import { PageHeader } from '../components/Brand';
+import { CopyableLinkCard } from '../components/CopyableLinkCard';
 
 interface Created { event: { id: string; name: string; slug: string }; guestLink: string; managementLink: string; csrfToken: string }
-
-function LinkCard({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  return <div className="link-card"><span>{label}</span><div><code>{value}</code><button type="button" className="icon-button" aria-label={`Copy ${label.toLowerCase()}`} onClick={() => { void navigator.clipboard?.writeText(value); setCopied(true); }}><Copy aria-hidden="true" /></button></div>{copied && <small role="status">Copied</small>}</div>;
-}
 
 export function CreatePage() {
   const [created, setCreated] = useState<Created | null>(null);
@@ -49,7 +45,7 @@ export function CreatePage() {
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
     <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
       <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />It cannot be recovered in this MVP.</p></div>
-      <LinkCard label="Guest link" value={created.guestLink} /><LinkCard label="Management link" value={created.managementLink} />
+      <CopyableLinkCard label="Guest link" value={created.guestLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
       <a className="button button--primary" href={created.managementLink}>Open event manager</a>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
