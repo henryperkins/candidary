@@ -10,7 +10,7 @@ export function LandingPage() {
       <section className="hero">
         <div className="hero__copy">
           <h1>Gather the moments <br />you didn’t see.</h1>
-          <p>A private place where every guest can add the photos, notes, and little moments that made your day yours.</p>
+          <p>Create one private place for your guests to add photos, then choose what appears in the shared gallery.</p>
           <div className="button-row">
             <Link className="button button--primary" to="/create">Create your event <ArrowRight aria-hidden="true" /></Link>
             <a className="button button--quiet" href="#how-it-works">See how it works</a>

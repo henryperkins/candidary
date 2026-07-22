@@ -31,11 +31,16 @@ export function createApp() {
   app.route('/api', manageRoutes);
   app.route('/api', messageRoutes);
 
-  app.notFound((context) => context.json({
-    code: 'EVENT_NOT_FOUND',
-    message: 'This page could not be found.',
-    requestId: context.get('requestId'),
-  }, 404));
+  app.notFound((context) => {
+    if (!new URL(context.req.url).pathname.startsWith('/api/')) {
+      return context.env.ASSETS.fetch(context.req.raw);
+    }
+    return context.json({
+      code: 'EVENT_NOT_FOUND',
+      message: 'This page could not be found.',
+      requestId: context.get('requestId'),
+    }, 404);
+  });
 
   app.onError((error, context) => {
     const response = toErrorResponse(error, context.get('requestId'));

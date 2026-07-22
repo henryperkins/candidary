@@ -4,6 +4,7 @@ dist/
 .dev.vars
 playwright-report/
 test-results/
+output/
 coverage/
 *.log
 *.tsbuildinfo

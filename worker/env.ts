@@ -4,8 +4,8 @@ export interface AppEnv extends Cloudflare.Env {
   TOKEN_HMAC_KEY: string;
   SESSION_HMAC_KEY: string;
   GUEST_TOKEN_ENCRYPTION_KEY: string;
-  R2_ACCESS_KEY_ID?: string;
-  R2_SECRET_ACCESS_KEY?: string;
+  R2_ACCESS_KEY_ID: string;
+  R2_SECRET_ACCESS_KEY: string;
 }
 
 export interface AuthenticatedSession {
