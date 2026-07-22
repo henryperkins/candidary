@@ -18,36 +18,53 @@ describe('manager exports', () => {
     expect((await response.json<any>()).code).toBe('EXPORT_EMPTY');
   });
 
-  it('prepares a snapshot archive and exposes status and a temporary download URL', async () => {
+  it('exports unpublished originals in bounded parts with a manifest and manager-only URLs', async () => {
     const access = await eventAccess();
-    const media = await uploadPending(access, 'exportable', 'Sunset toast');
-    await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
-      method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ action: 'approve', expectedStatus: 'pending' }),
-    }, testEnv);
+    await uploadPending(access, 'exportable-a', 'Sunset toast');
+    await uploadPending(access, 'exportable-b', 'Dance floor');
 
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     expect(created.status).toBe(202);
     const job = (await created.json<any>()).data.export;
-    await processExport(testEnv, job.id, new Date('2026-07-21T13:00:00.000Z'));
+    await processExport(testEnv, job.id, new Date('2026-07-21T13:00:00.000Z'), 100);
 
     const status = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
     expect((await status.json<any>()).data.export.state).toBe('ready');
-    const ready = await new ExportsRepository(testEnv.DB).getById(job.id);
-    const archiveObject = await testEnv.MEDIA_BUCKET.get(ready!.objectKey!);
-    const archive = unzipSync(new Uint8Array(await archiveObject!.arrayBuffer()));
-    expect(Object.keys(archive)).toEqual(['photos/001-exportable.png', 'media.csv']);
-    expect(strFromU8(archive['media.csv']!)).toContain('Sunset toast');
+    const repository = new ExportsRepository(testEnv.DB);
+    const ready = await repository.getById(job.id);
+    const parts = await repository.listParts(job.id);
+    expect(ready).toMatchObject({ partCount: 2 });
+    expect(parts.map(({ partNumber, mediaCount, sourceBytes }) => ({ partNumber, mediaCount, sourceBytes }))).toEqual([
+      { partNumber: 1, mediaCount: 1, sourceBytes: 64 },
+      { partNumber: 2, mediaCount: 1, sourceBytes: 64 },
+    ]);
+    const firstObject = await testEnv.MEDIA_BUCKET.get(parts[0]!.objectKey);
+    const firstArchive = unzipSync(new Uint8Array(await firstObject!.arrayBuffer()));
+    expect(Object.keys(firstArchive)).toEqual(['photos/001-exportable-a.png', 'media.csv']);
+    expect(strFromU8(firstArchive['media.csv']!)).toContain('unpublished');
+    const manifestObject = await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!);
+    const manifest = await manifestObject!.text();
+    expect(manifest).toContain('photos-001.zip');
+    expect(manifest).toContain('photos-002.zip');
+    expect(manifest).toContain('Sunset toast');
 
     const download = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     expect(download.status).toBe(200);
-    expect((await download.json<any>()).data.url).toContain('X-Amz-Expires=900');
+    const downloadData = (await download.json<any>()).data;
+    expect(downloadData.manifest.url).toContain('X-Amz-Expires=900');
+    expect(downloadData.parts).toHaveLength(2);
+    expect(downloadData.parts.every((part: any) => part.url.includes('X-Amz-Expires=900'))).toBe(true);
+
+    const denied = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
+      method: 'POST', headers: writeHeaders(access.guest), body: '{}',
+    }, testEnv);
+    expect(denied.status).toBe(403);
   });
 
   it('uses an attempt-specific object key when retrying a failed job', async () => {

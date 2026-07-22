@@ -74,6 +74,8 @@ export interface ExportRecord {
   state: ExportState;
   snapshotAt: string;
   objectKey: string | null;
+  manifestObjectKey: string | null;
+  partCount: number;
   mediaCount: number;
   totalBytes: number;
   attempt: number;
@@ -82,6 +84,16 @@ export interface ExportRecord {
   startedAt: string | null;
   completedAt: string | null;
   expiresAt: string | null;
+}
+
+export interface ExportPartRecord {
+  id: string;
+  exportJobId: string;
+  partNumber: number;
+  objectKey: string;
+  mediaCount: number;
+  sourceBytes: number;
+  createdAt: string;
 }
 
 export interface MessageRecord {

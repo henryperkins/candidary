@@ -4,7 +4,7 @@ import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 import { api, mediaOriginal, mediaPreview } from '../app/api';
-import type { EventView, ExportView, MediaView, MessageView } from '../app/types';
+import type { EventView, ExportDownloadView, ExportView, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { ErrorState, LoadingState } from '../components/States';
 
@@ -23,6 +23,7 @@ export function ManagerPage() {
   const [media, setMedia] = useState<MediaView[]>([]);
   const [messages, setMessages] = useState<MessageView[]>([]);
   const [exports, setExports] = useState<ExportView[]>([]);
+  const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
   const [guestLink, setGuestLink] = useState('');
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
@@ -111,8 +112,8 @@ export function ManagerPage() {
     await refresh();
   }
   async function downloadExport(job: ExportView) {
-    const result = await api<{ url: string }>(`/api/manage/events/${eventId}/exports/${job.id}/download`, { method: 'POST', body: '{}' });
-    window.location.assign(result.url);
+    const result = await api<ExportDownloadView>(`/api/manage/events/${eventId}/exports/${job.id}/download`, { method: 'POST', body: '{}' });
+    setExportDownloads((current) => ({ ...current, [job.id]: result }));
   }
   async function retryExport(job: ExportView) {
     await api(`/api/manage/events/${eventId}/exports/${job.id}/retry`, { method: 'POST', body: '{}' });
@@ -204,7 +205,7 @@ export function ManagerPage() {
     <aside className="manager-utility">
       <section><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void navigator.clipboard?.writeText(guestLink)}><Copy aria-hidden="true" /> Copy guest link</button></section>
       <section><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / 10_000) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of 10,000 · {formatBytes(event.storedBytes)} of 100 GB</small></section>
-      <section><p className="section-label">Complete export</p><h2>Keep every original</h2>{exports[0] ? <div className="export-state"><strong>{exports[0].state}</strong><span>{exports[0].mediaCount} photos · attempt {exports[0].attempt}</span>{exports[0].state === 'ready' && <button className="button button--secondary" onClick={() => void downloadExport(exports[0]!)}><Download aria-hidden="true" /> Get download link</button>}{(exports[0].state === 'failed' || exports[0].state === 'expired') && <button className="button button--secondary" onClick={() => void retryExport(exports[0]!)}>Retry export</button>}</div> : <><p>Prepare every delivered original, whether or not it appears in the gallery.</p><button className="button button--primary button--wide" onClick={() => void prepareExport()}><Download aria-hidden="true" /> Prepare download</button></>}</section>
+      <section><p className="section-label">Complete export</p><h2>Keep every original</h2>{exports[0] ? <div className="export-state"><strong>{exports[0].state}</strong><span>{exports[0].mediaCount} photos · {exports[0].partCount || 0} parts · attempt {exports[0].attempt}</span>{exports[0].state === 'ready' && !exportDownloads[exports[0].id] && <button className="button button--secondary" onClick={() => void downloadExport(exports[0]!)}><Download aria-hidden="true" /> Get download links</button>}{exportDownloads[exports[0].id] && <div className="export-links"><a href={exportDownloads[exports[0].id]!.manifest.url}>Manifest</a>{exportDownloads[exports[0].id]!.parts.map((part) => <a href={part.url} key={part.partNumber}>Part {part.partNumber} <small>{part.mediaCount} photos</small></a>)}</div>}{(exports[0].state === 'failed' || exports[0].state === 'expired') && <button className="button button--secondary" onClick={() => void retryExport(exports[0]!)}>Retry export</button>}</div> : <><p>Prepare every delivered original, whether or not it appears in the gallery.</p><button className="button button--primary button--wide" onClick={() => void prepareExport()}><Download aria-hidden="true" /> Prepare download</button></>}</section>
     </aside>
   </div>;
 }

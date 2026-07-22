@@ -44,5 +44,19 @@ export interface ExportView {
   mediaCount: number;
   totalBytes: number;
   attempt: number;
+  manifestObjectKey?: string | null;
+  partCount?: number;
   expiresAt: string | null;
+}
+
+export interface ExportDownloadView {
+  manifest: { url: string; expiresAt: string; filename: string };
+  parts: Array<{
+    partNumber: number;
+    mediaCount: number;
+    sourceBytes: number;
+    url: string;
+    expiresAt: string;
+    filename: string;
+  }>;
 }

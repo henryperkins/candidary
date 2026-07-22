@@ -9,14 +9,18 @@ import { eventAccess, resetDatabase, testEnv, uploadPending, writeHeaders } from
 describe('complete private event journey', () => {
   beforeEach(resetDatabase);
 
-  it('creates, contributes, moderates, publishes, and exports originals', async () => {
+  it('creates, privately collects, optionally publishes, and exports originals', async () => {
     const access = await eventAccess('Maya & Theo');
     const media = await uploadPending(access, 'first-look', 'The first look');
-    const approved = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+    await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ action: 'approve', expectedStatus: 'pending' }),
+      body: JSON.stringify({ galleryVisible: true, uploadsEnabled: true, moderationRequired: true }),
     }, testEnv);
-    expect(approved.status).toBe(200);
+    const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+      method: 'PATCH', headers: writeHeaders(access.manager),
+      body: JSON.stringify({ action: 'publish', expectedStatus: 'unpublished' }),
+    }, testEnv);
+    expect(published.status).toBe(200);
 
     const gallery = await createApp().request(`/api/event/${access.event.slug}/gallery`, {
       headers: { cookie: access.guest.cookie },
@@ -28,10 +32,14 @@ describe('complete private event journey', () => {
     }, testEnv);
     const job = (await requested.json<any>()).data.export;
     await processExport(testEnv, job.id);
-    const ready = await new ExportsRepository(testEnv.DB).getById(job.id);
-    const object = await testEnv.MEDIA_BUCKET.get(ready!.objectKey!);
+    const repository = new ExportsRepository(testEnv.DB);
+    const ready = await repository.getById(job.id);
+    const parts = await repository.listParts(job.id);
+    expect(ready).toMatchObject({ state: 'ready', partCount: 1 });
+    const object = await testEnv.MEDIA_BUCKET.get(parts[0]!.objectKey);
     const archive = unzipSync(new Uint8Array(await object!.arrayBuffer()));
     expect(Object.keys(archive)).toEqual(['photos/001-first-look.png', 'media.csv']);
     expect(strFromU8(archive['media.csv']!)).toContain('The first look');
+    expect(await testEnv.MEDIA_BUCKET.head(ready!.manifestObjectKey!)).not.toBeNull();
   });
 });

@@ -1,7 +1,8 @@
 import { strFromU8, unzipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 
-import { buildMediaCsv } from '../../worker/export/csv';
+import { buildExportManifest, buildMediaCsv } from '../../worker/export/csv';
+import { partitionExportSnapshot } from '../../worker/export/partition';
 import { buildExportZip, buildExportZipStream, exportPath } from '../../worker/export/zip-stream';
 
 const media = {
@@ -50,5 +51,28 @@ describe('export metadata', () => {
     const archive = unzipSync(new Uint8Array(await new Response(stream).arrayBuffer()));
     expect([...archive['photos/001-maya-laughing.png']!]).toEqual([7, 8, 9]);
     expect(strFromU8(archive['media.csv']!)).toContain('media-a');
+  });
+
+  it('partitions source payload deterministically and describes every original in one manifest', () => {
+    const items = [
+      { ...media, id: 'media-a', byteSize: 60, publicationStatus: 'unpublished' as const },
+      { ...media, id: 'media-b', byteSize: 40, publicationStatus: 'hidden' as const },
+      { ...media, id: 'media-c', byteSize: 70 },
+    ];
+    const parts = partitionExportSnapshot(items, 100);
+
+    expect(parts.map((part) => ({
+      number: part.partNumber,
+      ids: part.media.map(({ id }) => id),
+      bytes: part.sourceBytes,
+    }))).toEqual([
+      { number: 1, ids: ['media-a', 'media-b'], bytes: 100 },
+      { number: 2, ids: ['media-c'], bytes: 70 },
+    ]);
+    const manifest = buildExportManifest(parts);
+    expect(manifest).toContain('part_number,archive_name,archive_path,media_id');
+    expect(manifest).toContain('1,photos-001.zip,photos/001-maya-laughing.png,media-a');
+    expect(manifest).toContain('unpublished');
+    expect(manifest).toContain('hidden');
   });
 });

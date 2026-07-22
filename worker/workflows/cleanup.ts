@@ -28,8 +28,14 @@ export async function cleanupExpiredReservations(env: AppEnv, now = new Date()):
 }
 
 export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Promise<number> {
-  const expired = await new ExportsRepository(env.DB).expireReady(now.toISOString());
-  await Promise.all(expired.filter(({ objectKey }) => objectKey).map(({ objectKey }) => env.MEDIA_BUCKET.delete(objectKey!)));
+  const repository = new ExportsRepository(env.DB);
+  const expired = await repository.expireReady(now.toISOString());
+  for (const job of expired) {
+    const parts = await repository.listParts(job.id);
+    const keys = [job.objectKey, job.manifestObjectKey, ...parts.map(({ objectKey }) => objectKey)]
+      .filter((key): key is string => Boolean(key));
+    if (keys.length) await env.MEDIA_BUCKET.delete(keys);
+  }
   return expired.length;
 }
 
