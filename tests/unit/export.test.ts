@@ -2,7 +2,7 @@ import { strFromU8, unzipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 
 import { buildMediaCsv } from '../../worker/export/csv';
-import { buildExportZip, exportPath } from '../../worker/export/zip-stream';
+import { buildExportZip, buildExportZipStream, exportPath } from '../../worker/export/zip-stream';
 
 const media = {
   id: 'media-a', eventId: 'event-a', uploaderSessionId: 'session-a',
@@ -40,6 +40,15 @@ describe('export metadata', () => {
       'media.csv',
     ]);
     expect([...archive['photos/001-maya-laughing.png']!]).toEqual([1, 2, 3]);
+    expect(strFromU8(archive['media.csv']!)).toContain('media-a');
+  });
+
+  it('streams the same readable archive without buffering source objects', async () => {
+    const stream = buildExportZipStream([
+      { media, body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([7, 8, 9])); controller.close(); } }) },
+    ]);
+    const archive = unzipSync(new Uint8Array(await new Response(stream).arrayBuffer()));
+    expect([...archive['photos/001-maya-laughing.png']!]).toEqual([7, 8, 9]);
     expect(strFromU8(archive['media.csv']!)).toContain('media-a');
   });
 });

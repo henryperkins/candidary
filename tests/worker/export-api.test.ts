@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { strFromU8, unzipSync } from 'fflate';
 
 import { createApp } from '../../worker/app';
 import { ExportsRepository } from '../../worker/db/exports';
@@ -36,6 +37,11 @@ describe('manager exports', () => {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
     expect((await status.json<any>()).data.export.state).toBe('ready');
+    const ready = await new ExportsRepository(testEnv.DB).getById(job.id);
+    const archiveObject = await testEnv.MEDIA_BUCKET.get(ready!.objectKey!);
+    const archive = unzipSync(new Uint8Array(await archiveObject!.arrayBuffer()));
+    expect(Object.keys(archive)).toEqual(['photos/001-exportable.png', 'media.csv']);
+    expect(strFromU8(archive['media.csv']!)).toContain('Sunset toast');
 
     const download = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',

@@ -1,7 +1,8 @@
 import type { AppEnv } from '../env';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
-import { buildExportZip } from '../export/zip-stream';
+import { buildExportZipStream } from '../export/zip-stream';
+import { multipartPut } from '../storage/multipart';
 
 export async function processExport(env: AppEnv, jobId: string, now = new Date()) {
   const exports = new ExportsRepository(env.DB);
@@ -17,10 +18,10 @@ export async function processExport(env: AppEnv, jobId: string, now = new Date()
     for (const media of snapshot) {
       const object = await env.MEDIA_BUCKET.get(media.objectKey);
       if (!object) throw new Error('EXPORT_SOURCE_MISSING');
-      entries.push({ media, bytes: new Uint8Array(await object.arrayBuffer()) });
+      entries.push({ media, body: object.body });
     }
-    const archive = buildExportZip(entries);
-    await env.MEDIA_BUCKET.put(temporaryKey, archive, {
+    const archive = buildExportZipStream(entries);
+    await multipartPut(env.MEDIA_BUCKET, temporaryKey, archive, {
       httpMetadata: { contentType: 'application/zip', contentDisposition: `attachment; filename="candidary-${job.eventId}.zip"` },
     });
     const completedAt = now.toISOString();
