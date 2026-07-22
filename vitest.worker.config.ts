@@ -13,7 +13,12 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
-        bindings: { TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries) },
+        bindings: {
+          TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries),
+          TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
+          SESSION_HMAC_KEY: 'test-session-hmac-key-with-at-least-32-bytes',
+          GUEST_TOKEN_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',
+        },
         d1Databases: ['DB'],
         r2Buckets: ['MEDIA_BUCKET'],
       },
