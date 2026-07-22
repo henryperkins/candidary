@@ -337,6 +337,8 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
       <input
         ref={cameraInput}
         className="sr-only"
+        hidden
+        data-photo-source="camera"
         type="file"
         accept={IMAGE_ACCEPT}
         capture="environment"
@@ -346,6 +348,8 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
       <input
         ref={libraryInput}
         className="sr-only"
+        hidden
+        data-photo-source="library"
         type="file"
         accept={IMAGE_ACCEPT}
         multiple

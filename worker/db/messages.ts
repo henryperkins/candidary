@@ -94,10 +94,16 @@ export class MessagesRepository {
       WHERE event_id = ? AND deleted_at IS NULL
         AND (moderation_status = 'approved' OR guest_session_id = ?)
       UNION ALL
-      SELECT id, 'caption' AS kind, guest_name, caption AS body, moderation_status, created_at, id AS media_id
+      SELECT id, 'caption' AS kind, guest_name, caption AS body,
+        CASE publication_status
+          WHEN 'published' THEN 'approved'
+          WHEN 'hidden' THEN 'rejected'
+          ELSE 'pending'
+        END AS moderation_status,
+        created_at, id AS media_id
       FROM media
       WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL AND caption IS NOT NULL
-        AND (moderation_status = 'approved' OR uploader_session_id = ?)
+        AND (publication_status = 'published' OR uploader_session_id = ?)
       ORDER BY created_at ASC
     `).bind(eventId, guestSessionId, eventId, guestSessionId).all<FeedRow>();
     return result.results.map((row) => ({

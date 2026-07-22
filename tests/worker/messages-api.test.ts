@@ -46,13 +46,14 @@ describe('guest notes and captions', () => {
     expect((await approvedFeed.json<any>()).data.items.map((item: any) => item.id)).toContain(message.id);
   });
 
-  it('combines approved media captions with approved standalone notes chronologically', async () => {
+  it('combines published media captions with approved standalone notes chronologically', async () => {
     const access = await eventAccess();
     const media = await uploadPending(access, 'caption-1', 'The speeches had us crying.');
-    await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+    const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ action: 'approve', expectedStatus: 'pending' }),
+      body: JSON.stringify({ action: 'publish', expectedStatus: 'unpublished' }),
     }, testEnv);
+    expect(published.status).toBe(200);
     const note = await createApp().request(`/api/event/${access.event.slug}/messages`, {
       method: 'POST', headers: writeHeaders(access.guest),
       body: JSON.stringify({ guestName: 'Avery', body: 'And the dance floor was perfect.' }),
@@ -74,4 +75,3 @@ describe('guest notes and captions', () => {
     ]);
   });
 });
-

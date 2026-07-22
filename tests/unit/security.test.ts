@@ -9,6 +9,7 @@ import {
 } from '../../worker/security/crypto';
 import { calculateLifecycle } from '../../worker/security/lifecycle';
 import { sanitizeFilename } from '../../worker/security/filenames';
+import { eventSlug } from '../../worker/security/slugs';
 
 const encryptionKey = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY';
 
@@ -70,3 +71,9 @@ describe('display filenames', () => {
   });
 });
 
+describe('public event slugs', () => {
+  it('normalizes base64url token suffixes to the route-safe alphabet', () => {
+    expect(eventSlug('Maya & Theo', '_L1LbL')).toBe('maya-theo-l1lbl');
+    expect(eventSlug('✨', '--ABC_')).toBe('event-abc');
+  });
+});

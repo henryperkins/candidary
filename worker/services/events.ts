@@ -8,14 +8,7 @@ import {
   encryptGuestSecret,
 } from '../security/crypto';
 import { calculateLifecycle } from '../security/lifecycle';
-
-function slugify(name: string, suffix: string): string {
-  const stem = name.normalize('NFKD').toLowerCase()
-    .replace(/[^a-z0-9]+/gu, '-')
-    .replace(/^-+|-+$/gu, '')
-    .slice(0, 48) || 'event';
-  return `${stem}-${suffix.toLowerCase()}`;
-}
+import { eventSlug } from '../security/slugs';
 
 export interface CreateEventInput {
   name: string;
@@ -38,7 +31,7 @@ export class EventService {
     const lifecycle = calculateLifecycle(input.eventDate, now);
     const event = await events.create({
       id: eventId,
-      slug: slugify(input.name, guestToken.id.slice(0, 6)),
+      slug: eventSlug(input.name, guestToken.id.slice(0, 6)),
       name: input.name,
       eventDate: input.eventDate,
       welcomeMessage: input.welcomeMessage,
@@ -89,4 +82,3 @@ export class EventService {
     };
   }
 }
-

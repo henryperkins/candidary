@@ -1,10 +1,24 @@
-# Candidary Core
+# Candidary
 
-Candidary is a private event-photo workflow built on React, Vite, Hono, Cloudflare Workers, D1, R2, and Workflows. A host creates one event, shares a guest link or QR code, moderates guest originals and notes, publishes an approved gallery, and prepares a private ZIP export.
+Candidary is a mobile-first private photo drop for weddings and large events. A guest scans the event QR code, enters one required name, takes a photo or chooses recent photos, reviews the selection, and sends the untouched originals directly to the host. No account is required.
+
+The primary journey ends with an exact delivery receipt. Shared galleries, notes, and publication controls remain available as secondary features; they never block private host delivery or complete exports.
+
+## What it supports
+
+- Camera capture with an environment-camera hint and multi-select recent photos.
+- JPEG, PNG, WebP, HEIC, and HEIF originals up to 20 MB each.
+- Ordered reservation batches and at most two concurrent transfers per guest.
+- Independent retry/removal for partial failures and idempotent finalization.
+- Required 1-80 character guest-name snapshots remembered on the device.
+- Private R2 originals with authorized Cloudflare Images previews.
+- Live host intake, guest-name search, optional gallery publication, and notes.
+- 10,000 photos and 100 GiB per event by design.
+- Complete exports containing every stored original in source-bounded 2 GiB ZIP parts plus a manifest.
 
 ## Local development
 
-Requirements: Node.js 22+, npm 11+, and a Cloudflare account for browser-direct R2 upload testing.
+Requirements: Node.js 22+, npm 11+, and a Cloudflare account for browser-direct R2 and Images testing.
 
 ```powershell
 npm install
@@ -19,7 +33,7 @@ Generate independent local secrets with Node:
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Run that command three times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `GUEST_TOKEN_ENCRYPTION_KEY`. Direct upload URLs also require an R2 API token in `.dev.vars`; metadata, authentication, D1, and Worker tests run locally without contacting production resources.
+Run that command three times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `GUEST_TOKEN_ENCRYPTION_KEY`. Direct upload URLs also require an R2 API token in `.dev.vars`.
 
 ## Verification
 
@@ -29,17 +43,18 @@ npm run typecheck
 npm run lint
 npm run build
 npm run test:e2e
+npm run test:load:wedding
 ```
 
-Worker integration tests use isolated local D1 and R2 bindings. The browser suite exercises both 1440 px desktop and 390 px mobile surfaces. The complete host → guest → moderation → gallery → ZIP lifecycle is covered in `tests/worker/core-journey.test.ts` against real Worker handlers and bindings.
+The load command is a dry run unless an operator supplies a dedicated rehearsal event and the explicit live confirmation described in [operations.md](docs/operations.md). Browser automation at 390 by 844 pixels supplements—but does not replace—physical iPhone Safari and Android Chrome acceptance.
 
 ## Architecture
 
-- `src/` — React routes, upload orchestration, guest experience, and event manager.
-- `worker/` — Hono API, auth/session enforcement, D1 repositories, private R2 delivery, export Workflow, and scheduled cleanup.
-- `migrations/` — the D1 schema and state constraints.
-- `shared/` — API contracts, fixed limits, and stable error codes.
-- `tests/` — unit, Cloudflare Worker integration, and real-browser suites.
-- `design/` — approved visual concepts, design system, and fidelity record.
+- `src/` — React event drop, upload queue, secondary guest content, and host intake.
+- `worker/` — Hono API, authorization, D1 repositories, private R2 storage, Images previews, exports, and cleanup.
+- `migrations/` — D1 schema and state constraints.
+- `shared/` — contracts, limits, and stable errors.
+- `tests/` — unit, Worker integration, and real-browser coverage.
+- `docs/superpowers/` — the approved wedding photo-drop design and implementation plan.
 
-Production prerequisites and exact commands are in [deployment.md](docs/deployment.md). Security invariants are in [security.md](docs/security.md), and lifecycle/runbook details are in [operations.md](docs/operations.md).
+Deployment and rehearsal steps are in [deployment.md](docs/deployment.md). Operational limits and recovery are in [operations.md](docs/operations.md).
