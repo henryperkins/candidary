@@ -15,9 +15,11 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries),
+          APP_ORIGIN: 'http://127.0.0.1:5173',
           TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
           SESSION_HMAC_KEY: 'test-session-hmac-key-with-at-least-32-bytes',
           GUEST_TOKEN_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',
+          R2_ACCOUNT_ID: 'local',
           R2_ACCESS_KEY_ID: 'test-r2-access-key',
           R2_SECRET_ACCESS_KEY: 'test-r2-secret-key',
           R2_BUCKET_NAME: 'candidary-media',

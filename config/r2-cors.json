@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": [
+          "https://candidary.lfd.workers.dev"
+        ],
+        "methods": [
+          "PUT"
+        ],
+        "headers": [
+          "content-type"
+        ]
+      },
+      "exposeHeaders": [
+        "etag"
+      ],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}
