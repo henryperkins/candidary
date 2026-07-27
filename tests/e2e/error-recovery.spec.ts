@@ -16,9 +16,11 @@ const OFFLINE = {
   code: 'INTERNAL_ERROR',
   message: 'Something went wrong. Try again and keep this request ID if the problem continues.',
 };
-const RETRY_HINT = 'Your connection may have dropped. Try again in a moment.';
+const RETRY_HINT = 'This did not go through. Try again in a moment.';
 const GUEST_LINK_HINT = 'Open the latest guest link from your host to start again.';
 const MANAGER_LINK_HINT = 'Open the latest management link you saved to start again.';
+const GUEST_LIFECYCLE_HINT = 'Your host can share a new link if you still need to send photos.';
+const MANAGER_LIFECYCLE_HINT = 'Check the management link you saved. A closed or deleted event cannot be reopened from here.';
 
 // Retrying cannot mint a session, so every one of these has to recover through a link rather than a
 // button whose every press repeats the same refusal.
@@ -28,6 +30,23 @@ const LINK_FAILURES = [
   { code: 'TOKEN_REVOKED', status: 403, message: 'This link was replaced with a new one.' },
   { code: 'ROLE_FORBIDDEN', status: 403, message: 'This link does not open that view.' },
 ];
+
+// The normal end of every event, not an exotic case: the access window closes, the host deletes the
+// event, or retention purges it. The messages are the ones `worker/auth/service.ts` actually sends.
+const LIFECYCLE_FAILURES = [
+  { code: 'EVENT_NOT_FOUND', status: 404, message: 'This event could not be found.' },
+  { code: 'EVENT_DELETED', status: 410, message: 'This event has been deleted.' },
+  { code: 'EVENT_EXPIRED', status: 410, message: 'This event access has expired.' },
+];
+
+// Two families, one rule: nothing a retry could answer, so each carries the guidance that does recover
+// it — the link for a session failure, the event's own end for a lifecycle one.
+function terminalFailures(linkHint: string, lifecycleHint: string) {
+  return [
+    ...LINK_FAILURES.map((failure) => ({ ...failure, hint: linkHint })),
+    ...LIFECYCLE_FAILURES.map((failure) => ({ ...failure, hint: lifecycleHint })),
+  ];
+}
 
 // Playwright consults route handlers newest first, so this sits in front of the fixture's own handler
 // and hands every attempt after the first back to it.
@@ -39,6 +58,14 @@ async function failFirstAttempt(page: Page, url: string | RegExp, failure: typeo
       ? route.fulfill({ status, json: { ...failure, requestId: 'request-a' } })
       : route.fallback();
   });
+}
+
+// The live region has to carry the way out, not only the failure. On a state that offers no button
+// the hint is the sole path forward, and a region announcing just the failure never mentions it.
+async function expectAnnounced(page: Page, message: string, recoveryHint: string) {
+  const alert = page.getByRole('alert');
+  await expect(alert, 'the alert announces the failure').toContainText(message);
+  await expect(alert, 'the alert announces the way out of it').toContainText(recoveryHint);
 }
 
 async function expectContained(page: Page) {
@@ -68,7 +95,7 @@ test('a failed guest load recovers on the next attempt rather than dead-ending',
   await failFirstAttempt(page, GUEST_EVENT, OFFLINE, 500);
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
 
-  await expect(page.getByRole('alert')).toHaveText(OFFLINE.message);
+  await expectAnnounced(page, OFFLINE.message, RETRY_HINT);
   const hint = page.getByText(RETRY_HINT);
   await expect(hint).toBeVisible();
   // The way out has to be legible: measured from the colours the browser actually resolved.
@@ -96,7 +123,7 @@ test('a failed manager load recovers on the next attempt rather than dead-ending
   await failFirstAttempt(page, MANAGER_EVENT, OFFLINE, 500);
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
 
-  await expect(page.getByRole('alert')).toHaveText(OFFLINE.message);
+  await expectAnnounced(page, OFFLINE.message, RETRY_HINT);
   await expect(page.getByText(RETRY_HINT)).toBeVisible();
   await expectMobileTarget(page, 'Try again');
   await expectContained(page);
@@ -112,43 +139,50 @@ test('a failed manager load recovers on the next attempt rather than dead-ending
   await expectContained(page);
 });
 
-test('a guest link failure points at the link that recovers it and offers no retry', async ({ page }) => {
-  let failure = LINK_FAILURES[0]!;
+test('a guest failure no retry could answer points at what does recover it, and offers none', async ({ page }) => {
+  const cases = terminalFailures(GUEST_LINK_HINT, GUEST_LIFECYCLE_HINT);
+  let failure = cases[0]!;
   await stubGuestRoutes(page);
   await page.route(GUEST_EVENT, (route) => route.fulfill({
     status: failure.status,
     json: { code: failure.code, message: failure.message, requestId: 'request-a' },
   }));
 
-  for (const linkFailure of LINK_FAILURES) {
-    failure = linkFailure;
+  for (const terminal of cases) {
+    failure = terminal;
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
 
-    await expect(page.getByRole('alert'), linkFailure.code).toHaveText(linkFailure.message);
-    await expect(page.getByText(GUEST_LINK_HINT), linkFailure.code).toBeVisible();
-    // A retry here could only repeat the refusal, so the state must not offer one at all.
-    await expect(page.getByRole('button', { name: 'Try again', exact: true }), linkFailure.code)
+    await expect(page.getByRole('alert'), terminal.code).toContainText(terminal.message);
+    await expect(page.getByText(terminal.hint), terminal.code).toBeVisible();
+    await expectAnnounced(page, terminal.message, terminal.hint);
+    // A retry here could only repeat the refusal, so the state must not offer one at all — and the
+    // hint must never be the transport line, which would blame a connection that is working fine.
+    await expect(page.getByRole('button', { name: 'Try again', exact: true }), terminal.code)
       .toHaveCount(0);
+    await expect(page.getByText(RETRY_HINT), terminal.code).toHaveCount(0);
     await expectContained(page);
   }
 });
 
-test('a manager link failure points at the link that recovers it and offers no retry', async ({ page }) => {
-  let failure = LINK_FAILURES[0]!;
+test('a manager failure no retry could answer points at what does recover it, and offers none', async ({ page }) => {
+  const cases = terminalFailures(MANAGER_LINK_HINT, MANAGER_LIFECYCLE_HINT);
+  let failure = cases[0]!;
   await stubManagerRoutes(page, { mediaPages: { first: { media: makeMedia(1), nextCursor: null } } });
   await page.route(MANAGER_EVENT, (route) => route.fulfill({
     status: failure.status,
     json: { code: failure.code, message: failure.message, requestId: 'request-a' },
   }));
 
-  for (const linkFailure of LINK_FAILURES) {
-    failure = linkFailure;
+  for (const terminal of cases) {
+    failure = terminal;
     await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
 
-    await expect(page.getByRole('alert'), linkFailure.code).toHaveText(linkFailure.message);
-    await expect(page.getByText(MANAGER_LINK_HINT), linkFailure.code).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Try again', exact: true }), linkFailure.code)
+    await expect(page.getByRole('alert'), terminal.code).toContainText(terminal.message);
+    await expect(page.getByText(terminal.hint), terminal.code).toBeVisible();
+    await expectAnnounced(page, terminal.message, terminal.hint);
+    await expect(page.getByRole('button', { name: 'Try again', exact: true }), terminal.code)
       .toHaveCount(0);
+    await expect(page.getByText(RETRY_HINT), terminal.code).toHaveCount(0);
     await expectContained(page);
   }
 });

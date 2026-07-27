@@ -13,11 +13,15 @@ interface ErrorStateProps {
 }
 
 export function ErrorState({ message, recoveryHint, onRetry }: ErrorStateProps) {
-  // Only the failure itself interrupts; the hint and the action are read in place, in order.
+  // The failure and the way out are announced together. Most of these states offer no button, no
+  // heading, and nothing else focusable, so a live region carrying only the failure would tell a
+  // screen-reader user what broke and never mention the one thing that recovers it.
   return <div className="state-card state-card--error">
     <TriangleAlert aria-hidden="true" />
-    <p role="alert">{message}</p>
-    <p>{recoveryHint}</p>
+    <div role="alert">
+      <p>{message}</p>
+      <p className="state-card__recovery">{recoveryHint}</p>
+    </div>
     {onRetry && (
       <button type="button" className="button button--secondary" onClick={onRetry}>Try again</button>
     )}
@@ -29,12 +33,24 @@ export function ErrorState({ message, recoveryHint, onRetry }: ErrorStateProps) 
 // carry that instruction and no retry at all rather than a loop that is guaranteed to fail again.
 const LINK_RECOVERY_CODES = new Set(['SESSION_REQUIRED', 'SESSION_EXPIRED', 'TOKEN_REVOKED', 'ROLE_FORBIDDEN']);
 
+// The event itself has ended: its access window closed, the host deleted it, or retention purged it.
+// This is the normal last state of every event rather than an exotic one, and no retry reaches past
+// it either — so it is answered honestly instead of with a button and a guess about the network.
+const LIFECYCLE_CODES = new Set(['EVENT_NOT_FOUND', 'EVENT_DELETED', 'EVENT_EXPIRED']);
+
 const LINK_RECOVERY_HINT = {
   guest: 'Open the latest guest link from your host to start again.',
   manager: 'Open the latest management link you saved to start again.',
 };
 
-const RETRY_HINT = 'Your connection may have dropped. Try again in a moment.';
+const LIFECYCLE_HINT = {
+  guest: 'Your host can share a new link if you still need to send photos.',
+  manager: 'Check the management link you saved. A closed or deleted event cannot be reopened from here.',
+};
+
+// Deliberately cause-neutral. A retry is worth offering whenever the request could answer differently
+// next time, which is not the same as knowing why it did not answer this time.
+const RETRY_HINT = 'This did not go through. Try again in a moment.';
 
 export interface LoadFailure {
   message: string;
@@ -51,7 +67,11 @@ export function describeLoadFailure(
 ): LoadFailure {
   const message = caught instanceof Error && caught.message ? caught.message : fallback;
   const code = caught instanceof ClientApiError ? caught.code : '';
-  return LINK_RECOVERY_CODES.has(code)
-    ? { message, recoveryHint: LINK_RECOVERY_HINT[role], retryable: false }
-    : { message, recoveryHint: RETRY_HINT, retryable: true };
+  if (LINK_RECOVERY_CODES.has(code)) {
+    return { message, recoveryHint: LINK_RECOVERY_HINT[role], retryable: false };
+  }
+  if (LIFECYCLE_CODES.has(code)) {
+    return { message, recoveryHint: LIFECYCLE_HINT[role], retryable: false };
+  }
+  return { message, recoveryHint: RETRY_HINT, retryable: true };
 }
