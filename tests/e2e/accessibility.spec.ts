@@ -33,10 +33,15 @@ const MANAGER_SECTIONS = [
 ] as const;
 
 // axe-core 4.12.1 ships 105 rules and leaves 9 off by default, so a bare `.analyze()` is axe's
-// *default* rule set, not its *full* one. One of the nine is `target-size` — WCAG 2.2 SC 2.5.8, the
-// 44 px rule this whole plan is about — so it is switched on here explicitly. Nothing is narrowed to
-// pay for it: no `runOnly`, no `withTags`, no `disableRules`, no `include`/`exclude`. Which rules
-// still do not run, and why that is acceptable, is recorded in `design-qa.md`.
+// *default* rule set, not its *full* one. One of the nine is `target-size` — WCAG 2.2 SC 2.5.8 — so
+// it is switched on here explicitly. Nothing is narrowed to pay for it: no `runOnly`, no `withTags`,
+// no `disableRules`, no `include`/`exclude`.
+//
+// Its floor is 24 x 24 CSS px with spacing, inline and essential exceptions — NOT the 44 x 44 this
+// suite enforces. It is worth running, but it would not notice a 44 px control shrinking to 24: the
+// 44 px floor rests entirely on the `measureTarget` assertions in this file and the responsive
+// specs. A green axe run is not touch-target conformance. Which rules still do not run, and why
+// that is acceptable, is recorded in `design-qa.md`.
 const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
 
 // The engine runs over the whole document with axe's default rule set plus `target-size`. Narrowing

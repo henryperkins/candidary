@@ -168,9 +168,19 @@ difference matters enough to write down. Measured against the installed axe-core
   `duplicate-id`, `duplicate-id-active`, `identical-links-same-purpose`,
   `landmark-complementary-is-top-level`, `meta-refresh-no-exceptions`, and `target-size`.
 - **`target-size` is switched back on** — `.options({ rules: { 'target-size': { enabled: true } } })`
-  in `accessibility.spec.ts`. It is WCAG 2.2 SC 2.5.8, the 44 px rule this entire plan is about, and
-  leaving the one rule that names the plan's subject switched off would have made the gate read far
-  stronger than it was. It reports **passes** on every surface.
+  in `accessibility.spec.ts`. It is WCAG 2.2 SC 2.5.8, the closest thing axe ships to the subject of
+  this plan, and leaving it off would have made the gate read stronger than it was. It reports
+  **passes** on every surface.
+
+  **Read carefully what that does and does not prove.** SC 2.5.8's floor is **24 x 24 CSS px**, with
+  spacing, inline, and essential exceptions. It is **not** the 44 x 44 floor this document uses as
+  its standard everywhere else — see the target-size columns throughout the matrices above.
+  `target-size` passing therefore clears a materially lower bar than those tables assert.
+  **The 44 px floor is not machine-checked by axe and never has been:** it rests entirely on the
+  `measureTarget` geometry assertions in `accessibility.spec.ts`, `public-responsive.spec.ts`,
+  `guest-responsive.spec.ts`, `manager-responsive.spec.ts` and `manager-scale.spec.ts`. Do not read a
+  green axe run as touch-target conformance, and do not thin those assertions out on the strength of
+  it — axe would not notice a 44 px control shrinking to 24.
 - **A further 7 of the 96 default-enabled rules are tagged `experimental`** and axe excludes them
   from a default run: `css-orientation-lock`, `focus-order-semantics`, `hidden-content`,
   `label-content-name-mismatch`, `p-as-heading`, `table-fake-caption`, `td-has-header`. They are left
