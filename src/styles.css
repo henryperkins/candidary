@@ -129,7 +129,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .photo-drop__hero--cover { background-image: linear-gradient(180deg, rgb(31 9 28 / 5%), rgb(31 9 28 / 62%)), var(--event-cover); background-position: center; background-size: cover; }
 .photo-drop__event { margin: 0 0 7px; font-size: .72rem; font-weight: 700; letter-spacing: .11em; line-height: 1.35; text-transform: uppercase; }
 .photo-drop__hero h1 { max-width: 520px; margin: 0; color: white; font-size: clamp(1.9rem, 8vw, 3.1rem); line-height: 1.05; overflow-wrap: anywhere; text-wrap: balance; }
-.photo-drop__welcome--clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.photo-drop__welcome--clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .photo-drop__welcome-toggle { min-height: 44px; margin-top: 4px; padding: 8px 0; display: inline-flex; align-self: flex-start; align-items: center; border: 0; background: transparent; color: white; font-size: .875rem; font-weight: 700; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
 .photo-drop__card { padding: 22px 20px 28px; }
 .photo-drop__name { display: grid; gap: 7px; margin: 0; color: #35242f; font-size: .8rem; font-weight: 700; }
@@ -227,6 +227,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 /* Overrides the 100svh base and the 720px enhancement: review sizes to its content, leaving no dead space. */
 .photo-drop--review { min-height: auto; }
+
+/* Landscape phones get the 2-line base so the welcome never pushes the photo sources past the fold. */
+@media (min-height: 500px) {
+  .photo-drop__welcome--clamped { -webkit-line-clamp: 4; }
+}
 
 @media (max-width: 699px) {
   .guest-shell--drop { background: var(--paper); }

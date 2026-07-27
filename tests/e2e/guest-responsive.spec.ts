@@ -152,6 +152,20 @@ test('phone landscape keeps the camera action in view at 844 by 390', async ({ p
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });
 
+test('a 500-character welcome keeps the camera action in view in phone landscape', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });
+
+  await page.goto('/event/maya-theo');
+  const camera = page.getByRole('button', { name: 'Take a photo', exact: true });
+  await expect(camera).toBeVisible();
+
+  const bounds = await measureFold(page, camera);
+  expect(bounds.top, 'camera starts above the fold').toBeLessThan(bounds.fold);
+  expect(bounds.visible, 'a full tap target is reachable without scrolling').toBeGreaterThanOrEqual(44);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
+});
+
 test('review status text stays within the caption band at 320 px', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await stubGuestRoutes(page);
