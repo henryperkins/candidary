@@ -1,7 +1,13 @@
+import type { ApiErrorBody, ApiErrorCode } from '../../shared/errors';
+
 interface Envelope<T> { data: T; requestId: string }
 
 export class ClientApiError extends Error {
-  constructor(public code: string, message: string, public fieldErrors?: Record<string, string>) {
+  constructor(
+    public readonly code: ApiErrorCode,
+    message: string,
+    public readonly fieldErrors?: Record<string, string>,
+  ) {
     super(message);
   }
 }
@@ -19,7 +25,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (csrf) headers.set('x-candidary-csrf', decodeURIComponent(csrf));
   }
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
-  const payload = await response.json() as Envelope<T> & { code?: string; message?: string; fieldErrors?: Record<string, string> };
+  const payload = await response.json() as Envelope<T> & Partial<ApiErrorBody>;
   if (!response.ok) throw new ClientApiError(payload.code ?? 'INTERNAL_ERROR', payload.message ?? 'Something went wrong.', payload.fieldErrors);
   return payload.data;
 }

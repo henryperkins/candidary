@@ -1,5 +1,6 @@
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 
+import type { ApiErrorCode } from '../../shared/errors';
 import { ClientApiError } from '../app/api';
 
 export function LoadingState({ label = 'Gathering the details…' }: { label?: string }) {
@@ -28,15 +29,41 @@ export function ErrorState({ message, recoveryHint, onRetry }: ErrorStateProps) 
   </div>;
 }
 
-// Pressing a button cannot mint a session. A missing, expired, or revoked one — and a link used
-// against the wrong role — recovers only by opening the link that carries the secret, so those states
-// carry that instruction and no retry at all rather than a loop that is guaranteed to fail again.
-const LINK_RECOVERY_CODES = new Set(['SESSION_REQUIRED', 'SESSION_EXPIRED', 'TOKEN_REVOKED', 'ROLE_FORBIDDEN']);
+export type LoadFailureKind = 'latest-link' | 'ended-event' | 'retry';
 
-// The event itself has ended: its access window closed, the host deleted it, or retention purged it.
-// This is the normal last state of every event rather than an exotic one, and no retry reaches past
-// it either — so it is answered honestly instead of with a button and a guess about the network.
-const LIFECYCLE_CODES = new Set(['EVENT_NOT_FOUND', 'EVENT_DELETED', 'EVENT_EXPIRED']);
+// Every server code makes an explicit recovery decision here. `satisfies Record<ApiErrorCode, …>`
+// turns a future API-code addition into a compile failure instead of silently falling into retry.
+const LOAD_FAILURE_KIND = {
+  EVENT_NOT_FOUND: 'ended-event',
+  EVENT_DELETED: 'ended-event',
+  EVENT_EXPIRED: 'ended-event',
+  SESSION_REQUIRED: 'latest-link',
+  SESSION_EXPIRED: 'latest-link',
+  ROLE_FORBIDDEN: 'latest-link',
+  UPLOADS_DISABLED: 'retry',
+  GALLERY_HIDDEN: 'retry',
+  TOKEN_REVOKED: 'latest-link',
+  FILE_TYPE_UNSUPPORTED: 'retry',
+  FILE_TOO_LARGE: 'retry',
+  EVENT_MEDIA_LIMIT: 'retry',
+  EVENT_STORAGE_LIMIT: 'retry',
+  UPLOAD_RESERVATION_EXPIRED: 'retry',
+  UPLOAD_OBJECT_MISSING: 'retry',
+  UPLOAD_FINALIZE_CONFLICT: 'retry',
+  MEDIA_STATE_CONFLICT: 'retry',
+  EXPORT_ALREADY_ACTIVE: 'retry',
+  EXPORT_EMPTY: 'retry',
+  EXPORT_LIMIT_EXCEEDED: 'retry',
+  EXPORT_FAILED: 'retry',
+  VALIDATION_FAILED: 'retry',
+  CSRF_INVALID: 'retry',
+  ORIGIN_FORBIDDEN: 'retry',
+  INTERNAL_ERROR: 'retry',
+} as const satisfies Record<ApiErrorCode, LoadFailureKind>;
+
+export function classifyApiErrorCode(code: ApiErrorCode): LoadFailureKind {
+  return LOAD_FAILURE_KIND[code];
+}
 
 const LINK_RECOVERY_HINT = {
   guest: 'Open the latest guest link from your host to start again.',
@@ -66,11 +93,11 @@ export function describeLoadFailure(
   fallback: string,
 ): LoadFailure {
   const message = caught instanceof Error && caught.message ? caught.message : fallback;
-  const code = caught instanceof ClientApiError ? caught.code : '';
-  if (LINK_RECOVERY_CODES.has(code)) {
+  const kind = caught instanceof ClientApiError ? classifyApiErrorCode(caught.code) : 'retry';
+  if (kind === 'latest-link') {
     return { message, recoveryHint: LINK_RECOVERY_HINT[role], retryable: false };
   }
-  if (LIFECYCLE_CODES.has(code)) {
+  if (kind === 'ended-event') {
     return { message, recoveryHint: LIFECYCLE_HINT[role], retryable: false };
   }
   return { message, recoveryHint: RETRY_HINT, retryable: true };
