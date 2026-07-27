@@ -33,6 +33,17 @@ async function stubUploadDelivery(page: Page) {
   }));
 }
 
+// Returns the free space between two boxes: the horizontal gap when they share a row, otherwise the
+// vertical gap left by wrapping. A collision reads as 0 or less either way.
+async function measureSeparation(first: Locator, second: Locator) {
+  const [leading, trailing] = await Promise.all([first.boundingBox(), second.boundingBox()]);
+  if (!leading || !trailing) return 0;
+  const sharesRow = leading.y < trailing.y + trailing.height && trailing.y < leading.y + leading.height;
+  return sharesRow
+    ? trailing.x - (leading.x + leading.width)
+    : trailing.y - (leading.y + leading.height);
+}
+
 async function measureFold(page: Page, locator: Locator) {
   const box = await locator.boundingBox();
   const fold = await page.evaluate(() => window.innerHeight);
@@ -63,6 +74,23 @@ test('guest secondary sections stay contained at 320 px', async ({ page }) => {
 
   const withGallery = await measureDocument(page);
   expect(withGallery.scrollWidth).toBeLessThanOrEqual(withGallery.clientWidth + 1);
+});
+
+test('the guest footer wraps its brand clear of the tagline at 320 px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubGuestRoutes(page);
+
+  await page.goto('/event/maya-theo');
+  const brand = page.locator('.guest-shell footer .brand');
+  const tagline = page.locator('.guest-shell footer p');
+  await expect(brand).toBeVisible();
+  await expect(tagline).toBeVisible();
+
+  const separation = await measureSeparation(brand, tagline);
+  expect(separation, 'footer brand clear of the tagline').toBeGreaterThanOrEqual(12);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });
 
 test('the full-screen gallery stays contained with a reachable close target at 320 px', async ({ page }) => {
