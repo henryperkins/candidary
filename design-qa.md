@@ -132,13 +132,13 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 | Lifecycle facts at capacity | 761 through 1440 | Each of the three facts stays on one line at 10,000 photos and 100 GiB |
 | Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide |
 | All five sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
-| All five sections | 390 x 844 | No element of the shell leaves the viewport in any section; one guest entry and no duplicate capacity block |
+| All five sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
 | Card controls | 390, 431, 470, 1200 | Intake filter, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |
 | 120-photo intake | 320, 390, 768 | One 24-item page rendered, lazy and async previews, fewer than 24 preview requests, 44 x 44 `Load more photos`, second page appends without duplicates, and — with the intake poll held unanswered — paging state stays stable across a full interval. That last clause is a property of the test's held poll, not of the product under a live one; see "Intake poll and the paging assertion" below |
-| Mobile export reachability | 390, 768 | Exactly one export panel in the document; the Share copy below 761, the utility copy at and above it |
+| Mobile export reachability | 390, 768 | Never two export panels on screen at once. The mechanism is a CSS reveal, not DOM uniqueness: on the phone's Intake the rail's copy is the document's only panel and it is hidden; on Share the Share copy is visible below 761 and the utility copy hidden, and the two swap at and above it |
 
 ### Recoverable failures — `tests/e2e/error-recovery.spec.ts`
 
@@ -177,10 +177,13 @@ difference matters enough to write down. Measured against the installed axe-core
   its standard everywhere else — see the target-size columns throughout the matrices above.
   `target-size` passing therefore clears a materially lower bar than those tables assert.
   **The 44 px floor is not machine-checked by axe and never has been:** it rests entirely on the
-  `measureTarget` geometry assertions in `accessibility.spec.ts`, `public-responsive.spec.ts`,
-  `guest-responsive.spec.ts`, `manager-responsive.spec.ts` and `manager-scale.spec.ts`. Do not read a
-  green axe run as touch-target conformance, and do not thin those assertions out on the strength of
-  it — axe would not notice a 44 px control shrinking to 24.
+  `measureTarget` geometry assertions in six specs — `accessibility.spec.ts`,
+  `public-responsive.spec.ts`, `guest-responsive.spec.ts`, `manager-responsive.spec.ts`,
+  `manager-scale.spec.ts` and `error-recovery.spec.ts`. Those six are the complete list: no other spec
+  imports `measureTarget` or asserts against 44. Do not read a green axe run as touch-target
+  conformance, and do not thin those assertions out on the strength of it — axe would not notice a
+  44 px control shrinking to 24. `error-recovery.spec.ts` is the most exposed of the six, because it is
+  the only one whose surfaces no axe pass renders at all — see the known gap below.
 - **A further 7 of the 96 default-enabled rules are tagged `experimental`** and axe excludes them
   from a default run: `css-orientation-lock`, `focus-order-semantics`, `hidden-content`,
   `label-content-name-mismatch`, `p-as-heading`, `table-fake-caption`, `td-has-header`. They are left
