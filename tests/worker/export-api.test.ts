@@ -28,7 +28,10 @@ describe('manager exports', () => {
     }, testEnv);
     expect(created.status).toBe(202);
     const job = (await created.json<any>()).data.export;
-    await processExport(testEnv, job.id, new Date('2026-07-21T13:00:00.000Z'), 100);
+    // Completion is dated from the clock the run actually sees. A literal here silently rots: the
+    // download route refuses a job whose retention window has already elapsed, so a fixed date turns
+    // this into a 409 the moment real time passes it.
+    await processExport(testEnv, job.id, new Date(), 100);
 
     const status = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}`, {
       headers: { cookie: access.manager.cookie },

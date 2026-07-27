@@ -1,14 +1,24 @@
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EventsRepository } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
-import { MediaRepository } from '../../worker/db/media';
+import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
 import { SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
+import { finalizeStoredMedia } from '../../worker/storage/media';
+import { png } from './helpers';
 
-const testEnv = env as Env & { TEST_MIGRATION_QUERIES: string };
+interface TestMigration {
+  name: string;
+  queries: string[];
+}
+
+const testEnv = env as Env & {
+  TEST_MIGRATIONS: string;
+  TEST_MIGRATION_QUERIES: string;
+};
 const now = '2026-07-21T12:00:00.000Z';
 
 async function seedEvent(id = 'event-a', slug = 'maya-theo') {
@@ -58,6 +68,112 @@ beforeEach(async () => {
     name: '0001_core.sql',
     queries: JSON.parse(testEnv.TEST_MIGRATION_QUERIES) as string[],
   }]);
+});
+
+describe('manager media storage timestamp migration', () => {
+  it('backfills legacy stored rows from their reservation timestamp', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    await env.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
+        publication_status, idempotency_key, reservation_expires_at, created_at
+      )
+      VALUES (
+        'media-legacy', 'event-a', ?, 'events/event-a/media/legacy', 'legacy.jpg', 'image/jpeg',
+        1024, 900, 1200, 800, 'Avery', NULL, 'stored',
+        'unpublished', 'idem-legacy', '2026-07-21T12:15:00.000Z', ?
+      )
+    `).bind(sessionId, now).run();
+
+    const migrationQueries = JSON.parse(testEnv.TEST_MIGRATION_QUERIES) as string[];
+    const backfill = migrationQueries.find((query) => (
+      query.includes('UPDATE media')
+      && query.includes('stored_at')
+      && query.includes("upload_state = 'stored'")
+    ));
+    expect(backfill).toBeDefined();
+
+    await env.DB.prepare(backfill!).run();
+    const row = await env.DB.prepare('SELECT created_at, stored_at FROM media WHERE id = ?')
+      .bind('media-legacy')
+      .first<{ created_at: string; stored_at: string | null }>();
+    expect(row).toEqual({ created_at: now, stored_at: now });
+  });
+
+  it('stamps an old-worker finalization performed after the schema migration', async () => {
+    await reset();
+    const migrations = JSON.parse(testEnv.TEST_MIGRATIONS) as TestMigration[];
+    const storedAtMigrationIndex = migrations.findIndex(
+      ({ name }) => name === '0005_media_stored_at.sql',
+    );
+    expect(storedAtMigrationIndex).toBeGreaterThan(0);
+    await applyD1Migrations(env.DB, migrations.slice(0, storedAtMigrationIndex));
+
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    await env.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        declared_byte_size, guest_name, caption, upload_state, publication_status,
+        idempotency_key, reservation_expires_at, created_at
+      )
+      VALUES (
+        'media-old-worker', 'event-a', ?, 'events/event-a/media/old-worker',
+        'old-worker.jpg', 'image/jpeg', 1024, 'Avery', NULL, 'reserved',
+        'unpublished', 'idem-old-worker', '2026-07-21T12:15:00.000Z', ?
+      )
+    `).bind(sessionId, now).run();
+    await env.DB.prepare(`
+      UPDATE events
+      SET reserved_media_count = 1, reserved_bytes = 1024
+      WHERE id = 'event-a'
+    `).run();
+
+    await applyD1Migrations(env.DB, [migrations[storedAtMigrationIndex]!]);
+    const results = await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE media
+        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored'
+        WHERE id = ? AND upload_state = 'reserved'
+      `).bind(900, 1200, 800, 'media-old-worker'),
+      env.DB.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - 1,
+            reserved_bytes = reserved_bytes - ?,
+            stored_media_count = stored_media_count + 1,
+            stored_bytes = stored_bytes + ?
+        WHERE id = ? AND changes() = 1
+      `).bind(1024, 900, 'event-a'),
+    ]);
+    // D1 reports both the outer update and trigger update in the first result,
+    // but SQLite's changes() guard still sees the outer update and moves the
+    // event counters exactly once in the second statement.
+    expect(results.map((result) => result.meta.changes)).toEqual([2, 1]);
+
+    const row = await env.DB.prepare(
+      'SELECT upload_state, stored_at FROM media WHERE id = ?',
+    ).bind('media-old-worker').first<{
+      upload_state: string;
+      stored_at: string | null;
+    }>();
+    expect(row?.upload_state).toBe('stored');
+    expect(row?.stored_at).toEqual(expect.any(String));
+    expect(await env.DB.prepare(`
+      SELECT reserved_media_count, reserved_bytes, stored_media_count, stored_bytes
+      FROM events
+      WHERE id = ?
+    `).bind('event-a').first()).toEqual({
+      reserved_media_count: 0,
+      reserved_bytes: 0,
+      stored_media_count: 1,
+      stored_bytes: 900,
+    });
+
+    const managerPage = await new MediaRepository(env.DB).listForManager('event-a');
+    expect(managerPage.media.map((media) => media.id)).toContain('media-old-worker');
+  });
 });
 
 describe('event, token, and session repositories', () => {
@@ -253,6 +369,75 @@ describe('media reservation and lifecycle', () => {
     expect(event?.storedBytes).toBe(0);
   });
 
+  it('sets the storage timestamp on the first finalization and preserves it on repeats', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    await media.reserve({
+      id: 'media-stored-at', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/stored-at', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg', declaredByteSize: 2048, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-stored-at', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const metadata = { byteSize: 1800, width: 1200, height: 800 };
+    const firstStoredAt = '2026-07-21T12:01:00.000Z';
+
+    await media.finalize('media-stored-at', metadata, firstStoredAt);
+    await media.finalize('media-stored-at', metadata, '2026-07-21T12:02:00.000Z');
+
+    const row = await env.DB.prepare('SELECT created_at, stored_at FROM media WHERE id = ?')
+      .bind('media-stored-at')
+      .first<{ created_at: string; stored_at: string | null }>();
+    expect(row).toEqual({ created_at: now, stored_at: firstStoredAt });
+  });
+
+  it('stamps storage eligibility after delayed validation while keeping expiry deterministic', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-delayed-validation', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/delayed-validation', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-delayed-validation',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const bytes = png(1200, 800);
+    const expiryCheckTime = new Date('2026-07-21T12:10:00.000Z');
+    const storageEligibilityTime = new Date('2026-07-21T12:20:00.000Z');
+    const laterRetryTime = new Date('2026-07-21T12:30:00.000Z');
+    const bucket = {
+      async head() {
+        return {
+          size: bytes.byteLength,
+          httpMetadata: { contentType: 'image/png' },
+        };
+      },
+      async get() {
+        await Promise.resolve();
+        vi.setSystemTime(storageEligibilityTime);
+        return { body: new Response(bytes).body };
+      },
+      delete: vi.fn(),
+    } as unknown as R2Bucket;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(expiryCheckTime);
+    try {
+      const finalized = await finalizeStoredMedia(bucket, repository, reserved);
+      vi.setSystemTime(laterRetryTime);
+      await finalizeStoredMedia(bucket, repository, finalized);
+
+      const row = await env.DB.prepare('SELECT stored_at FROM media WHERE id = ?')
+        .bind(reserved.id)
+        .first<{ stored_at: string | null }>();
+      expect(row?.stored_at).toBe(storageEligibilityTime.toISOString());
+      expect(bucket.delete).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps private delivery separate from optional publication and exports every stored original', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
@@ -269,6 +454,77 @@ describe('media reservation and lifecycle', () => {
 
     expect((delivered as unknown as { publicationStatus: string }).publicationStatus).toBe('unpublished');
     expect(snapshot.map(({ id }) => id)).toEqual(['media-private']);
+  });
+});
+
+describe('manager media pagination', () => {
+  async function seedStored(count: number, eventId = 'event-a') {
+    const sessionId = await seedGuestSession(eventId);
+    for (const index of Array.from({ length: count }, (_, offset) => offset)) {
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+      const createdAt = new Date(Date.UTC(2026, 6, 20, 9, 0, 0) + index * 60_000).toISOString();
+      await env.DB.prepare(`
+        INSERT INTO media (
+          id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+          declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
+          publication_status, idempotency_key, reservation_expires_at, created_at, stored_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, 'Avery', NULL, 'stored', 'unpublished', ?, ?, ?, ?)
+      `).bind(
+        id,
+        eventId,
+        sessionId,
+        `events/${eventId}/media/${id}`,
+        `${index}.png`,
+        `idem-${index}`,
+        createdAt,
+        createdAt,
+        createdAt,
+      ).run();
+    }
+  }
+
+  async function planFor(options: Parameters<typeof buildManagerMediaQuery>[1]) {
+    const query = buildManagerMediaQuery('event-a', options);
+    const explained = await env.DB.prepare(`EXPLAIN QUERY PLAN ${query.sql}`)
+      .bind(...query.bindings)
+      .all<{ detail: string }>();
+    return explained.results.map((row) => row.detail).join(' | ');
+  }
+
+  it('plans both manager pages through the dedicated partial indexes without sorting', async () => {
+    await seedEvent();
+    await seedStored(3);
+    const cursor = { storedAt: '2026-07-20T09:02:00.000Z', id: '00000000-0000-4000-8000-000000000002' };
+
+    const unfiltered = await planFor({ limit: 24 });
+    const unfilteredWithCursor = await planFor({ limit: 24, cursor });
+    const filtered = await planFor({ limit: 24, status: 'published' });
+    const filteredWithCursor = await planFor({ limit: 24, status: 'published', cursor });
+
+    expect(unfiltered).toContain('media_manager_stored_page_all');
+    expect(unfilteredWithCursor).toContain('media_manager_stored_page_all');
+    expect(filtered).toContain('media_manager_stored_page_status');
+    expect(filteredWithCursor).toContain('media_manager_stored_page_status');
+    for (const plan of [unfiltered, unfilteredWithCursor, filtered, filteredWithCursor]) {
+      expect(plan).not.toContain('TEMP B-TREE');
+      expect(plan).not.toContain('SCAN media');
+    }
+  });
+
+  it('closes the cursor on a last page that is exactly full', async () => {
+    await seedEvent();
+    await seedStored(48);
+    const repository = new MediaRepository(env.DB);
+
+    const first = await repository.listForManager('event-a', { limit: 24 });
+    expect(first.media).toHaveLength(24);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = await repository.listForManager('event-a', { limit: 24, cursor: first.nextCursor! });
+    expect(second.media).toHaveLength(24);
+    expect(second.nextCursor).toBeNull();
+    expect(new Set([...first.media, ...second.media].map(({ id }) => id)).size).toBe(48);
   });
 });
 

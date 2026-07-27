@@ -1,13 +1,17 @@
 import { Check, ImagePlus, LockKeyhole, QrCode } from 'lucide-react';
 import QRCode from 'qrcode';
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
+import { MAX_EVENT_MEDIA } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 
 interface Created { event: { id: string; name: string; slug: string }; guestLink: string; managementLink: string; csrfToken: string }
+
+// Form order, not response order: the host should be taken to the first problem they would reach anyway.
+const CREATE_FIELDS = ['name', 'eventDate', 'welcomeMessage'] as const;
 
 export function CreatePage() {
   const [created, setCreated] = useState<Created | null>(null);
@@ -17,6 +21,17 @@ export function CreatePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [fields, setFields] = useState<Record<string, string>>({});
+  const formRef = useRef<HTMLFormElement>(null);
+
+  function focusFirstInvalid(fieldErrors: Record<string, string>) {
+    const firstName = CREATE_FIELDS.find((name) => fieldErrors[name]);
+    if (!firstName) return;
+    // Wait for the errors to paint so focus lands on a control that already announces its description.
+    requestAnimationFrame(() => {
+      const control = formRef.current?.elements.namedItem(firstName);
+      if (control instanceof HTMLElement) control.focus();
+    });
+  }
 
   useEffect(() => { if (created) void QRCode.toDataURL(created.guestLink, { width: 260, margin: 2, color: { dark: '#42103b', light: '#fffaf3' } }).then(setQr); }, [created]);
 
@@ -37,7 +52,10 @@ export function CreatePage() {
         } catch { setCoverError('Your event was created, but the cover did not finish uploading. Add it again from event settings.'); }
       }
     } catch (caught) {
-      if (caught instanceof ClientApiError) { setError(caught.message); setFields(caught.fieldErrors ?? {}); }
+      if (caught instanceof ClientApiError) {
+        const fieldErrors = caught.fieldErrors ?? {};
+        setError(caught.message); setFields(fieldErrors); focusFirstInvalid(fieldErrors);
+      }
       else setError('The event could not be created. Try again.');
     } finally { setBusy(false); }
   }
@@ -53,14 +71,15 @@ export function CreatePage() {
 
   return <div className="public-shell"><PageHeader action={<Link className="text-link" to="/">Back home</Link>} /><main className="create-layout">
     <section className="create-intro"><p className="section-label">Create your event</p><h1>A private home for every point of view.</h1><p>Start with the essentials. You can adjust sharing, moderation, and gallery visibility from your event manager.</p>
-      <ul className="trust-list"><li><Check aria-hidden="true" /> Up to 50 original photos</li><li><Check aria-hidden="true" /> Guest access without accounts</li><li><Check aria-hidden="true" /> Fixed, clear retention dates</li></ul>
+      <ul className="trust-list"><li><Check aria-hidden="true" /> Up to {MAX_EVENT_MEDIA.toLocaleString()} original photos</li><li><Check aria-hidden="true" /> Guest access without accounts</li><li><Check aria-hidden="true" /> Fixed, clear retention dates</li></ul>
     </section>
-    <form className="create-form" onSubmit={submit} noValidate>
+    <form className="create-form" ref={formRef} onSubmit={submit} noValidate>
       <h2>Event details</h2>{error && <p className="form-error" role="alert">{error}</p>}
-      <label>Event name<input name="name" maxLength={80} required aria-invalid={Boolean(fields.name)} />{fields.name && <small>{fields.name}</small>}</label>
-      <label>Event date<input name="eventDate" type="date" required aria-invalid={Boolean(fields.eventDate)} />{fields.eventDate && <small>{fields.eventDate}</small>}</label>
-      <label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." />{fields.welcomeMessage && <small>{fields.welcomeMessage}</small>}</label>
-      <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : 'Optional · JPEG, PNG, or WebP · 10 MB max'}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0] ?? null; setCover(file && file.size <= 10 * 1024 * 1024 ? file : null); if (file && file.size > 10 * 1024 * 1024) setError('Cover photos must be 10 MB or smaller.'); }} /></label>
+      {/* The error sits outside the label: a name identifies the field, an error describes it. */}
+      <div className="create-field"><label>Event name<input name="name" maxLength={80} required aria-invalid={Boolean(fields.name)} aria-describedby={fields.name ? 'name-error' : undefined} /></label>{fields.name && <small id="name-error">{fields.name}</small>}</div>
+      <div className="create-field"><label>Event date<input name="eventDate" type="date" required aria-invalid={Boolean(fields.eventDate)} aria-describedby={fields.eventDate ? 'eventDate-error' : undefined} /></label>{fields.eventDate && <small id="eventDate-error">{fields.eventDate}</small>}</div>
+      <div className="create-field"><label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." aria-invalid={Boolean(fields.welcomeMessage)} aria-describedby={fields.welcomeMessage ? 'welcomeMessage-error' : undefined} /></label>{fields.welcomeMessage && <small id="welcomeMessage-error">{fields.welcomeMessage}</small>}</div>
+      <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : 'Optional · JPEG, PNG, or WebP · 10 MB max'}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only cover-field__input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0] ?? null; setCover(file && file.size <= 10 * 1024 * 1024 ? file : null); if (file && file.size > 10 * 1024 * 1024) setError('Cover photos must be 10 MB or smaller.'); }} /></label>
       <button className="button button--primary button--wide" disabled={busy}>{busy ? 'Creating your event…' : 'Create private event'}</button>
       <p className="form-note"><LockKeyhole aria-hidden="true" /> Your links act as the keys to this private event.</p>
     </form>

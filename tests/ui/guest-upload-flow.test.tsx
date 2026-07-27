@@ -24,8 +24,21 @@ function transport(): UploadTransport {
   };
 }
 
+function deferredTransport(): UploadTransport {
+  return {
+    ...transport(),
+    upload: vi.fn((_item, _reservation, _progress, signal?: AbortSignal) => new Promise<void>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('Sending was cancelled.', 'AbortError')), { once: true });
+    })),
+  };
+}
+
 beforeEach(() => localStorage.clear());
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('mobile guest photo delivery', () => {
   it('requires and remembers a name before opening either photo source', async () => {
@@ -69,6 +82,58 @@ describe('mobile guest photo delivery', () => {
     expect(screen.queryByText(/gallery|note/i)).not.toBeInTheDocument();
   });
 
+  it('keeps the event name and date in the review header', async () => {
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
+    await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    const identity = screen.getByText(/Alex & Jordan/);
+    expect(identity).toBeVisible();
+    expect(identity).toHaveTextContent('Sep 14');
+  });
+
+  it('receipts the delivered photo when an invalid file stays behind', async () => {
+    const user = userEvent.setup();
+    const queueTransport = transport();
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={queueTransport} />);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: {
+        files: [
+          new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' }),
+          new File(['notes'], 'notes.txt', { type: 'text/plain' }),
+        ],
+      },
+    });
+    expect(await screen.findByText('2 photos selected')).toBeVisible();
+
+    expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
+    await waitFor(() => expect(queueTransport.finalize).toHaveBeenCalledTimes(1));
+
+    expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+    expect(screen.getByText('1 photo could not be added.')).toBeVisible();
+  });
+
+  it('holds an all-invalid selection in review with recovery guidance', async () => {
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
+    await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] },
+    });
+
+    expect(await screen.findByText('1 photo selected')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^Send/u })).not.toBeInTheDocument();
+    expect(screen.getByText('Remove or replace the photos that need attention.')).toBeVisible();
+    expect(screen.queryByText('Keep this page open while your photos transfer.')).not.toBeInTheDocument();
+  });
+
   it('accepts vendor HEIC MIME values provisionally for final server inspection', async () => {
     render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
     await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');
@@ -80,6 +145,85 @@ describe('mobile guest photo delivery', () => {
     expect(await screen.findByText('1 photo selected')).toBeVisible();
     expect(screen.queryByText('Needs attention')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send 1 photo' })).toBeEnabled();
+  });
+
+  it('keeps the send action mounted while sending and recovers a cancelled transfer', async () => {
+    const user = userEvent.setup();
+    const queueTransport = deferredTransport();
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={queueTransport} />);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+    expect(await screen.findByText('1 photo selected')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
+    expect(screen.getByRole('heading', { name: 'Sending photos' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel sending' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel sending' }));
+
+    expect(await screen.findByRole('button', { name: 'Retry 1 photo' })).toBeEnabled();
+    expect(screen.getByText('Sending was cancelled. Retry when you are ready.')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Cancel sending' })).not.toBeInTheDocument();
+    expect(queueTransport.finalize).not.toHaveBeenCalled();
+  });
+
+  it('aborts the shipped adapter when the guest flow unmounts', async () => {
+    let reserveSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      reserveSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        reserveSignal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Sending was cancelled.', 'AbortError')),
+          { once: true },
+        );
+      });
+    }));
+    const view = render(<GuestUploadFlow event={event} slug="alex-jordan" />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Send 1 photo' }));
+    await waitFor(() => expect(reserveSignal).toBeDefined());
+
+    view.unmount();
+
+    expect(reserveSignal?.aborted).toBe(true);
+  });
+
+  it('turns shipped-adapter cancellation into visible retry guidance', async () => {
+    let reserveSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      reserveSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        reserveSignal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Sending was cancelled.', 'AbortError')),
+          { once: true },
+        );
+      });
+    }));
+    render(<GuestUploadFlow event={event} slug="alex-jordan" />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Send 1 photo' }));
+    await waitFor(() => expect(reserveSignal).toBeDefined());
+
+    await user.click(screen.getByRole('button', { name: 'Cancel sending' }));
+
+    expect(reserveSignal?.aborted).toBe(true);
+    expect(await screen.findByRole('button', { name: 'Retry 1 photo' })).toBeEnabled();
+    expect(screen.getByText('Sending was cancelled. Retry when you are ready.')).toBeVisible();
   });
 
   it('lets a returning guest reach the camera with one tap', async () => {

@@ -1,11 +1,12 @@
 import { ArrowRight, ChevronDown, Expand, ImagePlus, MessageCircle, X } from 'lucide-react';
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
 import { api, mediaPreview } from '../app/api';
 import type { EventView, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
-import { ErrorState, LoadingState } from '../components/States';
+import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
+import type { LoadFailure } from '../components/States';
 import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
 
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
@@ -16,8 +17,11 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const [messages, setMessages] = useState<MessageView[]>([]);
   const [opened, setOpened] = useState({ gallery: false, contributions: false, notes: false });
   const [loaded, setLoaded] = useState({ gallery: false, contributions: false, notes: false });
-  const [error, setError] = useState('');
+  const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [terminal, setTerminal] = useState(false);
+  // Each load takes the next ticket and only the newest one may install its answer. A slug change, a
+  // second Try again press, or an unmount all leave an older load holding a ticket nobody honours.
+  const loadTicket = useRef(0);
 
   const loadGallery = useCallback(async () => {
     const result = await api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`);
@@ -32,22 +36,31 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     setMessages(result.items);
   }, [slug]);
 
-  useEffect(() => {
-    let active = true;
-    void api<{ event: EventView; role: string }>(`/api/event/${slug}`)
-      .then(async ({ event: eventView }) => {
-        if (!active) return;
-        setEvent(eventView);
-        if (fullscreen && eventView.galleryVisible) {
-          await loadGallery();
-          if (active) setLoaded((current) => ({ ...current, gallery: true }));
-        }
-      })
-      .catch((caught: unknown) => {
-        if (active) setError(caught instanceof Error ? caught.message : 'This event could not be loaded.');
-      });
-    return () => { active = false; };
+  // The same request on mount and behind Try again, so a guest whose reception dropped at the venue
+  // is one press from the photo drop instead of stranded on a dead end.
+  const loadEvent = useCallback(async () => {
+    const ticket = (loadTicket.current += 1);
+    setFailure(null);
+    try {
+      const { event: eventView } = await api<{ event: EventView; role: string }>(`/api/event/${slug}`);
+      if (loadTicket.current !== ticket) return;
+      setEvent(eventView);
+      if (fullscreen && eventView.galleryVisible) {
+        await loadGallery();
+        if (loadTicket.current !== ticket) return;
+        setLoaded((current) => ({ ...current, gallery: true }));
+      }
+    } catch (caught) {
+      if (loadTicket.current !== ticket) return;
+      setFailure(describeLoadFailure(caught, 'guest', 'This event could not be loaded.'));
+    }
   }, [fullscreen, loadGallery, slug]);
+
+  useEffect(() => {
+    void loadEvent();
+    // An unmount retires the ticket, so a load still in flight cannot install its answer afterwards.
+    return () => { loadTicket.current += 1; };
+  }, [loadEvent]);
 
   function toggleExtra(kind: keyof typeof opened, isOpen: boolean) {
     setOpened((current) => ({ ...current, [kind]: isOpen }));
@@ -74,10 +87,18 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     setLoaded((current) => ({ ...current, notes: true }));
   }
 
-  if (error) return <main className="centered-state"><Brand /><ErrorState message={error} /></main>;
+  if (failure) return <main className="centered-state"><Brand /><ErrorState
+    message={failure.message}
+    recoveryHint={failure.recoveryHint}
+    onRetry={failure.retryable ? () => void loadEvent() : undefined}
+  /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState /></main>;
   if (fullscreen) return <main className="fullscreen">
-    <div className="fullscreen__bar"><Brand compact /><Link to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
+    {/* The full-screen gallery is its own route and had no level-one heading at all, so a screen
+        reader arrived with nothing naming the view. The name belongs to the page, not to the layout,
+        so it is announced rather than drawn — the bar's approved copy is unchanged. */}
+    <h1 className="sr-only">Shared gallery · {event.name}</h1>
+    <div className="fullscreen__bar"><Brand compact /><Link className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
     {gallery.length
       ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption>{item.caption || item.originalFilename}</figcaption></figure>)}</div>
       : <p>No shared photos yet.</p>}
@@ -118,7 +139,8 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
           <summary><span>Leave a note <small>Optional</small></span><ChevronDown aria-hidden="true" /></summary>
           {opened.notes && <div className="event-extra__content notes-secondary">
             <div><MessageCircle aria-hidden="true" /><h3>A few words for {event.name}</h3><p>Share a wish or memory whenever you have a moment.</p></div>
-            <div><form className="note-form" onSubmit={(formEvent) => void leaveNote(formEvent)}><textarea name="body" rows={3} maxLength={500} required placeholder="Write a note…" /><button className="button button--primary">Leave a note <ArrowRight aria-hidden="true" /></button></form>{messages.length > 0 && <ul className="notes-feed">{messages.map((item) => <li key={item.id}><p>{item.body}</p><small>{item.guestName || 'A guest'}</small></li>)}</ul>}</div>
+            {/* The name belongs to the field, not to the placeholder that vanishes on the first keystroke. */}
+            <div><form className="note-form" onSubmit={(formEvent) => void leaveNote(formEvent)}><label><span className="sr-only">Note for {event.name}</span><textarea name="body" rows={3} maxLength={500} required placeholder="Write a note…" /></label><button className="button button--primary">Leave a note <ArrowRight aria-hidden="true" /></button></form>{messages.length > 0 && <ul className="notes-feed">{messages.map((item) => <li key={item.id}><p>{item.body}</p><small>{item.guestName || 'A guest'}</small></li>)}</ul>}</div>
           </div>}
         </details>
       </section>}

@@ -1,16 +1,14 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, ClientApiError } from '../../app/api';
-import { MAX_IMAGE_BYTES, UPLOAD_BATCH_SIZE } from '../../../shared/constants';
+import { MAX_IMAGE_BYTES } from '../../../shared/constants';
+import { createBrowserTransport } from './browser-upload-transport';
 import {
   getReceiptCount,
   removeQueueItem,
   runUploadQueue,
-  type ReservationResult,
   type UploadQueueItem,
   type UploadQueueState,
-  type UploadReservation,
   type UploadTransport,
 } from './upload-queue';
 
@@ -34,13 +32,6 @@ const PROVISIONAL_HEIF_TYPES = new Map([
   ['image/x-heif', 'heif'],
   ['image/x-heif-sequence', 'heif'],
 ]);
-const FINALIZE_REUPLOAD_CODES = new Set([
-  'UPLOAD_RESERVATION_EXPIRED',
-  'UPLOAD_FINALIZE_CONFLICT',
-  'FILE_TOO_LARGE',
-  'FILE_TYPE_UNSUPPORTED',
-]);
-
 interface GuestUploadEvent {
   name: string;
   eventDate: string;
@@ -54,101 +45,6 @@ interface GuestUploadFlowProps {
   slug: string;
   transport?: UploadTransport;
   onDelivered?: (count: number) => void;
-}
-
-interface BatchResponseItem {
-  idempotencyKey: string;
-  status: 'accepted' | 'rejected';
-  media?: { id: string; mimeType: string };
-  uploadUrl?: string;
-  error?: { message: string };
-}
-
-function xhrUpload(file: File, reservation: UploadReservation, progress: (percent: number) => void) {
-  return new Promise<void>((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open('PUT', reservation.uploadUrl);
-    request.setRequestHeader('Content-Type', reservation.mimeType);
-    request.upload.addEventListener('progress', (event) => {
-      if (event.lengthComputable) progress((event.loaded / event.total) * 100);
-    });
-    request.addEventListener('load', () => {
-      if (request.status >= 200 && request.status < 300) resolve();
-      else reject(new Error('The transfer was interrupted. Try this photo again.'));
-    });
-    request.addEventListener('error', () => reject(new Error('Reception dropped out. Try this photo again.')));
-    request.addEventListener('abort', () => reject(new Error('The transfer was cancelled.')));
-    request.send(file);
-  });
-}
-
-function createBrowserTransport(slug: string, guestName: string): UploadTransport {
-  return {
-    async reserve(items) {
-      const results: ReservationResult[] = [];
-      for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
-        const chunk = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
-        const response = await api<{ items: BatchResponseItem[] }>(`/api/event/${slug}/uploads/batch`, {
-          method: 'POST',
-          body: JSON.stringify({
-            guestName,
-            files: chunk.map(({ id, file }) => ({
-              filename: file.name,
-              mimeType: file.type,
-              byteSize: file.size,
-              idempotencyKey: id,
-              caption: null,
-            })),
-          }),
-        });
-        results.push(...response.items.map((item) => {
-          if (item.status === 'accepted' && item.media && item.uploadUrl) {
-            return {
-              id: item.idempotencyKey,
-              status: 'accepted' as const,
-              reservation: { mediaId: item.media.id, uploadUrl: item.uploadUrl, mimeType: item.media.mimeType },
-            };
-          }
-          return {
-            id: item.idempotencyKey,
-            status: 'rejected' as const,
-            error: item.error?.message ?? 'This photo could not be reserved.',
-          };
-        }));
-      }
-      return results;
-    },
-    async upload(item, reservation, progress) {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          await xhrUpload(item.file, reservation, progress);
-          return;
-        } catch (error) {
-          lastError = error;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
-        }
-      }
-      throw lastError;
-    },
-    async finalize(_item, reservation) {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, { method: 'POST', body: '{}' });
-          return;
-        } catch (error) {
-          lastError = error;
-          if (error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code)) throw error;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
-        }
-      }
-      throw lastError;
-    },
-    retryUploadAfterFinalizeError(error) {
-      return error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code);
-    },
-  };
 }
 
 function validationMessage(file: File): string | null {
@@ -187,14 +83,18 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const [nameError, setNameError] = useState('');
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [sending, setSending] = useState(false);
+  const [welcomeExpanded, setWelcomeExpanded] = useState(false);
   const cameraInput = useRef<HTMLInputElement>(null);
   const libraryInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
   const objectUrls = useRef(new Set<string>());
+  const uploadController = useRef<AbortController | null>(null);
   const notifiedReceipt = useRef<number | null>(null);
   const receiptCount = getReceiptCount(items);
 
   useEffect(() => () => {
+    uploadController.current?.abort();
+    uploadController.current = null;
     objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
@@ -260,17 +160,30 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   async function send() {
     const savedName = saveName();
     if (!savedName || sending) return;
+    const controller = new AbortController();
+    uploadController.current = controller;
     setSending(true);
     const activeTransport = transport ?? createBrowserTransport(slug, savedName);
-    const result = await runUploadQueue(items, activeTransport, 2, setItems);
+    const result = await runUploadQueue(items, activeTransport, {
+      concurrency: 2,
+      onChange: setItems,
+      signal: controller.signal,
+    });
     setItems(result);
     setSending(false);
+    uploadController.current = null;
   }
 
   const unresolvedCount = items.filter(({ state, validationError }) =>
     !validationError && (state === 'selected' || state === 'failed')).length;
+  const attemptedFailureCount = items.filter(({ state, validationError }) =>
+    !validationError && state === 'failed').length;
   const failedCount = items.filter(({ state }) => state === 'failed').length;
+  const validationFailureCount = items.filter(({ validationError }) => validationError).length;
+  const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
   const reviewMode = items.length > 0;
+  const welcomeMessage = event.welcomeMessage || 'Help us remember tonight.';
+  const welcomeNeedsDisclosure = welcomeMessage.length > 180;
   const eventDate = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
     .format(new Date(`${event.eventDate}T12:00:00`));
   const heroStyle = event.coverObjectKey
@@ -283,6 +196,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         <span className="delivery-receipt__check"><Check aria-hidden="true" /></span>
         <p className="delivery-receipt__eyebrow">Delivered to {event.name}</p>
         <h1>Your {receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} sent.</h1>
+        {validationFailureCount > 0 && <p className="delivery-receipt__caveat">{validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.</p>}
         <p>Thanks, {name}. You’re all done and can close this page.</p>
       </div>
     </section>;
@@ -291,13 +205,26 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
     {!reviewMode && <div className={`photo-drop__hero${event.coverObjectKey ? ' photo-drop__hero--cover' : ''}`} style={heroStyle}>
       <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
-      <h1>{event.welcomeMessage || 'Help us remember tonight.'}</h1>
+      <h1
+        id="guest-welcome"
+        className={welcomeNeedsDisclosure && !welcomeExpanded ? 'photo-drop__welcome--clamped' : undefined}
+      >{welcomeMessage}</h1>
+      {welcomeNeedsDisclosure && <button
+        type="button"
+        className="photo-drop__welcome-toggle"
+        aria-controls="guest-welcome"
+        aria-expanded={welcomeExpanded}
+        onClick={() => setWelcomeExpanded((current) => !current)}
+      >
+        {welcomeExpanded ? 'Show less' : 'Read full welcome'}
+      </button>}
     </div>}
 
     <div className="photo-drop__card">
       {reviewMode && <header className="review-heading">
+        <p>{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
         <p>Sending as {name}</p>
-        <h1>Ready to send</h1>
+        <h1>{sending ? 'Sending photos' : 'Ready to send'}</h1>
         <button type="button" className="text-button" onClick={() => setEditingName(true)} disabled={sending}>
           <Pencil aria-hidden="true" /> Edit name
         </button>
@@ -357,12 +284,17 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         </div>
         <div className="selection-summary">
           <span>{items.length} {plural(items.length, 'photo')} selected</span>
-          {failedCount > 0 && <span>{failedCount} need {failedCount === 1 ? 'attention' : 'attention'}</span>}
+          {failedCount > 0 && <span className="selection-summary__attention">{failedCount} {plural(failedCount, 'needs', 'need')} attention</span>}
         </div>
-        {unresolvedCount > 0 && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
-          {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${items.some(({ state }) => state === 'failed') ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
+        {(sending || unresolvedCount > 0) && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
+          {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${attemptedFailureCount > 0 ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
         </button>}
-        <p className="progress-note">Keep this page open while your photos transfer.</p>
+        {sending && <button type="button" className="text-button send-cancel" onClick={() => uploadController.current?.abort()}>
+          Cancel sending
+        </button>}
+        <p className="progress-note">{onlyValidationFailures
+          ? 'Remove or replace the photos that need attention.'
+          : 'Keep this page open while your photos transfer.'}</p>
       </>}
 
       <input

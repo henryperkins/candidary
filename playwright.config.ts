@@ -9,8 +9,27 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
+  expect: {
+    // Baselines are tracked evidence, so they are compared as captured: animations stilled, caret
+    // hidden, and CSS pixels rather than device pixels so the image belongs to the viewport the test
+    // pinned. Both tolerances are zero. `maxDiffPixels` alone is not exact — it only counts pixels
+    // that already exceeded the per-pixel `threshold`, which defaults to 0.2 in a YIQ colour space
+    // and silently absorbs a whole-surface recolour of a few units per channel. A palette regression
+    // is exactly the kind of change a tracked baseline exists to catch, so `threshold` is zero too.
+    // Snapshot paths keep Playwright's default naming, which carries both the project and the
+    // platform — a Linux run reports a missing baseline rather than quietly diffing Windows font
+    // rasterisation against it.
+    toHaveScreenshot: { animations: 'disabled', caret: 'hide', scale: 'css', threshold: 0, maxDiffPixels: 0 },
+  },
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 1000 } } },
+    {
+      name: 'desktop',
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 1000 } },
+      // Every tracked baseline pins its own viewport at 844 px or narrower and is phone or tablet
+      // evidence. Running them a second time without touch or mobile viewport emulation would add a
+      // second image of a state no visitor is in — and a desktop scrollbar that eats 15 of the 320.
+      testIgnore: /visual-qa\.spec\.ts/,
+    },
     { name: 'mobile', use: { ...devices['Desktop Chrome'], viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
   ],
   webServer: {

@@ -60,6 +60,48 @@ Do not describe a deployment as wedding-ready until a dedicated rehearsal event 
 
 Desktop emulation is supplementary. Physical iPhone and Android evidence, Images availability, load evidence, and this production-like rehearsal are release gates.
 
+## Device and assistive-technology rehearsal gate
+
+These are **production rehearsal gates performed by a person on real hardware**. They are not covered
+by the automated suite and nothing below may be recorded as passed on the strength of a green
+`npm run test:e2e`. The suite runs one Chromium engine under viewport emulation on Windows: it can
+prove geometry, containment, target size, focus order, resolved contrast, reduced motion, and
+`axe-core` 4.12.1's default rule set plus `target-size` — 90 of the 105 rules it ships, nothing
+scoped away, with the omissions enumerated in `design-qa.md` — on eleven surfaces, and it can prove
+none of the following.
+
+The engine currently reports zero accessibility violations, but note what that is and is not. It
+means computed colour pairings clear WCAG AA arithmetically on the states the suite renders. Muted
+ink on parchment clears it by 0.0046 — see `design-qa.md`. Arithmetic is not legibility: check the
+guest captions, the disclosure summaries, and the footer on a real phone screen at reception
+brightness, outdoors, and at whatever the device's own contrast and text-size settings are set to.
+
+11. **Physical iPhone Safari.** Open the guest link on a current iPhone. Confirm the photo drop's
+    first fold, that both photo sources are reachable without scrolling, that the dynamic toolbar
+    appearing and disappearing never hides a control or introduces horizontal scrolling, and that
+    rotating to landscape keeps a full camera target on screen. Repeat on the manager link and step
+    through all five sections.
+12. **Physical Android Chrome.** Repeat the same pass on a current Android phone, including the
+    address bar collapsing on scroll and the on-screen keyboard opening over the guest name field and
+    the note field.
+13. **Real HEIC selection.** From the iPhone's own photo library, select genuine HEIC and HEIF
+    captures — not files copied through a desktop — and send them. Confirm the picker accepts them,
+    the vendor MIME value is accepted, private previews render, and the originals stay byte-identical.
+14. **VoiceOver on iOS.** With VoiceOver on, reach and operate the guest name field, both photo
+    sources, the review list, and the send action; confirm each upload state change is announced and
+    that a failure announces both what happened and the way out of it. On the manager, confirm the
+    five destinations announce their names and selected state, and that a refused write announces
+    through the live region without moving focus.
+15. **TalkBack on Android.** Repeat the guest and manager passes with TalkBack, including swipe
+    navigation through the section rail and the full-screen gallery's close control.
+16. **10,000-photo disposable event.** On a disposable event loaded to the documented per-event cap,
+    confirm on a phone that intake still pages rather than loading everything, that the count badge
+    renders the full five-digit number, that scrolling stays smooth, and that a complete export can
+    be prepared and downloaded. Delete the event afterwards.
+
+Record the device models, OS versions, and browser versions with the result. A gate exercised on an
+emulator, a simulator, or a desktop browser's device mode does not count.
+
 ## Public-launch gate
 
 The event-creation endpoint is suitable for a controlled deployment. Before unrestricted public traffic, add Cloudflare rate limiting and Turnstile to `POST /api/events`, alert on creation/upload spikes, and assign an abuse-response owner.

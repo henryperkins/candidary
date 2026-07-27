@@ -1,17 +1,149 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
-test('public actions and creation fields are keyboard reachable with named landmarks', async ({ page }, testInfo) => {
+import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
+import { measureContrast, measureDocument, measureSeparation, measureTarget } from './helpers/geometry';
+
+// 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
+const HEADER_WIDTHS = [320, 768];
+// The five manager destinations are unchanged and the public header keeps exactly these exits: the
+// count is asserted so neither a hidden one nor an added one can pass unnoticed.
+const HEADER_EXITS = [
+  { path: '/', names: ['Candidary home', 'Create an event'] },
+  { path: '/create', names: ['Candidary home', 'Back home'] },
+];
+
+const NOTE = {
+  id: 'message-a',
+  guestName: 'Rowan',
+  body: 'To a lifetime of noticing the little things.',
+  moderationStatus: 'approved' as const,
+  createdAt: '2026-09-19T20:00:00Z',
+};
+// The five manager destinations, paired with the heading that proves the section is on screen before
+// the engine reads it. An axe pass over a section that has not rendered yet proves nothing.
+const MANAGER_SECTIONS = [
+  { name: 'Intake', heading: 'Live intake' },
+  { name: 'Gallery', heading: 'Gallery publishing' },
+  { name: 'Notes', heading: 'Notes from the day' },
+  { name: 'Share', heading: 'Share the photo drop' },
+  { name: 'Settings', heading: 'Settings' },
+] as const;
+
+// axe-core 4.12.1 ships 105 rules and leaves 9 off by default, so a bare `.analyze()` is axe's
+// *default* rule set, not its *full* one. One of the nine is `target-size` — WCAG 2.2 SC 2.5.8 — so
+// it is switched on here explicitly. Nothing is narrowed to pay for it: no `runOnly`, no `withTags`,
+// no `disableRules`, no `include`/`exclude`.
+//
+// Its floor is 24 x 24 CSS px with spacing, inline and essential exceptions — NOT the 44 x 44 this
+// suite enforces. It is worth running, but it would not notice a 44 px control shrinking to 24: the
+// 44 px floor rests entirely on the `measureTarget` assertions in this file and the responsive
+// specs. A green axe run is not touch-target conformance. Which rules still do not run, and why
+// that is acceptable, is recorded in `design-qa.md`.
+const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
+
+// The engine runs over the whole document with axe's default rule set plus `target-size`. Narrowing
+// it to make a surface pass would leave it proving nothing. Violations are reported by rule id,
+// target, and axe's own explanation so a failure names the element and the measurement instead of
+// dumping the rule catalogue; the array is empty exactly when `results.violations` is. Soft, so one
+// run reports every surface rather than stopping at the first.
+async function expectNoAxeViolations(page: Page, surface: string) {
+  const results = await new AxeBuilder({ page }).options(AXE_OPTIONS).analyze();
+  // A rule that never ran reports nothing, which on the wire is indistinguishable from a rule that
+  // ran and found nothing. axe lists every rule it evaluated across these four buckets and omits any
+  // rule that was switched off, so this is what makes the `target-size` claim in `design-qa.md`
+  // checkable rather than merely written down. Remove the option above and this fails first.
+  const evaluated = [results.passes, results.violations, results.incomplete, results.inapplicable]
+    .flat().map(({ id }) => id);
+  expect.soft(evaluated, `${surface} evaluated target-size`).toContain('target-size');
+  expect.soft(
+    results.violations.flatMap(({ id, impact, nodes }) => nodes.map((node) => ({
+      id, impact, target: node.target, why: [...node.any, ...node.all].map(({ message }) => message),
+    }))),
+    `${surface} accessibility violations`,
+  ).toEqual([]);
+}
+
+function animationName(locator: Locator) {
+  return locator.evaluate((element) => getComputedStyle(element).animationName);
+}
+
+function outline(locator: Locator) {
+  return locator.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+  });
+}
+
+test('public actions and creation fields are keyboard reachable with named landmarks', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('banner')).toBeVisible();
   await expect(page.getByRole('main')).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Candidary home' })).toBeFocused();
+  // The header exit is now reachable at every width, so the tab order no longer varies by viewport.
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: testInfo.project.name === 'mobile' ? 'Create your event' : 'Create an event' })).toBeFocused();
+  await expect(page.getByRole('link', { name: 'Create an event', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Create your event', exact: true })).toBeFocused();
   await page.goto('/create');
   await expect(page.getByLabel('Event name')).toHaveAttribute('required', '');
   await expect(page.getByLabel('Event date')).toHaveAttribute('type', 'date');
   await expect(page.getByLabel('Welcome message')).toHaveAttribute('maxlength', '500');
+});
+
+test('every public header exit stays visible and mobile-sized across the width matrix', async ({ page }) => {
+  for (const width of HEADER_WIDTHS) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const { path, names } of HEADER_EXITS) {
+      await page.goto(path);
+      const header = page.getByRole('banner');
+      // Hiding an exit strands the visitor; adding one is unapproved navigation. Both fail here.
+      await expect(header.getByRole('link'), `${path} header exits at ${width}`).toHaveCount(names.length);
+
+      for (const name of names) {
+        const link = header.getByRole('link', { name, exact: true });
+        await expect(link, `${name} on ${path} at ${width}`).toBeVisible();
+        const target = await measureTarget(link);
+        expect(target.width, `${name} width on ${path} at ${width}`).toBeGreaterThanOrEqual(44);
+        expect(target.height, `${name} height on ${path} at ${width}`).toBeGreaterThanOrEqual(44);
+      }
+
+      // Two exits that touch are one mis-tap apart, and 320 is where they come closest.
+      const separation = await measureSeparation(header.getByRole('link').first(), header.getByRole('link').last());
+      expect(separation, `header exits stay apart on ${path} at ${width}`).toBeGreaterThanOrEqual(8);
+
+      const documentSize = await measureDocument(page);
+      expect(documentSize.scrollWidth, `${path} contained at ${width}`)
+        .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+    }
+  }
+});
+
+test('cover photo focus lands on the control the host can actually see', async ({ page }) => {
+  await page.goto('/create');
+  const field = page.locator('.cover-field');
+  const input = page.locator('.cover-field__input');
+  await expect(field).toBeVisible();
+  await expect(input).toHaveAttribute('type', 'file');
+
+  const target = await measureTarget(field);
+  expect(target.width, 'cover control width').toBeGreaterThanOrEqual(44);
+  expect(target.height, 'cover control height').toBeGreaterThanOrEqual(44);
+
+  await page.getByLabel('Welcome message').focus();
+  await page.keyboard.press('Tab');
+  await expect(input).toBeFocused();
+
+  const visibleRing = await outline(field);
+  expect(visibleRing.style, 'the visible cover control draws the focus ring').toBe('solid');
+  expect(visibleRing.width, 'focus ring width').toBeGreaterThanOrEqual(2);
+
+  const hiddenRing = await outline(input);
+  expect(hiddenRing.style, 'no ring on the control the host cannot see').toBe('none');
+  expect(hiddenRing.width).toBe(0);
 });
 
 test('guest photo sources have mobile-sized targets and name errors focus the field', async ({ page }) => {
@@ -32,6 +164,53 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await camera.click();
   await expect(page.getByLabel('Your name')).toBeFocused();
   await expect(page.getByText('Enter your name before adding photos.')).toHaveAttribute('role', 'alert');
+});
+
+test('reduced motion stops every guest spinner instead of racing it', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+
+  let releaseEvent = () => {};
+  const eventGate = new Promise<void>((resolve) => { releaseEvent = resolve; });
+  let releaseBatch = () => {};
+  const batchGate = new Promise<void>((resolve) => { releaseBatch = resolve; });
+  const base = `**/api/event/${EVENT_FIXTURE.slug}`;
+
+  await page.route(base, async (route) => {
+    await eventGate;
+    await route.fulfill({ json: { data: { event: EVENT_FIXTURE, role: 'guest' }, requestId: 'r' } });
+  });
+  await page.route(`${base}/contributions`, (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
+  await page.route(`${base}/messages`, (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
+  await page.route(`${base}/uploads/batch`, async (route) => {
+    await batchGate;
+    const payload = route.request().postDataJSON() as { files: Array<{ idempotencyKey: string }> };
+    await route.fulfill({ status: 201, json: { data: { items: payload.files.map(({ idempotencyKey }) => ({
+      idempotencyKey, status: 'rejected', error: { message: 'Reception dropped out. Try this photo again.' },
+    })) }, requestId: 'r' } });
+  });
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  const appSpinner = page.locator('.spin');
+  await expect(appSpinner).toBeVisible();
+  expect(await animationName(appSpinner)).toBe('none');
+  releaseEvent();
+
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'recent.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('recent-photo'),
+  });
+  await page.getByRole('button', { name: 'Send 1 photo' }).click();
+
+  const cardSpinner = page.locator('.selection-card__spinner svg');
+  await expect(cardSpinner).toBeVisible();
+  expect(await animationName(cardSpinner)).toBe('none');
+
+  const sendSpinner = page.locator('.send-button svg');
+  await expect(sendSpinner).toBeVisible();
+  expect(await animationName(sendSpinner)).toBe('none');
+
+  releaseBatch();
+  await expect(page.getByRole('button', { name: 'Retry 1 photo' })).toBeVisible();
 });
 
 test('manager navigation exposes visible labels, selected state, and mobile-sized targets', async ({ page }) => {
@@ -60,9 +239,81 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
     await expect(label).toBeVisible();
     expect(await label.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(0);
     expect((await label.boundingBox())?.height ?? 0).toBeGreaterThan(0);
+    // Measured from the colours the browser resolved, so a token that never reaches the label fails here.
+    expect(await measureContrast(label), `${name} label contrast`).toBeGreaterThanOrEqual(4.5);
   }
 
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Share', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(intake).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('the public surfaces carry no automated accessibility violation', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  await expectNoAxeViolations(page, 'landing');
+
+  await page.goto('/create');
+  await expect(page.getByLabel('Event name')).toBeVisible();
+  await expectNoAxeViolations(page, 'create');
+
+  // The success state is the same route with a different document: a QR aside, both private links,
+  // and the reveal control. It is where the host's only copy of the management link lives.
+  await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
+    event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+    guestLink: UNBROKEN_TOKEN,
+    managementLink: `${UNBROKEN_TOKEN}-manage`,
+    csrfToken: 'csrf-a',
+  }, requestId: 'request-a' } }));
+  await page.getByLabel('Event name').fill('Maya & Theo');
+  await page.getByLabel('Event date').fill('2026-09-19');
+  await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
+  await page.getByRole('button', { name: 'Create private event' }).click();
+  await expect(page.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Show full guest link' }).click();
+  await expect(page.locator('.link-card--expanded code')).toHaveCount(1);
+  await expectNoAxeViolations(page, 'create success');
+});
+
+test('the guest surfaces carry no automated accessibility violation', async ({ page }) => {
+  await stubGuestRoutes(page, {
+    gallery: makeMedia(3),
+    contributions: makeMedia(2),
+    messages: [NOTE],
+  });
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('heading', { name: EVENT_FIXTURE.welcomeMessage })).toBeVisible();
+  await expectNoAxeViolations(page, 'guest hero');
+
+  // The secondary disclosures are collapsed by default, so their content is outside the hero pass.
+  for (const [summary, rendered] of [
+    ['Shared gallery', '.photo-grid figure'],
+    ['My deliveries', '.contributions li'],
+    ['Leave a note', '.note-form textarea'],
+  ] as const) {
+    await page.locator('.event-extra summary').filter({ hasText: summary }).click();
+    await expect(page.locator(rendered).first()).toBeVisible();
+  }
+  await expectNoAxeViolations(page, 'guest secondary content');
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
+  await expect(page.locator('.fullscreen figure')).toHaveCount(3);
+  await expectNoAxeViolations(page, 'fullscreen gallery');
+});
+
+test('every manager section carries no automated accessibility violation', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    // Unpublished is the Gallery's default filter and the state that renders every card control.
+    mediaPages: { first: { media: makeMedia(3, 'unpublished'), nextCursor: null } },
+    messages: [NOTE],
+    event: { storedMediaCount: 3 },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+
+  for (const { name, heading } of MANAGER_SECTIONS) {
+    await page.locator('.manager-nav nav button').filter({ hasText: name }).click();
+    await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+    await expectNoAxeViolations(page, `manager ${name}`);
+  }
 });

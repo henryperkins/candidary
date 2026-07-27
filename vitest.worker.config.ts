@@ -1,16 +1,11 @@
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
-import { readFileSync } from 'node:fs';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-const migrationSql = [
-  './migrations/0001_core.sql',
-  './migrations/0002_wedding_photo_drop.sql',
-  './migrations/0003_partitioned_exports.sql',
-].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8')).join(';\n');
-const migrationQueries = migrationSql
-  .split(';')
-  .map((query) => query.trim())
-  .filter(Boolean);
+const migrations = await readD1Migrations(
+  fileURLToPath(new URL('./migrations', import.meta.url)),
+);
+const migrationQueries = migrations.flatMap((migration) => migration.queries);
 
 export default defineConfig({
   plugins: [
@@ -18,6 +13,7 @@ export default defineConfig({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
         bindings: {
+          TEST_MIGRATIONS: JSON.stringify(migrations),
           TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries),
           APP_ORIGIN: 'http://127.0.0.1:5173',
           TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
