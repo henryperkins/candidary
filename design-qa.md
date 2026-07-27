@@ -132,10 +132,14 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 ### Automated accessibility engine — `tests/e2e/accessibility.spec.ts`
 
 `@axe-core/playwright` 4.12.1 runs unscoped — every rule axe ships, over the whole document, with no
-exclusion and no tag filter — on `/`, `/create`, the guest hero, the guest secondary content with all
-three disclosures open, `/event/:slug/fullscreen`, and each of the five manager sections. It
-supplements rather than replaces the keyboard, target-size, geometry, contrast, zoom and
-reduced-motion assertions above.
+exclusion and no tag filter — on `/`, the `/create` form, the `/create` success state with the guest
+link revealed, the guest hero, the guest secondary content with all three disclosures open,
+`/event/:slug/fullscreen`, and each of the five manager sections. It supplements rather than replaces
+the keyboard, target-size, geometry, contrast, zoom and reduced-motion assertions above.
+
+Known gap: no axe pass renders a failed state, so the engine never reads the guest or manager error
+cards or the manager's inline action notice. Those states are measured geometrically by
+`error-recovery.spec.ts`; the one colour finding they carry is recorded below.
 
 Fixed under this task:
 

@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
 import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
-import { makeMedia } from './fixtures/ui-data';
+import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
 import { measureContrast, measureDocument, measureSeparation, measureTarget } from './helpers/geometry';
 
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
@@ -237,6 +237,23 @@ test('the public surfaces carry no automated accessibility violation', async ({ 
   await page.goto('/create');
   await expect(page.getByLabel('Event name')).toBeVisible();
   await expectNoAxeViolations(page, 'create');
+
+  // The success state is the same route with a different document: a QR aside, both private links,
+  // and the reveal control. It is where the host's only copy of the management link lives.
+  await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
+    event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+    guestLink: UNBROKEN_TOKEN,
+    managementLink: `${UNBROKEN_TOKEN}-manage`,
+    csrfToken: 'csrf-a',
+  }, requestId: 'request-a' } }));
+  await page.getByLabel('Event name').fill('Maya & Theo');
+  await page.getByLabel('Event date').fill('2026-09-19');
+  await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
+  await page.getByRole('button', { name: 'Create private event' }).click();
+  await expect(page.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Show full guest link' }).click();
+  await expect(page.locator('.link-card--expanded code')).toHaveCount(1);
+  await expectNoAxeViolations(page, 'create success');
 });
 
 test('the guest surfaces carry no automated accessibility violation', async ({ page }) => {
