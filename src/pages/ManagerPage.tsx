@@ -189,6 +189,13 @@ export function ManagerPage() {
     setActionError('');
     if (next === 'intake') setStatus('all');
     if (next === 'gallery' && status === 'all') setStatus('unpublished');
+    // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
+    // or under the sticky header. Restore the top once the new section has actually been laid out, and
+    // only when there is something to restore. `instant` rather than `auto`, because the document
+    // carries `scroll-behavior: smooth` and `auto` would defer to it.
+    requestAnimationFrame(() => {
+      if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'instant' });
+    });
   }
 
   async function bulk(action: 'publish' | 'hide') {
@@ -266,7 +273,7 @@ export function ManagerPage() {
         </div>
         <div>
           <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
-          <strong>{item.caption || item.originalFilename}</strong>
+          <strong title={item.caption || item.originalFilename}>{item.caption || item.originalFilename}</strong>
           <small>From {item.guestName}</small>
           <div className="intake-card-actions">
             <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>

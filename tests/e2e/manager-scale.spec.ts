@@ -21,6 +21,8 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
   });
   await stubManagerRoutes(page, { mediaPages, event: { storedMediaCount: STORED_PHOTOS } });
 
+  // A phone, not whichever viewport the project happens to carry: the claims below are about the phone.
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
 
@@ -59,6 +61,8 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
 test('exposes export in the mobile share section rather than below the intake grid', async ({ page }) => {
   await stubManagerRoutes(page, { mediaPages, event: { storedMediaCount: STORED_PHOTOS } });
 
+  // The Share placement is the phone's, so pin the phone rather than inherit the project viewport.
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await expect(page.locator('.moderation-grid')).toBeVisible();

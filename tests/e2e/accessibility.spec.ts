@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Locator } from '@playwright/test';
 
 import { EVENT_FIXTURE } from './fixtures/routes';
-import { measureTarget } from './helpers/geometry';
+import { measureContrast, measureTarget } from './helpers/geometry';
 
 function animationName(locator: Locator) {
   return locator.evaluate((element) => getComputedStyle(element).animationName);
@@ -146,6 +146,8 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
     await expect(label).toBeVisible();
     expect(await label.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(0);
     expect((await label.boundingBox())?.height ?? 0).toBeGreaterThan(0);
+    // Measured from the colours the browser resolved, so a token that never reaches the label fails here.
+    expect(await measureContrast(label), `${name} label contrast`).toBeGreaterThanOrEqual(4.5);
   }
 
   await page.getByRole('button', { name: 'Share', exact: true }).click();

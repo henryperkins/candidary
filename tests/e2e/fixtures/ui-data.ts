@@ -1,5 +1,7 @@
 export const LONG_FILENAME = `IMG_${'A'.repeat(80)}.HEIC`;
 export const UNBROKEN_TOKEN = 'https://candidary.example/'.concat('x'.repeat(110));
+// A guest note the browser has no opportunity to break: 80 characters with no space, hyphen, or slash.
+export const UNBROKEN_NOTE = 'W'.repeat(80);
 
 export function makeMedia(count: number) {
   return Array.from({ length: count }, (_, index) => ({
