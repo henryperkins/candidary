@@ -10,7 +10,15 @@ import { TokensRepository } from '../../worker/db/tokens';
 import { finalizeStoredMedia } from '../../worker/storage/media';
 import { png } from './helpers';
 
-const testEnv = env as Env & { TEST_MIGRATION_QUERIES: string };
+interface TestMigration {
+  name: string;
+  queries: string[];
+}
+
+const testEnv = env as Env & {
+  TEST_MIGRATIONS: string;
+  TEST_MIGRATION_QUERIES: string;
+};
 const now = '2026-07-21T12:00:00.000Z';
 
 async function seedEvent(id = 'event-a', slug = 'maya-theo') {
@@ -95,6 +103,14 @@ describe('manager media storage timestamp migration', () => {
   });
 
   it('stamps an old-worker finalization performed after the schema migration', async () => {
+    await reset();
+    const migrations = JSON.parse(testEnv.TEST_MIGRATIONS) as TestMigration[];
+    const storedAtMigrationIndex = migrations.findIndex(
+      ({ name }) => name === '0005_media_stored_at.sql',
+    );
+    expect(storedAtMigrationIndex).toBeGreaterThan(0);
+    await applyD1Migrations(env.DB, migrations.slice(0, storedAtMigrationIndex));
+
     await seedEvent();
     const sessionId = await seedGuestSession();
     await env.DB.prepare(`
@@ -109,12 +125,32 @@ describe('manager media storage timestamp migration', () => {
         'unpublished', 'idem-old-worker', '2026-07-21T12:15:00.000Z', ?
       )
     `).bind(sessionId, now).run();
-
     await env.DB.prepare(`
-      UPDATE media
-      SET byte_size = ?, width = ?, height = ?, upload_state = 'stored'
-      WHERE id = ? AND upload_state = 'reserved'
-    `).bind(900, 1200, 800, 'media-old-worker').run();
+      UPDATE events
+      SET reserved_media_count = 1, reserved_bytes = 1024
+      WHERE id = 'event-a'
+    `).run();
+
+    await applyD1Migrations(env.DB, [migrations[storedAtMigrationIndex]!]);
+    const results = await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE media
+        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored'
+        WHERE id = ? AND upload_state = 'reserved'
+      `).bind(900, 1200, 800, 'media-old-worker'),
+      env.DB.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - 1,
+            reserved_bytes = reserved_bytes - ?,
+            stored_media_count = stored_media_count + 1,
+            stored_bytes = stored_bytes + ?
+        WHERE id = ? AND changes() = 1
+      `).bind(1024, 900, 'event-a'),
+    ]);
+    // D1 reports both the outer update and trigger update in the first result,
+    // but SQLite's changes() guard still sees the outer update and moves the
+    // event counters exactly once in the second statement.
+    expect(results.map((result) => result.meta.changes)).toEqual([2, 1]);
 
     const row = await env.DB.prepare(
       'SELECT upload_state, stored_at FROM media WHERE id = ?',
@@ -124,6 +160,16 @@ describe('manager media storage timestamp migration', () => {
     }>();
     expect(row?.upload_state).toBe('stored');
     expect(row?.stored_at).toEqual(expect.any(String));
+    expect(await env.DB.prepare(`
+      SELECT reserved_media_count, reserved_bytes, stored_media_count, stored_bytes
+      FROM events
+      WHERE id = ?
+    `).bind('event-a').first()).toEqual({
+      reserved_media_count: 0,
+      reserved_bytes: 0,
+      stored_media_count: 1,
+      stored_bytes: 900,
+    });
 
     const managerPage = await new MediaRepository(env.DB).listForManager('event-a');
     expect(managerPage.media.map((media) => media.id)).toContain('media-old-worker');

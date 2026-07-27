@@ -13,6 +13,7 @@ export default defineConfig({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
         bindings: {
+          TEST_MIGRATIONS: JSON.stringify(migrations),
           TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries),
           APP_ORIGIN: 'http://127.0.0.1:5173',
           TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
