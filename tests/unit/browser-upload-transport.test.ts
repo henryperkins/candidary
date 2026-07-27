@@ -150,7 +150,12 @@ describe('browser upload transport cancellation', () => {
     const finalize = createBrowserTransport('alex-jordan', 'Taylor')
       .finalize(item(), reservation, controller.signal);
 
-    for (let turn = 0; turn < 6 && vi.getTimerCount() === 0; turn += 1) {
+    // Spin until the backoff timer is armed. The number of microtask turns the
+    // failing finalize takes is not fixed: `Response.json()` alone costs eight
+    // on some Node/undici builds and fewer on others, so a tight budget passes
+    // on one machine and fails on the next. The loop still exits on the first
+    // turn that arms the timer, so the bound only has to be safely generous.
+    for (let turn = 0; turn < 100 && vi.getTimerCount() === 0; turn += 1) {
       await Promise.resolve();
     }
     expect(fetchMock).toHaveBeenCalledTimes(1);
