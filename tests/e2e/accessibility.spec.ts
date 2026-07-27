@@ -1,7 +1,9 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
-import type { Locator } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
-import { EVENT_FIXTURE } from './fixtures/routes';
+import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import { makeMedia } from './fixtures/ui-data';
 import { measureContrast, measureDocument, measureSeparation, measureTarget } from './helpers/geometry';
 
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
@@ -12,6 +14,38 @@ const HEADER_EXITS = [
   { path: '/', names: ['Candidary home', 'Create an event'] },
   { path: '/create', names: ['Candidary home', 'Back home'] },
 ];
+
+const NOTE = {
+  id: 'message-a',
+  guestName: 'Rowan',
+  body: 'To a lifetime of noticing the little things.',
+  moderationStatus: 'approved' as const,
+  createdAt: '2026-09-19T20:00:00Z',
+};
+// The five manager destinations, paired with the heading that proves the section is on screen before
+// the engine reads it. An axe pass over a section that has not rendered yet proves nothing.
+const MANAGER_SECTIONS = [
+  { name: 'Intake', heading: 'Live intake' },
+  { name: 'Gallery', heading: 'Gallery publishing' },
+  { name: 'Notes', heading: 'Notes from the day' },
+  { name: 'Share', heading: 'Share the photo drop' },
+  { name: 'Settings', heading: 'Settings' },
+] as const;
+
+// The engine runs unscoped: every rule axe ships, over the whole document, with nothing excluded and
+// no tag filter. Narrowing it to make a surface pass would leave it proving nothing. Violations are
+// reported by rule id, target, and axe's own explanation so a failure names the element and the
+// measurement instead of dumping the rule catalogue; the array is empty exactly when
+// `results.violations` is. Soft, so one run reports every surface rather than stopping at the first.
+async function expectNoAxeViolations(page: Page, surface: string) {
+  const { violations } = await new AxeBuilder({ page }).analyze();
+  expect.soft(
+    violations.flatMap(({ id, impact, nodes }) => nodes.map((node) => ({
+      id, impact, target: node.target, why: [...node.any, ...node.all].map(({ message }) => message),
+    }))),
+    `${surface} accessibility violations`,
+  ).toEqual([]);
+}
 
 function animationName(locator: Locator) {
   return locator.evaluate((element) => getComputedStyle(element).animationName);
@@ -193,4 +227,57 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Share', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(intake).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('the public surfaces carry no automated accessibility violation', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  await expectNoAxeViolations(page, 'landing');
+
+  await page.goto('/create');
+  await expect(page.getByLabel('Event name')).toBeVisible();
+  await expectNoAxeViolations(page, 'create');
+});
+
+test('the guest surfaces carry no automated accessibility violation', async ({ page }) => {
+  await stubGuestRoutes(page, {
+    gallery: makeMedia(3),
+    contributions: makeMedia(2),
+    messages: [NOTE],
+  });
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('heading', { name: EVENT_FIXTURE.welcomeMessage })).toBeVisible();
+  await expectNoAxeViolations(page, 'guest hero');
+
+  // The secondary disclosures are collapsed by default, so their content is outside the hero pass.
+  for (const [summary, rendered] of [
+    ['Shared gallery', '.photo-grid figure'],
+    ['My deliveries', '.contributions li'],
+    ['Leave a note', '.note-form textarea'],
+  ] as const) {
+    await page.locator('.event-extra summary').filter({ hasText: summary }).click();
+    await expect(page.locator(rendered).first()).toBeVisible();
+  }
+  await expectNoAxeViolations(page, 'guest secondary content');
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
+  await expect(page.locator('.fullscreen figure')).toHaveCount(3);
+  await expectNoAxeViolations(page, 'fullscreen gallery');
+});
+
+test('every manager section carries no automated accessibility violation', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    // Unpublished is the Gallery's default filter and the state that renders every card control.
+    mediaPages: { first: { media: makeMedia(3, 'unpublished'), nextCursor: null } },
+    messages: [NOTE],
+    event: { storedMediaCount: 3 },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+
+  for (const { name, heading } of MANAGER_SECTIONS) {
+    await page.locator('.manager-nav nav button').filter({ hasText: name }).click();
+    await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+    await expectNoAxeViolations(page, `manager ${name}`);
+  }
 });

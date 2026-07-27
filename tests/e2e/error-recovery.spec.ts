@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page, Route } from '@playwright/test';
 
 import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
-import { makeMedia } from './fixtures/ui-data';
+import { LONG_FILENAME, makeMedia } from './fixtures/ui-data';
 import { measureContrast, measureDocument, measureTarget } from './helpers/geometry';
 
 // The design system holds hint and caption text inside this band.
@@ -162,6 +162,108 @@ test('a guest failure no retry could answer points at what does recover it, and 
     await expect(page.getByText(RETRY_HINT), terminal.code).toHaveCount(0);
     await expectContained(page);
   }
+});
+
+// A rejected write is the ordinary case a host meets on reception wifi. The photos, the section, the
+// filter, and the selection are all still true — only the write failed — so the view has to survive it.
+const MUTATION_REFUSED = {
+  code: 'PUBLICATION_CONFLICT',
+  message: 'That photo changed before this update. Reload and try again.',
+};
+const MANAGER_BASE = `**/api/manage/events/${EVENT_FIXTURE.id}`;
+
+async function openGallery(page: Page) {
+  await stubManagerRoutes(page, {
+    // Unpublished is the Gallery's own default filter and carries every card control at once.
+    mediaPages: { first: { media: makeMedia(2, 'unpublished'), nextCursor: null } },
+    event: { storedMediaCount: 2 },
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
+  await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+  await expect(page.locator('.moderation-grid article')).toHaveCount(2);
+}
+
+// The notice has to be readable, dismissible by thumb, and contained — and everything it interrupted
+// has to still be there underneath it.
+async function expectRecoverableNotice(page: Page, survivingHeading: string) {
+  const notice = page.getByRole('alert');
+  await expect(notice).toContainText(MUTATION_REFUSED.message);
+  // The notice is caption-weight prose, so it lives in the design system's 12–14 px band like every
+  // other status line. Its colour pairing is measured by the axe pass, not asserted twice here.
+  const noticeText = notice.locator('span');
+  const fontSize = await noticeText.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+  expect(fontSize, 'notice text size').toBeGreaterThanOrEqual(CAPTION_TEXT_RANGE.min);
+  expect(fontSize, 'notice text size').toBeLessThanOrEqual(CAPTION_TEXT_RANGE.max);
+  await expect(page.getByRole('heading', { name: survivingHeading })).toBeVisible();
+  await expect(page.locator('.moderation-grid article'), 'the cards the host was working on survive')
+    .toHaveCount(2);
+
+  const dismiss = page.getByRole('button', { name: 'Dismiss error', exact: true });
+  const dismissSize = await measureTarget(dismiss);
+  expect(dismissSize.width, 'dismiss target width').toBeGreaterThanOrEqual(44);
+  expect(dismissSize.height, 'dismiss target height').toBeGreaterThanOrEqual(44);
+  await expectContained(page);
+
+  await dismiss.click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: survivingHeading })).toBeVisible();
+}
+
+test('a refused bulk publish keeps the gallery, its filter, and the selection', async ({ page }) => {
+  await openGallery(page);
+  await page.route(`${MANAGER_BASE}/media/bulk`, (route) => route.fulfill({
+    status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
+  }));
+
+  const first = page.locator('.moderation-grid article').first();
+  await first.getByRole('checkbox').check();
+  await expect(page.getByText('1 selected')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish selected' }).click();
+
+  await expectRecoverableNotice(page, 'Gallery publishing');
+  // The filter the host had chosen and the selection they had made are both still true.
+  await expect(page.locator('.filter-tabs button.active')).toHaveText('unpublished');
+  await expect(page.getByText('1 selected')).toBeVisible();
+  await expect(first.getByRole('checkbox')).toBeChecked();
+});
+
+test('a refused delete leaves the photo and the card it was deleted from', async ({ page }) => {
+  await openGallery(page);
+  await page.route(new RegExp(`/api/manage/events/${EVENT_FIXTURE.id}/media/[^/]+$`, 'u'), (route) => route.fulfill({
+    status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
+  }));
+
+  const first = page.locator('.moderation-grid article').first();
+  await first.getByRole('button', { name: `Delete ${LONG_FILENAME}` }).click();
+
+  await expectRecoverableNotice(page, 'Gallery publishing');
+  // A refused delete that removed the card anyway would be the worst possible lie about a photo.
+  await expect(first.locator('strong')).toHaveText(LONG_FILENAME);
+});
+
+test('a refused export request keeps the share section and the control that asked for it', async ({ page }) => {
+  await openGallery(page);
+  await page.route(`${MANAGER_BASE}/exports`, (route) => route.request().method() === 'POST'
+    ? route.fulfill({ status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' } })
+    : route.fallback());
+
+  await page.locator('.manager-nav nav button').filter({ hasText: 'Share' }).click();
+  const panel = page.locator('.manager-export-panel--share');
+  await expect(panel).toBeVisible();
+  await panel.getByRole('button', { name: 'Prepare download' }).click();
+
+  const notice = page.getByRole('alert');
+  await expect(notice).toContainText(MUTATION_REFUSED.message);
+  await expect(page.getByRole('heading', { name: 'Share the photo drop' })).toBeVisible();
+  // The panel that asked is still there, still able to ask again, rather than a dead section.
+  await expect(panel.getByRole('button', { name: 'Prepare download' })).toBeEnabled();
+  await expectContained(page);
+
+  await page.getByRole('button', { name: 'Dismiss error', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
 test('a manager failure no retry could answer points at what does recover it, and offers none', async ({ page }) => {

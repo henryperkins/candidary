@@ -1,78 +1,198 @@
 import { readFileSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
-const screenshotDir = 'output/playwright/screenshots';
-const hero = readFileSync('public/assets/candidary-hero.png');
-const event = {
-  id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
-  galleryVisible: true, moderationRequired: true, storedMediaCount: 6, storedBytes: 384,
-  guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
+import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import { LONG_FILENAME, UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
+import { measureViewportEscapes } from './helpers/geometry';
+
+// This file is the tracked visual evidence. Every case pins its own viewport and asserts a committed
+// baseline under `visual-qa.spec.ts-snapshots/`, so a layout that silently moves fails here rather
+// than surviving in a gitignored `output/` folder nobody compares. It runs only in the `mobile`
+// project — see the `testIgnore` in `playwright.config.ts` — because each state below is a phone or
+// tablet one and a second desktop-emulated copy would be a picture of nobody's screen.
+
+const previewBytes = readFileSync('public/assets/candidary-hero.png');
+// The 500-character ceiling the create form enforces, so this is the longest welcome a host can save.
+const LONG_WELCOME = `Share the night as you saw it, from every table and every corner. ${UNBROKEN_TOKEN} `
+  .padEnd(500, 'We will treasure every frame you send. ');
+// A decodable file that still carries the fixture's 80-character name, so the review card is measured
+// with both a real thumbnail and the worst filename a phone produces.
+const KEEPER = { name: LONG_FILENAME.replace(/\.HEIC$/u, '.png'), mimeType: 'image/png', buffer: previewBytes };
+const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
+const DESTINATIONS = ['Intake', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
+const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
+const NOTE = {
+  id: 'message-a',
+  guestName: 'Rowan',
+  body: 'To a lifetime of noticing the little things.',
+  moderationStatus: 'approved' as const,
+  createdAt: '2026-09-19T20:00:00Z',
 };
-const media = ['First look', 'Golden hour', 'The toast', 'First dance', 'Garden walk', 'Afterglow'].map((caption, index) => ({
-  id: `media-${index + 1}`, originalFilename: `moment-${index + 1}.png`, guestName: ['Avery', 'Jamie', 'Sam'][index % 3],
-  caption, publicationStatus: 'published', uploadState: 'stored', width: 1200, height: 900,
-}));
+// Unpublished is the Gallery's default filter and the only state carrying every card control at once.
+const MEDIA_PAGES = { first: { media: makeMedia(3, 'unpublished'), nextCursor: null } };
 
-async function routeImages(page: Page) {
-  await page.route('**/api/media/*/preview', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: hero }));
+// Web fonts change metrics as they arrive, so every capture waits for the faces the page asked for.
+async function settle(page: Page) {
+  await page.evaluate(() => document.fonts.ready);
 }
 
-test.beforeAll(async () => { await mkdir(screenshotDir, { recursive: true }); });
+async function openManager(page: Page, storedMediaCount: number) {
+  await stubManagerRoutes(page, {
+    mediaPages: MEDIA_PAGES,
+    messages: [NOTE],
+    event: { storedMediaCount, ...(storedMediaCount === MAX_EVENT_MEDIA ? { storedBytes: MAX_EVENT_BYTES } : {}) },
+  });
+  await page.goto(managerUrl);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+}
 
-test('guest visual reference', async ({ page }, testInfo) => {
-  await routeImages(page);
-  await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event, role: 'guest' }, requestId: 'r' } }));
-  await page.route('**/api/event/maya-theo/gallery', (route) => route.fulfill({ json: { data: { media }, requestId: 'r' } }));
-  await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({ json: { data: { media: [media[0]] }, requestId: 'r' } }));
-  await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({ json: { data: { items: [
-    { id: 'message-a', kind: 'message', guestName: 'Rowan', body: 'To a lifetime of noticing the little things.', moderationStatus: 'approved', createdAt: '2026-09-19T20:00:00Z' },
-  ] }, requestId: 'r' } }));
-  await page.goto('/event/maya-theo');
-  await expect(page.getByRole('heading', { name: event.welcomeMessage })).toBeVisible();
-  await page.screenshot({ path: `${screenshotDir}/guest-${testInfo.project.name}.png`, fullPage: true });
+function destination(page: Page, name: string) {
+  return page.locator('.manager-nav nav button').filter({ hasText: name });
+}
+
+test('the landing first fold and workflow band hold their composition', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Create your event', exact: true })).toBeVisible();
+  await settle(page);
+  // Viewport-sized rather than full page: the claim is about what a 320 by 568 phone sees first.
+  await expect(page).toHaveScreenshot('landing-first-fold-320.png');
+
+  await page.setViewportSize({ width: 780, height: 900 });
+  await page.goto('/');
+  const workflow = page.locator('.workflow');
+  await expect(page.locator('.workflow li')).toHaveCount(3);
+  await settle(page);
+  await expect(workflow).toHaveScreenshot('landing-workflow-780.png');
 });
 
-test('manager visual reference', async ({ page }, testInfo) => {
-  await routeImages(page);
-  await page.route('**/api/manage/events/event-a', (route) => route.fulfill({ json: { data: { event }, requestId: 'r' } }));
-  await page.route('**/api/manage/events/event-a/media*', (route) => route.fulfill({ json: { data: { media: media.map((item) => ({ ...item, publicationStatus: 'unpublished' })) }, requestId: 'r' } }));
-  await page.route('**/api/manage/events/event-a/messages', (route) => route.fulfill({ json: { data: { messages: [] }, requestId: 'r' } }));
-  await page.route('**/api/manage/events/event-a/exports', (route) => route.fulfill({ json: { data: { exports: [] }, requestId: 'r' } }));
-  await page.route('**/api/manage/events/event-a/links', (route) => route.fulfill({ json: { data: { guestLink: `https://candidary.test/join/${'guest-secret-'.repeat(8)}` }, requestId: 'r' } }));
-  await page.goto('/manage/event/event-a');
-  await expect(page.getByRole('heading', { name: event.name })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await page.screenshot({ path: `${screenshotDir}/manager-${testInfo.project.name}.png`, fullPage: true });
+test('the create form holds its field errors and the focus they move to', async ({ page }) => {
+  await page.route('**/api/events', (route) => route.fulfill({ status: 422, json: {
+    code: 'VALIDATION_FAILED',
+    message: 'Check the event details.',
+    fieldErrors: {
+      name: 'Enter an event name.',
+      eventDate: 'Choose an event date.',
+      welcomeMessage: 'Write a welcome message.',
+    },
+    requestId: 'request-a',
+  } }));
 
-  if (testInfo.project.name === 'mobile') {
-    const navigationButtons = page.locator('.manager-nav nav button');
-    await expect(navigationButtons).toHaveCount(5);
-    for (const button of await navigationButtons.all()) {
-      const box = await button.boundingBox();
-      expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
-    }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/create');
+  await page.getByRole('button', { name: 'Create private event' }).click();
+  await expect(page.getByRole('alert')).toHaveText('Check the event details.');
+  await expect(page.locator('input[name="name"]')).toBeFocused();
+  await settle(page);
+  await expect(page.locator('.create-form')).toHaveScreenshot('create-validation-focus-390.png');
+});
 
-    for (const section of ['Gallery', 'Notes', 'Share', 'Settings', 'Intake']) {
-      await page.getByRole('button', { name: new RegExp(section, 'iu') }).click();
-      const overflow = await page.locator('.manager-main').evaluate((main) => {
-        const viewportWidth = document.documentElement.clientWidth;
-        return Array.from(main.querySelectorAll<HTMLElement>('*')).flatMap((element) => {
-          const rect = element.getBoundingClientRect();
-          return rect.width > 0 && (rect.left < -1 || rect.right > viewportWidth + 1)
-            ? [{ className: element.className, left: rect.left, right: rect.right }]
-            : [];
-        });
-      });
-      expect(overflow, `${section} contains viewport overflow`).toEqual([]);
-    }
+test('the guest photo drop holds its longest welcome, its review, and phone landscape', async ({ page }) => {
+  await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });
 
-    await page.getByRole('button', { name: 'Share' }).click();
-    await expect(page.locator('.manager-panel img[alt="Guest event QR code"]')).toBeVisible();
-    await expect(page.locator('.manager-utility__guest-entry')).toBeHidden();
-    await expect(page.locator('.manager-utility__capacity')).toBeHidden();
-    await page.screenshot({ path: `${screenshotDir}/manager-share-mobile.png`, fullPage: true });
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('button', { name: 'Read full welcome' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Take a photo', exact: true })).toBeVisible();
+  await settle(page);
+  await expect(page).toHaveScreenshot('guest-long-welcome-320.png');
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await settle(page);
+  await expect(page).toHaveScreenshot('guest-landscape-844x390.png');
+
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles([KEEPER, REJECT]);
+  await expect(page.getByText('2 photos selected')).toBeVisible();
+  await expect(page.locator('.selection-card__image img')).toHaveCount(1);
+  await settle(page);
+  await expect(page.locator('.photo-drop--review')).toHaveScreenshot('guest-review-320.png');
+});
+
+test('the guest secondary sections and the full-screen caption hold their longest content', async ({ page }) => {
+  await stubGuestRoutes(page, { gallery: makeMedia(4), contributions: makeMedia(3) });
+
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await page.locator('.event-extra summary').filter({ hasText: 'My deliveries' }).click();
+  await expect(page.locator('.contributions li')).toHaveCount(3);
+  await page.locator('.event-extra summary').filter({ hasText: 'Shared gallery' }).click();
+  await expect(page.locator('.photo-grid figure')).toHaveCount(4);
+  await settle(page);
+  await expect(page.locator('.guest-secondary')).toHaveScreenshot('guest-secondary-long-content-320.png');
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
+  await expect(page.locator('.fullscreen figure')).toHaveCount(4);
+  await settle(page);
+  // The first item carries the 80-character filename as its caption, which is the case that overflows.
+  await expect(page.locator('.fullscreen figure').first())
+    .toHaveScreenshot('fullscreen-long-caption-320.png');
+});
+
+test('the manager rail holds its labels at 768', async ({ page }) => {
+  await openManager(page, 6);
+  await page.setViewportSize({ width: 768, height: 900 });
+  for (const name of DESTINATIONS) await expect(destination(page, name)).toBeVisible();
+  await settle(page);
+  await expect(page.locator('.manager-nav')).toHaveScreenshot('manager-nav-768.png');
+});
+
+// 10,000 photos is the documented per-event cap, so this is the widest the count badge ever gets.
+test('the manager rail holds its counts at the documented photo cap', async ({ page }) => {
+  await openManager(page, MAX_EVENT_MEDIA);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(destination(page, 'Intake').locator('.manager-nav__count'))
+    .toHaveText(String(MAX_EVENT_MEDIA));
+  await settle(page);
+  await expect(page.locator('.manager-nav')).toHaveScreenshot('manager-nav-count-390.png');
+});
+
+test('the manager card controls and the mobile export panel hold their layout', async ({ page }) => {
+  await openManager(page, 6);
+  await page.setViewportSize({ width: 320, height: 844 });
+  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+  const card = page.locator('.moderation-grid article').first();
+  await expect(card.locator('.intake-card-actions button')).toHaveCount(3);
+  await settle(page);
+  await expect(card).toHaveScreenshot('manager-actions-320.png');
+
+  // The Share section is taller than a phone screen, and the rail is sticky: scrolling any part of it
+  // into view for a capture would put the rail on top of it. Phone width is what the layout is made
+  // of, so the width stays at 390 and only the capture window is opened far enough that the whole
+  // section is laid out at once, below the rail rather than under it.
+  await page.setViewportSize({ width: 390, height: 1500 });
+  await destination(page, 'Share').click();
+  const share = page.locator('.manager-panel');
+  await expect(page.getByRole('heading', { name: 'Share the photo drop' })).toBeVisible();
+  await expect(page.locator('.manager-export-panel--share')).toBeVisible();
+  await expect(page.locator('.manager-panel img[alt="Guest event QR code"]')).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY), 'the section is laid out without scrolling').toBe(0);
+  await settle(page);
+  await expect(share).toHaveScreenshot('manager-export-first-390.png');
+});
+
+// Kept from the pre-baseline visual pass: a picture proves what a state looks like, not that nothing
+// left the viewport behind it. Every section is scanned on the phone the baselines were taken on.
+test('every manager section stays inside the phone viewport and shows one guest entry', async ({ page }) => {
+  await openManager(page, 6);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  for (const name of DESTINATIONS) {
+    await destination(page, name).click();
+    await expect(destination(page, name), `${name} is the open destination`)
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(await measureViewportEscapes(page.locator('.manager-shell--intake')), `${name} escapes the viewport`)
+      .toEqual([]);
   }
+
+  await destination(page, 'Share').click();
+  await expect(page.locator('.manager-panel img[alt="Guest event QR code"]')).toBeVisible();
+  // The utility rail's copies belong to the wide layout; on a phone the host sees exactly one.
+  await expect(page.locator('.manager-utility__guest-entry')).toBeHidden();
+  await expect(page.locator('.manager-utility__capacity')).toBeHidden();
 });

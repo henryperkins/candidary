@@ -213,6 +213,54 @@ test('manager navigation keeps an inactive section count visible on both sides o
   }
 });
 
+// The badge is a fixed-size box no containment assertion can reach: the digits that leave it are an
+// anonymous box, not an element, so `measureViewportEscapes` and the document scan both see nothing.
+// Only the badge's own scroll width reports it, and only the documented cap makes it happen.
+test('the intake count badge holds the whole photo cap at every width', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    mediaPages,
+    messages: [NOTE],
+    event: { storedMediaCount: MAX_EVENT_MEDIA, storedBytes: MAX_EVENT_BYTES },
+  });
+  await page.goto(managerUrl);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  const count = destination(page, 'Intake').locator('.manager-nav__count');
+  await expect(count).toHaveText(String(MAX_EVENT_MEDIA));
+
+  for (const width of [...ONE_COLUMN_WIDTHS, ...TWO_COLUMN_WIDTHS, ...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
+    await page.setViewportSize({ width, height: 900 });
+    const badge = await measureOverflow(count);
+    expect(badge.scrollWidth, `intake count contains ${MAX_EVENT_MEDIA} at ${width}`)
+      .toBeLessThanOrEqual(badge.clientWidth + 1);
+    // Still a badge rather than a bar: it grows with its digits and no further.
+    const box = await measureTarget(count);
+    expect(box.width, `intake count width at ${width}`).toBeLessThanOrEqual(48);
+    await expectContained(page, width);
+  }
+});
+
+// A 1280 px laptop at the 200% zoom WCAG expects leaves a 640 by 450 layout viewport. It lands in the
+// two-column stacked band, where the shell has no rails and the whole manager is one column of content.
+test('the manager holds every section in the 1280-at-200%-zoom layout', async ({ page }) => {
+  await openManager(page);
+  await page.setViewportSize({ width: 640, height: 450 });
+
+  for (const name of DESTINATIONS) {
+    await destination(page, name).click();
+    await expect(destination(page, name), `${name} is the open destination`).toHaveAttribute('aria-pressed', 'true');
+    const target = await measureTarget(destination(page, name));
+    expect(target.width, `${name} target width at 640 by 450`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    expect(target.height, `${name} target height at 640 by 450`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    await expectContained(page, 640);
+  }
+
+  // The rails belong to 761 and above; at this size the manager is the stacked layout, not a squeezed
+  // three-column one, and the two-column media grid is what the workspace carries.
+  expect(await measureGridTracks(page.locator('.manager-shell--intake')), 'shell tracks at 640').toEqual([]);
+  await destination(page, 'Intake').click();
+  expect((await measureGridTracks(page.locator('.moderation-grid'))).length, 'media columns at 640').toBe(2);
+});
+
 test('changing manager section returns the host to the top of the new section', async ({ page }) => {
   const rows = makeMedia(120);
   await stubManagerRoutes(page, {

@@ -178,6 +178,31 @@ test('a 500-character welcome keeps the camera action in view in phone landscape
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
 });
 
+// A 1280 px laptop at the 200% zoom WCAG expects leaves a 640 by 450 layout viewport. The guest hero is
+// the surface with the most to lose: 450 px of height is shorter than any phone this app supports.
+test('the guest photo drop holds the 1280-at-200%-zoom layout at 640 by 450', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 450 });
+  await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });
+
+  await page.goto('/event/maya-theo');
+  const camera = page.getByRole('button', { name: 'Take a photo', exact: true });
+  const library = page.getByRole('button', { name: 'Choose recent photos', exact: true });
+  await expect(camera).toBeVisible();
+
+  for (const [label, action] of [['camera', camera], ['library', library]] as const) {
+    const bounds = await measureFold(page, action);
+    expect(bounds.top, `${label} starts above the zoomed fold`).toBeLessThan(bounds.fold);
+    expect(bounds.visible, `a full ${label} target is reachable without scrolling`).toBeGreaterThanOrEqual(44);
+  }
+
+  // The welcome still clamps rather than pushing the photo sources off a 450 px viewport.
+  await expect(page.getByRole('button', { name: 'Read full welcome' })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
 test('review status text stays within the caption band at 320 px', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await stubGuestRoutes(page);

@@ -246,7 +246,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .notes-secondary h3 { margin: 12px 0 5px; font-size: 1.45rem; }
 .notes-secondary p { color: var(--muted); }
 .notes-secondary .note-form textarea { background: white; border-color: var(--border); color: var(--ink); }
+/* The notes feed was written for the dark aubergine band, where apricot on aubergine reads. Reused on
+   the light guest surface it inherited that rule and rendered the guest's name at 1.72:1 — the body
+   text was already reclaimed for this surface, and the byline belongs with it. */
 .notes-secondary .notes-feed { color: var(--ink); }
+.notes-secondary .notes-feed small { color: inherit; }
 .guest-shell--drop footer { max-width: 980px; margin: 0 auto; border-top: 1px solid var(--border); }
 @keyframes photo-drop-spin { to { transform: rotate(360deg); } }
 
@@ -321,7 +325,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* The label and the count are styled by their own class, so neither can win the other's font size. */
 .manager-nav__label { margin: 0; color: var(--ink); font-size: .65rem; }
 .manager-nav button.active .manager-nav__label { color: var(--aubergine); }
-.manager-nav__count { width: 17px; height: 17px; margin: 0; position: absolute; top: 5px; right: calc(50% - 22px); display: grid; place-items: center; border-radius: 999px; background: var(--aubergine); color: white; font-size: .58rem; line-height: 1; }
+/* A count runs to 10,000 — the per-event photo cap — so the badge is a pill that grows with its own
+   text rather than a fixed box the digits spill out of. The 999px radius reads as a circle at one
+   digit and as a capsule past that. */
+.manager-nav__count { min-width: 17px; height: 17px; margin: 0; padding: 0 4px; position: absolute; top: 5px; right: calc(50% - 22px); display: grid; place-items: center; border-radius: 999px; background: var(--aubergine); color: white; font-size: .58rem; line-height: 1; }
 .share-layout .button-row .button { width: 100%; }
 .manager-qr { width: min(100%, 260px); }
 .manager-qr .button { width: 100%; }

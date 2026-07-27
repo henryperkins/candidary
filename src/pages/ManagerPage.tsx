@@ -312,13 +312,16 @@ export function ManagerPage() {
     onRetry={(job) => runManagerAction(() => retryExport(job))}
   />;
   return <div className="manager-shell manager-shell--intake">
-    <aside className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
+    {/* The brand and the section navigation, which is a banner rather than complementary content. As
+        an `aside` this announced a second unnamed complementary landmark beside the utility rail —
+        `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
+    <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
       <button aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
       <button aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
       <button aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <span className="manager-nav__count">{messages.length}</span>}</button>
       <button aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
       <button aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => openSection('settings')}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
-    </nav></aside>
+    </nav></header>
 
     <main className="manager-main">
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>

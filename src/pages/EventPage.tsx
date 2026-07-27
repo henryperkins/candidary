@@ -94,6 +94,10 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState /></main>;
   if (fullscreen) return <main className="fullscreen">
+    {/* The full-screen gallery is its own route and had no level-one heading at all, so a screen
+        reader arrived with nothing naming the view. The name belongs to the page, not to the layout,
+        so it is announced rather than drawn — the bar's approved copy is unchanged. */}
+    <h1 className="sr-only">Shared gallery · {event.name}</h1>
     <div className="fullscreen__bar"><Brand compact /><Link className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
     {gallery.length
       ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption>{item.caption || item.originalFilename}</figcaption></figure>)}</div>

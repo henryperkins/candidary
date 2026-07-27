@@ -185,6 +185,36 @@ test('a private link can be revealed and read across the width matrix', async ({
   }
 });
 
+// A 1280 px laptop at the 200% zoom WCAG expects leaves a 640 by 450 layout viewport: narrower than the
+// 700 px workflow boundary and shorter than any phone, which is where a fold claim is most easily lost.
+test('the public surfaces hold the 1280-at-200%-zoom layout at 640 by 450', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 450 });
+
+  await page.goto('/');
+  const headline = page.getByRole('heading', { level: 1 });
+  const action = page.getByRole('link', { name: 'Create your event', exact: true });
+  await expect(headline).toBeVisible();
+  const headlineBounds = await measureFold(page, headline);
+  expect(headlineBounds.bottom, 'headline within the zoomed fold').toBeLessThanOrEqual(headlineBounds.fold);
+  const actionBounds = await measureFold(page, action);
+  expect(actionBounds.visible, 'a full primary target is reachable without scrolling')
+    .toBeGreaterThanOrEqual(44);
+  // Below the 700 px boundary the workflow is one column, so the zoomed layout is the phone's.
+  expect((await measureGridTracks(page.locator('.workflow ol'))).length, 'workflow columns at 640').toBe(1);
+  expect((await measureGridTracks(page.locator('.hero'))).length, 'hero columns at 640').toBe(1);
+  const landingSize = await measureDocument(page);
+  expect(landingSize.scrollWidth).toBeLessThanOrEqual(landingSize.clientWidth + 1);
+
+  await page.goto('/create');
+  const submit = page.getByRole('button', { name: 'Create private event' });
+  await expect(page.getByLabel('Event name')).toBeVisible();
+  await expect(submit).toBeVisible();
+  const submitSize = await measureTarget(submit);
+  expect(submitSize.height, 'create submit height at 640 by 450').toBeGreaterThanOrEqual(44);
+  const createSize = await measureDocument(page);
+  expect(createSize.scrollWidth).toBeLessThanOrEqual(createSize.clientWidth + 1);
+});
+
 test('the landing workflow and hero turn over exactly at their breakpoints', async ({ page }) => {
   for (const { width, workflowColumns, heroColumns } of LANDING_BOUNDARIES) {
     await page.setViewportSize({ width, height: 900 });
