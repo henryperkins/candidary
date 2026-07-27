@@ -273,8 +273,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* Overrides the 100svh base and the 720px enhancement: review sizes to its content, leaving no dead space. */
 .photo-drop--review { min-height: auto; }
 
-/* Landscape phones get the 2-line base so the welcome never pushes the photo sources past the fold. */
-@media (min-height: 500px) {
+/* Shallow landscape phones keep the 2-line base through 567px so both photo sources remain reachable. */
+@media (min-height: 568px) {
   .photo-drop__welcome--clamped { -webkit-line-clamp: 4; }
 }
 

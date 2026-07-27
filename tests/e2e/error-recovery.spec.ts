@@ -167,7 +167,7 @@ test('a guest failure no retry could answer points at what does recover it, and 
 // A rejected write is the ordinary case a host meets on reception wifi. The photos, the section, the
 // filter, and the selection are all still true — only the write failed — so the view has to survive it.
 const MUTATION_REFUSED = {
-  code: 'PUBLICATION_CONFLICT',
+  code: 'MEDIA_STATE_CONFLICT',
   message: 'That photo changed before this update. Reload and try again.',
 };
 const MANAGER_BASE = `**/api/manage/events/${EVENT_FIXTURE.id}`;
@@ -192,11 +192,12 @@ async function expectRecoverableNotice(page: Page, survivingHeading: string) {
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
   // The notice is caption-weight prose, so it lives in the design system's 12–14 px band like every
-  // other status line. Its colour pairing is measured by the axe pass, not asserted twice here.
+  // other status line. No axe pass renders this failed state, so its resolved pairing is checked here.
   const noticeText = notice.locator('span');
   const fontSize = await noticeText.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
   expect(fontSize, 'notice text size').toBeGreaterThanOrEqual(CAPTION_TEXT_RANGE.min);
   expect(fontSize, 'notice text size').toBeLessThanOrEqual(CAPTION_TEXT_RANGE.max);
+  expect(await measureContrast(noticeText), 'notice text contrast').toBeGreaterThanOrEqual(4.5);
   await expect(page.getByRole('heading', { name: survivingHeading })).toBeVisible();
   await expect(page.locator('.moderation-grid article'), 'the cards the host was working on survive')
     .toHaveCount(2);

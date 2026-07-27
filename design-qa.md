@@ -111,6 +111,7 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 | --- | --- | --- |
 | Photo drop, 500-character welcome | 320 x 568 | Welcome clamped with `Read full welcome`; both photo sources inside the fold; full text present for assistive technology |
 | Photo drop, phone landscape | 844 x 390 | A full 44 px camera target reachable without scrolling, with and without the long welcome |
+| Photo drop, shallow landscape boundary | 844 x 500, 844 x 520, 844 x 567 | The 500-character welcome stays clamped; a full 44 px target from both photo sources remains reachable; document contained |
 | Photo drop at 200% zoom | 640 x 450 | Both sources reachable; the welcome still clamps rather than pushing them off screen |
 | Review state | 320 x 844 | Status, filename and error text held to 12–14 px; the all-invalid state offers no send |
 | Delivery receipt with caveat | 320 x 844 | Delivered count and caveat contained |
@@ -172,7 +173,7 @@ difference matters enough to write down. Measured against the installed axe-core
 - **`target-size` is switched back on** — `.options({ rules: { 'target-size': { enabled: true } } })`
   in `accessibility.spec.ts`. It is WCAG 2.2 SC 2.5.8, the closest thing axe ships to the subject of
   this plan, and leaving it off would have made the gate read stronger than it was. It reports
-  **passes** on every surface.
+  **passes** on every surface that spec renders.
 
   **Read carefully what that does and does not prove.** SC 2.5.8's floor is **24 x 24 CSS px**, with
   spacing, inline, and essential exceptions. It is **not** the 44 x 44 floor this document uses as
@@ -210,10 +211,12 @@ Verified by removing the option: the guard fails first, on every surface.
 
 Known gap: no axe pass renders a failed state, so the engine never reads the guest or manager error
 cards or the manager's inline action notice. Those states are measured geometrically by
-`error-recovery.spec.ts`, and the one colour pairing they carried was found and fixed by hand — see
-"Contrast remediation".
+`error-recovery.spec.ts`, which also checks the notice's resolved contrast directly; the original
+pairing was found and fixed by hand — see "Contrast remediation".
 
-Every surface reports zero violations, in both Playwright projects.
+Every surface enumerated for `accessibility.spec.ts` reports zero violations in both Playwright
+projects. This is automated-browser evidence for those rendered states, not failed-state or
+physical-device conformance.
 
 Fixed under this task:
 
