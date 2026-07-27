@@ -74,6 +74,24 @@ describe('photo upload queue', () => {
     expect(getReceiptCount(resolved)).toBe(1);
   });
 
+  it('counts delivered photos when validation failures remain', () => {
+    const delivered = { ...item('sent'), state: 'delivered' as const };
+    const invalid = {
+      ...item('invalid'),
+      state: 'failed' as const,
+      validationError: true,
+      error: 'Choose a supported photo.',
+    };
+    expect(getReceiptCount([delivered, invalid])).toBe(1);
+    expect(getReceiptCount([invalid])).toBeNull();
+  });
+
+  it('keeps a transfer failure from producing a receipt', () => {
+    const delivered = { ...item('sent'), state: 'delivered' as const };
+    const failed = { ...item('failed'), state: 'failed' as const, error: 'Reception dropped out.' };
+    expect(getReceiptCount([delivered, failed])).toBeNull();
+  });
+
   it('retries only the failed photo with the same stable id', async () => {
     let attempts = 0;
     const transport = acceptingTransport({

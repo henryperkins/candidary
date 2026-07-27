@@ -69,6 +69,43 @@ describe('mobile guest photo delivery', () => {
     expect(screen.queryByText(/gallery|note/i)).not.toBeInTheDocument();
   });
 
+  it('receipts the delivered photo when an invalid file stays behind', async () => {
+    const user = userEvent.setup();
+    const queueTransport = transport();
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={queueTransport} />);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: {
+        files: [
+          new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' }),
+          new File(['notes'], 'notes.txt', { type: 'text/plain' }),
+        ],
+      },
+    });
+    expect(await screen.findByText('2 photos selected')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Retry 1 photo' }));
+    await waitFor(() => expect(queueTransport.finalize).toHaveBeenCalledTimes(1));
+
+    expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+    expect(screen.getByText('1 photo could not be added.')).toBeVisible();
+  });
+
+  it('holds an all-invalid selection in review with recovery guidance', async () => {
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
+    await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] },
+    });
+
+    expect(await screen.findByText('1 photo selected')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^Send/u })).not.toBeInTheDocument();
+    expect(screen.getByText('Remove or replace the photos that need attention.')).toBeVisible();
+    expect(screen.queryByText('Keep this page open while your photos transfer.')).not.toBeInTheDocument();
+  });
+
   it('accepts vendor HEIC MIME values provisionally for final server inspection', async () => {
     render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
     await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');

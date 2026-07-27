@@ -138,7 +138,7 @@ export function removeQueueItem(items: readonly UploadQueueItem[], id: string): 
 }
 
 export function getReceiptCount(items: readonly UploadQueueItem[]): number | null {
-  if (items.length === 0 || items.some(({ state }) => state !== 'delivered')) return null;
-  const delivered = items.filter(({ state }) => state === 'delivered').length;
-  return delivered > 0 ? delivered : null;
+  const deliverable = items.filter(({ validationError }) => !validationError);
+  if (deliverable.length === 0 || deliverable.some(({ state }) => state !== 'delivered')) return null;
+  return deliverable.length;
 }

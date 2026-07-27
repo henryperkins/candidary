@@ -270,6 +270,8 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const unresolvedCount = items.filter(({ state, validationError }) =>
     !validationError && (state === 'selected' || state === 'failed')).length;
   const failedCount = items.filter(({ state }) => state === 'failed').length;
+  const validationFailureCount = items.filter(({ validationError }) => validationError).length;
+  const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
   const reviewMode = items.length > 0;
   const eventDate = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
     .format(new Date(`${event.eventDate}T12:00:00`));
@@ -283,6 +285,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         <span className="delivery-receipt__check"><Check aria-hidden="true" /></span>
         <p className="delivery-receipt__eyebrow">Delivered to {event.name}</p>
         <h1>Your {receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} sent.</h1>
+        {validationFailureCount > 0 && <p>{validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.</p>}
         <p>Thanks, {name}. You’re all done and can close this page.</p>
       </div>
     </section>;
@@ -362,7 +365,9 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         {unresolvedCount > 0 && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
           {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${items.some(({ state }) => state === 'failed') ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
         </button>}
-        <p className="progress-note">Keep this page open while your photos transfer.</p>
+        <p className="progress-note">{onlyValidationFailures
+          ? 'Remove or replace the photos that need attention.'
+          : 'Keep this page open while your photos transfer.'}</p>
       </>}
 
       <input
