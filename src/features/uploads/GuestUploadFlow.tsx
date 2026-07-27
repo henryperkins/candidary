@@ -64,32 +64,49 @@ interface BatchResponseItem {
   error?: { message: string };
 }
 
-function xhrUpload(file: File, reservation: UploadReservation, progress: (percent: number) => void) {
+function cancellation() {
+  return new DOMException('Sending was cancelled.', 'AbortError');
+}
+
+function xhrUpload(
+  file: File,
+  reservation: UploadReservation,
+  progress: (percent: number) => void,
+  signal?: AbortSignal,
+) {
   return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(cancellation());
     const request = new XMLHttpRequest();
+    const abort = () => request.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const settle = (finish: () => void) => {
+      signal?.removeEventListener('abort', abort);
+      finish();
+    };
     request.open('PUT', reservation.uploadUrl);
     request.setRequestHeader('Content-Type', reservation.mimeType);
     request.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) progress((event.loaded / event.total) * 100);
     });
-    request.addEventListener('load', () => {
+    request.addEventListener('load', () => settle(() => {
       if (request.status >= 200 && request.status < 300) resolve();
       else reject(new Error('The transfer was interrupted. Try this photo again.'));
-    });
-    request.addEventListener('error', () => reject(new Error('Reception dropped out. Try this photo again.')));
-    request.addEventListener('abort', () => reject(new Error('The transfer was cancelled.')));
+    }));
+    request.addEventListener('error', () => settle(() => reject(new Error('Reception dropped out. Try this photo again.'))));
+    request.addEventListener('abort', () => settle(() => reject(cancellation())));
     request.send(file);
   });
 }
 
 function createBrowserTransport(slug: string, guestName: string): UploadTransport {
   return {
-    async reserve(items) {
+    async reserve(items, signal) {
       const results: ReservationResult[] = [];
       for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
         const chunk = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
         const response = await api<{ items: BatchResponseItem[] }>(`/api/event/${slug}/uploads/batch`, {
           method: 'POST',
+          signal,
           body: JSON.stringify({
             guestName,
             files: chunk.map(({ id, file }) => ({
@@ -118,28 +135,30 @@ function createBrowserTransport(slug: string, guestName: string): UploadTranspor
       }
       return results;
     },
-    async upload(item, reservation, progress) {
+    async upload(item, reservation, progress, signal) {
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          await xhrUpload(item.file, reservation, progress);
+          await xhrUpload(item.file, reservation, progress, signal);
           return;
         } catch (error) {
           lastError = error;
+          if (signal?.aborted) break;
           if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
         }
       }
       throw lastError;
     },
-    async finalize(_item, reservation) {
+    async finalize(_item, reservation, signal) {
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, { method: 'POST', body: '{}' });
+          await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, { method: 'POST', signal, body: '{}' });
           return;
         } catch (error) {
           lastError = error;
           if (error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code)) throw error;
+          if (signal?.aborted) break;
           if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
         }
       }
@@ -191,6 +210,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const libraryInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
   const objectUrls = useRef(new Set<string>());
+  const uploadController = useRef<AbortController | null>(null);
   const notifiedReceipt = useRef<number | null>(null);
   const receiptCount = getReceiptCount(items);
 
@@ -260,15 +280,24 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   async function send() {
     const savedName = saveName();
     if (!savedName || sending) return;
+    const controller = new AbortController();
+    uploadController.current = controller;
     setSending(true);
     const activeTransport = transport ?? createBrowserTransport(slug, savedName);
-    const result = await runUploadQueue(items, activeTransport, 2, setItems);
+    const result = await runUploadQueue(items, activeTransport, {
+      concurrency: 2,
+      onChange: setItems,
+      signal: controller.signal,
+    });
     setItems(result);
     setSending(false);
+    uploadController.current = null;
   }
 
   const unresolvedCount = items.filter(({ state, validationError }) =>
     !validationError && (state === 'selected' || state === 'failed')).length;
+  const attemptedFailureCount = items.filter(({ state, validationError }) =>
+    !validationError && state === 'failed').length;
   const failedCount = items.filter(({ state }) => state === 'failed').length;
   const validationFailureCount = items.filter(({ validationError }) => validationError).length;
   const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
@@ -300,7 +329,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
     <div className="photo-drop__card">
       {reviewMode && <header className="review-heading">
         <p>Sending as {name}</p>
-        <h1>Ready to send</h1>
+        <h1>{sending ? 'Sending photos' : 'Ready to send'}</h1>
         <button type="button" className="text-button" onClick={() => setEditingName(true)} disabled={sending}>
           <Pencil aria-hidden="true" /> Edit name
         </button>
@@ -362,8 +391,11 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
           <span>{items.length} {plural(items.length, 'photo')} selected</span>
           {failedCount > 0 && <span>{failedCount} need {failedCount === 1 ? 'attention' : 'attention'}</span>}
         </div>
-        {unresolvedCount > 0 && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
-          {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${items.some(({ state }) => state === 'failed') ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
+        {(sending || unresolvedCount > 0) && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
+          {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${attemptedFailureCount > 0 ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
+        </button>}
+        {sending && <button type="button" className="text-button" onClick={() => uploadController.current?.abort()}>
+          Cancel sending
         </button>}
         <p className="progress-note">{onlyValidationFailures
           ? 'Remove or replace the photos that need attention.'

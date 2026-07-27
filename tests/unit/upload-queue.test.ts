@@ -18,6 +18,14 @@ function item(id: string): UploadQueueItem {
   };
 }
 
+const CANCELLED = 'Sending was cancelled. Retry when you are ready.';
+
+function untilAborted(signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(new DOMException('Sending was cancelled.', 'AbortError')), { once: true });
+  });
+}
+
 function acceptingTransport(overrides: Partial<UploadTransport> = {}): UploadTransport {
   return {
     reserve: async (items) => items.map(({ id }) => ({
@@ -49,8 +57,7 @@ describe('photo upload queue', () => {
     const result = await runUploadQueue(
       [item('a'), item('b'), item('c'), item('d')],
       transport,
-      2,
-      (items) => items.forEach(({ state }) => seenStates.add(state)),
+      { concurrency: 2, onChange: (items) => items.forEach(({ state }) => seenStates.add(state)) },
     );
 
     expect(maximum).toBe(2);
@@ -131,5 +138,48 @@ describe('photo upload queue', () => {
 
   it('never creates a receipt when every photo is removed before delivery', () => {
     expect(getReceiptCount(removeQueueItem([item('a')], 'a'))).toBeNull();
+  });
+
+  it('cancels undelivered photos into recoverable failures', async () => {
+    const controller = new AbortController();
+    const transport = acceptingTransport({ upload: (_item, _reservation, _progress, signal) => untilAborted(signal) });
+
+    const promise = runUploadQueue([item('a'), item('b')], transport, {
+      concurrency: 2,
+      signal: controller.signal,
+    });
+    controller.abort();
+    const result = await promise;
+
+    expect(result.filter(({ state }) => state === 'delivered')).toHaveLength(0);
+    expect(result.every(({ state }) => state === 'failed')).toBe(true);
+    expect(result.every(({ error }) => error === CANCELLED)).toBe(true);
+    expect(result.every(({ retryStage }) => retryStage === undefined)).toBe(true);
+    expect(getReceiptCount(result)).toBeNull();
+  });
+
+  it('keeps a photo delivered before the cancellation and never starts the waiting ones', async () => {
+    const controller = new AbortController();
+    const transport = acceptingTransport({
+      upload: async (uploadItem, _reservation, progress, signal) => {
+        if (uploadItem.id === 'fast') return progress(100);
+        return untilAborted(signal);
+      },
+    });
+    const upload = vi.spyOn(transport, 'upload');
+
+    const result = await runUploadQueue([item('fast'), item('slow'), item('waiting')], transport, {
+      concurrency: 2,
+      signal: controller.signal,
+      onChange: (items) => {
+        if (items.some(({ id, state }) => id === 'fast' && state === 'delivered')) controller.abort();
+      },
+    });
+
+    expect(result.find(({ id }) => id === 'fast')).toMatchObject({ state: 'delivered', error: undefined });
+    expect(result.find(({ id }) => id === 'slow')).toMatchObject({ state: 'failed', error: CANCELLED });
+    expect(result.find(({ id }) => id === 'waiting')).toMatchObject({ state: 'failed', error: CANCELLED });
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(getReceiptCount(result)).toBeNull();
   });
 });

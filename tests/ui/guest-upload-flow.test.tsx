@@ -24,6 +24,15 @@ function transport(): UploadTransport {
   };
 }
 
+function deferredTransport(): UploadTransport {
+  return {
+    ...transport(),
+    upload: vi.fn((_item, _reservation, _progress, signal?: AbortSignal) => new Promise<void>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('Sending was cancelled.', 'AbortError')), { once: true });
+    })),
+  };
+}
+
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
@@ -85,7 +94,8 @@ describe('mobile guest photo delivery', () => {
     });
     expect(await screen.findByText('2 photos selected')).toBeVisible();
 
-    await user.click(screen.getByRole('button', { name: 'Retry 1 photo' }));
+    expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
     await waitFor(() => expect(queueTransport.finalize).toHaveBeenCalledTimes(1));
 
     expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
@@ -117,6 +127,31 @@ describe('mobile guest photo delivery', () => {
     expect(await screen.findByText('1 photo selected')).toBeVisible();
     expect(screen.queryByText('Needs attention')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send 1 photo' })).toBeEnabled();
+  });
+
+  it('keeps the send action mounted while sending and recovers a cancelled transfer', async () => {
+    const user = userEvent.setup();
+    const queueTransport = deferredTransport();
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={queueTransport} />);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+    expect(await screen.findByText('1 photo selected')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
+    expect(screen.getByRole('heading', { name: 'Sending photos' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel sending' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel sending' }));
+
+    expect(await screen.findByRole('button', { name: 'Retry 1 photo' })).toBeEnabled();
+    expect(screen.getByText('Sending was cancelled. Retry when you are ready.')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Cancel sending' })).not.toBeInTheDocument();
+    expect(queueTransport.finalize).not.toHaveBeenCalled();
   });
 
   it('lets a returning guest reach the camera with one tap', async () => {
