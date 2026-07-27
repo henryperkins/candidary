@@ -4,7 +4,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 import { api, mediaOriginal, mediaPreview } from '../app/api';
-import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
+import {
+  MANAGER_BULK_SELECTION_MAX,
+  MAX_EVENT_BYTES,
+  MAX_EVENT_MEDIA,
+} from '../../shared/constants';
 import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -307,26 +311,43 @@ export function ManagerPage() {
     window.location.assign('/');
   }
 
+  const selectionAtLimit = selected.length >= MANAGER_BULK_SELECTION_MAX;
+
   function renderMediaGrid(publicationControls: boolean) {
     if (!media.length) return <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>No matching photos.</h3><p>New private deliveries will appear here immediately.</p></div>;
     return <>
-      <div className="moderation-grid intake-grid">{media.map((item) => <article className={selected.includes(item.id) ? 'selected' : ''} key={item.id}>
-        <div className="intake-photo">
-          {publicationControls && <label className="intake-select"><input type="checkbox" aria-label={`Select ${item.originalFilename}`} checked={selected.includes(item.id)} onChange={(change) => setSelected((current) => change.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></label>}
-          <img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} loading="lazy" decoding="async" />
-        </div>
-        <div>
-          <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
-          <strong title={item.caption || item.originalFilename}>{item.caption || item.originalFilename}</strong>
-          <small>From {item.guestName}</small>
-          <div className="intake-card-actions">
-            <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>
-            {publicationControls && item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'publish'))}><Eye aria-hidden="true" /></button>}
-            {publicationControls && item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'hide'))}><EyeOff aria-hidden="true" /></button>}
-            <button aria-label={`Delete ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'delete'))}><Trash2 aria-hidden="true" /></button>
+      <div className="moderation-grid intake-grid">{media.map((item) => {
+        const isSelected = selected.includes(item.id);
+        const selectionUnavailable = !isSelected && selectionAtLimit;
+        return <article className={isSelected ? 'selected' : ''} key={item.id}>
+          <div className="intake-photo">
+            {publicationControls && <label className="intake-select"><input
+              type="checkbox"
+              aria-label={`Select ${item.originalFilename}`}
+              aria-describedby={selectionUnavailable ? 'bulk-selection-status' : undefined}
+              checked={isSelected}
+              disabled={selectionUnavailable}
+              onChange={(change) => setSelected((current) => {
+                if (!change.target.checked) return current.filter((id) => id !== item.id);
+                if (current.includes(item.id) || current.length >= MANAGER_BULK_SELECTION_MAX) return current;
+                return [...current, item.id];
+              })}
+            /></label>}
+            <img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} loading="lazy" decoding="async" />
           </div>
-        </div>
-      </article>)}</div>
+          <div>
+            <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
+            <strong title={item.caption || item.originalFilename}>{item.caption || item.originalFilename}</strong>
+            <small>From {item.guestName}</small>
+            <div className="intake-card-actions">
+              <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>
+              {publicationControls && item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'publish'))}><Eye aria-hidden="true" /></button>}
+              {publicationControls && item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'hide'))}><EyeOff aria-hidden="true" /></button>}
+              <button aria-label={`Delete ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'delete'))}><Trash2 aria-hidden="true" /></button>
+            </div>
+          </div>
+        </article>;
+      })}</div>
       {nextMediaCursor && <div className="media-more">
         <button type="button" className="button button--secondary" disabled={loadingMore} onClick={() => void loadMoreMedia()}>Load more photos</button>
       </div>}
@@ -388,7 +409,11 @@ export function ManagerPage() {
       {section === 'gallery' && <section aria-labelledby="gallery-publishing-title">
         <div className="workspace-heading"><div><p className="section-label">Optional shared view</p><h2 id="gallery-publishing-title">Gallery publishing</h2></div><div className="filter-tabs" role="group" aria-label="Publication status">{(['unpublished', 'published', 'hidden'] as const).map((value) => <button className={status === value ? 'active' : ''} onClick={() => { setStatus(value); setSelected([]); }} key={value}>{value}</button>)}</div></div>
         {!event.galleryVisible && <p className="manager-notice">The guest gallery is off. Publishing choices are saved for whenever you enable it.</p>}
-        <div className="bulk-bar"><span>{selected.length ? `${selected.length} selected` : 'Select photos to update the optional gallery'}</span><button className="button button--approve" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('publish'))}><Eye aria-hidden="true" /> Publish selected</button><button className="button button--danger-outline" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('hide'))}><EyeOff aria-hidden="true" /> Hide selected</button></div>
+        <div className="bulk-bar"><span id="bulk-selection-status" role="status" aria-live="polite">{selectionAtLimit
+          ? `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`
+          : selected.length
+            ? `${selected.length} selected`
+            : 'Select photos to update the optional gallery'}</span><button className="button button--approve" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('publish'))}><Eye aria-hidden="true" /> Publish selected</button><button className="button button--danger-outline" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('hide'))}><EyeOff aria-hidden="true" /> Hide selected</button></div>
         {renderMediaGrid(true)}
       </section>}
 

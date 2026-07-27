@@ -13,6 +13,7 @@ import { LinkService } from '../services/links';
 import { TokensRepository } from '../db/tokens';
 import { decryptGuestSecret } from '../security/crypto';
 import {
+  MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_IMAGE_BYTES,
@@ -33,6 +34,14 @@ const settingsSchema = z.object({
 });
 const actionSchema = z.object({
   action: z.enum(['publish', 'hide', 'delete']),
+  expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
+});
+const bulkActionSchema = z.object({
+  ids: z.array(z.uuid())
+    .min(1)
+    .max(MANAGER_BULK_SELECTION_MAX)
+    .refine((ids) => new Set(ids).size === ids.length),
+  action: z.enum(['publish', 'hide']),
   expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
 });
 const deleteSchema = z.object({ confirmation: z.string() });
@@ -170,22 +179,16 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
 
 manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
   await managerForEvent(context, true);
-  const parsed = z.object({
-    ids: z.array(z.string().uuid()).min(1).max(50),
-    action: z.enum(['publish', 'hide']),
-    expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
-  }).safeParse(await context.req.json().catch(() => null));
+  const parsed = bulkActionSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Select valid photos to moderate.', 422);
   const repository = new MediaRepository(context.env.DB);
-  const changed: string[] = [];
-  for (const id of parsed.data.ids) {
-    const media = await repository.getById(id);
-    if (!media || media.eventId !== context.req.param('eventId')) {
-      throw new ApiError('ROLE_FORBIDDEN', 'One selected photo belongs to a different event.', 403);
-    }
-    await repository.setPublication(id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), new Date().toISOString());
-    changed.push(id);
-  }
+  const changed = await repository.setPublicationBulk(
+    context.req.param('eventId'),
+    parsed.data.ids,
+    parsed.data.expectedStatus,
+    publicationTarget(parsed.data.action),
+    new Date().toISOString(),
+  );
   return context.json({ data: { changed }, requestId: context.get('requestId') });
 });
 

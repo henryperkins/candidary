@@ -356,6 +356,109 @@ describe('manager settings and private photo intake', () => {
     const rows = await env.DB.prepare('SELECT id, publication_status FROM media ORDER BY id').all<any>();
     const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.publication_status]));
     expect(states).toMatchObject({ [first.id]: 'published', [second.id]: 'published', [untouched.id]: 'unpublished' });
+    expect((await response.json<any>()).data.changed).toEqual([first.id, second.id]);
+  });
+
+  it('leaves every selected row unchanged when a later bulk id conflicts', async () => {
+    const access = await eventAccess();
+    const first = await uploadPending(access, 'bulk-conflict-first');
+    const second = await uploadPending(access, 'bulk-conflict-second');
+    await new MediaRepository(env.DB).setPublication(
+      second.id,
+      'unpublished',
+      'published',
+      '2026-07-27T12:00:00.000Z',
+    );
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
+      method: 'POST',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        ids: [first.id, second.id],
+        action: 'publish',
+        expectedStatus: 'unpublished',
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).code).toBe('MEDIA_STATE_CONFLICT');
+    const rows = await env.DB.prepare('SELECT id, publication_status FROM media WHERE id IN (?, ?)')
+      .bind(first.id, second.id)
+      .all<{ id: string; publication_status: string }>();
+    expect(Object.fromEntries(rows.results.map((row) => [row.id, row.publication_status]))).toEqual({
+      [first.id]: 'unpublished',
+      [second.id]: 'published',
+    });
+  });
+
+  it('does not reveal or partially apply ineligible bulk ids', async () => {
+    const access = await eventAccess();
+    const other = await eventAccess('Rowan & Sky');
+    const foreign = await uploadPending(other, 'bulk-foreign');
+    const deleted = await uploadPending(access, 'bulk-deleted');
+    await new MediaRepository(env.DB).delete(deleted.id, '2026-07-27T12:01:00.000Z');
+    const reservedResponse = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST',
+      headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        filename: 'reserved.png',
+        mimeType: 'image/png',
+        byteSize: 128,
+        idempotencyKey: 'bulk-reserved',
+        guestName: 'Avery',
+      }),
+    }, testEnv);
+    const reserved = (await reservedResponse.json<any>()).data.media as { id: string };
+    const cases = [
+      ['missing', '11111111-1111-4111-8111-111111111111'],
+      ['foreign', foreign.id],
+      ['deleted', deleted.id],
+      ['reserved', reserved.id],
+    ] as const;
+
+    for (const [label, ineligibleId] of cases) {
+      const local = await uploadPending(access, `bulk-local-${label}`);
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({
+          ids: [local.id, ineligibleId],
+          action: 'publish',
+          expectedStatus: 'unpublished',
+        }),
+      }, testEnv);
+
+      expect([label, response.status]).toEqual([label, 409]);
+      expect((await response.json<any>()).code).toBe('MEDIA_STATE_CONFLICT');
+      expect(await env.DB.prepare('SELECT publication_status FROM media WHERE id = ?')
+        .bind(local.id)
+        .first<{ publication_status: string }>()).toEqual({ publication_status: 'unpublished' });
+    }
+  });
+
+  it('rejects empty, duplicate, oversized, and malformed bulk selections consistently', async () => {
+    const access = await eventAccess();
+    const id = crypto.randomUUID();
+    const payloads = [
+      { ids: [], action: 'publish', expectedStatus: 'unpublished' },
+      { ids: [id, id], action: 'publish', expectedStatus: 'unpublished' },
+      {
+        ids: Array.from({ length: 51 }, () => crypto.randomUUID()),
+        action: 'hide',
+        expectedStatus: 'published',
+      },
+      { ids: ['not-a-uuid'], action: 'publish', expectedStatus: 'unpublished' },
+    ];
+
+    for (const body of payloads) {
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify(body),
+      }, testEnv);
+      expect(response.status).toBe(422);
+      expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    }
   });
 
   it('deletes the cached preview with an individual private original', async () => {

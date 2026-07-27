@@ -1,9 +1,9 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { mediaPreview } from '../../src/app/api';
 import { createAppRouter } from '../../src/app/router';
 import { makeMedia } from '../e2e/fixtures/ui-data';
@@ -780,6 +780,60 @@ describe('manager experience', () => {
     await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+  });
+
+  it('caps cross-page bulk selection at 50 and submits only the selected ids', async () => {
+    const rows = makeMedia(MANAGER_BULK_SELECTION_MAX + 1, 'unpublished');
+    const bulkBodies: Array<{ ids: string[] }> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'POST' && url.endsWith('/media/bulk')) {
+        const body = JSON.parse(String(init?.body)) as { ids: string[] };
+        bulkBodies.push(body);
+        return json({ changed: body.ids });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor');
+        return cursor === 'page-two'
+          ? json({ media: rows.slice(MANAGER_BULK_SELECTION_MAX), nextCursor: null })
+          : json({ media: rows.slice(0, MANAGER_BULK_SELECTION_MAX), nextCursor: 'page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    expect(await screen.findByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
+    const choices = await screen.findAllByRole('checkbox', { name: /^Select /u });
+    expect(choices).toHaveLength(MANAGER_BULK_SELECTION_MAX + 1);
+
+    for (const choice of choices.slice(0, MANAGER_BULK_SELECTION_MAX)) fireEvent.click(choice);
+    const extra = choices[MANAGER_BULK_SELECTION_MAX]!;
+    expect(screen.getByRole('status')).toHaveTextContent(
+      `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`,
+    );
+    expect(extra).toBeDisabled();
+    await user.click(extra);
+    expect(extra).not.toBeChecked();
+    expect(screen.getByRole('status')).toHaveTextContent('50 of 50 photos selected');
+
+    await user.click(choices[0]!);
+    expect(extra, 'unchecking remains available as the recovery').toBeEnabled();
+    await user.click(choices[0]!);
+    expect(extra).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await waitFor(() => expect(bulkBodies).toHaveLength(1));
+    expect(bulkBodies[0]!.ids).toEqual(rows.slice(0, MANAGER_BULK_SELECTION_MAX).map(({ id }) => id));
+    expect(bulkBodies[0]!.ids).not.toContain(rows[MANAGER_BULK_SELECTION_MAX]!.id);
   });
 
   it('polls live intake so a new private delivery appears without navigation', async () => {

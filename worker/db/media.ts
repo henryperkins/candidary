@@ -530,6 +530,52 @@ export class MediaRepository {
     return (await this.getById(id))!;
   }
 
+  async setPublicationBulk(
+    eventId: string,
+    ids: readonly string[],
+    expected: PublicationStatus,
+    target: PublicationStatus,
+    changedAt: string,
+  ): Promise<string[]> {
+    const placeholders = ids.map(() => '?').join(', ');
+    const result = await this.db.prepare(`
+      UPDATE media
+      SET publication_status = ?, published_at = ?
+      WHERE event_id = ?
+        AND id IN (${placeholders})
+        AND upload_state = 'stored'
+        AND publication_status = ?
+        AND deleted_at IS NULL
+        AND (
+          SELECT COUNT(*)
+          FROM media AS eligible
+          WHERE eligible.event_id = ?
+            AND eligible.id IN (${placeholders})
+            AND eligible.upload_state = 'stored'
+            AND eligible.publication_status = ?
+            AND eligible.deleted_at IS NULL
+        ) = ?
+    `).bind(
+      target,
+      target === 'published' ? changedAt : null,
+      eventId,
+      ...ids,
+      expected,
+      eventId,
+      ...ids,
+      expected,
+      ids.length,
+    ).run();
+    if ((result.meta.changes ?? 0) !== ids.length) {
+      throw new ApiError(
+        'MEDIA_STATE_CONFLICT',
+        'One or more photos changed since you last viewed them. Refresh and try again.',
+        409,
+      );
+    }
+    return [...ids];
+  }
+
   async setPreviewObjectKey(id: string, previewObjectKey: string): Promise<MediaRecord> {
     const result = await this.db.prepare(`
       UPDATE media SET preview_object_key = ?
