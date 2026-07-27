@@ -118,6 +118,25 @@ test('guest media grids widen at the 761 px enhancement boundary', async ({ page
   }
 });
 
+test('View full screen remains a 44 by 44 target across guest layout widths', async ({ page }) => {
+  await stubGuestRoutes(page, { gallery: makeMedia(3) });
+
+  for (const width of [320, 761, 1101]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/event/maya-theo');
+    await page.locator('.event-extra summary').filter({ hasText: 'Shared gallery' }).click();
+
+    const link = page.getByRole('link', { name: 'View full screen' });
+    await expect(link).toBeVisible();
+    const target = await measureTarget(link);
+    expect(target.width, `View full screen width at ${width}`).toBeGreaterThanOrEqual(44);
+    expect(target.height, `View full screen height at ${width}`).toBeGreaterThanOrEqual(44);
+
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+});
+
 test('a 500-character welcome keeps both photo sources on the first fold at 320 by 568', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 });
   await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });

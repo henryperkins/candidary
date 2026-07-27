@@ -115,6 +115,7 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 | Review state | 320 x 844 | Status, filename and error text held to 12–14 px; the all-invalid state offers no send |
 | Delivery receipt with caveat | 320 x 844 | Delivered count and caveat contained |
 | Secondary sections | 320 x 844 | 80-character filenames wrap inside their column in both the gallery caption and the deliveries list |
+| `View full screen` | 320, 761, 1101 | Link remains at least 44 x 44 and the document stays contained |
 | Media grids | 761, 768 | Gallery grid at 12 tracks, full-screen grid at 3 |
 | Full-screen gallery | 320 x 844 | Long caption contained; 44 x 44 close target |
 | Guest footer | 320 x 844 | Brand wraps at least 12 px clear of the tagline |
@@ -126,14 +127,15 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 | Surface | Widths | Result |
 | --- | --- | --- |
 | Shell and media grid turnover | 320, 360, 390, 430 / 431, 470, 760 / 761, 768, 780, 860, 1024, 1100 / 1101, 1120, 1133, 1134, 1440 | 1, 2, 2 and 3 media columns; no shell tracks below 761, a 104 px rail through 1100, and 184 px + 330 px rails from 1101 |
-| Destination labels | 761, 768, 780, 860, 1024, 1100 | Five labels rendered, each at or above 10 px, each target 44 x 44 |
+| Destination labels | 320, 390, 761, 768, 780, 860, 1024, 1100, 1101, 1440 | Five labels rendered, each at or above 14 px, each target 44 x 44 |
 | Label contrast | 320, 390, 761, 1024, 1440 | Every destination label at or above 4.5:1, measured from resolved colours |
 | Rail packing | 761 through 1440 | Brand at or under 60 px; the five destinations occupy at most 340 px rather than stretching |
+| Manager Brand target | 320, 761, 1101 | Clickable Brand remains at least 44 x 44 when each navigation layout begins |
 | Lifecycle facts at capacity | 761 through 1440 | Each of the three facts stays on one line at 10,000 photos and 100 GiB |
-| Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide |
+| Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide; count text is at least 12 px at the three layout starts |
 | All five sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
 | All five sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
-| Card controls | 390, 431, 470, 1200 | Intake filter, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
+| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |

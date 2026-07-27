@@ -245,6 +245,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .event-extra[open] summary svg { transform: rotate(180deg); }
 .event-extra__content { padding: 5px 0 35px; }
 .secondary-actions { margin-bottom: 18px; display: flex; justify-content: flex-end; }
+.secondary-actions .text-link { min-height: 44px; }
 .contributions--compact { padding: 5px 0 35px; display: block; border: 0; }
 .contributions--compact ul { width: 100%; }
 .notes-secondary { display: grid; grid-template-columns: .8fr 1.2fr; gap: 50px; }
@@ -298,6 +299,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .intake-search .button { flex: 1 1 auto; }
 .intake-search label > svg { position: absolute; top: 50%; left: 13px; z-index: 1; transform: translateY(-50%); color: var(--muted); }
 .intake-search input { width: 100%; min-height: 48px; padding: 10px 13px 10px 42px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
+.intake-search .text-button { min-width: 44px; font-size: .875rem; }
 .intake-grid .intake-photo { position: relative; padding: 0; }
 .intake-grid .intake-photo > img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }
 .intake-select { position: absolute !important; inset: 0; z-index: 1; cursor: pointer; }
@@ -331,12 +333,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* The card clips its own corners, so keep the code focus ring inside them. */
 .link-card code:focus-visible { outline-offset: -3px; }
 /* The label and the count are styled by their own class, so neither can win the other's font size. */
-.manager-nav__label { margin: 0; color: var(--ink); font-size: .65rem; }
+.manager-nav__label { margin: 0; color: var(--ink); font-size: .875rem; }
 .manager-nav button.active .manager-nav__label { color: var(--aubergine); }
 /* A count runs to 10,000 — the per-event photo cap — so the badge is a pill that grows with its own
    text rather than a fixed box the digits spill out of. The 999px radius reads as a circle at one
    digit and as a capsule past that. */
-.manager-nav__count { min-width: 17px; height: 17px; margin: 0; padding: 0 4px; position: absolute; top: 5px; right: calc(50% - 22px); display: grid; place-items: center; border-radius: 999px; background: var(--aubergine); color: white; font-size: .58rem; line-height: 1; }
+.manager-nav__count { min-width: 20px; height: 20px; margin: 0; padding: 0 5px; position: absolute; top: 5px; right: calc(50% - 22px); display: grid; place-items: center; border-radius: 999px; background: var(--aubergine); color: white; font-size: .75rem; line-height: 1; }
 .share-layout .button-row .button { width: 100%; }
 .manager-qr { width: min(100%, 260px); }
 .manager-qr .button { width: 100%; }
@@ -392,7 +394,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     border-bottom: 0;
   }
 
-  .manager-nav .brand { min-height: 0; padding: 0 4px; }
+  .manager-nav .brand { padding: 0 4px; }
   /* 88px of rail carries the mark and five labels; the wordmark beside it would not fit. */
   .manager-nav .brand > span:last-child { display: none; }
   .manager-nav nav { margin-top: 28px; grid-template-columns: minmax(0, 1fr); gap: 5px; border-top: 0; }
@@ -409,7 +411,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .manager-nav__label {
     display: block;
     color: var(--ink);
-    font-size: .75rem;
+    font-size: .875rem;
   }
 
   .manager-nav__count { top: 6px; right: 8px; }

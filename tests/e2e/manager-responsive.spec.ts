@@ -23,8 +23,9 @@ const WIDE_WIDTHS = [1101, 1120, 1133, 1134, 1440];
 // The stacked phone modes: one media column below 431, two from 431 up to the compact rail.
 const ONE_COLUMN_WIDTHS = [320, 360, 390, 430];
 const TWO_COLUMN_WIDTHS = [431, 470, 760];
-// The nav label is a destination, not decoration; below this it is an unreadable smudge on a phone.
-const MIN_LABEL_TEXT = 10;
+// Manager destinations are controls, so their labels follow the binding 14–16px control-text band.
+const MIN_LABEL_TEXT = 14;
+const MIN_COUNT_TEXT = 12;
 const MIN_CONTRAST = 4.5;
 const TOUCH_MINIMUM = 44;
 const NOTE = {
@@ -71,10 +72,10 @@ async function openManager(page: Page) {
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
 }
 
-test('manager navigation keeps every destination labelled across the compact rail band', async ({ page }) => {
+test('manager navigation keeps every destination labelled at the control-text floor', async ({ page }) => {
   await openManager(page);
 
-  for (const width of RAIL_WIDTHS) {
+  for (const width of [320, 390, ...RAIL_WIDTHS, 1101, 1440]) {
     await page.setViewportSize({ width, height: 900 });
 
     for (const name of DESTINATIONS) {
@@ -155,6 +156,18 @@ test('manager rail keeps its brand and destinations packed at the top', async ({
   }
 });
 
+test('the manager Brand remains a 44 by 44 target when each navigation layout begins', async ({ page }) => {
+  await openManager(page);
+
+  for (const width of [320, 761, 1101]) {
+    await page.setViewportSize({ width, height: 900 });
+    const brand = await measureTarget(page.locator('.manager-nav .brand'));
+    expect(brand.width, `Brand width at ${width}`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    expect(brand.height, `Brand height at ${width}`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    await expectContained(page, width);
+  }
+});
+
 test('manager shell stays contained where the wide rails return', async ({ page }) => {
   await openManager(page);
 
@@ -198,7 +211,7 @@ test('manager navigation keeps an inactive section count visible on both sides o
   const notes = destination(page, 'Notes');
   const count = notes.locator('.manager-nav__count');
 
-  for (const width of [390, 1024]) {
+  for (const width of [320, 761, 1101]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(notes, `Notes is the inactive destination at ${width}`).toHaveAttribute('aria-pressed', 'false');
     await expect(count, `Notes count rendered at ${width}`).toBeVisible();
@@ -209,7 +222,7 @@ test('manager navigation keeps an inactive section count visible on both sides o
     expect(box.height, `Notes count height at ${width}`).toBeGreaterThan(0);
 
     const fontSize = await count.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
-    expect(fontSize, `Notes count text size at ${width}`).toBeGreaterThan(0);
+    expect(fontSize, `Notes count text size at ${width}`).toBeGreaterThanOrEqual(MIN_COUNT_TEXT);
   }
 });
 
@@ -367,6 +380,9 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
   }));
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await page.getByLabel('Filter by guest name').fill('Rowan');
+  await page.getByRole('button', { name: 'Filter', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Clear', exact: true })).toBeVisible();
 
   // Every media-grid mode: one phone column, the 431 two-column band, and the three-column rail layout.
   for (const width of [390, 431, 470, 1200]) {
@@ -374,6 +390,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
 
     await destination(page, 'Intake').click();
     await expectTouchTargets(page, '.intake-search .button', `intake filter at ${width}`);
+    await expectTouchTargets(page, '.intake-search .text-button', `intake clear at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions a', `intake download at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions button', `intake card control at ${width}`);
 
