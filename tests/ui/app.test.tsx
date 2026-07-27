@@ -212,6 +212,29 @@ describe('guest event experience', () => {
     expect(screen.getByText('To many happy years.')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('names the note field after the event rather than leaving it to a placeholder', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: {
+        id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
+        welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
+        galleryVisible: false, moderationRequired: true,
+      }, role: 'guest' });
+      if (url.endsWith('/messages')) return json({ items: [] });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    await userEvent.setup().click(screen.getByText(/Leave a note/, { selector: 'span' }));
+    // A placeholder is not a name: it disappears on the first keystroke and is not announced as one.
+    const note = await screen.findByRole('textbox', { name: 'Note for Maya & Theo' });
+    expect(note).toBeVisible();
+    // Exactly the field's own name — no placeholder, no submit label, nothing else swept in with it.
+    expect(note).toHaveAccessibleName('Note for Maya & Theo');
+    expect(note).toHaveAttribute('name', 'body');
+  });
 });
 
 const MANAGED_EVENT = {
@@ -672,6 +695,39 @@ describe('manager experience', () => {
     await act(async () => { (poll as () => void)(); });
 
     expect(await screen.findByText('From Avery')).toBeVisible();
+  });
+
+  it('keeps the last usable intake on screen when a poll fails', async () => {
+    let mediaRequests = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        return mediaRequests > 1
+          ? errorJson({ code: 'INTERNAL_ERROR', message: 'The event manager could not be loaded.', requestId: 'request-a' }, 500)
+          : json({ media: makeMedia(2).slice(1), nextCursor: null });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const interval = vi.spyOn(window, 'setInterval');
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    expect(poll).toBeTypeOf('function');
+    await act(async () => { (poll as () => void)(); });
+
+    // Reception drops for one interval at the venue. The host keeps the intake already on screen
+    // rather than being thrown back to a whole-page dead end they never asked to leave for.
+    expect(screen.getByAltText('Moment 2')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
   it('opens on live intake, filters by guest name, and keeps gallery publishing secondary', async () => {

@@ -9,7 +9,8 @@ import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, Media
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
-import { ErrorState, LoadingState } from '../components/States';
+import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
+import type { LoadFailure } from '../components/States';
 
 type Section = 'intake' | 'gallery' | 'messages' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
@@ -48,7 +49,7 @@ export function ManagerPage() {
   const [status, setStatus] = useState<MediaStatus>('all');
   const [searchInput, setSearchInput] = useState('');
   const [guestFilter, setGuestFilter] = useState('');
-  const [error, setError] = useState('');
+  const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState('');
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
@@ -75,7 +76,10 @@ export function ManagerPage() {
     setMediaPage((current) => current.cursor === null ? current : { ...current, cursor: null });
   }, [mediaPath]);
 
+  // Reused verbatim behind Try again, so the prior failure clears the moment the attempt starts and
+  // the host watches this load rather than the dead end the last one left.
   const refresh = useCallback(async () => {
+    setFailure(null);
     try {
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
@@ -94,11 +98,10 @@ export function ManagerPage() {
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setGuestLink(linkData.guestLink);
-      setError('');
       loadedOnce.current = true;
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'The event manager could not be loaded.';
-      if (loadedOnce.current) setActionError(message); else setError(message);
+      const loadFailure = describeLoadFailure(caught, 'manager', 'The event manager could not be loaded.');
+      if (loadedOnce.current) setActionError(loadFailure.message); else setFailure(loadFailure);
     }
   }, [eventId, mediaPath]);
 
@@ -289,7 +292,11 @@ export function ManagerPage() {
     </>;
   }
 
-  if (error) return <main className="centered-state"><Brand /><ErrorState message={error} /></main>;
+  if (failure) return <main className="centered-state"><Brand /><ErrorState
+    message={failure.message}
+    recoveryHint={failure.recoveryHint}
+    onRetry={failure.retryable ? () => void refresh() : undefined}
+  /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 
   const photoCount = event.storedMediaCount ?? 0;

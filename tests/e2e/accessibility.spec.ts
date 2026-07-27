@@ -2,7 +2,16 @@ import { expect, test } from '@playwright/test';
 import type { Locator } from '@playwright/test';
 
 import { EVENT_FIXTURE } from './fixtures/routes';
-import { measureContrast, measureTarget } from './helpers/geometry';
+import { measureContrast, measureDocument, measureSeparation, measureTarget } from './helpers/geometry';
+
+// 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
+const HEADER_WIDTHS = [320, 768];
+// The five manager destinations are unchanged and the public header keeps exactly these exits: the
+// count is asserted so neither a hidden one nor an added one can pass unnoticed.
+const HEADER_EXITS = [
+  { path: '/', names: ['Candidary home', 'Create an event'] },
+  { path: '/create', names: ['Candidary home', 'Back home'] },
+];
 
 function animationName(locator: Locator) {
   return locator.evaluate((element) => getComputedStyle(element).animationName);
@@ -15,18 +24,49 @@ function outline(locator: Locator) {
   });
 }
 
-test('public actions and creation fields are keyboard reachable with named landmarks', async ({ page }, testInfo) => {
+test('public actions and creation fields are keyboard reachable with named landmarks', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('banner')).toBeVisible();
   await expect(page.getByRole('main')).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Candidary home' })).toBeFocused();
+  // The header exit is now reachable at every width, so the tab order no longer varies by viewport.
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: testInfo.project.name === 'mobile' ? 'Create your event' : 'Create an event' })).toBeFocused();
+  await expect(page.getByRole('link', { name: 'Create an event', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Create your event', exact: true })).toBeFocused();
   await page.goto('/create');
   await expect(page.getByLabel('Event name')).toHaveAttribute('required', '');
   await expect(page.getByLabel('Event date')).toHaveAttribute('type', 'date');
   await expect(page.getByLabel('Welcome message')).toHaveAttribute('maxlength', '500');
+});
+
+test('every public header exit stays visible and mobile-sized across the width matrix', async ({ page }) => {
+  for (const width of HEADER_WIDTHS) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const { path, names } of HEADER_EXITS) {
+      await page.goto(path);
+      const header = page.getByRole('banner');
+      // Hiding an exit strands the visitor; adding one is unapproved navigation. Both fail here.
+      await expect(header.getByRole('link'), `${path} header exits at ${width}`).toHaveCount(names.length);
+
+      for (const name of names) {
+        const link = header.getByRole('link', { name, exact: true });
+        await expect(link, `${name} on ${path} at ${width}`).toBeVisible();
+        const target = await measureTarget(link);
+        expect(target.width, `${name} width on ${path} at ${width}`).toBeGreaterThanOrEqual(44);
+        expect(target.height, `${name} height on ${path} at ${width}`).toBeGreaterThanOrEqual(44);
+      }
+
+      // Two exits that touch are one mis-tap apart, and 320 is where they come closest.
+      const separation = await measureSeparation(header.getByRole('link').first(), header.getByRole('link').last());
+      expect(separation, `header exits stay apart on ${path} at ${width}`).toBeGreaterThanOrEqual(8);
+
+      const documentSize = await measureDocument(page);
+      expect(documentSize.scrollWidth, `${path} contained at ${width}`)
+        .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+    }
+  }
 });
 
 test('cover photo focus lands on the control the host can actually see', async ({ page }) => {
