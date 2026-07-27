@@ -21,7 +21,7 @@ export const EVENT_FIXTURE = {
 };
 
 interface GuestRouteOptions {
-  event?: typeof EVENT_FIXTURE;
+  event?: Partial<typeof EVENT_FIXTURE>;
   gallery?: ReturnType<typeof makeMedia>;
   contributions?: ReturnType<typeof makeMedia>;
   messages?: Array<{
@@ -34,26 +34,27 @@ interface GuestRouteOptions {
 }
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
-  const event = options.event ?? EVENT_FIXTURE;
+  const event = { ...EVENT_FIXTURE, ...options.event };
   const gallery = options.gallery ?? makeMedia(1);
   const contributions = options.contributions ?? gallery;
   const messages = options.messages ?? [];
+  const base = `**/api/event/${event.slug}`;
 
   await page.route('**/api/media/*/preview', (route) => route.fulfill({
     status: 200,
     contentType: 'image/png',
     body: preview,
   }));
-  await page.route('**/api/event/maya-theo', (route) => route.fulfill({
+  await page.route(base, (route) => route.fulfill({
     json: { data: { event, role: 'guest' }, requestId: 'request-a' },
   }));
-  await page.route('**/api/event/maya-theo/gallery', (route) => route.fulfill({
+  await page.route(`${base}/gallery`, (route) => route.fulfill({
     json: { data: { media: gallery }, requestId: 'request-a' },
   }));
-  await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({
+  await page.route(`${base}/contributions`, (route) => route.fulfill({
     json: { data: { media: contributions }, requestId: 'request-a' },
   }));
-  await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({
+  await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { items: messages }, requestId: 'request-a' },
   }));
 }
