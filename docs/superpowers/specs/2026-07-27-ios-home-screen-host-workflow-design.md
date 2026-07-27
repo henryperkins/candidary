@@ -1,7 +1,7 @@
 # iOS Home Screen Host Workflow Design
 
 - **Date:** 2026-07-27
-- **Status:** Approved for implementation planning
+- **Status:** Revised after code review; awaiting approval
 
 ## Objective
 
@@ -13,7 +13,9 @@ banner, modal, tooltip, or other promotion.
 The installed manager must also have a path back into the event after its
 12-hour manager session expires. That recovery must reuse the existing
 management-link exchange and must not change token lifetimes, session
-lifetimes, authorization, or server endpoints.
+lifetimes, or authorization. It may change how the existing management-link
+route renders errors for top-level document navigation, but it must not add an
+API endpoint.
 
 ## Product decisions
 
@@ -25,6 +27,8 @@ lifetimes, authorization, or server endpoints.
 - Manager sessions remain limited to 12 hours.
 - Management links retain their existing fixed event lifecycle. Opening a valid
   management link creates a new manager session.
+- A failed top-level management-link exchange returns to a token-free in-app
+  recovery page. Non-navigation clients retain the existing JSON error contract.
 - The installed app does not provide offline behavior.
 - The feature is scoped to iOS Home Screen behavior. It does not attempt to
   satisfy Chrome's in-browser install-promotion criteria.
@@ -39,7 +43,8 @@ The relevant paths are:
 - `/create`;
 - `/event/:slug`;
 - `/manage/:token`, which is a Worker exchange route; and
-- `/manage/event/:eventId`, which is the token-free manager SPA route.
+- `/manage/event/:eventId`, which is the token-free manager SPA route; and
+- `/recover/manage`, which will be a token-free manager recovery SPA route.
 
 The brand links to `/`. A standalone manager app therefore needs a root
 navigation scope; a default scope derived from `/manage/event/:eventId` would
@@ -53,6 +58,12 @@ route. Manager sessions last 12 hours. The installed iOS web app has storage
 separate from Safari after installation, so opening a saved management link in
 Safari cannot be relied on to renew the installed app's cookie jar.
 
+Today, every exception from `/manage/:token` reaches `app.onError`, which
+returns JSON even for a top-level navigation. That is tolerable as an API
+response but strands a standalone app without browser chrome. The design must
+remove the bearer URL and return document navigations to an HTML recovery
+surface while preserving JSON for programmatic requests.
+
 ### Static delivery
 
 `public/_headers` applies `X-Content-Type-Options: nosniff` to static assets.
@@ -65,6 +76,12 @@ The existing Candidary mark is CSS-only: three slightly rotated, rounded stems
 using Apricot and Aubergine. There is no reusable source image for an app icon.
 The application currently uses an undocumented `#32122f` browser theme color
 instead of a design-system token.
+
+Changing the browser theme color affects browser chrome on every route, not
+only installed apps. Implementation records the `#32122f` to `#42103b` change
+in `design/fidelity-ledger.md`. Browser chrome is outside the tracked page
+screenshots, so the change requires a ledger entry but no visual-baseline
+regeneration.
 
 ## Selected architecture
 
@@ -139,6 +156,7 @@ Update `index.html` to include:
 
 ```html
 <meta name="theme-color" content="#42103b" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-title" content="Candidary" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -181,8 +199,10 @@ factor 1 and write:
 
 All four files are checked in. The maskable file is a separate reviewed output,
 even though it is generated from the same safe-zone-compliant master. The
-generator is deterministic and can replace the outputs when the source artwork
-changes. Add the package script
+generator provides a repeatable manual regeneration command, but PNG bytes are
+not expected to remain identical across Chromium or operating-system
+antialiasing changes. Tests do not regenerate and byte-compare the checked-in
+PNGs. Add the package script
 `"generate:app-icons": "node scripts/generate-app-icons.mjs"` as the documented
 regeneration command.
 
@@ -204,6 +224,11 @@ No Content Security Policy change is required. In the absence of a
 `manifest-src` directive, the same-origin manifest is allowed by
 `default-src 'self'`.
 
+Both `public/_headers` and Worker security middleware retain
+`Referrer-Policy: no-referrer`. This is part of the bearer-secret boundary: a
+management-token request must not become a referrer when the standalone app
+later opens a cross-origin presigned R2 export URL.
+
 ## Manager-link recovery
 
 ### When recovery appears
@@ -223,13 +248,55 @@ It appears in both manager failure presentations:
 
 It does not appear for ended or deleted events, retryable transport failures,
 guest failures, or ordinary manager pages. It is not added to the landing page.
+The token-free `/recover/manage` page also uses the same component when an
+existing management-link exchange redirects there with a recoverable failure.
 
 ### Failure model
 
-Expose the existing `LoadFailureKind` on `LoadFailure` instead of discarding it
-after selecting recovery prose. Carry that kind into manager notices. Rendering
-uses the kind, never message text, to decide whether management-link recovery
-is available.
+Move the existing `LoadFailureKind` and API-code classification table into a
+small shared module used by the client and Worker. Expose the resulting kind on
+`LoadFailure` instead of discarding it after selecting recovery prose, and
+carry that kind into manager notices. Rendering and exchange redirects use the
+shared kind, never message text, to decide whether management-link recovery is
+available.
+
+### Top-level exchange failure handling
+
+Change the existing `/manage/:token` exchange route; do not add a server
+endpoint. The route catches exchange errors only long enough to distinguish a
+top-level document navigation from a programmatic request.
+
+A request is a document navigation when either:
+
+- `Sec-Fetch-Mode` is `navigate`; or
+- `Accept` contains `text/html`, as a compatibility fallback.
+
+For a non-navigation request, the error is rethrown and the existing
+`app.onError` JSON response remains unchanged.
+
+For a document navigation, the route redirects to the token-free
+`/recover/manage` SPA route. The redirect contains only a sanitized failure
+kind:
+
+- `latest-link` for invalid, missing, wrong-role, or revoked management links;
+- `ended-event` for expired, deleted, or missing events; and
+- `retry` for an unexpected failure.
+
+The redirect never includes the pasted token, raw error message, event ID, or
+request ID. A valid exchange remains unchanged: it sets the session and CSRF
+cookies and redirects to `/manage/event/:eventId`.
+
+Add `/recover/manage` to the React router. It reads only the allow-listed
+failure kind. `latest-link` and `retry` render an in-app explanation plus the
+management-link recovery form; `ended-event` renders the existing terminal
+event guidance without the form. An absent or unrecognized kind falls back to
+`latest-link`, ensuring a malformed recovery URL remains recoverable.
+
+Because `/recover/manage` does not begin with `/manage/`, it does not collide
+with the Worker exchange matcher. Add the exact path to
+`assets.run_worker_first`; the Worker `notFound` handler then serves the SPA
+shell through `ASSETS` with the same security middleware as the other clean
+client routes. The route remains inside the root manifest scope.
 
 ### Recovery component
 
@@ -248,15 +315,26 @@ On submit, the parser:
 1. trims the input;
 2. parses it relative to the current origin;
 3. requires the parsed origin to equal the current origin;
-4. rejects usernames, passwords, query strings, and fragments;
-5. requires exactly one non-empty path segment after `/manage/`; and
-6. returns only the validated pathname.
+4. rejects usernames and passwords;
+5. requires exactly one path segment after `/manage/`;
+6. requires that segment to contain exactly two non-empty base64url-shaped
+   components separated by one dot; and
+7. discards any query string or fragment and returns only the validated
+   pathname.
+
+The parser does not pin current token lengths; the Worker remains authoritative
+for token validity. Requiring the existing `id.secret` shape prevents
+`/manage/event` and similarly malformed paths from leaving the recoverable
+form, while ignoring harmless mail-client query or fragment additions.
 
 An invalid value stays on the page, shows a field-associated validation message,
 and moves focus to the invalid field. A valid value replaces the current
 location with the validated `/manage/:token` pathname. The existing Worker
 exchange sets cookies in the installed app's own cookie jar and redirects to
-the token-free event manager.
+the token-free event manager. If the structurally valid token is stale, wrong,
+or truncated in a way the server alone can detect, the navigation-only exchange
+handling redirects to `/recover/manage` rather than rendering JSON. The host
+therefore retains the form and can paste another link.
 
 The component does not:
 
@@ -265,13 +343,16 @@ The component does not:
 - send it to analytics or logs;
 - accept another origin;
 - change link or session expiry;
-- introduce a new API endpoint.
+- introduce a new API endpoint;
+- leave a failed bearer URL as the standalone app's current document.
 
 ## Navigation and known platform behavior
 
 - Launching the icon returns to the installing route because `start_url` is
   absent.
 - Root-scoped Candidary navigation remains inside the standalone app.
+- A failed management-link document navigation ends on token-free
+  `/recover/manage`; API-style requests still receive JSON.
 - Cross-origin presigned R2 export links are outside manifest scope and are
   expected to leave the standalone context. This is verified on a physical
   iPhone rather than changed.
@@ -285,6 +366,8 @@ The component does not:
 ## Accessibility
 
 - The recovery form uses visible labels and field-associated error text.
+- The token-free recovery page has a level-one heading and an explicit
+  accessible name for the form.
 - The submit button retains the existing minimum 44-pixel target behavior.
 - Invalid input receives focus so the correction is announced and immediately
   actionable.
@@ -306,7 +389,7 @@ assets are added.
 Unit tests verify:
 
 - `index.html` links the manifest and 180-pixel Apple touch icon;
-- Apple standalone metadata is present;
+- standard and Apple-prefixed standalone metadata are present;
 - status-bar style is `default`;
 - the HTML theme color is Aubergine;
 - the manifest parses as JSON;
@@ -321,20 +404,41 @@ Unit tests verify:
 
 `tests/unit/static-headers.test.ts` additionally verifies the manifest-specific
 `Content-Type: application/manifest+json` rule while preserving the existing
-security-header assertions.
+security-header assertions. Its route contract also requires
+`/recover/manage` in `assets.run_worker_first`.
 
 ### Manager recovery
 
 Unit and UI tests verify:
 
 - same-origin management links return only `/manage/:token`;
-- foreign origins, credentials, extra path segments, queries, fragments, and
-  non-management paths are rejected;
-- `describeLoadFailure` exposes its stable kind;
+- foreign origins, credentials, extra path segments, malformed token shapes,
+  and non-management paths are rejected;
+- query strings and fragments are stripped from otherwise valid links;
+- the shared classifier and `describeLoadFailure` expose the same stable kind;
 - `latest-link` manager failures show the recovery form;
-- ended-event and retry failures do not show it;
+- ordinary manager ended-event and retry failures do not show it;
+- the dedicated exchange-recovery page shows the form for `latest-link` and
+  `retry`, but not `ended-event`;
+- absent or unrecognized recovery-page kinds fall back to `latest-link`;
 - invalid submissions show and focus the validation error; and
 - guest failure surfaces do not gain manager recovery.
+
+Worker tests verify:
+
+- a valid management-link exchange still sets cookies and redirects to the
+  token-free event manager;
+- an invalid or revoked management link requested with
+  `Sec-Fetch-Mode: navigate` redirects to
+  `/recover/manage?kind=latest-link`;
+- an expired or deleted event navigation redirects with
+  `kind=ended-event`;
+- the pure exchange-error classifier maps an unexpected error to `retry`;
+- no redirect location contains the bearer token;
+- `Accept: text/html` triggers the same navigation behavior when
+  `Sec-Fetch-Mode` is absent;
+- JSON-oriented requests preserve their current status and JSON body; and
+- navigation redirects retain `Referrer-Policy: no-referrer`.
 
 Browser tests verify:
 
@@ -343,7 +447,11 @@ Browser tests verify:
 - a full-page expired manager can submit a valid management link;
 - an inline expired-session notice can submit the same recovery;
 - recovery requests the existing `/manage/:token` path and follows its
-  token-free redirect; and
+  token-free redirect;
+- a structurally valid but stale link returns to the in-app recovery form
+  instead of a JSON document;
+- a malformed token shape remains in the client-side form with a focused
+  validation error; and
 - the manager route remains within the root manifest scope.
 
 ### Built client output
@@ -380,15 +488,20 @@ staging or controlled-production event and verify:
    without unexpectedly opening Safari;
 7. expire the manager session in the controlled environment, relaunch, paste
    the saved management link, and return to the same token-free manager;
-8. request an export and confirm each presigned cross-origin download opens
+8. paste a malformed link and a structurally valid stale or rotated link, then
+   confirm both failures leave a usable in-app recovery form from which a valid
+   link can reopen the manager, and confirm back navigation reveals neither the
+   bearer URL nor a JSON document;
+9. request an export and confirm each presigned cross-origin download opens
    outside the standalone app without losing the installed manager; and
-9. confirm no install promotion appears inside Candidary.
+10. confirm no install promotion appears inside Candidary.
 
 ## Deployment and operational boundaries
 
-This feature adds no migration, binding, Worker route, API contract, token
-change, or retention change. Deployment still uses the repository's normal
-release gates.
+This feature adds no migration, binding, server endpoint, API contract, token
+change, or retention change. It adds one client route and changes top-level
+error rendering on the existing management-link exchange route. Deployment
+still uses the repository's normal release gates.
 
 A deployed verification must check the live manifest, icon responses, content
 type, security headers, and manager route. Source and preview verification do
@@ -405,15 +518,24 @@ remains a separate release claim.
 - A host with a missing, expired, forbidden, or revoked manager session can
   paste a valid same-origin management link inside the app and re-enter through
   the existing exchange route.
+- Malformed links remain in the form, and structurally valid but invalid or
+  revoked links return to a token-free in-app recovery page rather than a JSON
+  document.
+- Expired or deleted events return to token-free terminal guidance without
+  offering recovery that cannot work.
 - Recovery never stores, logs, or submits the management secret anywhere except
   the existing same-origin exchange path.
+- `Referrer-Policy: no-referrer` remains enforced on static and Worker
+  responses.
 - Session and management-link lifetimes remain unchanged.
 - Manifest delivery has an explicit `application/manifest+json` content type
   under the existing `nosniff` policy.
 - Theme and launch colors use documented design-system tokens.
+- `design/fidelity-ledger.md` records the global browser-chrome token change.
 - Source, UI, browser, build-output, and static-header tests pass.
-- Actual iOS install, expired-session re-entry, and export behavior are not
-  described as device-verified until the physical acceptance list passes.
+- Actual iOS install, expired-session re-entry, failed-link recovery, and export
+  behavior are not described as device-verified until the physical acceptance
+  list passes.
 
 ## References
 
@@ -422,4 +544,5 @@ remains a separate release claim.
 - [WebKit: Every site can be a web app on iOS and iPadOS 26](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/)
 - [Apple: Configuring Web Applications](https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariWebContent/ConfiguringWebApplications/ConfiguringWebApplications.html)
 - [Cloudflare Workers static-asset headers](https://developers.cloudflare.com/workers/static-assets/headers/)
+- [Cloudflare Vite plugin static assets](https://developers.cloudflare.com/workers/vite-plugin/reference/static-assets/)
 - [Chrome install-promotion criteria](https://web.dev/articles/install-criteria)
