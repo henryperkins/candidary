@@ -1,18 +1,11 @@
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
-import { readFileSync } from 'node:fs';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-const migrationSql = [
-  './migrations/0001_core.sql',
-  './migrations/0002_wedding_photo_drop.sql',
-  './migrations/0003_partitioned_exports.sql',
-  './migrations/0004_manager_media_pagination.sql',
-  './migrations/0005_media_stored_at.sql',
-].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8')).join(';\n');
-const migrationQueries = migrationSql
-  .split(';')
-  .map((query) => query.trim())
-  .filter(Boolean);
+const migrations = await readD1Migrations(
+  fileURLToPath(new URL('./migrations', import.meta.url)),
+);
+const migrationQueries = migrations.flatMap((migration) => migration.queries);
 
 export default defineConfig({
   plugins: [

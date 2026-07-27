@@ -91,6 +91,41 @@ describe('manager media storage timestamp migration', () => {
       .first<{ created_at: string; stored_at: string | null }>();
     expect(row).toEqual({ created_at: now, stored_at: now });
   });
+
+  it('stamps an old-worker finalization performed after the schema migration', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    await env.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        declared_byte_size, guest_name, caption, upload_state, publication_status,
+        idempotency_key, reservation_expires_at, created_at
+      )
+      VALUES (
+        'media-old-worker', 'event-a', ?, 'events/event-a/media/old-worker',
+        'old-worker.jpg', 'image/jpeg', 1024, 'Avery', NULL, 'reserved',
+        'unpublished', 'idem-old-worker', '2026-07-21T12:15:00.000Z', ?
+      )
+    `).bind(sessionId, now).run();
+
+    await env.DB.prepare(`
+      UPDATE media
+      SET byte_size = ?, width = ?, height = ?, upload_state = 'stored'
+      WHERE id = ? AND upload_state = 'reserved'
+    `).bind(900, 1200, 800, 'media-old-worker').run();
+
+    const row = await env.DB.prepare(
+      'SELECT upload_state, stored_at FROM media WHERE id = ?',
+    ).bind('media-old-worker').first<{
+      upload_state: string;
+      stored_at: string | null;
+    }>();
+    expect(row?.upload_state).toBe('stored');
+    expect(row?.stored_at).toEqual(expect.any(String));
+
+    const managerPage = await new MediaRepository(env.DB).listForManager('event-a');
+    expect(managerPage.media.map((media) => media.id)).toContain('media-old-worker');
+  });
 });
 
 describe('event, token, and session repositories', () => {

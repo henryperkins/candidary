@@ -8,6 +8,19 @@ UPDATE media
 SET stored_at = created_at
 WHERE upload_state = 'stored' AND stored_at IS NULL;
 
+CREATE TRIGGER media_stamp_stored_at_compat
+AFTER UPDATE OF upload_state ON media
+FOR EACH ROW
+WHEN OLD.upload_state = 'reserved'
+  AND NEW.upload_state = 'stored'
+  AND NEW.stored_at IS NULL
+BEGIN
+  UPDATE media
+  SET stored_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE id = NEW.id
+    AND stored_at IS NULL;
+END;
+
 CREATE INDEX media_manager_stored_page_all
 ON media(event_id, upload_state, stored_at DESC, id DESC)
 WHERE deleted_at IS NULL;
