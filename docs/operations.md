@@ -60,3 +60,13 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 ## Recovery boundaries
 
 The application does not promise recovery for a lost management link, explicit deletion, or retention purge. Do not restore an object without its matching D1 lifecycle state. Preview generation can be retried safely; an unavailable preview does not mean the original failed delivery. Never copy an original into the preview key as a fallback: every served derivative must pass through the Images binding so original metadata is not exposed.
+
+## Host notifications
+
+Three lifecycle emails are sent from the daily `17 3 * * *` trigger, before the retention purge in the same run: a getting-started guide when a host confirms their address, a reminder the day before the event date, and a warning seven days before management access ends.
+
+The warning is keyed to `management_access_expires_at`, not `purge_after`. Management access ends 90 days after the event and photos are deleted at 120, so a warning keyed to deletion would reach the host a month after they could still act on it.
+
+Each send is claimed in `host_notifications` before it is attempted and the claim is released if delivery fails, so a cron that runs twice sends once and a transient failure is retried the next night. Hosts who have not confirmed their address, or who unsubscribed, are never selected. A mail failure is logged and swallowed rather than allowed to abort the purge that follows.
+
+Outbound sends appear as **dropped** in the Email Routing summary even when delivered; use the Email Sending metrics instead. A hard-bounced address is added to Cloudflare's suppression list, after which its codes silently stop arriving — the management link is the remaining route for that host.

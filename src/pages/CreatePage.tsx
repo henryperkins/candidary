@@ -7,6 +7,7 @@ import { api, ClientApiError } from '../app/api';
 import { MAX_EVENT_MEDIA } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
+import { HostAccountPanel } from '../components/HostAccountPanel';
 
 interface Created { event: { id: string; name: string; slug: string }; guestLink: string; managementLink: string; csrfToken: string }
 
@@ -15,6 +16,7 @@ const CREATE_FIELDS = ['name', 'eventDate', 'welcomeMessage'] as const;
 
 export function CreatePage() {
   const [created, setCreated] = useState<Created | null>(null);
+  const [saved, setSaved] = useState(false);
   const [cover, setCover] = useState<File | null>(null);
   const [coverError, setCoverError] = useState('');
   const [qr, setQr] = useState('');
@@ -62,11 +64,15 @@ export function CreatePage() {
 
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
     <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
-      <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />It cannot be recovered in this MVP.</p></div>
+      {/* The warning is only true while the link is the sole way in. Once the event
+          is saved to an account it stops being true, and leaving it up would talk a
+          host out of the recovery they just set up. */}
+      <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
       <CopyableLinkCard label="Guest link" value={created.guestLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
       <a className="button button--primary" href={created.managementLink}>Open event manager</a>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
+    <HostAccountPanel bindEventId={created.event.id} onRegistered={() => setSaved(true)} />
   </main></div>;
 
   return <div className="public-shell"><PageHeader action={<Link className="text-link" to="/">Back home</Link>} /><main className="create-layout">

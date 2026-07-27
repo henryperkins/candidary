@@ -1,6 +1,6 @@
 import type { EventRecord } from './types';
 
-interface EventRow {
+export interface EventRow {
   id: string;
   slug: string;
   name: string;
@@ -33,7 +33,7 @@ export interface CreateEventRecord {
   createdAt: string;
 }
 
-function mapEvent(row: EventRow): EventRecord {
+export function mapEvent(row: EventRow): EventRecord {
   return {
     id: row.id,
     slug: row.slug,

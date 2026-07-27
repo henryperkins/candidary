@@ -39,11 +39,11 @@ function validationError(parsed: { error: z.ZodError }) {
 }
 
 async function guestForSlug(context: Parameters<typeof assertCsrf>[0]) {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
+  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
   if (auth.session.role !== 'guest' || auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
-  await assertCsrf(context, auth);
+  await assertCsrf(context, 'event', auth.session.csrfDigest);
   return auth;
 }
 

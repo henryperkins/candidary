@@ -105,3 +105,14 @@ emulator, a simulator, or a desktop browser's device mode does not count.
 ## Public-launch gate
 
 The event-creation endpoint is suitable for a controlled deployment. Before unrestricted public traffic, add Cloudflare rate limiting and Turnstile to `POST /api/events`, alert on creation/upload spikes, and assign an abuse-response owner.
+
+## Email
+
+Host accounts send confirmation codes, password resets, and lifecycle notifications through the `EMAIL` binding (Cloudflare Email Service).
+
+1. Onboard a domain you control to Email Service and complete its SPF, DKIM, and DMARC records. A `workers.dev` subdomain cannot be used — those records need DNS you control.
+2. Set `EMAIL_FROM` in `wrangler.jsonc` to an address on that domain.
+3. Confirm the account is on the Workers Paid plan. The free plan can only send to verified destination addresses in your own account, which is not enough for real hosts.
+4. Set the `LOGIN_HMAC_KEY` secret alongside the other secrets.
+
+Without remote bindings, `wrangler dev` simulates sending and writes each message to a local file, so local development needs no mail configuration at all. Add `"remote": true` to the `send_email` binding to send real mail from a local Worker.

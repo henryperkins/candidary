@@ -8,6 +8,8 @@ import { exportRoutes } from './routes/exports';
 import { exchangeRoutes } from './routes/exchange';
 import { contentRoutes } from './routes/content';
 import { galleryRoutes } from './routes/gallery';
+import { hostAuthRoutes } from './routes/host-auth';
+import { hostPublicRoutes } from './routes/host-public';
 import { manageRoutes } from './routes/manage';
 import { messageRoutes } from './routes/messages';
 import { publicRoutes } from './routes/public';
@@ -23,6 +25,8 @@ export function createApp() {
   app.use('*', securityHeaders);
   app.route('/api', publicRoutes);
   app.route('/', exchangeRoutes);
+  app.route('/', hostPublicRoutes);
+  app.route('/api', hostAuthRoutes);
   app.route('/api', eventRoutes);
   app.route('/api', exportRoutes);
   app.route('/api', uploadRoutes);

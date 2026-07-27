@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 
 import { ApiError } from '../../shared/errors';
+import { requireManager } from '../auth/manager';
 import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
@@ -8,7 +9,7 @@ import { getSessionCookie } from '../http/cookies';
 export const eventRoutes = new Hono<AppBindings>();
 
 eventRoutes.get('/event/:slug', async (context) => {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
+  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
   if (auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
@@ -32,10 +33,7 @@ eventRoutes.get('/event/:slug', async (context) => {
 });
 
 eventRoutes.get('/manage/events/:eventId', async (context) => {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
-  if (auth.session.role !== 'manager' || auth.event.id !== context.req.param('eventId')) {
-    throw new ApiError('ROLE_FORBIDDEN', 'This management session belongs to a different event.', 403);
-  }
+  const auth = await requireManager(context);
   return context.json({ data: { event: auth.event }, requestId: context.get('requestId') });
 });
 

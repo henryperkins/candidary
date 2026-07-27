@@ -33,7 +33,7 @@ publicRoutes.post('/events', async (context) => {
   }
   const created = await new EventService(context.env).create(parsed.data);
   const maxAge = Math.max(1, Math.floor((Date.parse(created.sessionExpiresAt) - Date.now()) / 1000));
-  setSessionCookies(context, created.managementSession, created.csrfToken, maxAge);
+  setSessionCookies(context, 'event', created.managementSession, created.csrfToken, maxAge);
   return context.json({
     data: {
       event: created.event,
