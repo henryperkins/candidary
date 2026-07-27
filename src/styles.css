@@ -176,13 +176,14 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .selection-summary span:last-child { color: var(--danger); }
 .send-button { margin-top: 10px; border: 0; }
 .send-button svg { animation: photo-drop-spin 900ms linear infinite; }
-.progress-note { margin-top: 9px; }
+.progress-note { margin-top: 9px; font-size: .75rem; }
 .photo-drop--receipt { display: grid; place-items: center; padding: 30px 22px; }
 .delivery-receipt { max-width: 470px; text-align: center; }
 .delivery-receipt__check { width: 72px; height: 72px; margin: 0 auto 20px; display: grid; place-items: center; border-radius: 999px; background: #dfe9d9; color: #31552d; }
 .delivery-receipt__check svg { width: 36px; height: 36px; stroke-width: 2.5; }
 .delivery-receipt__eyebrow { margin: 0; color: #587051; font-size: .69rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
 .delivery-receipt h1 { margin: 8px auto 0; font-size: clamp(2.1rem, 9vw, 3.2rem); line-height: 1.08; text-wrap: balance; }
+.delivery-receipt__caveat { max-width: 380px; margin: 14px auto 0; color: #665860; font-size: .85rem; line-height: 1.5; }
 .delivery-receipt > p:last-child { max-width: 380px; margin: 15px auto 0; color: #665860; font-size: .96rem; line-height: 1.55; }
 .guest-secondary { max-width: 980px; margin: 0 auto; padding: 72px 20px 88px; }
 .guest-secondary__heading { max-width: 610px; margin-bottom: 35px; }

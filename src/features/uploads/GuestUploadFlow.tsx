@@ -285,7 +285,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         <span className="delivery-receipt__check"><Check aria-hidden="true" /></span>
         <p className="delivery-receipt__eyebrow">Delivered to {event.name}</p>
         <h1>Your {receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} sent.</h1>
-        {validationFailureCount > 0 && <p>{validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.</p>}
+        {validationFailureCount > 0 && <p className="delivery-receipt__caveat">{validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.</p>}
         <p>Thanks, {name}. You’re all done and can close this page.</p>
       </div>
     </section>;
