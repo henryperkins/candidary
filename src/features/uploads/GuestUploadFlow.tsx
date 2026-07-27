@@ -2,6 +2,7 @@ import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, P
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 
 import { MAX_IMAGE_BYTES } from '../../../shared/constants';
+import { readGuestName, rememberGuestName } from '../../app/guest-name-storage';
 import { createBrowserTransport } from './browser-upload-transport';
 import {
   getReceiptCount,
@@ -12,7 +13,6 @@ import {
   type UploadTransport,
 } from './upload-queue';
 
-const NAME_STORAGE_KEY = 'candidary_guest_name';
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/heic-sequence,image/heif-sequence,.heic,.heif';
 const CLIENT_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const ALLOWED_IMAGE_TYPES = new Set([
@@ -77,7 +77,7 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
 }
 
 export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUploadFlowProps) {
-  const rememberedName = useMemo(() => localStorage.getItem(NAME_STORAGE_KEY)?.trim() ?? '', []);
+  const rememberedName = useMemo(readGuestName, []);
   const [name, setName] = useState(rememberedName);
   const [editingName, setEditingName] = useState(!rememberedName);
   const [nameError, setNameError] = useState('');
@@ -117,7 +117,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
     setName(trimmed);
     setNameError('');
     setEditingName(false);
-    localStorage.setItem(NAME_STORAGE_KEY, trimmed);
+    rememberGuestName(trimmed);
     return trimmed;
   }
 
