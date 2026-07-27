@@ -144,6 +144,27 @@ test('create errors reach their fields and the first one across the width matrix
   }
 });
 
+test('the event date stays inside its field under iOS native date sizing', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.goto('/create');
+
+  // iOS WebKit currently sizes a padded date input with a percentage width as though its content
+  // box owned that percentage. Reproduce that layout calculation without replacing the real field.
+  await page.addStyleTag({ content: 'input[type="date"] { box-sizing: content-box; }' });
+
+  const field = page.getByLabel('Event date');
+  const fieldBounds = await field.boundingBox();
+  const labelBounds = await field.locator('..').boundingBox();
+  if (!fieldBounds || !labelBounds) throw new Error('the event date and its label must be laid out');
+
+  expect(fieldBounds.x, 'date input starts inside its label').toBeGreaterThanOrEqual(labelBounds.x);
+  expect(fieldBounds.x + fieldBounds.width, 'date input ends inside its label')
+    .toBeLessThanOrEqual(labelBounds.x + labelBounds.width + 1);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
 test('a private link can be revealed and read across the width matrix', async ({ page }) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
     event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
