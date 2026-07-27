@@ -3,7 +3,7 @@
     {
       "allowed": {
         "origins": [
-          "https://candidary.lfd.workers.dev"
+          "https://candidary.online"
         ],
         "methods": [
           "PUT"

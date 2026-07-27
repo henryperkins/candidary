@@ -69,4 +69,4 @@ The warning is keyed to `management_access_expires_at`, not `purge_after`. Manag
 
 Each send is claimed in `host_notifications` before it is attempted and the claim is released if delivery fails, so a cron that runs twice sends once and a transient failure is retried the next night. Hosts who have not confirmed their address, or who unsubscribed, are never selected. A mail failure is logged and swallowed rather than allowed to abort the purge that follows.
 
-Outbound sends appear as **dropped** in the Email Routing summary even when delivered; use the Email Sending metrics instead. A hard-bounced address is added to Cloudflare's suppression list, after which its codes silently stop arriving — the management link is the remaining route for that host.
+Sending is capped at 1,000 messages per day for the account. Outbound sends appear as **dropped** in the Email Routing summary even when delivered; use the Email Sending metrics instead. A hard-bounced address is added to Cloudflare's suppression list, after which its codes silently stop arriving — the management link is the remaining route for that host.

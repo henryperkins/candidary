@@ -11,7 +11,7 @@ npx wrangler r2 bucket create candidary-media
 
 The Worker uses an `IMAGES` binding for metadata-free browser previews, including HEIC and HEIF. Confirm the account plan and Images availability before deploying; preview failure never removes an already delivered original, but hosts need the binding to view phone formats cross-browser.
 
-Set the R2 CORS policy after replacing the example origin:
+The R2 CORS policy names the application origin, so it has to be reset whenever `APP_ORIGIN` changes — a signed browser `PUT` comes from the page, not from the Worker, and a stale origin fails every upload while leaving the rest of the app working. Set it after replacing the example origin:
 
 ```powershell
 Copy-Item config/r2-cors.example.json config/r2-cors.json
@@ -110,9 +110,14 @@ The event-creation endpoint is suitable for a controlled deployment. Before unre
 
 Host accounts send confirmation codes, password resets, and lifecycle notifications through the `EMAIL` binding (Cloudflare Email Service).
 
-1. Onboard a domain you control to Email Service and complete its SPF, DKIM, and DMARC records. A `workers.dev` subdomain cannot be used — those records need DNS you control.
-2. Set `EMAIL_FROM` in `wrangler.jsonc` to an address on that domain.
+`candidary.online` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.online`, set in `EMAIL_FROM`. The account quota is 1,000 messages per day.
+
+Setting up a different domain means repeating three things:
+
+1. Create a sending subdomain for the zone and let Cloudflare write its SPF, DKIM, and DMARC records. A `workers.dev` subdomain cannot be used — those records need DNS you control.
+2. Point `EMAIL_FROM` at an address on that domain.
 3. Confirm the account is on the Workers Paid plan. The free plan can only send to verified destination addresses in your own account, which is not enough for real hosts.
-4. Set the `LOGIN_HMAC_KEY` secret alongside the other secrets.
+
+`LOGIN_HMAC_KEY` is a secret like the others and is required whether or not mail is configured — it signs the emailed codes and the unsubscribe links.
 
 Without remote bindings, `wrangler dev` simulates sending and writes each message to a local file, so local development needs no mail configuration at all. Add `"remote": true` to the `send_email` binding to send real mail from a local Worker.

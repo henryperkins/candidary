@@ -43,10 +43,10 @@
     "crons": ["17 3 * * *"]
   },
   "vars": {
-    "APP_ORIGIN": "https://candidary.lfd.workers.dev",
+    "APP_ORIGIN": "https://candidary.online",
     "R2_ACCOUNT_ID": "a77e479f6736120eadd99973dbeb705e",
     "R2_BUCKET_NAME": "candidary-media",
-    "EMAIL_FROM": "hello@candidary.example"
+    "EMAIL_FROM": "hello@candidary.online"
   },
   "observability": {
     "enabled": true
