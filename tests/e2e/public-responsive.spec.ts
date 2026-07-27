@@ -27,6 +27,8 @@ const LANDING_BOUNDARIES = [
   { width: 899, workflowColumns: 2, heroColumns: 1 },
   { width: 900, workflowColumns: 3, heroColumns: 2 },
 ];
+// The phone matrix plus the tablet side of the 760 px boundary, where create and success turn two-column.
+const CREATE_WIDTHS = [...PHONE_WIDTHS, 768];
 // The design system holds field-level error text inside the caption band.
 const CAPTION_TEXT_RANGE = { min: 12, max: 14 };
 const CREATE_FIELD_ERRORS = {
@@ -109,10 +111,10 @@ test('workflow steps keep a readable text column across the tablet band', async 
   }
 });
 
-test('create errors reach their fields and the first one across phone widths', async ({ page }) => {
+test('create errors reach their fields and the first one across the width matrix', async ({ page }) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 422, json: CREATE_FIELD_ERRORS }));
 
-  for (const width of PHONE_WIDTHS) {
+  for (const width of CREATE_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/create');
     await page.getByRole('button', { name: 'Create private event' }).click();
@@ -142,7 +144,7 @@ test('create errors reach their fields and the first one across phone widths', a
   }
 });
 
-test('a private link can be revealed and read across phone widths', async ({ page }) => {
+test('a private link can be revealed and read across the width matrix', async ({ page }) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
     event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
     guestLink: UNBROKEN_TOKEN,
@@ -150,7 +152,7 @@ test('a private link can be revealed and read across phone widths', async ({ pag
     csrfToken: 'csrf-a',
   }, requestId: 'request-a' } }));
 
-  for (const width of PHONE_WIDTHS) {
+  for (const width of CREATE_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/create');
     await page.getByLabel('Event name').fill('Maya & Theo');
