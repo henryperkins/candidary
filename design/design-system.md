@@ -55,7 +55,7 @@ Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCi
 
 Public: `Candidary`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three workflow labels.
 
-Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt.
+Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
 
 Manager: `Candidary`, event name/date, guest-upload state, capacity/lifecycle facts, and the active section title.
 
