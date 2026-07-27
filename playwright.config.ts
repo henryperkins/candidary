@@ -10,12 +10,16 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   expect: {
-    // Baselines are tracked evidence, so they are compared as captured: no pixel budget, animations
-    // stilled, caret hidden, and CSS pixels rather than device pixels so the image belongs to the
-    // viewport the test pinned. Snapshot paths keep Playwright's default naming, which carries both
-    // the project and the platform — a Linux run reports a missing baseline rather than quietly
-    // diffing Windows font rasterisation against it.
-    toHaveScreenshot: { animations: 'disabled', caret: 'hide', scale: 'css', maxDiffPixels: 0 },
+    // Baselines are tracked evidence, so they are compared as captured: animations stilled, caret
+    // hidden, and CSS pixels rather than device pixels so the image belongs to the viewport the test
+    // pinned. Both tolerances are zero. `maxDiffPixels` alone is not exact — it only counts pixels
+    // that already exceeded the per-pixel `threshold`, which defaults to 0.2 in a YIQ colour space
+    // and silently absorbs a whole-surface recolour of a few units per channel. A palette regression
+    // is exactly the kind of change a tracked baseline exists to catch, so `threshold` is zero too.
+    // Snapshot paths keep Playwright's default naming, which carries both the project and the
+    // platform — a Linux run reports a missing baseline rather than quietly diffing Windows font
+    // rasterisation against it.
+    toHaveScreenshot: { animations: 'disabled', caret: 'hide', scale: 'css', threshold: 0, maxDiffPixels: 0 },
   },
   projects: [
     {

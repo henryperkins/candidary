@@ -28,8 +28,29 @@ pins its own viewport with `page.setViewportSize()`.
 ## Tracked visual baselines
 
 `tests/e2e/visual-qa.spec.ts` asserts committed images under
-`tests/e2e/visual-qa.spec.ts-snapshots/`, compared with `maxDiffPixels: 0`, animations disabled and
-`scale: 'css'`. `output/` remains disposable and is cited nowhere.
+`tests/e2e/visual-qa.spec.ts-snapshots/`, compared exactly — `threshold: 0` **and**
+`maxDiffPixels: 0` — with animations disabled and `scale: 'css'`. `output/` remains disposable and is
+cited nowhere.
+
+Both tolerances are required. `maxDiffPixels: 0` alone only counts pixels that already exceeded the
+per-pixel `threshold`, which defaults to 0.2 in a YIQ colour space. That default absorbs a
+whole-surface recolour of a few units per channel: the guest ground moving from `#f4ede4` to
+`#f7f1e7` changed 393,839 pixels of one baseline and the comparison reported it as a pass. A palette
+regression is exactly what a tracked baseline exists to catch, so the comparison is exact.
+
+Exactness only pays if the capture is deterministic, so `settle()` in `visual-qa.spec.ts` does two
+things before every screenshot, both of which were found by turning the tolerances off:
+
+- **Parks the pointer outside the viewport.** A test that clicks its way into a state leaves the
+  mouse on the control it clicked, and that control keeps its `:hover` paint. The `/create` submit
+  button differs from its resting state by 13,077 px of aubergine-strong fill, and whether that paint
+  landed before the capture varied from run to run.
+- **Waits until the font set is quiet across two frames**, not merely for one `document.fonts.ready`.
+  A face is only requested when a glyph needs it, so laying out with the faces loaded so far can
+  request another and begin a cycle that `ready` already resolved past. A late arrival moves centred
+  text even when it moves nothing else, because the label re-centres on a different sub-pixel origin.
+
+Both were latent while the comparison was lossy. Neither affects what the page renders.
 
 Regenerate and then prove reproducibility:
 
@@ -139,7 +160,10 @@ the keyboard, target-size, geometry, contrast, zoom and reduced-motion assertion
 
 Known gap: no axe pass renders a failed state, so the engine never reads the guest or manager error
 cards or the manager's inline action notice. Those states are measured geometrically by
-`error-recovery.spec.ts`; the one colour finding they carry is recorded below.
+`error-recovery.spec.ts`, and the one colour pairing they carried was found and fixed by hand — see
+"Contrast remediation".
+
+Every surface reports zero violations, in both Playwright projects.
 
 Fixed under this task:
 
@@ -150,8 +174,8 @@ Fixed under this task:
 - `color-contrast` on the guest note byline — `.notes-feed small` was written for the dark aubergine
   notes band and rendered a guest's name at 1.72:1 when that component was reused on the light guest
   surface. It now inherits the ink the surrounding feed already uses.
-
-**Open, and the only thing on this page that does not pass — see "Severity review".**
+- `color-contrast` on the guest ground — see "Contrast remediation" below.
+- `color-contrast` on the landing privacy note — see "Contrast remediation" below.
 
 ## Decisions recorded
 
@@ -179,43 +203,42 @@ Fixed under this task:
   `nextCursor` and `Load more photos` returns even though nothing arrived. That is cosmetic — the
   control loads nothing new and disappears again — but it is a real product wart worth an owner.
 
+## Contrast remediation
+
+The engine originally reported eleven serious `color-contrast` elements on the landing and guest
+surfaces, plus one more the engine never reaches. All are now resolved. **No value in
+`design/design-system.md`'s token table changed.** Two of the three fixes move an *undocumented*
+literal onto a *documented* token or an existing one, and the third stops using a status token as
+body copy — which is why this satisfies "preserve the Candidary palette" rather than departing from
+it.
+
+| Fix | Before | After | Elements cleared |
+| --- | --- | --- | ---: |
+| Guest ground: `.guest-shell--drop` and `.guest-secondary` | `#f4ede4`, not in the token table | Parchment `#f7f1e7`, the documented page ground the rest of the app already stands on | 10 |
+| `.privacy-note`: colour declaration deleted, moss moved to the icon | moss `#68763d` body text at 4.40 | inherited ink at 14.88 with a moss check, matching `.trust-list` — an existing component with identical markup | 1 |
+| `.manager-action-error` ground | `#fbe0dc`, danger at 4.48 | `#fff1ee`, the ground `.form-error` already uses, danger at 5.09 | 1 (engine-invisible) |
+
+### The margin, recorded honestly
+
+The guest-ground fix lands ten elements **simultaneously at 4.5046**, clearing the 4.5 threshold by
+**0.0046**. It genuinely passes, and the same pairing already passed under this engine on `/` and
+`/create` before this change, so it is the app's established standard rather than a new one. But the
+headroom is essentially nil: **any future darkening of Parchment, or lightening of Muted ink,
+re-breaks all ten at once.** Treat `--muted` on `--parchment` as a load-bearing pair.
+
+The alternative with real headroom — nudging Muted ink from `#766c70` to `#726a6e`, which measures
+4.67 on parchment and is visually indistinguishable — was **declined** because it edits the binding
+token table.
+
+One instance of the old error ground survives deliberately: `.status--rejected` still pairs danger
+with `#fbe0dc` at 4.48. It is a different component, it was outside the scope of this remediation,
+and no axe pass renders it. It is the next thing to look at if that pairing is revisited.
+
 ## Severity review
 
 - P0: none.
 - P1: none.
-- **P2: one open.** `color-contrast` (axe, serious) on the landing and guest surfaces. Eleven
-  elements, all measured by axe against resolved colours:
-
-  | Surface | Element | Pairing | Ratio |
-  | --- | --- | --- | ---: |
-  | `/` | `.privacy-note` | moss `#68763d` on parchment `#f7f1e7`, 14.4 px | 4.40 |
-  | Guest hero and secondary | `.guest-secondary__heading > p` | muted `#766c70` on `#f4ede4`, 16 px | 4.35 |
-  | Guest hero and secondary | three `.event-extra summary small` | muted `#766c70` on `#f4ede4`, 11.2 px | 4.35 |
-  | Guest hero and secondary | `.guest-shell footer p` | muted `#766c70` on `#f4ede4`, 16 px | 4.35 |
-  | Guest secondary | three `.photo-grid figcaption small` | muted `#766c70` on `#f4ede4`, 13.3 px | 4.35 |
-  | Guest secondary | `.notes-secondary p`, `.notes-feed li p` | muted `#766c70` on `#f4ede4`, 16 px | 4.35 |
-
-  A related pairing the engine does not reach, because no axe pass renders the state:
-  `.manager-action-error` is danger `#b54033` on `#fbe0dc` at 4.48.
-
-  This is pre-existing and is not caused by any task in the mobile-first plan. It is left open
-  because every remedy is a design decision: the plan's global constraints require the Candidary
-  palette to be preserved, and `design/design-system.md` is binding on its token table.
-
-  Recommended, in preference order, all of which leave every documented token untouched:
-
-  1. Replace the guest ground `#f4ede4` — which is not in the token table — with the documented
-     Parchment `#f7f1e7`. Muted on parchment measures 4.50 and already passes axe on `/` and
-     `/create` today. Clears ten of the eleven.
-  2. Give `.privacy-note` ink text and keep its moss check icon. The design system asks for
-     "textual state plus icon; never colour alone", so the moss belongs to the icon.
-  3. Give `.manager-action-error` the `#fff1ee` ground `.form-error` already uses, which puts danger
-     at 5.09 and makes the two error surfaces consistent.
-
-  The alternative — nudging the Muted ink token from `#766c70` to about `#726a6e` — fixes every
-  pairing at once with margin and is visually indistinguishable, but it edits the binding token
-  table and so needs an explicit design decision.
-
+- P2: none open. The one serious `color-contrast` finding is resolved above.
 - P3: none observed in the verified states.
 
-final result: passed except for the open P2 above
+final result: passed

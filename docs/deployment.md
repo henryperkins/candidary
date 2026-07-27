@@ -65,8 +65,14 @@ Desktop emulation is supplementary. Physical iPhone and Android evidence, Images
 These are **production rehearsal gates performed by a person on real hardware**. They are not covered
 by the automated suite and nothing below may be recorded as passed on the strength of a green
 `npm run test:e2e`. The suite runs one Chromium engine under viewport emulation on Windows: it can
-prove geometry, containment, target size, focus order, resolved contrast, reduced motion, and a fixed
-set of axe rules, and it can prove none of the following.
+prove geometry, containment, target size, focus order, resolved contrast, reduced motion, and the
+full `axe-core` rule set on eleven surfaces, and it can prove none of the following.
+
+The engine currently reports zero accessibility violations, but note what that is and is not. It
+means computed colour pairings clear WCAG AA arithmetically on the states the suite renders. Muted
+ink on parchment clears it by 0.0046 — see `design-qa.md`. Arithmetic is not legibility: check the
+guest captions, the disclosure summaries, and the footer on a real phone screen at reception
+brightness, outdoors, and at whatever the device's own contrast and text-size settings are set to.
 
 11. **Physical iPhone Safari.** Open the guest link on a current iPhone. Confirm the photo drop's
     first fold, that both photo sources are reachable without scrolling, that the dynamic toolbar

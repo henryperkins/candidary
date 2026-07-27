@@ -73,7 +73,10 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .workflow li:first-child { padding-left: 0; }.workflow li:last-child { border: 0; }
 .workflow li > span { width: 44px; height: 44px; flex: 0 0 44px; border-radius: 50%; display: grid; place-items: center; background: var(--apricot-soft); color: var(--aubergine); }
 .workflow li strong { font-family: 'Manrope'; font-size: 1.12rem; }.workflow li p { margin: 5px 0 0; color: var(--muted); }
-.privacy-note { margin: 23px 0 0; display: flex; gap: 8px; align-items: center; color: var(--moss); font-size: .9rem; }
+/* Ink text with a moss check, exactly like `.trust-list` below: the design system asks for textual
+   state plus icon, never colour alone, and moss as 14.4px body copy measured 4.4:1 on parchment. */
+.privacy-note { margin: 23px 0 0; display: flex; gap: 8px; align-items: center; font-size: .9rem; }
+.privacy-note svg { color: var(--moss); }
 .create-layout, .success-layout { min-height: calc(100vh - 88px); padding: 65px 7vw 80px; display: grid; grid-template-columns: .8fr 1.2fr; gap: 8vw; align-items: start; }
 .create-intro { position: sticky; top: 55px; padding-top: 36px; }.create-intro h1 { font-size: clamp(2.8rem, 5vw, 4.8rem); }.create-intro > p:not(.section-label) { color: var(--muted); font-size: 1.1rem; }
 .trust-list { margin: 34px 0; padding: 27px 0 0; border-top: 1px solid var(--border); display: grid; gap: 14px; list-style: none; }.trust-list li { display: flex; gap: 10px; align-items: center; }.trust-list svg { color: var(--moss); }
@@ -155,7 +158,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition-duration: .01ms !important; } }
 
 /* Wedding photo drop */
-.guest-shell--drop { max-width: none; background: #f4ede4; }
+/* The documented Parchment token rather than an undocumented literal one shade darker. Muted ink on
+   parchment is what the landing and create surfaces already stand on; on the old ground the guest
+   captions, disclosures, and footer all measured 4.35:1. */
+.guest-shell--drop { max-width: none; background: #f7f1e7; }
 .guest-drop-main { min-height: 100vh; }
 .photo-drop { width: 100%; max-width: 620px; min-height: 100svh; margin: 0 auto; overflow: hidden; background: var(--paper); color: #35242f; }
 .photo-drop__hero { min-height: 218px; padding: 26px 22px 24px; display: flex; flex-direction: column; justify-content: flex-end; position: relative; isolation: isolate; color: white; background: linear-gradient(145deg, #63345c 0%, #9f5a6b 53%, #d98b6a 100%); }
@@ -273,7 +279,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 @media (max-width: 699px) {
   .guest-shell--drop { background: var(--paper); }
-  .guest-secondary { background: #f4ede4; }
+  /* The same documented Parchment the wider shell now stands on, so the secondary band reads the
+     same on a phone as it does above 699 and its muted captions clear the contrast floor either way. */
+  .guest-secondary { background: #f7f1e7; }
   .notes-secondary { grid-template-columns: 1fr; gap: 20px; }
 }
 
@@ -343,7 +351,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 /* Paging, recoverable action errors, and one export presentation shown in one place at a time. */
 .media-more { margin-top: 20px; display: grid; grid-template-columns: minmax(0, 1fr); }
-.manager-action-error { margin: 0 0 24px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px; border-left: 3px solid var(--danger); background: #fbe0dc; color: var(--danger); font-size: .875rem; }
+/* The same ground `.form-error` stands on, so the two error surfaces are one treatment. Danger on the
+   old, deeper ground measured 4.48:1; on this one it is 5.09:1. */
+.manager-action-error { margin: 0 0 24px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); font-size: .875rem; }
 .manager-action-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .manager-action-error__dismiss { width: 44px; min-height: 44px; margin: -10px -10px -10px 0; display: grid; place-items: center; flex: 0 0 44px; border: 0; background: transparent; color: var(--danger); cursor: pointer; }
 .manager-export-panel h2 { margin: 0 0 10px; font-size: 1.55rem; }

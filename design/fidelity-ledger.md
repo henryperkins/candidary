@@ -6,7 +6,7 @@ Evidence is now committed rather than disposable. Image names below are the base
 `tests/e2e/visual-qa.spec.ts-snapshots/`, stored with Playwright's default `-mobile-win32` suffixes
 and asserted by `npm run test:e2e`; named tests are the specs that measure the claim. Nothing here
 cites `output/`, which remains a disposable working folder. `design-qa.md` holds the full route,
-state, width, and baseline matrix and the one open finding.
+state, width, and baseline matrix.
 
 | Contract point | Accepted direction | Browser result | Disposition |
 | --- | --- | --- | --- |
@@ -19,7 +19,7 @@ state, width, and baseline matrix and the one open finding.
 | Secondary features | Gallery, previous deliveries, and notes remain available but subordinate | `guest-secondary-long-content-320.png`, `fullscreen-long-caption-320.png` | These features are collapsed under `More from the event`, below the primary canvas, and disappear with the rest of the page after the terminal receipt. 80-character filenames wrap inside their column rather than widening the page. |
 | Private-by-default delivery | Every original reaches the host; sharing is a separate decision | `manager-actions-320.png` and manager API tests | Gallery visibility defaults off. New photos arrive as `Unpublished` private originals in Live intake; publish/hide actions affect gallery projection without changing delivery or export inclusion. |
 | Host operating view | Live intake first, with guest lookup, QR/link, capacity, originals, and export | `manager-nav-768.png`, `manager-nav-count-390.png`, `manager-export-first-390.png`, `manager-responsive.spec.ts` across 320–1440 | The manager opens on the recent private collection, can filter by required guest name, download any original, and prepare a complete partitioned export. The five destinations stay labelled from 320 px to 1440 px, and the 184 px navigation rail with the 330 px utility rail returns at 1101 px. |
-| Visual system | Warm parchment, paper surfaces, aubergine actions, apricot accents, moss completion | Every baseline above | The implementation retains the established typography, palette, restrained borders, Lucide outlines, and explicit focus/status treatment while simplifying the guest composition around the approved photo-first flow. One contrast pairing on the guest and landing surfaces remains open; see `design-qa.md`. |
+| Visual system | Warm parchment, paper surfaces, aubergine actions, apricot accents, moss completion | Every baseline above | The implementation retains the established typography, palette, restrained borders, Lucide outlines, and explicit focus/status treatment while simplifying the guest composition around the approved photo-first flow. The guest ground now stands on the documented Parchment token rather than an undocumented literal one shade darker, and the landing privacy note reads as ink with a moss check like `.trust-list`; every token in `design/design-system.md` is unchanged and the accessibility engine reports no contrast violation on any surface. |
 
 ## Intentional adaptations
 
@@ -29,6 +29,6 @@ state, width, and baseline matrix and the one open finding.
 
 ## QA outcome
 
-No material mismatch remains between the approved wedding photo-drop journey and the implemented browser experience. One serious `color-contrast` finding on the guest and landing surfaces is open and awaiting a design decision; it is recorded with measurements and options in `design-qa.md`.
+No material mismatch remains between the approved wedding photo-drop journey and the implemented browser experience. The serious `color-contrast` finding the accessibility engine surfaced on the guest and landing surfaces has been resolved without changing a single design-system token; `design-qa.md` records what moved, the resulting ratios, and the fact that muted ink on parchment now clears the threshold by only 0.0046.
 
 Physical iPhone and Android checks remain release gates because desktop browser emulation cannot prove native camera-picker behavior. The automated accessibility engine, tracked baselines, and geometry assertions are supporting evidence, not a substitute for those gates — `docs/deployment.md` lists them.
