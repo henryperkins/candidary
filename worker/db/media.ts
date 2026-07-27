@@ -537,30 +537,32 @@ export class MediaRepository {
     target: PublicationStatus,
     changedAt: string,
   ): Promise<string[]> {
-    const placeholders = ids.map(() => '?').join(', ');
+    const firstIdSlot = 4;
+    const idPlaceholders = ids
+      .map((_, index) => `?${firstIdSlot + index}`)
+      .join(', ');
+    const expectedSlot = firstIdSlot + ids.length;
+    const countSlot = expectedSlot + 1;
     const result = await this.db.prepare(`
       UPDATE media
-      SET publication_status = ?, published_at = ?
-      WHERE event_id = ?
-        AND id IN (${placeholders})
+      SET publication_status = ?1, published_at = ?2
+      WHERE event_id = ?3
+        AND id IN (${idPlaceholders})
         AND upload_state = 'stored'
-        AND publication_status = ?
+        AND publication_status = ?${expectedSlot}
         AND deleted_at IS NULL
         AND (
           SELECT COUNT(*)
           FROM media AS eligible
-          WHERE eligible.event_id = ?
-            AND eligible.id IN (${placeholders})
+          WHERE eligible.event_id = ?3
+            AND eligible.id IN (${idPlaceholders})
             AND eligible.upload_state = 'stored'
-            AND eligible.publication_status = ?
+            AND eligible.publication_status = ?${expectedSlot}
             AND eligible.deleted_at IS NULL
-        ) = ?
+        ) = ?${countSlot}
     `).bind(
       target,
       target === 'published' ? changedAt : null,
-      eventId,
-      ...ids,
-      expected,
       eventId,
       ...ids,
       expected,

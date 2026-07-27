@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { MediaRepository } from '../../worker/db/media';
 import {
@@ -357,6 +358,40 @@ describe('manager settings and private photo intake', () => {
     const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.publication_status]));
     expect(states).toMatchObject({ [first.id]: 'published', [second.id]: 'published', [untouched.id]: 'unpublished' });
     expect((await response.json<any>()).data.changed).toEqual([first.id, second.id]);
+  });
+
+  it('supports the maximum bulk selection through D1 in request order', async () => {
+    const access = await eventAccess();
+    const seeded = await seedStoredMedia(access, range(MANAGER_BULK_SELECTION_MAX + 1));
+    const selectedIds = seeded
+      .slice(0, MANAGER_BULK_SELECTION_MAX)
+      .map(({ id }) => id)
+      .reverse();
+    const untouched = seeded[MANAGER_BULK_SELECTION_MAX]!;
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
+      method: 'POST',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        ids: selectedIds,
+        action: 'publish',
+        expectedStatus: 'unpublished',
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.changed).toEqual(selectedIds);
+    const rows = await env.DB.prepare(`
+      SELECT id, publication_status
+      FROM media
+      WHERE event_id = ?
+    `).bind(access.event.id).all<{ id: string; publication_status: string }>();
+    const states = new Map(rows.results.map((row) => [row.id, row.publication_status]));
+    expect(selectedIds.every((id) => states.get(id) === 'published')).toBe(true);
+    expect([...states.values()].filter((status) => status === 'published')).toHaveLength(
+      MANAGER_BULK_SELECTION_MAX,
+    );
+    expect(states.get(untouched.id)).toBe('unpublished');
   });
 
   it('leaves every selected row unchanged when a later bulk id conflicts', async () => {
