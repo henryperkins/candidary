@@ -208,6 +208,19 @@ export function ManagerPage() {
     }
   }, [loadingMore, mediaPath, nextMediaCursor]);
 
+  // iOS Safari refuses `writeText` outside a permitted gesture and rejects rather than resolving, and
+  // the API is absent entirely in any non-secure context. Left unhandled that is a silent no-op the
+  // host reads as a copied link, so the refusal is reported and the readable link stays on screen.
+  async function copyGuestLink() {
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(guestLink);
+      setActionError(null);
+    } catch {
+      setActionError({ message: 'The guest link could not be copied.', recoveryHint: guestLink });
+    }
+  }
+
   // Every host mutation reports through here, so a rejected write leaves the current cards, filters,
   // and section exactly where they were and only adds a dismissible notice.
   async function runManagerAction(action: () => Promise<void>) {
@@ -425,7 +438,7 @@ export function ManagerPage() {
     </main>
 
     <aside className="manager-utility">
-      <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void navigator.clipboard?.writeText(guestLink)}><Copy aria-hidden="true" /> Copy guest link</button></section>
+      <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void copyGuestLink()}><Copy aria-hidden="true" /> Copy guest link</button></section>
       <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(event.storedBytes)} of {STORAGE_CAP}</small></section>
       {exportPanel('utility')}
     </aside>

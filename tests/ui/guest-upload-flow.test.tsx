@@ -232,4 +232,22 @@ describe('mobile guest photo delivery', () => {
     expect(screen.getByText('Sending as Avery')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Edit name' })).toBeVisible();
   });
+
+  // iOS Safari with "Block All Cookies" throws on the storage access itself rather than returning
+  // null, so the drop has to keep working without the convenience of a remembered name.
+  it('still delivers when the browser refuses local storage', async () => {
+    const user = userEvent.setup();
+    const blocked = {
+      getItem: () => { throw new DOMException('The operation is insecure.', 'SecurityError'); },
+      setItem: () => { throw new DOMException('The operation is insecure.', 'SecurityError'); },
+    };
+    vi.spyOn(globalThis, 'localStorage', 'get').mockReturnValue(blocked as unknown as Storage);
+
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Take a photo' }));
+
+    expect(screen.queryByText('Enter your name before adding photos.')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Take a photo from your camera')).toBeInTheDocument();
+  });
 });

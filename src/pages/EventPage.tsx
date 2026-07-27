@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom';
 
 import { api, mediaPreview } from '../app/api';
+import { readGuestName } from '../app/guest-name-storage';
 import type { EventView, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
@@ -77,7 +78,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   async function leaveNote(eventForm: FormEvent<HTMLFormElement>) {
     eventForm.preventDefault();
     const form = new FormData(eventForm.currentTarget);
-    const guestName = localStorage.getItem('candidary_guest_name')?.trim() || null;
+    const guestName = readGuestName() || null;
     await api(`/api/event/${slug}/messages`, {
       method: 'POST',
       body: JSON.stringify({ guestName, body: form.get('body') }),
