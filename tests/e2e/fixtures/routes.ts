@@ -20,17 +20,27 @@ export const EVENT_FIXTURE = {
   purgeAfter: '2026-12-19T00:00:00Z',
 };
 
+interface GuestMessage {
+  id: string;
+  guestName: string;
+  body: string;
+  moderationStatus: 'approved';
+  createdAt: string;
+}
+
 interface GuestRouteOptions {
   event?: Partial<typeof EVENT_FIXTURE>;
   gallery?: ReturnType<typeof makeMedia>;
   contributions?: ReturnType<typeof makeMedia>;
-  messages?: Array<{
-    id: string;
-    guestName: string;
-    body: string;
-    moderationStatus: 'approved';
-    createdAt: string;
-  }>;
+  messages?: GuestMessage[];
+}
+
+interface ManagerRouteOptions {
+  event?: Partial<typeof EVENT_FIXTURE>;
+  // Keyed by the cursor the client sends back; `first` answers a request that carries no cursor.
+  mediaPages: Record<string, { media: ReturnType<typeof makeMedia>; nextCursor: string | null }>;
+  messages?: GuestMessage[];
+  exports?: unknown[];
 }
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
@@ -56,5 +66,37 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   }));
   await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { items: messages }, requestId: 'request-a' },
+  }));
+}
+
+export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions) {
+  const event = { ...EVENT_FIXTURE, ...options.event };
+  const base = `**/api/manage/events/${event.id}`;
+
+  await page.route('**/api/media/*/preview', (route) => route.fulfill({
+    status: 200,
+    contentType: 'image/png',
+    body: preview,
+  }));
+  await page.route(`${base}/media*`, (route) => {
+    // `cursor=` is a 422, so the client omits the parameter for the first page.
+    const cursor = new URL(route.request().url()).searchParams.get('cursor') ?? 'first';
+    const mediaPage = options.mediaPages[cursor] ?? { media: [], nextCursor: null };
+    return route.fulfill({ json: { data: mediaPage, requestId: 'request-a' } });
+  });
+  await page.route(new RegExp(`/api/manage/events/${event.id}$`, 'u'), (route) => route.fulfill({
+    json: { data: { event }, requestId: 'request-a' },
+  }));
+  await page.route(`${base}/messages`, (route) => route.fulfill({
+    json: { data: { messages: options.messages ?? [] }, requestId: 'request-a' },
+  }));
+  await page.route(`${base}/exports`, (route) => route.fulfill({
+    json: { data: { exports: options.exports ?? [] }, requestId: 'request-a' },
+  }));
+  await page.route(`${base}/links`, (route) => route.fulfill({
+    json: {
+      data: { guestLink: `https://candidary.test/join/${'guest-secret-'.repeat(8)}` },
+      requestId: 'request-a',
+    },
   }));
 }

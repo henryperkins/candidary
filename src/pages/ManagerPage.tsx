@@ -1,13 +1,14 @@
-import { Check, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2 } from 'lucide-react';
+import { Check, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 import { api, mediaOriginal, mediaPreview } from '../app/api';
 import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
-import type { EventView, ExportDownloadView, ExportView, MediaView, MessageView } from '../app/types';
+import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
+import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { ErrorState, LoadingState } from '../components/States';
 
 type Section = 'intake' | 'gallery' | 'messages' | 'share' | 'settings';
@@ -37,47 +38,104 @@ export function ManagerPage() {
   const [searchInput, setSearchInput] = useState('');
   const [guestFilter, setGuestFilter] = useState('');
   const [error, setError] = useState('');
+  const [nextMediaCursor, setNextMediaCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [actionError, setActionError] = useState('');
+  // Once the manager has rendered, a later load failure must not throw the host back to a bare error
+  // page: it becomes the same inline, recoverable notice a failed mutation uses.
+  const loadedOnce = useRef(false);
 
-  const mediaPath = useMemo(() => {
+  const mediaPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
     if (status !== 'all') params.set('status', status);
     if (guestFilter) params.set('guestName', guestFilter);
+    // The cursor is opaque and `cursor=` is a validation failure, so an absent cursor stays absent.
+    if (cursor) params.set('cursor', cursor);
     const query = params.toString();
     return `/api/manage/events/${eventId}/media${query ? `?${query}` : ''}`;
   }, [eventId, guestFilter, status]);
+
+  // Media and the continuation cursor belong to the current query. This tracks which one that is, so a
+  // request still open across a status or guest-filter change can tell that its answer is now stale.
+  const latestMediaPath = useRef(mediaPath);
+  useEffect(() => { latestMediaPath.current = mediaPath; }, [mediaPath]);
 
   const refresh = useCallback(async () => {
     try {
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
-        api<{ media: MediaView[] }>(mediaPath),
+        api<ManagerMediaPage>(mediaPath()),
         api<{ messages: MessageView[] }>(`/api/manage/events/${eventId}/messages`),
         api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`),
         api<{ guestLink: string }>(`/api/manage/events/${eventId}/links`),
       ]);
       setEvent(eventData.event);
       setMedia(mediaData.media);
+      setNextMediaCursor(mediaData.nextCursor ?? null);
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setGuestLink(linkData.guestLink);
       setError('');
+      loadedOnce.current = true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'The event manager could not be loaded.');
+      const message = caught instanceof Error ? caught.message : 'The event manager could not be loaded.';
+      if (loadedOnce.current) setActionError(message); else setError(message);
     }
   }, [eventId, mediaPath]);
 
   const refreshIntake = useCallback(async () => {
     try {
-      const [eventData, mediaData] = await Promise.all([
+      const [eventData, firstPage] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
-        api<{ media: MediaView[] }>(mediaPath),
+        api<ManagerMediaPage>(mediaPath()),
       ]);
       setEvent(eventData.event);
-      setMedia(mediaData.media);
+      // A poll opened under the previous filter must not merge its rows back over the narrowed list.
+      if (latestMediaPath.current !== mediaPath) return;
+      // The poll refreshes only the newest page. Its rows lead, every page the host already pulled in
+      // stays behind them, and an id carried by both sides appears once.
+      setMedia((current) => {
+        const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
+        return [...firstPage.media, ...current.filter(({ id }) => !refreshedIds.has(id))];
+      });
+      // Never rewind a live continuation cursor to the first page's own; only adopt one when paging
+      // had already reached the end and newer deliveries reopened it.
+      setNextMediaCursor((current) => current ?? firstPage.nextCursor ?? null);
     } catch {
       // Keep the last usable intake visible; the next poll or a host action retries.
     }
   }, [eventId, mediaPath]);
+
+  const loadMoreMedia = useCallback(async () => {
+    if (!nextMediaCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await api<ManagerMediaPage>(mediaPath(nextMediaCursor));
+      // The cursor was issued for the query that was current when the host asked for more.
+      if (latestMediaPath.current !== mediaPath) return;
+      setMedia((current) => {
+        const known = new Set(current.map(({ id }) => id));
+        return [...current, ...page.media.filter(({ id }) => !known.has(id))];
+      });
+      setNextMediaCursor(page.nextCursor ?? null);
+      setActionError('');
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, mediaPath, nextMediaCursor]);
+
+  // Every host mutation reports through here, so a rejected write leaves the current cards, filters,
+  // and section exactly where they were and only adds a dismissible notice.
+  async function runManagerAction(action: () => Promise<void>) {
+    setActionError('');
+    try {
+      await action();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : 'The manager action could not be completed.');
+    }
+  }
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
@@ -94,6 +152,7 @@ export function ManagerPage() {
   function openSection(next: Section) {
     setSection(next);
     setSelected([]);
+    setActionError('');
     if (next === 'intake') setStatus('all');
     if (next === 'gallery' && status === 'all') setStatus('unpublished');
   }
@@ -119,9 +178,8 @@ export function ManagerPage() {
     await refresh();
   }
 
-  async function saveSettings(formEvent: FormEvent<HTMLFormElement>) {
-    formEvent.preventDefault();
-    const form = new FormData(formEvent.currentTarget);
+  async function saveSettings(element: HTMLFormElement) {
+    const form = new FormData(element);
     await api(`/api/manage/events/${eventId}/settings`, { method: 'PATCH', body: JSON.stringify({
       name: form.get('name'),
       welcomeMessage: form.get('welcomeMessage'),
@@ -158,38 +216,53 @@ export function ManagerPage() {
     const rotated = await api<{ managementLink: string }>(`/api/manage/events/${eventId}/links/manager/rotate`, { method: 'POST', body: '{}' });
     window.location.assign(rotated.managementLink);
   }
-  async function deleteEvent(formEvent: FormEvent<HTMLFormElement>) {
-    formEvent.preventDefault();
-    const form = new FormData(formEvent.currentTarget);
+  async function deleteEvent(element: HTMLFormElement) {
+    const form = new FormData(element);
     await api(`/api/manage/events/${eventId}`, { method: 'DELETE', body: JSON.stringify({ confirmation: form.get('confirmation') }) });
     window.location.assign('/');
   }
 
   function renderMediaGrid(publicationControls: boolean) {
     if (!media.length) return <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>No matching photos.</h3><p>New private deliveries will appear here immediately.</p></div>;
-    return <div className="moderation-grid intake-grid">{media.map((item) => <article className={selected.includes(item.id) ? 'selected' : ''} key={item.id}>
-      <div className="intake-photo">
-        {publicationControls && <label className="intake-select"><input type="checkbox" aria-label={`Select ${item.originalFilename}`} checked={selected.includes(item.id)} onChange={(change) => setSelected((current) => change.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></label>}
-        <img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} />
-      </div>
-      <div>
-        <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
-        <strong>{item.caption || item.originalFilename}</strong>
-        <small>From {item.guestName}</small>
-        <div className="intake-card-actions">
-          <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>
-          {publicationControls && item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void changePublication(item, 'publish')}><Eye aria-hidden="true" /></button>}
-          {publicationControls && item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void changePublication(item, 'hide')}><EyeOff aria-hidden="true" /></button>}
-          <button aria-label={`Delete ${item.originalFilename}`} onClick={() => void changePublication(item, 'delete')}><Trash2 aria-hidden="true" /></button>
+    return <>
+      <div className="moderation-grid intake-grid">{media.map((item) => <article className={selected.includes(item.id) ? 'selected' : ''} key={item.id}>
+        <div className="intake-photo">
+          {publicationControls && <label className="intake-select"><input type="checkbox" aria-label={`Select ${item.originalFilename}`} checked={selected.includes(item.id)} onChange={(change) => setSelected((current) => change.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></label>}
+          <img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} loading="lazy" decoding="async" />
         </div>
-      </div>
-    </article>)}</div>;
+        <div>
+          <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
+          <strong>{item.caption || item.originalFilename}</strong>
+          <small>From {item.guestName}</small>
+          <div className="intake-card-actions">
+            <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>
+            {publicationControls && item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'publish'))}><Eye aria-hidden="true" /></button>}
+            {publicationControls && item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'hide'))}><EyeOff aria-hidden="true" /></button>}
+            <button aria-label={`Delete ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'delete'))}><Trash2 aria-hidden="true" /></button>
+          </div>
+        </div>
+      </article>)}</div>
+      {nextMediaCursor && <div className="media-more">
+        <button type="button" className="button button--secondary" disabled={loadingMore} onClick={() => void loadMoreMedia()}>Load more photos</button>
+      </div>}
+    </>;
   }
 
   if (error) return <main className="centered-state"><Brand /><ErrorState message={error} /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 
   const photoCount = event.storedMediaCount ?? 0;
+  const activeExport = exports[0];
+  // One panel, two placements: the wide utility rail and the narrow Share section. The stylesheet
+  // reveals exactly one of them, so the host never sees the same export control twice.
+  const exportPanel = (variant: 'share' | 'utility') => <ManagerExportPanel
+    className={`manager-export-panel--${variant}`}
+    job={activeExport}
+    download={activeExport ? exportDownloads[activeExport.id] : undefined}
+    onPrepare={() => runManagerAction(prepareExport)}
+    onDownload={(job) => runManagerAction(() => downloadExport(job))}
+    onRetry={(job) => runManagerAction(() => retryExport(job))}
+  />;
   return <div className="manager-shell manager-shell--intake">
     <aside className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
       <button aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
@@ -202,6 +275,11 @@ export function ManagerPage() {
     <main className="manager-main">
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
+
+      {actionError && <p className="manager-action-error" role="alert">
+        <span>{actionError}</span>
+        <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError('')}><X aria-hidden="true" /></button>
+      </p>}
 
       {section === 'intake' && <section aria-labelledby="intake-title">
         <div className="workspace-heading"><div><p className="section-label">Private collection</p><h2 id="intake-title">Live intake</h2></div></div>
@@ -216,21 +294,21 @@ export function ManagerPage() {
       {section === 'gallery' && <section aria-labelledby="gallery-publishing-title">
         <div className="workspace-heading"><div><p className="section-label">Optional shared view</p><h2 id="gallery-publishing-title">Gallery publishing</h2></div><div className="filter-tabs" role="group" aria-label="Publication status">{(['unpublished', 'published', 'hidden'] as const).map((value) => <button className={status === value ? 'active' : ''} onClick={() => { setStatus(value); setSelected([]); }} key={value}>{value}</button>)}</div></div>
         {!event.galleryVisible && <p className="manager-notice">The guest gallery is off. Publishing choices are saved for whenever you enable it.</p>}
-        <div className="bulk-bar"><span>{selected.length ? `${selected.length} selected` : 'Select photos to update the optional gallery'}</span><button className="button button--approve" disabled={!selected.length} onClick={() => void bulk('publish')}><Eye aria-hidden="true" /> Publish selected</button><button className="button button--danger-outline" disabled={!selected.length} onClick={() => void bulk('hide')}><EyeOff aria-hidden="true" /> Hide selected</button></div>
+        <div className="bulk-bar"><span>{selected.length ? `${selected.length} selected` : 'Select photos to update the optional gallery'}</span><button className="button button--approve" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('publish'))}><Eye aria-hidden="true" /> Publish selected</button><button className="button button--danger-outline" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('hide'))}><EyeOff aria-hidden="true" /> Hide selected</button></div>
         {renderMediaGrid(true)}
       </section>}
 
-      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share the photo drop</h2><div className="share-layout"><div><CopyableLinkCard label="Guest link" value={guestLink} /><div className="button-row"><button className="button button--secondary" onClick={() => void rotateGuestLink()}>Rotate guest link</button><button className="button button--secondary" onClick={() => void rotateManagerLink()}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Guest event QR code" /><a className="button button--secondary" href={qr} download="candidary-guest-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div></section>}
+      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share the photo drop</h2><div className="share-layout"><div><CopyableLinkCard label="Guest link" value={guestLink} /><div className="button-row"><button className="button button--secondary" onClick={() => void runManagerAction(rotateGuestLink)}>Rotate guest link</button><button className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Guest event QR code" /><a className="button button--secondary" href={qr} download="candidary-guest-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div>{exportPanel('share')}</section>}
 
-      {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void moderateMessage(message, 'approve')}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void moderateMessage(message, 'reject')}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void moderateMessage(message, 'delete')}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
+      {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
 
-      {section === 'settings' && <section className="manager-panel"><p className="section-label">Event controls</p><h2>Settings</h2><form className="settings-form" onSubmit={(formEvent) => void saveSettings(formEvent)}><label>Event name<input name="name" defaultValue={event.name} /></label><label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label><label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label><label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label><label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label><button className="button button--primary">Save settings</button></form><div className="danger-zone"><h3>Delete this event</h3><p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p><form onSubmit={(formEvent) => void deleteEvent(formEvent)}><input name="confirmation" aria-label="Confirm event name" autoComplete="off" /><button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button></form></div></section>}
+      {section === 'settings' && <section className="manager-panel"><p className="section-label">Event controls</p><h2>Settings</h2><form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => saveSettings(element)); }}><label>Event name<input name="name" defaultValue={event.name} /></label><label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label><label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label><label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label><label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label><button className="button button--primary">Save settings</button></form><div className="danger-zone"><h3>Delete this event</h3><p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p><form onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => deleteEvent(element)); }}><input name="confirmation" aria-label="Confirm event name" autoComplete="off" /><button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button></form></div></section>}
     </main>
 
     <aside className="manager-utility">
       <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void navigator.clipboard?.writeText(guestLink)}><Copy aria-hidden="true" /> Copy guest link</button></section>
       <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(event.storedBytes)} of {STORAGE_CAP}</small></section>
-      <section className="manager-utility__export"><p className="section-label">Complete export</p><h2>Keep every original</h2>{exports[0] ? <div className="export-state"><strong>{exports[0].state}</strong><span>{exports[0].mediaCount} photos · {exports[0].partCount || 0} parts · attempt {exports[0].attempt}</span>{exports[0].state === 'ready' && !exportDownloads[exports[0].id] && <button className="button button--secondary" onClick={() => void downloadExport(exports[0]!)}><Download aria-hidden="true" /> Get download links</button>}{exportDownloads[exports[0].id] && <div className="export-links"><a href={exportDownloads[exports[0].id]!.manifest.url}>Manifest</a>{exportDownloads[exports[0].id]!.parts.map((part) => <a href={part.url} key={part.partNumber}>Part {part.partNumber} <small>{part.mediaCount} photos</small></a>)}</div>}{(exports[0].state === 'failed' || exports[0].state === 'expired') && <button className="button button--secondary" onClick={() => void retryExport(exports[0]!)}>Retry export</button>}</div> : <><p>Prepare every delivered original, whether or not it appears in the gallery.</p><button className="button button--primary button--wide" onClick={() => void prepareExport()}><Download aria-hidden="true" /> Prepare download</button></>}</section>
+      {exportPanel('utility')}
     </aside>
   </div>;
 }

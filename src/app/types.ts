@@ -28,6 +28,13 @@ export interface MediaView {
   createdAt?: string;
 }
 
+// One keyset page of manager media. `nextCursor` is opaque: pass it back untouched, and omit the
+// parameter entirely when it is null — the server rejects an empty `cursor` as malformed.
+export interface ManagerMediaPage {
+  media: MediaView[];
+  nextCursor: string | null;
+}
+
 export interface MessageView {
   id: string;
   kind?: 'message' | 'caption';

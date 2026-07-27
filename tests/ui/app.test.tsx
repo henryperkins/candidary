@@ -3,7 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { createAppRouter } from '../../src/app/router';
+import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
@@ -211,7 +213,202 @@ describe('guest event experience', () => {
   });
 });
 
+const MANAGED_EVENT = {
+  id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
+  welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
+  storedMediaCount: 3, storedBytes: 128,
+  guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+};
+
+interface MediaPage { media: unknown[]; nextCursor: string | null }
+
+// Answers every manager GET, resolving `/media` from a cursor-keyed page map that the test may mutate
+// between requests. A request that carries no `cursor` parameter is the first page: the server rejects
+// `cursor=` as malformed, so the client has to omit the parameter rather than send an empty one.
+function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] = []) {
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+    if (url.includes('/media')) {
+      mediaRequests.push(url);
+      const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
+      return json(pages[cursor] ?? { media: [], nextCursor: null });
+    }
+    if (url.includes('/messages')) return json({ messages: [] });
+    if (url.endsWith('/exports')) return json({ exports: [] });
+    if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+    throw new Error(`Unexpected request ${url}`);
+  });
+}
+
+function previewSources() {
+  return Array.from(document.querySelectorAll('.moderation-grid img'), (image) => image.getAttribute('src'));
+}
+
 describe('manager experience', () => {
+  it('appends the next media page and keeps every row unique', async () => {
+    const rows = makeMedia(MANAGER_MEDIA_PAGE_SIZE + 1);
+    const mediaRequests: string[] = [];
+    vi.stubGlobal('fetch', managerFetch({
+      first: { media: rows.slice(0, MANAGER_MEDIA_PAGE_SIZE), nextCursor: 'page-two' },
+      // The oldest row of page one shifted onto page two; appending it twice would be a visible bug.
+      'page-two': { media: [rows[MANAGER_MEDIA_PAGE_SIZE - 1], rows[MANAGER_MEDIA_PAGE_SIZE]], nextCursor: null },
+    }, mediaRequests));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(MANAGER_MEDIA_PAGE_SIZE));
+    expect(mediaRequests[0], 'an empty cursor is a 422, so the first page omits it').not.toContain('cursor');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(MANAGER_MEDIA_PAGE_SIZE + 1));
+    expect(mediaRequests.at(-1)).toContain('cursor=page-two');
+    expect(new Set(previewSources()).size).toBe(MANAGER_MEDIA_PAGE_SIZE + 1);
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+  });
+
+  it('manager previews use lazy loading and asynchronous decoding', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: makeMedia(3), nextCursor: null } }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
+
+    for (const image of document.querySelectorAll('.moderation-grid img')) {
+      expect(image).toHaveAttribute('loading', 'lazy');
+      expect(image).toHaveAttribute('decoding', 'async');
+    }
+  });
+
+  it('merges the polled first page ahead of retained pages without dropping or duplicating rows', async () => {
+    // `Moment 2` … `Moment 8`; small pages keep the merge arithmetic legible.
+    const rows = makeMedia(8).slice(1);
+    const pages: Record<string, MediaPage> = {
+      first: { media: rows.slice(0, 3), nextCursor: 'page-two' },
+      'page-two': { media: rows.slice(3, 5), nextCursor: 'page-three' },
+      'page-three': { media: rows.slice(5, 6), nextCursor: null },
+    };
+    const mediaRequests: string[] = [];
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', managerFetch(pages, mediaRequests));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(5));
+
+    // A new delivery lands, pushing `Moment 4` off the refreshed first page. The retained second page
+    // is untouched, and `Moment 2`/`Moment 3` are now in both the refreshed page and the retained list.
+    pages.first = { media: [rows[6], rows[0], rows[1]], nextCursor: 'page-two' };
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    expect(poll).toBeTypeOf('function');
+    await act(async () => { (poll as () => void)(); });
+
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6));
+    expect(mediaRequests.at(-1), 'the poll asks for the first page only').not.toContain('cursor');
+    expect(screen.getByAltText('Moment 8'), 'the polled arrival merges ahead').toBeVisible();
+    expect(screen.getByAltText('Moment 4'), 'a row pushed off the first page is retained').toBeVisible();
+    expect(screen.getByAltText('Moment 6'), 'the retained second page survives the poll').toBeVisible();
+    expect(new Set(previewSources()).size).toBe(6);
+
+    // The poll must not rewind the continuation cursor to the first page's own `nextCursor`.
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(7));
+    expect(mediaRequests.at(-1)).toContain('cursor=page-three');
+  });
+
+  it('discards media pages that resolve after the guest filter narrowed the list', async () => {
+    const rows = makeMedia(7).slice(1);
+    const held: Array<() => void> = [];
+    let mediaRequests = 0;
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        // Requests two and three are the load-more page and the poll. Hold both open until the host
+        // has already refiltered, then answer them with rows that belong to the unfiltered query.
+        if (mediaRequests === 2 || mediaRequests === 3) {
+          const stale = mediaRequests === 2
+            ? { media: rows.slice(2, 4), nextCursor: null }
+            : { media: [rows[4], rows[0], rows[1]], nextCursor: 'page-two' };
+          return new Promise<Response>((resolve) => { held.push(() => resolve(json(stale))); });
+        }
+        return json(url.includes('guestName=')
+          ? { media: rows.slice(5), nextCursor: null }
+          : { media: rows.slice(0, 2), nextCursor: 'page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    await act(async () => { (poll as () => void)(); });
+    expect(held).toHaveLength(2);
+
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    expect(await screen.findByAltText('Moment 7')).toBeVisible();
+
+    await act(async () => { for (const release of held) release(); });
+    // Both answers belong to the unfiltered query. Appending or merging either would resurrect rows the
+    // host just filtered away, and the poll's cursor would reopen paging over the wrong list.
+    for (const caption of ['Moment 2', 'Moment 3', 'Moment 4', 'Moment 5', 'Moment 6']) {
+      expect(screen.queryByAltText(caption), caption).not.toBeInTheDocument();
+    }
+    expect(screen.getByAltText('Moment 7')).toBeVisible();
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the manager view in place when a bulk publish, delete, or export fails', async () => {
+    const rows = makeMedia(3).slice(1);
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
+        return errorJson({ code: 'CONFLICT', message: 'That photo changed before your update.', requestId: 'request-a' }, 409);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: rows, nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /gallery/i }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid article')).toHaveLength(2));
+
+    async function expectRecoverableFailure(label: string, act_: () => Promise<void>) {
+      await act_();
+      expect(await screen.findByRole('alert'), label).toHaveTextContent('That photo changed before your update.');
+      expect(screen.getByRole('heading', { name: 'Gallery publishing' }), label).toBeVisible();
+      expect(document.querySelectorAll('.moderation-grid article'), label).toHaveLength(2);
+    }
+
+    await user.click(screen.getByRole('checkbox', { name: 'Select moment-2.jpg' }));
+    await expectRecoverableFailure('bulk publish', () => user.click(screen.getByRole('button', { name: 'Publish selected' })));
+    await expectRecoverableFailure('delete', () => user.click(screen.getByRole('button', { name: 'Delete moment-2.jpg' })));
+    await expectRecoverableFailure('export', () => user.click(screen.getByRole('button', { name: 'Prepare download' })));
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+  });
+
   it('polls live intake so a new private delivery appears without navigation', async () => {
     let mediaRequests = 0;
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
