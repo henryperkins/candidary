@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import { MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { makeMedia } from './fixtures/ui-data';
-import { measureDocument, measureTarget } from './helpers/geometry';
+import { measureDocument, measureFold, measureTarget } from './helpers/geometry';
 
 // A wedding-scale event. The route hands out one page at a time, exactly as the paginated endpoint does.
 const STORED_PHOTOS = 120;
@@ -61,10 +61,11 @@ test('exposes export in the mobile share section rather than below the intake gr
 
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  const grid = page.locator('.moderation-grid');
-  await expect(grid).toBeVisible();
-  const gridBox = await grid.boundingBox();
-  const gridBottom = (gridBox?.y ?? 0) + (gridBox?.height ?? 0);
+  await expect(page.locator('.moderation-grid')).toBeVisible();
+  // Intake is where the 120-photo grid lives. At phone width it carries no export control at all, so
+  // there is nothing to bury underneath that grid — the rail copy is the only one in the document.
+  await expect(page.locator('.manager-export-panel')).toHaveCount(1);
+  await expect(page.locator('.manager-export-panel')).toBeHidden();
 
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   const sharePanel = page.locator('.manager-export-panel--share');
@@ -79,9 +80,10 @@ test('exposes export in the mobile share section rather than below the intake gr
   expect(prepareSize.width).toBeGreaterThanOrEqual(44);
   expect(prepareSize.height).toBeGreaterThanOrEqual(44);
 
-  // Reaching the export no longer means scrolling past every photo the event has taken in.
-  const panelBox = await sharePanel.boundingBox();
-  expect(panelBox?.y ?? 0).toBeLessThan(gridBottom);
+  // Share is short enough that the whole export panel is reached within one screen of scrolling from
+  // the top of the manager — the property that makes attaching it here worth anything.
+  const bounds = await measureFold(page, sharePanel);
+  expect(bounds.bottom, 'export reached within one screen of scrolling').toBeLessThanOrEqual(bounds.fold * 2);
 
   const shareSize = await measureDocument(page);
   expect(shareSize.scrollWidth).toBeLessThanOrEqual(shareSize.clientWidth + 1);

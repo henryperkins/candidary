@@ -57,8 +57,18 @@ export function ManagerPage() {
 
   // Media and the continuation cursor belong to the current query. This tracks which one that is, so a
   // request still open across a status or guest-filter change can tell that its answer is now stale.
+  // Dropping the cursor here rather than waiting for the response also retires `Load more photos`
+  // immediately, so the host cannot spend the previous query's cursor against the new one.
   const latestMediaPath = useRef(mediaPath);
-  useEffect(() => { latestMediaPath.current = mediaPath; }, [mediaPath]);
+  useEffect(() => {
+    latestMediaPath.current = mediaPath;
+    setNextMediaCursor(null);
+  }, [mediaPath]);
+
+  // Mirrors the rendered rows so the poll can compare an incoming first page against them without
+  // taking `media` as a dependency, which would restart the five-second interval on every arrival.
+  const renderedMedia = useRef<MediaView[]>([]);
+  useEffect(() => { renderedMedia.current = media; }, [media]);
 
   const refresh = useCallback(async () => {
     try {
@@ -70,8 +80,13 @@ export function ManagerPage() {
         api<{ guestLink: string }>(`/api/manage/events/${eventId}/links`),
       ]);
       setEvent(eventData.event);
-      setMedia(mediaData.media);
-      setNextMediaCursor(mediaData.nextCursor ?? null);
+      // A load opened under the previous query must not reinstate its rows or its cursor. Polling
+      // merges rather than replaces, so a stale list here would sit behind every later poll forever.
+      // Only the media half is query-scoped; notes, exports, and links are the same either way.
+      if (latestMediaPath.current === mediaPath) {
+        setMedia(mediaData.media);
+        setNextMediaCursor(mediaData.nextCursor ?? null);
+      }
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setGuestLink(linkData.guestLink);
@@ -92,15 +107,24 @@ export function ManagerPage() {
       setEvent(eventData.event);
       // A poll opened under the previous filter must not merge its rows back over the narrowed list.
       if (latestMediaPath.current !== mediaPath) return;
-      // The poll refreshes only the newest page. Its rows lead, every page the host already pulled in
-      // stays behind them, and an id carried by both sides appears once.
-      setMedia((current) => {
-        const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
-        return [...firstPage.media, ...current.filter(({ id }) => !refreshedIds.has(id))];
-      });
+      const current = renderedMedia.current;
+      const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
+      const retained = current.filter(({ id }) => !refreshedIds.has(id));
+      // Sharing no id at all with the rows on screen means the keyset moved by more than a page inside
+      // one interval — or emptied. Either way the rows between the new first page and the retained ones
+      // are in no list and behind no cursor, so trust the page we can actually see and start again from
+      // its cursor rather than stitch together a list with an invisible hole in it.
+      if (current.length > 0 && retained.length === current.length) {
+        setMedia(firstPage.media);
+        setNextMediaCursor(firstPage.nextCursor ?? null);
+        return;
+      }
+      // Otherwise the poll refreshes only the newest page: its rows lead, every page the host already
+      // pulled in stays behind them, and an id carried by both sides appears once.
+      setMedia([...firstPage.media, ...retained]);
       // Never rewind a live continuation cursor to the first page's own; only adopt one when paging
       // had already reached the end and newer deliveries reopened it.
-      setNextMediaCursor((current) => current ?? firstPage.nextCursor ?? null);
+      setNextMediaCursor((cursor) => cursor ?? firstPage.nextCursor ?? null);
     } catch {
       // Keep the last usable intake visible; the next poll or a host action retries.
     }

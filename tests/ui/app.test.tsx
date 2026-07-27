@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import { mediaPreview } from '../../src/app/api';
 import { createAppRouter } from '../../src/app/router';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
@@ -307,6 +308,7 @@ describe('manager experience', () => {
 
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6));
     expect(mediaRequests.at(-1), 'the poll asks for the first page only').not.toContain('cursor');
+    expect(previewSources()[0], 'refreshed rows lead the retained ones').toBe(mediaPreview(rows[6]!.id));
     expect(screen.getByAltText('Moment 8'), 'the polled arrival merges ahead').toBeVisible();
     expect(screen.getByAltText('Moment 4'), 'a row pushed off the first page is retained').toBeVisible();
     expect(screen.getByAltText('Moment 6'), 'the retained second page survives the poll').toBeVisible();
@@ -316,6 +318,133 @@ describe('manager experience', () => {
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(7));
     expect(mediaRequests.at(-1)).toContain('cursor=page-three');
+  });
+
+  it('never lets a superseded load reinstate its rows or its cursor', async () => {
+    const rows = makeMedia(4).slice(1);
+    let releaseFiltered!: () => void;
+    let mediaRequests = 0;
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        // Hold the filtered load so it lands after the host has already cleared the filter.
+        if (url.includes('guestName=')) {
+          return new Promise<Response>((resolve) => {
+            releaseFiltered = () => resolve(json({ media: rows.slice(2), nextCursor: 'stale-page' }));
+          });
+        }
+        return json({ media: rows.slice(0, 2), nextCursor: null });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(mediaRequests).toBe(3));
+
+    await act(async () => { releaseFiltered(); });
+    // `refresh` replaces rather than merges, so before polling merged this was self-correcting. It is
+    // not any more: a stale list installed here sits behind every later poll for the rest of the session.
+    expect(screen.queryByAltText('Moment 4'), 'filtered rows do not return').not.toBeInTheDocument();
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: 'Load more photos' }), 'no stale cursor').not.toBeInTheDocument();
+
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    await act(async () => { (poll as () => void)(); });
+    expect(screen.queryByAltText('Moment 4'), 'and the poll cannot retain them').not.toBeInTheDocument();
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
+  });
+
+  it('restarts from the polled first page when the keyset moved past everything on screen', async () => {
+    // Pages of two keep the burst arithmetic small: the host holds four rows, then six newer photos
+    // land inside one interval, so the refreshed first page shares no id with anything on screen.
+    const rows = makeMedia(8).slice(1);
+    const mediaRequests: string[] = [];
+    const pages: Record<string, MediaPage> = {
+      first: { media: rows.slice(0, 2), nextCursor: 'page-two' },
+      'page-two': { media: rows.slice(2, 4), nextCursor: 'page-three' },
+      'page-four': { media: rows.slice(6), nextCursor: null },
+    };
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', managerFetch(pages, mediaRequests));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(4));
+
+    pages.first = { media: rows.slice(4, 6), nextCursor: 'page-four' };
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    await act(async () => { (poll as () => void)(); });
+
+    // Merging would leave Moment 2 … Moment 5 on screen with the photos between them unreachable by
+    // any cursor. The discontinuity is provable, so the list restarts from the page the host can see.
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
+    expect(screen.getByAltText('Moment 6')).toBeVisible();
+    expect(screen.getByAltText('Moment 7')).toBeVisible();
+    for (const caption of ['Moment 2', 'Moment 3', 'Moment 4', 'Moment 5']) {
+      expect(screen.queryByAltText(caption), caption).not.toBeInTheDocument();
+    }
+
+    // The restart adopts the new cursor rather than keeping one that points into the abandoned keyset.
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
+    expect(mediaRequests.at(-1)).toContain('cursor=page-four');
+    expect(screen.getByAltText('Moment 8')).toBeVisible();
+  });
+
+  it('retires the continuation cursor the moment the guest filter changes', async () => {
+    const rows = makeMedia(4).slice(1);
+    let releaseFiltered!: () => void;
+    let mediaRequests = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        // Hold the filtered load open: this is the window in which the old cursor is still spendable.
+        if (url.includes('guestName=')) {
+          return new Promise<Response>((resolve) => {
+            releaseFiltered = () => resolve(json({ media: rows.slice(2), nextCursor: null }));
+          });
+        }
+        return json({ media: rows.slice(0, 2), nextCursor: 'page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Load more photos' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+
+    // The filtered rows have not arrived yet, so the old grid is still on screen — but the cursor it
+    // was paged with belongs to the unfiltered keyset and must no longer be spendable.
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+    expect(mediaRequests).toBe(2);
+
+    await act(async () => { releaseFiltered(); });
+    expect(await screen.findByAltText('Moment 4')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
   });
 
   it('discards media pages that resolve after the guest filter narrowed the list', async () => {
