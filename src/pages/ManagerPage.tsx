@@ -17,12 +17,28 @@ type MediaStatus = 'all' | MediaView['publicationStatus'];
 
 // The rows and the cursor that continues them are one value. Polling has to compare an incoming first
 // page against the rows on screen and decide the cursor from that same verdict, and React only
-// guarantees an accurate `current` inside a functional updater — so both live in one state and every
-// write is an updater. Anything held outside the update queue, a ref included, lags the committed list
-// by at least a scheduler turn, which is long enough for a poll to overwrite a page just appended.
+// guarantees an accurate `current` inside a functional updater — so both live in one state, and any
+// write derived from what is already there has to be an updater. Anything held outside the update
+// queue, a ref included, lags the committed list by at least a scheduler turn, which is long enough
+// for a poll to overwrite a page just appended.
+//
+// The one absolute write is the whole-page replacement in `refresh`. It derives from nothing on
+// screen: its rows and its cursor arrive in the same response and are consistent by construction, and
+// `latestMediaPath` is what keeps it off a query it no longer belongs to. Read the rule as "reads then
+// writes must be updaters", not "no absolute writes" — a partial replacement is never safe absolutely.
 interface MediaPageState {
   rows: MediaView[];
   cursor: string | null;
+}
+
+// A dismissible notice, and the way out of it when there is one to state. A refused write is retryable
+// by definition — the control that failed is still under the host's thumb — but a load failure can be
+// a dead session or an ended event, where `describeLoadFailure` holds the only instruction that
+// recovers it. Dropping that hint here would leave the host reading "This session has expired." with
+// no mention of the management link, which is the whole point of computing it.
+interface ManagerNotice {
+  message: string;
+  recoveryHint?: string;
 }
 
 function formatBytes(bytes = 0) {
@@ -51,9 +67,10 @@ export function ManagerPage() {
   const [guestFilter, setGuestFilter] = useState('');
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [actionError, setActionError] = useState('');
+  const [actionError, setActionError] = useState<ManagerNotice | null>(null);
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
-  // page: it becomes the same inline, recoverable notice a failed mutation uses.
+  // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
+  // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
 
   const mediaPath = useCallback((cursor?: string) => {
@@ -101,7 +118,7 @@ export function ManagerPage() {
       loadedOnce.current = true;
     } catch (caught) {
       const loadFailure = describeLoadFailure(caught, 'manager', 'The event manager could not be loaded.');
-      if (loadedOnce.current) setActionError(loadFailure.message); else setFailure(loadFailure);
+      if (loadedOnce.current) setActionError(loadFailure); else setFailure(loadFailure);
     }
   }, [eventId, mediaPath]);
 
@@ -155,9 +172,9 @@ export function ManagerPage() {
           cursor: page.nextCursor ?? null,
         };
       });
-      setActionError('');
+      setActionError(null);
     } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.');
+      setActionError({ message: caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.' });
     } finally {
       setLoadingMore(false);
     }
@@ -166,11 +183,11 @@ export function ManagerPage() {
   // Every host mutation reports through here, so a rejected write leaves the current cards, filters,
   // and section exactly where they were and only adds a dismissible notice.
   async function runManagerAction(action: () => Promise<void>) {
-    setActionError('');
+    setActionError(null);
     try {
       await action();
     } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : 'The manager action could not be completed.');
+      setActionError({ message: caught instanceof Error ? caught.message : 'The manager action could not be completed.' });
     }
   }
 
@@ -189,7 +206,7 @@ export function ManagerPage() {
   function openSection(next: Section) {
     setSection(next);
     setSelected([]);
-    setActionError('');
+    setActionError(null);
     if (next === 'intake') setStatus('all');
     if (next === 'gallery' && status === 'all') setStatus('unpublished');
     // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
@@ -327,9 +344,11 @@ export function ManagerPage() {
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
+      {/* One live region carrying both lines, for the same reason `ErrorState` does: a region that
+          announces only what broke never mentions the one thing that recovers it. */}
       {actionError && <p className="manager-action-error" role="alert">
-        <span>{actionError}</span>
-        <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError('')}><X aria-hidden="true" /></button>
+        <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>
+        <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
       </p>}
 
       {section === 'intake' && <section aria-labelledby="intake-title">

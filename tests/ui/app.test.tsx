@@ -730,6 +730,73 @@ describe('manager experience', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
+  it('names the way out when a load fails after the manager has already rendered', async () => {
+    let mediaRequests = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        // A manager session lasts twelve hours. The one that expires overnight expires against a page
+        // that has been rendered for hours, so the failure lands on the `loadedOnce` path.
+        return mediaRequests > 1
+          ? errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401)
+          : json({ media: makeMedia(2).slice(1), nextCursor: null });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    // Any host action that reloads the manager will do; filtering is the one that needs no write.
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+
+    // Pressing a button cannot mint a session, so the notice has to name the management link. A bare
+    // "This session has expired." leaves the host with no stated way back into their own event.
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('This session has expired.');
+    expect(notice).toHaveTextContent('Open the latest management link you saved to start again.');
+    // Still the inline, dismissible notice: the manager the host was working in survives.
+    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a rejected write without inventing a recovery instruction for it', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
+        return errorJson({ code: 'CONFLICT', message: 'That photo changed before your update.', requestId: 'request-a' }, 409);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Delete moment-2.jpg' }));
+
+    // A refused write is retryable by definition — the control is still under the host's thumb — so
+    // the notice carries the failure and nothing else. The recovery line belongs to load failures.
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('That photo changed before your update.');
+    expect(notice.querySelector('.manager-action-error__recovery')).toBeNull();
+  });
+
   it('opens on live intake, filters by guest name, and keeps gallery publishing secondary', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
