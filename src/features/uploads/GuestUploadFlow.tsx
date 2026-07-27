@@ -1,16 +1,14 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, ClientApiError } from '../../app/api';
-import { MAX_IMAGE_BYTES, UPLOAD_BATCH_SIZE } from '../../../shared/constants';
+import { MAX_IMAGE_BYTES } from '../../../shared/constants';
+import { createBrowserTransport } from './browser-upload-transport';
 import {
   getReceiptCount,
   removeQueueItem,
   runUploadQueue,
-  type ReservationResult,
   type UploadQueueItem,
   type UploadQueueState,
-  type UploadReservation,
   type UploadTransport,
 } from './upload-queue';
 
@@ -34,13 +32,6 @@ const PROVISIONAL_HEIF_TYPES = new Map([
   ['image/x-heif', 'heif'],
   ['image/x-heif-sequence', 'heif'],
 ]);
-const FINALIZE_REUPLOAD_CODES = new Set([
-  'UPLOAD_RESERVATION_EXPIRED',
-  'UPLOAD_FINALIZE_CONFLICT',
-  'FILE_TOO_LARGE',
-  'FILE_TYPE_UNSUPPORTED',
-]);
-
 interface GuestUploadEvent {
   name: string;
   eventDate: string;
@@ -54,133 +45,6 @@ interface GuestUploadFlowProps {
   slug: string;
   transport?: UploadTransport;
   onDelivered?: (count: number) => void;
-}
-
-interface BatchResponseItem {
-  idempotencyKey: string;
-  status: 'accepted' | 'rejected';
-  media?: { id: string; mimeType: string };
-  uploadUrl?: string;
-  error?: { message: string };
-}
-
-function cancellation() {
-  return new DOMException('Sending was cancelled.', 'AbortError');
-}
-
-function backoff(attempt: number, signal?: AbortSignal) {
-  return new Promise<void>((resolve) => {
-    if (signal?.aborted) return resolve();
-    const settle = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', settle);
-      resolve();
-    };
-    const timer = setTimeout(settle, 350 * 2 ** attempt);
-    signal?.addEventListener('abort', settle, { once: true });
-  });
-}
-
-function xhrUpload(
-  file: File,
-  reservation: UploadReservation,
-  progress: (percent: number) => void,
-  signal?: AbortSignal,
-) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) return reject(cancellation());
-    const request = new XMLHttpRequest();
-    const abort = () => request.abort();
-    signal?.addEventListener('abort', abort, { once: true });
-    const settle = (finish: () => void) => {
-      signal?.removeEventListener('abort', abort);
-      finish();
-    };
-    request.open('PUT', reservation.uploadUrl);
-    request.setRequestHeader('Content-Type', reservation.mimeType);
-    request.upload.addEventListener('progress', (event) => {
-      if (event.lengthComputable) progress((event.loaded / event.total) * 100);
-    });
-    request.addEventListener('load', () => settle(() => {
-      if (request.status >= 200 && request.status < 300) resolve();
-      else reject(new Error('The transfer was interrupted. Try this photo again.'));
-    }));
-    request.addEventListener('error', () => settle(() => reject(new Error('Reception dropped out. Try this photo again.'))));
-    request.addEventListener('abort', () => settle(() => reject(cancellation())));
-    request.send(file);
-  });
-}
-
-function createBrowserTransport(slug: string, guestName: string): UploadTransport {
-  return {
-    async reserve(items, signal) {
-      const results: ReservationResult[] = [];
-      for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
-        const chunk = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
-        const response = await api<{ items: BatchResponseItem[] }>(`/api/event/${slug}/uploads/batch`, {
-          method: 'POST',
-          signal,
-          body: JSON.stringify({
-            guestName,
-            files: chunk.map(({ id, file }) => ({
-              filename: file.name,
-              mimeType: file.type,
-              byteSize: file.size,
-              idempotencyKey: id,
-              caption: null,
-            })),
-          }),
-        });
-        results.push(...response.items.map((item) => {
-          if (item.status === 'accepted' && item.media && item.uploadUrl) {
-            return {
-              id: item.idempotencyKey,
-              status: 'accepted' as const,
-              reservation: { mediaId: item.media.id, uploadUrl: item.uploadUrl, mimeType: item.media.mimeType },
-            };
-          }
-          return {
-            id: item.idempotencyKey,
-            status: 'rejected' as const,
-            error: item.error?.message ?? 'This photo could not be reserved.',
-          };
-        }));
-      }
-      return results;
-    },
-    async upload(item, reservation, progress, signal) {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          await xhrUpload(item.file, reservation, progress, signal);
-          return;
-        } catch (error) {
-          lastError = error;
-          if (signal?.aborted) break;
-          if (attempt < 2) await backoff(attempt, signal);
-        }
-      }
-      throw lastError;
-    },
-    async finalize(_item, reservation, signal) {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, { method: 'POST', signal, body: '{}' });
-          return;
-        } catch (error) {
-          lastError = error;
-          if (error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code)) throw error;
-          if (signal?.aborted) break;
-          if (attempt < 2) await backoff(attempt, signal);
-        }
-      }
-      throw lastError;
-    },
-    retryUploadAfterFinalizeError(error) {
-      return error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code);
-    },
-  };
 }
 
 function validationMessage(file: File): string | null {
@@ -229,6 +93,8 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const receiptCount = getReceiptCount(items);
 
   useEffect(() => () => {
+    uploadController.current?.abort();
+    uploadController.current = null;
     objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
