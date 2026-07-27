@@ -8,13 +8,13 @@ export async function finalizeStoredMedia(
   bucket: R2Bucket,
   repository: MediaRepository,
   media: MediaRecord,
-  now = new Date(),
+  expirationCheckTime = new Date(),
 ): Promise<MediaRecord> {
   if (media.uploadState === 'stored') return media;
   if (media.uploadState !== 'reserved') {
     throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer be finalized.', 409);
   }
-  if (Date.parse(media.reservationExpiresAt) <= now.getTime()) {
+  if (Date.parse(media.reservationExpiresAt) <= expirationCheckTime.getTime()) {
     await bucket.delete(media.objectKey);
     await repository.failReservation(media.id);
     throw new ApiError('UPLOAD_RESERVATION_EXPIRED', 'This upload reservation expired. Choose the file again.', 409);
@@ -57,5 +57,5 @@ export async function finalizeStoredMedia(
     byteSize: object.size,
     width: metadata.width,
     height: metadata.height,
-  }, now.toISOString());
+  });
 }

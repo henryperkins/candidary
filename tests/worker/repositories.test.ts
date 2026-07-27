@@ -1,12 +1,14 @@
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EventsRepository } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
 import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
 import { SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
+import { finalizeStoredMedia } from '../../worker/storage/media';
+import { png } from './helpers';
 
 const testEnv = env as Env & { TEST_MIGRATION_QUERIES: string };
 const now = '2026-07-21T12:00:00.000Z';
@@ -341,6 +343,53 @@ describe('media reservation and lifecycle', () => {
       .bind('media-stored-at')
       .first<{ created_at: string; stored_at: string | null }>();
     expect(row).toEqual({ created_at: now, stored_at: firstStoredAt });
+  });
+
+  it('stamps storage eligibility after delayed validation while keeping expiry deterministic', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-delayed-validation', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/delayed-validation', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-delayed-validation',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const bytes = png(1200, 800);
+    const expiryCheckTime = new Date('2026-07-21T12:10:00.000Z');
+    const storageEligibilityTime = new Date('2026-07-21T12:20:00.000Z');
+    const laterRetryTime = new Date('2026-07-21T12:30:00.000Z');
+    const bucket = {
+      async head() {
+        return {
+          size: bytes.byteLength,
+          httpMetadata: { contentType: 'image/png' },
+        };
+      },
+      async get() {
+        await Promise.resolve();
+        vi.setSystemTime(storageEligibilityTime);
+        return { body: new Response(bytes).body };
+      },
+      delete: vi.fn(),
+    } as unknown as R2Bucket;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(expiryCheckTime);
+    try {
+      const finalized = await finalizeStoredMedia(bucket, repository, reserved);
+      vi.setSystemTime(laterRetryTime);
+      await finalizeStoredMedia(bucket, repository, finalized);
+
+      const row = await env.DB.prepare('SELECT stored_at FROM media WHERE id = ?')
+        .bind(reserved.id)
+        .first<{ stored_at: string | null }>();
+      expect(row?.stored_at).toBe(storageEligibilityTime.toISOString());
+      expect(bucket.delete).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps private delivery separate from optional publication and exports every stored original', async () => {
