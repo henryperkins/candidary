@@ -137,7 +137,7 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |
-| 120-photo intake | 320, 390, 768 | One 24-item page rendered, lazy and async previews, fewer than 24 preview requests, 44 x 44 `Load more photos`, second page appends without duplicates, and the control stays retired past a full poll interval |
+| 120-photo intake | 320, 390, 768 | One 24-item page rendered, lazy and async previews, fewer than 24 preview requests, 44 x 44 `Load more photos`, second page appends without duplicates, and — with the intake poll held unanswered — paging state stays stable across a full interval. That last clause is a property of the test's held poll, not of the product under a live one; see "Intake poll and the paging assertion" below |
 | Mobile export reachability | 390, 768 | Exactly one export panel in the document; the Share copy below 761, the utility copy at and above it |
 
 ### Recoverable failures — `tests/e2e/error-recovery.spec.ts`
@@ -152,11 +152,46 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 
 ### Automated accessibility engine — `tests/e2e/accessibility.spec.ts`
 
-`@axe-core/playwright` 4.12.1 runs unscoped — every rule axe ships, over the whole document, with no
-exclusion and no tag filter — on `/`, the `/create` form, the `/create` success state with the guest
-link revealed, the guest hero, the guest secondary content with all three disclosures open,
-`/event/:slug/fullscreen`, and each of the five manager sections. It supplements rather than replaces
-the keyboard, target-size, geometry, contrast, zoom and reduced-motion assertions above.
+`@axe-core/playwright` 4.12.1 runs over the whole document — no `include`, no `exclude`, no
+`runOnly`, no `withTags`, no `disableRules` — on `/`, the `/create` form, the `/create` success state
+with the guest link revealed, the guest hero, the guest secondary content with all three disclosures
+open, `/event/:slug/fullscreen`, and each of the five manager sections. It supplements rather than
+replaces the keyboard, target-size, geometry, contrast, zoom and reduced-motion assertions above.
+
+### Exactly which rules run
+
+Nothing is scoped away, but "nothing scoped away" is not the same as "every rule axe ships", and the
+difference matters enough to write down. Measured against the installed axe-core 4.12.1:
+
+- **105 rules ship.** **9 are disabled by default**, so a bare `.analyze()` is axe's *default* rule
+  set, not its *full* one: `aria-roledescription`, `audio-caption`, `color-contrast-enhanced`,
+  `duplicate-id`, `duplicate-id-active`, `identical-links-same-purpose`,
+  `landmark-complementary-is-top-level`, `meta-refresh-no-exceptions`, and `target-size`.
+- **`target-size` is switched back on** — `.options({ rules: { 'target-size': { enabled: true } } })`
+  in `accessibility.spec.ts`. It is WCAG 2.2 SC 2.5.8, the 44 px rule this entire plan is about, and
+  leaving the one rule that names the plan's subject switched off would have made the gate read far
+  stronger than it was. It reports **passes** on every surface.
+- **A further 7 of the 96 default-enabled rules are tagged `experimental`** and axe excludes them
+  from a default run: `css-orientation-lock`, `focus-order-semantics`, `hidden-content`,
+  `label-content-name-mismatch`, `p-as-heading`, `table-fake-caption`, `td-has-header`. They are left
+  as axe ships them.
+- So **90 rules are evaluated** per surface: 89 by default, plus `target-size`.
+
+The eight rules that remain off are off deliberately. `color-contrast-enhanced` is AAA and this
+product targets AA — the AA pairings are measured above and one of them clears by 0.0046, so
+enabling AAA would report a long list of things nobody has agreed to fix. `duplicate-id` and
+`duplicate-id-active` are deprecated in axe 4.x. `audio-caption` and `meta-refresh-no-exceptions`
+have no applicable content: the product ships no audio and no meta refresh.
+`landmark-complementary-is-top-level` and `aria-roledescription` are best-practice rules axe itself
+holds back. `identical-links-same-purpose` is a needs-review rule that cannot pass or fail without a
+human. None of them is off because it was failing.
+
+The claim that `target-size` actually ran is itself asserted rather than trusted:
+`expectNoAxeViolations` checks that `target-size` appears among the rules axe reports as evaluated
+(`passes ∪ violations ∪ incomplete ∪ inapplicable`) before it checks the violation list. A rule that
+never ran reports nothing, which on the wire is indistinguishable from a rule that ran and found
+nothing — so without that check, deleting the option would leave a green suite and a false document.
+Verified by removing the option: the guard fails first, on every surface.
 
 Known gap: no axe pass renders a failed state, so the engine never reads the guest or manager error
 cards or the manager's inline action notice. Those states are measured geometrically by
@@ -199,9 +234,14 @@ Fixed under this task:
 - **Intake poll and the paging assertion.** `manager-scale.spec.ts` holds the intake poll's
   first-page request open after the initial load. What the poll does with an answer is pinned turn by
   turn in `tests/ui/app.test.tsx`; here it was only a clock. Removing the hold reproduces the
-  original failure exactly: five seconds after the final page, the poll re-adopts the first page's
-  `nextCursor` and `Load more photos` returns even though nothing arrived. That is cosmetic — the
-  control loads nothing new and disappears again — but it is a real product wart worth an owner.
+  original failure exactly: five seconds after the final page, `ManagerPage`'s merge
+  (`cursor: current.cursor ?? firstPage.nextCursor ?? null`) re-adopts the first page's `nextCursor`
+  and `Load more photos` returns even though nothing arrived. That is cosmetic — the control loads
+  nothing new and disappears again — but it is a real product wart worth an owner. **So the
+  post-interval assertion in that spec proves the test's paging state is stable while the poll is
+  held, and nothing about the product under a live poll.** The matrix row above is worded to match;
+  neither statement should be read as saying the control stays retired in production, because it
+  does not.
 
 ## Contrast remediation
 

@@ -79,12 +79,14 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
   expect(new Set(sources).size).toBe(MANAGER_MEDIA_PAGE_SIZE * 2);
   // The page-two response ends the keyset, so the control that reached it is gone.
   await expect(more).toHaveCount(0);
-  // And stays gone: held past a full poll interval, nothing arrives to reopen it or to move the rows.
-  // Without the hold above this is where a slow run's poll lands, so the wait is the evidence rather
-  // than a workaround for it.
+  // And stays gone for as long as the poll goes unanswered. This asserts the *test's* paging state is
+  // stable across a full interval — it is not a claim about the product under a live poll. An answered
+  // poll re-adopts the first page's `nextCursor` and brings `Load more photos` back; that wart is real,
+  // is `ManagerPage`'s, and is recorded in `design-qa.md` rather than papered over here.
   await page.waitForTimeout(INTAKE_POLL_MS + 1_000);
-  await expect(more, 'a poll cannot reopen an exhausted keyset').toHaveCount(0);
-  await expect(previews, 'a poll cannot move the pages the host already has')
+  await expect(more, 'with the poll held unanswered, the exhausted keyset stays exhausted')
+    .toHaveCount(0);
+  await expect(previews, 'with the poll held unanswered, the pages the host already has do not move')
     .toHaveCount(MANAGER_MEDIA_PAGE_SIZE * 2);
 
   const secondPageSize = await measureDocument(page);

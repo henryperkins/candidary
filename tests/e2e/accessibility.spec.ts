@@ -32,15 +32,29 @@ const MANAGER_SECTIONS = [
   { name: 'Settings', heading: 'Settings' },
 ] as const;
 
-// The engine runs unscoped: every rule axe ships, over the whole document, with nothing excluded and
-// no tag filter. Narrowing it to make a surface pass would leave it proving nothing. Violations are
-// reported by rule id, target, and axe's own explanation so a failure names the element and the
-// measurement instead of dumping the rule catalogue; the array is empty exactly when
-// `results.violations` is. Soft, so one run reports every surface rather than stopping at the first.
+// axe-core 4.12.1 ships 105 rules and leaves 9 off by default, so a bare `.analyze()` is axe's
+// *default* rule set, not its *full* one. One of the nine is `target-size` — WCAG 2.2 SC 2.5.8, the
+// 44 px rule this whole plan is about — so it is switched on here explicitly. Nothing is narrowed to
+// pay for it: no `runOnly`, no `withTags`, no `disableRules`, no `include`/`exclude`. Which rules
+// still do not run, and why that is acceptable, is recorded in `design-qa.md`.
+const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
+
+// The engine runs over the whole document with axe's default rule set plus `target-size`. Narrowing
+// it to make a surface pass would leave it proving nothing. Violations are reported by rule id,
+// target, and axe's own explanation so a failure names the element and the measurement instead of
+// dumping the rule catalogue; the array is empty exactly when `results.violations` is. Soft, so one
+// run reports every surface rather than stopping at the first.
 async function expectNoAxeViolations(page: Page, surface: string) {
-  const { violations } = await new AxeBuilder({ page }).analyze();
+  const results = await new AxeBuilder({ page }).options(AXE_OPTIONS).analyze();
+  // A rule that never ran reports nothing, which on the wire is indistinguishable from a rule that
+  // ran and found nothing. axe lists every rule it evaluated across these four buckets and omits any
+  // rule that was switched off, so this is what makes the `target-size` claim in `design-qa.md`
+  // checkable rather than merely written down. Remove the option above and this fails first.
+  const evaluated = [results.passes, results.violations, results.incomplete, results.inapplicable]
+    .flat().map(({ id }) => id);
+  expect.soft(evaluated, `${surface} evaluated target-size`).toContain('target-size');
   expect.soft(
-    violations.flatMap(({ id, impact, nodes }) => nodes.map((node) => ({
+    results.violations.flatMap(({ id, impact, nodes }) => nodes.map((node) => ({
       id, impact, target: node.target, why: [...node.any, ...node.all].map(({ message }) => message),
     }))),
     `${surface} accessibility violations`,

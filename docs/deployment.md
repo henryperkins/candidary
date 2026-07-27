@@ -65,8 +65,10 @@ Desktop emulation is supplementary. Physical iPhone and Android evidence, Images
 These are **production rehearsal gates performed by a person on real hardware**. They are not covered
 by the automated suite and nothing below may be recorded as passed on the strength of a green
 `npm run test:e2e`. The suite runs one Chromium engine under viewport emulation on Windows: it can
-prove geometry, containment, target size, focus order, resolved contrast, reduced motion, and the
-full `axe-core` rule set on eleven surfaces, and it can prove none of the following.
+prove geometry, containment, target size, focus order, resolved contrast, reduced motion, and
+`axe-core` 4.12.1's default rule set plus `target-size` — 90 of the 105 rules it ships, nothing
+scoped away, with the omissions enumerated in `design-qa.md` — on eleven surfaces, and it can prove
+none of the following.
 
 The engine currently reports zero accessibility violations, but note what that is and is not. It
 means computed colour pairings clear WCAG AA arithmetically on the states the suite renders. Muted
