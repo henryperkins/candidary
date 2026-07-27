@@ -1,12 +1,44 @@
 import { expect, test } from '@playwright/test';
-import type { Locator } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
-import { stubGuestRoutes } from './fixtures/routes';
-import { makeMedia } from './fixtures/ui-data';
+import { EVENT_FIXTURE, stubGuestRoutes } from './fixtures/routes';
+import { LONG_FILENAME, makeMedia, UNBROKEN_TOKEN } from './fixtures/ui-data';
 import { measureDocument, measureOverflow, measureTarget } from './helpers/geometry';
+
+// The create form caps the welcome message at 500 characters, so this is the worst case a host can save.
+const LONG_WELCOME = `Share the night as you saw it, from every table and every corner. ${UNBROKEN_TOKEN} `
+  .padEnd(500, 'We will treasure every frame you send. ');
+const KEEPER = { name: LONG_FILENAME, mimeType: 'image/jpeg', buffer: Buffer.from('keeper') };
+const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
 
 async function countGridTracks(locator: Locator) {
   return locator.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length);
+}
+
+async function stubUploadDelivery(page: Page) {
+  const base = `**/api/event/${EVENT_FIXTURE.slug}`;
+  await page.route(`${base}/uploads/batch`, async (route) => {
+    const payload = route.request().postDataJSON() as { files: Array<{ idempotencyKey: string; mimeType: string }> };
+    const origin = new URL(page.url()).origin;
+    await route.fulfill({ status: 201, json: { data: { items: payload.files.map((file) => ({
+      idempotencyKey: file.idempotencyKey,
+      status: 'accepted',
+      media: { id: `media-${file.idempotencyKey}`, mimeType: file.mimeType || 'image/jpeg' },
+      uploadUrl: `${origin}/direct-upload/${file.idempotencyKey}`,
+    })) }, requestId: 'request-a' } });
+  });
+  await page.route('**/direct-upload/*', (route) => route.fulfill({ status: 200, body: '' }));
+  await page.route(`${base}/uploads/*/finalize`, (route) => route.fulfill({
+    json: { data: { media: { uploadState: 'stored' } }, requestId: 'request-a' },
+  }));
+}
+
+async function measureFold(page: Page, locator: Locator) {
+  const box = await locator.boundingBox();
+  const fold = await page.evaluate(() => window.innerHeight);
+  const top = box?.y ?? 0;
+  const bottom = top + (box?.height ?? 0);
+  return { fold, top, bottom, visible: Math.min(bottom, fold) - Math.max(top, 0) };
 }
 
 test('guest secondary sections stay contained at 320 px', async ({ page }) => {
@@ -72,4 +104,105 @@ test('guest media grids widen at the 761 px enhancement boundary', async ({ page
     const fullscreenSize = await measureDocument(page);
     expect(fullscreenSize.scrollWidth).toBeLessThanOrEqual(fullscreenSize.clientWidth + 1);
   }
+});
+
+test('a 500-character welcome keeps both photo sources on the first fold at 320 by 568', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });
+
+  await page.goto('/event/maya-theo');
+  const camera = page.getByRole('button', { name: 'Take a photo', exact: true });
+  const library = page.getByRole('button', { name: 'Choose recent photos', exact: true });
+  await expect(camera).toBeVisible();
+
+  for (const [label, action] of [['camera', camera], ['library', library]] as const) {
+    const bounds = await measureFold(page, action);
+    expect(bounds.bottom, `${label} bottom within the fold`).toBeLessThanOrEqual(bounds.fold);
+  }
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+
+  const toggle = page.getByRole('button', { name: 'Read full welcome' });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
+
+  await toggle.click();
+  const expanded = page.getByRole('button', { name: 'Show less' });
+  await expect(expanded).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
+
+  const expandedSize = await measureDocument(page);
+  expect(expandedSize.scrollWidth).toBeLessThanOrEqual(expandedSize.clientWidth + 1);
+});
+
+test('phone landscape keeps the camera action in view at 844 by 390', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await stubGuestRoutes(page);
+
+  await page.goto('/event/maya-theo');
+  const camera = page.getByRole('button', { name: 'Take a photo', exact: true });
+  await expect(camera).toBeVisible();
+
+  const bounds = await measureFold(page, camera);
+  expect(bounds.top, 'camera starts above the fold').toBeLessThan(bounds.fold);
+  expect(bounds.visible, 'a full tap target is reachable without scrolling').toBeGreaterThanOrEqual(44);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+test('review status text stays within the caption band at 320 px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubGuestRoutes(page);
+
+  await page.goto('/event/maya-theo');
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles([KEEPER, REJECT]);
+  await expect(page.getByText('2 photos selected')).toBeVisible();
+
+  for (const locator of [
+    page.locator('.selection-card__status strong'),
+    page.locator('.selection-card__status span'),
+    page.locator('.selection-card__status small'),
+  ]) {
+    const fontSize = await locator.first().evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+    expect(fontSize).toBeGreaterThanOrEqual(12);
+    expect(fontSize).toBeLessThanOrEqual(14);
+  }
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+test('the all-invalid review state stays contained at 320 px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubGuestRoutes(page);
+
+  await page.goto('/event/maya-theo');
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles([REJECT]);
+
+  await expect(page.getByText('Remove or replace the photos that need attention.')).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Send/u })).toHaveCount(0);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+test('the delivery receipt with a caveat stays contained at 320 px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubGuestRoutes(page);
+  await stubUploadDelivery(page);
+
+  await page.goto('/event/maya-theo');
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles([KEEPER, REJECT]);
+  await page.getByRole('button', { name: 'Send 1 photo' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+  await expect(page.getByText('1 photo could not be added.')).toBeVisible();
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });

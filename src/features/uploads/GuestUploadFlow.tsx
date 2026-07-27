@@ -219,6 +219,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const [nameError, setNameError] = useState('');
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [sending, setSending] = useState(false);
+  const [welcomeExpanded, setWelcomeExpanded] = useState(false);
   const cameraInput = useRef<HTMLInputElement>(null);
   const libraryInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
@@ -315,6 +316,8 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const validationFailureCount = items.filter(({ validationError }) => validationError).length;
   const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
   const reviewMode = items.length > 0;
+  const welcomeMessage = event.welcomeMessage || 'Help us remember tonight.';
+  const welcomeNeedsDisclosure = welcomeMessage.length > 180;
   const eventDate = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
     .format(new Date(`${event.eventDate}T12:00:00`));
   const heroStyle = event.coverObjectKey
@@ -336,11 +339,24 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
     {!reviewMode && <div className={`photo-drop__hero${event.coverObjectKey ? ' photo-drop__hero--cover' : ''}`} style={heroStyle}>
       <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
-      <h1>{event.welcomeMessage || 'Help us remember tonight.'}</h1>
+      <h1
+        id="guest-welcome"
+        className={welcomeNeedsDisclosure && !welcomeExpanded ? 'photo-drop__welcome--clamped' : undefined}
+      >{welcomeMessage}</h1>
+      {welcomeNeedsDisclosure && <button
+        type="button"
+        className="photo-drop__welcome-toggle"
+        aria-controls="guest-welcome"
+        aria-expanded={welcomeExpanded}
+        onClick={() => setWelcomeExpanded((current) => !current)}
+      >
+        {welcomeExpanded ? 'Show less' : 'Read full welcome'}
+      </button>}
     </div>}
 
     <div className="photo-drop__card">
       {reviewMode && <header className="review-heading">
+        <p>{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
         <p>Sending as {name}</p>
         <h1>{sending ? 'Sending photos' : 'Ready to send'}</h1>
         <button type="button" className="text-button" onClick={() => setEditingName(true)} disabled={sending}>
@@ -402,12 +418,12 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         </div>
         <div className="selection-summary">
           <span>{items.length} {plural(items.length, 'photo')} selected</span>
-          {failedCount > 0 && <span>{failedCount} need {failedCount === 1 ? 'attention' : 'attention'}</span>}
+          {failedCount > 0 && <span className="selection-summary__attention">{failedCount} {plural(failedCount, 'needs', 'need')} attention</span>}
         </div>
         {(sending || unresolvedCount > 0) && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
           {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${attemptedFailureCount > 0 ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
         </button>}
-        {sending && <button type="button" className="text-button" onClick={() => uploadController.current?.abort()}>
+        {sending && <button type="button" className="text-button send-cancel" onClick={() => uploadController.current?.abort()}>
           Cancel sending
         </button>}
         <p className="progress-note">{onlyValidationFailures

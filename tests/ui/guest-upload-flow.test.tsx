@@ -78,6 +78,20 @@ describe('mobile guest photo delivery', () => {
     expect(screen.queryByText(/gallery|note/i)).not.toBeInTheDocument();
   });
 
+  it('keeps the event name and date in the review header', async () => {
+    render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
+    await userEvent.type(screen.getByLabelText('Your name'), 'Taylor');
+
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    const identity = screen.getByText(/Alex & Jordan/);
+    expect(identity).toBeVisible();
+    expect(identity).toHaveTextContent('Sep 14');
+  });
+
   it('receipts the delivered photo when an invalid file stays behind', async () => {
     const user = userEvent.setup();
     const queueTransport = transport();

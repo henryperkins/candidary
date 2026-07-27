@@ -1,4 +1,11 @@
 import { expect, test } from '@playwright/test';
+import type { Locator } from '@playwright/test';
+
+import { EVENT_FIXTURE } from './fixtures/routes';
+
+function animationName(locator: Locator) {
+  return locator.evaluate((element) => getComputedStyle(element).animationName);
+}
 
 test('public actions and creation fields are keyboard reachable with named landmarks', async ({ page }, testInfo) => {
   await page.goto('/');
@@ -32,6 +39,53 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await camera.click();
   await expect(page.getByLabel('Your name')).toBeFocused();
   await expect(page.getByText('Enter your name before adding photos.')).toHaveAttribute('role', 'alert');
+});
+
+test('reduced motion stops every guest spinner instead of racing it', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+
+  let releaseEvent = () => {};
+  const eventGate = new Promise<void>((resolve) => { releaseEvent = resolve; });
+  let releaseBatch = () => {};
+  const batchGate = new Promise<void>((resolve) => { releaseBatch = resolve; });
+  const base = `**/api/event/${EVENT_FIXTURE.slug}`;
+
+  await page.route(base, async (route) => {
+    await eventGate;
+    await route.fulfill({ json: { data: { event: EVENT_FIXTURE, role: 'guest' }, requestId: 'r' } });
+  });
+  await page.route(`${base}/contributions`, (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
+  await page.route(`${base}/messages`, (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
+  await page.route(`${base}/uploads/batch`, async (route) => {
+    await batchGate;
+    const payload = route.request().postDataJSON() as { files: Array<{ idempotencyKey: string }> };
+    await route.fulfill({ status: 201, json: { data: { items: payload.files.map(({ idempotencyKey }) => ({
+      idempotencyKey, status: 'rejected', error: { message: 'Reception dropped out. Try this photo again.' },
+    })) }, requestId: 'r' } });
+  });
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  const appSpinner = page.locator('.spin');
+  await expect(appSpinner).toBeVisible();
+  expect(await animationName(appSpinner)).toBe('none');
+  releaseEvent();
+
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'recent.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('recent-photo'),
+  });
+  await page.getByRole('button', { name: 'Send 1 photo' }).click();
+
+  const cardSpinner = page.locator('.selection-card__spinner svg');
+  await expect(cardSpinner).toBeVisible();
+  expect(await animationName(cardSpinner)).toBe('none');
+
+  const sendSpinner = page.locator('.send-button svg');
+  await expect(sendSpinner).toBeVisible();
+  expect(await animationName(sendSpinner)).toBe('none');
+
+  releaseBatch();
+  await expect(page.getByRole('button', { name: 'Retry 1 photo' })).toBeVisible();
 });
 
 test('manager navigation exposes visible labels, selected state, and mobile-sized targets', async ({ page }) => {
