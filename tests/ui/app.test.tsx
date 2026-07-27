@@ -70,11 +70,13 @@ describe('public Candidary experience', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the event details.');
 
     const associations = [
-      { label: /Event name/, id: 'name-error', message: 'Enter an event name.' },
-      { label: /Event date/, id: 'eventDate-error', message: 'Choose an event date.' },
-      { label: /Welcome message/, id: 'welcomeMessage-error', message: 'Write a welcome message.' },
+      { label: 'Event name', id: 'name-error', message: 'Enter an event name.' },
+      { label: 'Event date', id: 'eventDate-error', message: 'Choose an event date.' },
+      { label: 'Welcome message', id: 'welcomeMessage-error', message: 'Write a welcome message.' },
     ];
     for (const { label, id, message } of associations) {
+      // An exact label query must keep working while the field is in error: the name identifies the
+      // field, the error is a description. If the error leaks into the name this lookup throws.
       const control = screen.getByLabelText(label);
       expect(control, `${id} control is invalid`).toHaveAttribute('aria-invalid', 'true');
       expect(control, `${id} control is described`).toHaveAttribute('aria-describedby', id);
@@ -83,9 +85,12 @@ describe('public Candidary experience', () => {
       expect(description, `${id} is rendered`).not.toBeNull();
       expect(description).toBeVisible();
       expect(description).toHaveTextContent(message);
+      // The computed name stays the stable field label; the error arrives only as the description.
+      expect(control, `${id} keeps its name`).toHaveAccessibleName(label);
+      expect(control, `${id} carries the error as its description`).toHaveAccessibleDescription(message);
     }
 
-    await waitFor(() => expect(screen.getByLabelText(/Event name/)).toHaveFocus());
+    await waitFor(() => expect(screen.getByLabelText('Event name')).toHaveFocus());
   });
 
   it('focuses the first invalid field in form order, not the order the server replied in', async () => {
@@ -104,8 +109,8 @@ describe('public Candidary experience', () => {
     await user.click(screen.getByRole('button', { name: 'Create private event' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the event details.');
 
-    await waitFor(() => expect(screen.getByLabelText(/Event date/)).toHaveFocus());
-    expect(screen.getByLabelText(/Event name/)).not.toHaveAttribute('aria-invalid', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Event date')).toHaveFocus());
+    expect(screen.getByLabelText('Event name')).not.toHaveAttribute('aria-invalid', 'true');
   });
 
   it('announces a copied link only after the clipboard write succeeds', async () => {

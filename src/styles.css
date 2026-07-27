@@ -71,7 +71,10 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .trust-list { margin: 34px 0; padding: 27px 0 0; border-top: 1px solid var(--border); display: grid; gap: 14px; list-style: none; }.trust-list li { display: flex; gap: 10px; align-items: center; }.trust-list svg { color: var(--moss); }
 .create-form { max-width: 680px; padding: 40px; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 50px rgb(66 16 59 / 5%); }
 .create-form h2 { font-size: 2rem; margin-bottom: 30px; }.create-form > label, .settings-form > label:not(.toggle), .guest-name { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
-input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: #fffdf8; color: var(--ink); }.create-form textarea { resize: vertical; }.create-form label small { color: var(--danger); font-weight: 500; }
+/* The field wrapper owns the stack so the error can sit beside the label rather than inside its name. */
+.create-field { display: grid; gap: 8px; margin-bottom: 23px; }
+.create-field > label { display: grid; gap: 8px; font-weight: 600; }
+input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: #fffdf8; color: var(--ink); }.create-form textarea { resize: vertical; }.create-field > small { color: var(--danger); font-weight: 500; }
 .cover-field { position: relative; margin: 6px 0 28px; padding: 17px; display: flex; gap: 14px; align-items: center; border: 1px dashed var(--border); border-radius: 8px; }.cover-field > svg { flex: 0 0 auto; color: var(--apricot); font-size: 1.5rem; }.cover-field div { flex: 1; }.cover-field p { margin: 2px 0 0; color: var(--muted); font-size: .8rem; }.cover-field .button { min-height: 40px; padding: 8px 13px; }
 /* The file input is visually hidden, so the whole cover control carries its focus ring instead. */
 .cover-field:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
