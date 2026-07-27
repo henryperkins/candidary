@@ -60,6 +60,39 @@ beforeEach(async () => {
   }]);
 });
 
+describe('manager media storage timestamp migration', () => {
+  it('backfills legacy stored rows from their reservation timestamp', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    await env.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
+        publication_status, idempotency_key, reservation_expires_at, created_at
+      )
+      VALUES (
+        'media-legacy', 'event-a', ?, 'events/event-a/media/legacy', 'legacy.jpg', 'image/jpeg',
+        1024, 900, 1200, 800, 'Avery', NULL, 'stored',
+        'unpublished', 'idem-legacy', '2026-07-21T12:15:00.000Z', ?
+      )
+    `).bind(sessionId, now).run();
+
+    const migrationQueries = JSON.parse(testEnv.TEST_MIGRATION_QUERIES) as string[];
+    const backfill = migrationQueries.find((query) => (
+      query.includes('UPDATE media')
+      && query.includes('stored_at')
+      && query.includes("upload_state = 'stored'")
+    ));
+    expect(backfill).toBeDefined();
+
+    await env.DB.prepare(backfill!).run();
+    const row = await env.DB.prepare('SELECT created_at, stored_at FROM media WHERE id = ?')
+      .bind('media-legacy')
+      .first<{ created_at: string; stored_at: string | null }>();
+    expect(row).toEqual({ created_at: now, stored_at: now });
+  });
+});
+
 describe('event, token, and session repositories', () => {
   it('creates and resolves event-scoped records without crossing events', async () => {
     const events = await seedEvent();
@@ -253,6 +286,28 @@ describe('media reservation and lifecycle', () => {
     expect(event?.storedBytes).toBe(0);
   });
 
+  it('sets the storage timestamp on the first finalization and preserves it on repeats', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    await media.reserve({
+      id: 'media-stored-at', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/stored-at', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg', declaredByteSize: 2048, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-stored-at', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const metadata = { byteSize: 1800, width: 1200, height: 800 };
+    const firstStoredAt = '2026-07-21T12:01:00.000Z';
+
+    await media.finalize('media-stored-at', metadata, firstStoredAt);
+    await media.finalize('media-stored-at', metadata, '2026-07-21T12:02:00.000Z');
+
+    const row = await env.DB.prepare('SELECT created_at, stored_at FROM media WHERE id = ?')
+      .bind('media-stored-at')
+      .first<{ created_at: string; stored_at: string | null }>();
+    expect(row).toEqual({ created_at: now, stored_at: firstStoredAt });
+  });
+
   it('keeps private delivery separate from optional publication and exports every stored original', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
@@ -282,10 +337,20 @@ describe('manager media pagination', () => {
         INSERT INTO media (
           id, event_id, uploader_session_id, object_key, original_filename, mime_type,
           declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
-          publication_status, idempotency_key, reservation_expires_at, created_at
+          publication_status, idempotency_key, reservation_expires_at, created_at, stored_at
         )
-        VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, 'Avery', NULL, 'stored', 'unpublished', ?, ?, ?)
-      `).bind(id, eventId, sessionId, `events/${eventId}/media/${id}`, `${index}.png`, `idem-${index}`, createdAt, createdAt).run();
+        VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, 'Avery', NULL, 'stored', 'unpublished', ?, ?, ?, ?)
+      `).bind(
+        id,
+        eventId,
+        sessionId,
+        `events/${eventId}/media/${id}`,
+        `${index}.png`,
+        `idem-${index}`,
+        createdAt,
+        createdAt,
+        createdAt,
+      ).run();
     }
   }
 
@@ -300,17 +365,17 @@ describe('manager media pagination', () => {
   it('plans both manager pages through the dedicated partial indexes without sorting', async () => {
     await seedEvent();
     await seedStored(3);
-    const cursor = { createdAt: '2026-07-20T09:02:00.000Z', id: '00000000-0000-4000-8000-000000000002' };
+    const cursor = { storedAt: '2026-07-20T09:02:00.000Z', id: '00000000-0000-4000-8000-000000000002' };
 
     const unfiltered = await planFor({ limit: 24 });
     const unfilteredWithCursor = await planFor({ limit: 24, cursor });
     const filtered = await planFor({ limit: 24, status: 'published' });
     const filteredWithCursor = await planFor({ limit: 24, status: 'published', cursor });
 
-    expect(unfiltered).toContain('media_manager_page_all');
-    expect(unfilteredWithCursor).toContain('media_manager_page_all');
-    expect(filtered).toContain('media_manager_page_status');
-    expect(filteredWithCursor).toContain('media_manager_page_status');
+    expect(unfiltered).toContain('media_manager_stored_page_all');
+    expect(unfilteredWithCursor).toContain('media_manager_stored_page_all');
+    expect(filtered).toContain('media_manager_stored_page_status');
+    expect(filteredWithCursor).toContain('media_manager_stored_page_status');
     for (const plan of [unfiltered, unfilteredWithCursor, filtered, filteredWithCursor]) {
       expect(plan).not.toContain('TEMP B-TREE');
       expect(plan).not.toContain('SCAN media');

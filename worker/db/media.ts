@@ -27,6 +27,7 @@ interface MediaRow {
   idempotency_key: string;
   reservation_expires_at: string;
   created_at: string;
+  stored_at: string | null;
   published_at: string | null;
   preview_object_key: string | null;
   deleted_at: string | null;
@@ -99,7 +100,12 @@ export function buildManagerMediaQuery(
   options: ManagerMediaOptions = {},
 ): { sql: string; bindings: unknown[] } {
   const limit = options.limit ?? MANAGER_MEDIA_PAGE_SIZE;
-  const predicates = ['event_id = ?', "upload_state = 'stored'", 'deleted_at IS NULL'];
+  const predicates = [
+    'event_id = ?',
+    "upload_state = 'stored'",
+    'stored_at IS NOT NULL',
+    'deleted_at IS NULL',
+  ];
   const bindings: unknown[] = [eventId];
 
   if (options.status) {
@@ -112,8 +118,8 @@ export function buildManagerMediaQuery(
     bindings.push(guestName);
   }
   if (options.cursor) {
-    predicates.push('(created_at < ? OR (created_at = ? AND id < ?))');
-    bindings.push(options.cursor.createdAt, options.cursor.createdAt, options.cursor.id);
+    predicates.push('(stored_at < ? OR (stored_at = ? AND id < ?))');
+    bindings.push(options.cursor.storedAt, options.cursor.storedAt, options.cursor.id);
   }
   bindings.push(limit + 1);
 
@@ -121,7 +127,7 @@ export function buildManagerMediaQuery(
     sql: `
       SELECT * FROM media
       WHERE ${predicates.join(' AND ')}
-      ORDER BY created_at DESC, id DESC
+      ORDER BY stored_at DESC, id DESC
       LIMIT ?
     `,
     bindings,
@@ -141,12 +147,15 @@ export class MediaRepository {
     const query = buildManagerMediaQuery(eventId, { ...options, limit });
     // One extra row tells us whether another page exists without a second query.
     const result = await this.db.prepare(query.sql).bind(...query.bindings).all<MediaRow>();
-    const media = result.results.slice(0, limit).map(mapMedia);
-    const last = media[media.length - 1];
+    const pageRows = result.results.slice(0, limit);
+    const media = pageRows.map(mapMedia);
+    const last = pageRows[pageRows.length - 1];
     const hasMore = result.results.length > limit;
     return {
       media,
-      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+      nextCursor: hasMore && last?.stored_at
+        ? { storedAt: last.stored_at, id: last.id }
+        : null,
     };
   }
 
@@ -464,6 +473,7 @@ export class MediaRepository {
   async finalize(
     id: string,
     metadata: { byteSize: number; width: number; height: number },
+    storedAt = new Date().toISOString(),
   ): Promise<MediaRecord> {
     const current = await this.getById(id);
     if (!current) throw new ApiError('UPLOAD_OBJECT_MISSING', 'The upload reservation no longer exists.', 404);
@@ -482,12 +492,13 @@ export class MediaRepository {
     const results = await this.db.batch([
       this.db.prepare(`
         UPDATE media
-        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored'
+        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored', stored_at = ?
         WHERE id = ? AND upload_state = 'reserved'
       `).bind(
         metadata.byteSize,
         metadata.width,
         metadata.height,
+        storedAt,
         id,
       ),
       this.db.prepare(`

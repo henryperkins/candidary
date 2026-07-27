@@ -57,5 +57,5 @@ export async function finalizeStoredMedia(
     byteSize: object.size,
     width: metadata.width,
     height: metadata.height,
-  });
+  }, now.toISOString());
 }

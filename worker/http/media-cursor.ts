@@ -5,14 +5,14 @@ import { ApiError } from '../../shared/errors';
 // zod 4 moved the string formats to the top level; `z.string().uuid()` and
 // `z.string().datetime()` are both marked deprecated in this version.
 const cursorSchema = z.object({
-  createdAt: z.iso.datetime({ offset: true }),
+  storedAt: z.iso.datetime({ offset: true }),
   id: z.uuid(),
 });
 
 export type ManagerMediaCursor = z.infer<typeof cursorSchema>;
 
 export function encodeMediaCursor(cursor: ManagerMediaCursor): string {
-  return btoa(JSON.stringify({ createdAt: cursor.createdAt, id: cursor.id }))
+  return btoa(JSON.stringify({ storedAt: cursor.storedAt, id: cursor.id }))
     .replaceAll('+', '-')
     .replaceAll('/', '_')
     .replace(/=+$/u, '');

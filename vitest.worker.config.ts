@@ -7,6 +7,7 @@ const migrationSql = [
   './migrations/0002_wedding_photo_drop.sql',
   './migrations/0003_partitioned_exports.sql',
   './migrations/0004_manager_media_pagination.sql',
+  './migrations/0005_media_stored_at.sql',
 ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8')).join(';\n');
 const migrationQueries = migrationSql
   .split(';')

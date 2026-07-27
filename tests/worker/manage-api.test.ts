@@ -5,6 +5,7 @@ import { createApp } from '../../worker/app';
 import { MediaRepository } from '../../worker/db/media';
 import {
   eventAccess,
+  png,
   resetDatabase,
   secondGuest,
   testEnv,
@@ -15,7 +16,7 @@ import {
 beforeEach(resetDatabase);
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
-type SeededMedia = { id: string; createdAt: string };
+type SeededMedia = { id: string; storedAt: string };
 
 const SEED_EPOCH_MS = Date.UTC(2026, 6, 20, 9, 0, 0);
 
@@ -33,7 +34,7 @@ function range(count: number, start = 0) {
   return Array.from({ length: count }, (_, offset) => start + offset);
 }
 
-/** Insert `stored` rows straight into D1 so `created_at` and ids are deterministic. */
+/** Insert `stored` rows straight into D1 so `stored_at` and ids are deterministic. */
 async function seedStoredMedia(access: Access, indexes: readonly number[], group = 0): Promise<SeededMedia[]> {
   const session = await env.DB
     .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
@@ -49,9 +50,9 @@ async function seedStoredMedia(access: Access, indexes: readonly number[], group
       INSERT INTO media (
         id, event_id, uploader_session_id, object_key, original_filename, mime_type,
         declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
-        publication_status, idempotency_key, reservation_expires_at, created_at
+        publication_status, idempotency_key, reservation_expires_at, created_at, stored_at
       )
-      VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, ?, NULL, 'stored', 'unpublished', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, ?, NULL, 'stored', 'unpublished', ?, ?, ?, ?)
     `).bind(
       id,
       access.event.id,
@@ -62,16 +63,17 @@ async function seedStoredMedia(access: Access, indexes: readonly number[], group
       `seed-${group}-${index}`,
       createdAt,
       createdAt,
+      createdAt,
     ).run();
-    seeded.push({ id, createdAt });
+    seeded.push({ id, storedAt: createdAt });
   }
   return seeded;
 }
 
-/** The exact order `created_at DESC, id DESC` must produce. */
+/** The exact order `stored_at DESC, id DESC` must produce. */
 function expectedOrder(seeded: readonly SeededMedia[]) {
   return [...seeded]
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+    .sort((left, right) => right.storedAt.localeCompare(left.storedAt) || right.id.localeCompare(left.id))
     .map((row) => row.id);
 }
 
@@ -136,16 +138,75 @@ describe('manager media pagination', () => {
     expect(new Set([...first.ids, ...second.ids]).size).toBe(51);
   });
 
+  it('positions a late finalization by storage time without corrupting a consumed cursor', async () => {
+    const access = await eventAccess();
+    const seeded = await seedStoredMedia(access, range(5));
+    const order = expectedOrder(seeded);
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST',
+      headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        filename: 'late.png',
+        mimeType: 'image/png',
+        byteSize: 128,
+        idempotencyKey: 'late-finalization',
+        guestName: 'Avery Stone',
+      }),
+    }, testEnv);
+    const reserved = (await initiated.json<any>()).data.media as { id: string; objectKey: string };
+    const behindCursor = '2026-07-20T08:00:00.000Z';
+    await env.DB.prepare('UPDATE media SET created_at = ? WHERE id = ?')
+      .bind(behindCursor, reserved.id)
+      .run();
+    await testEnv.MEDIA_BUCKET.put(reserved.objectKey, png(), {
+      httpMetadata: { contentType: 'image/png' },
+    });
+
+    const first = await managerMediaPage(access, '?limit=2');
+    expect(first.ids).toEqual(order.slice(0, 2));
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const finalized = await createApp().request(
+      `/api/event/${access.event.slug}/uploads/${reserved.id}/finalize`,
+      { method: 'POST', headers: writeHeaders(access.guest), body: '{}' },
+      testEnv,
+    );
+    expect(finalized.status).toBe(200);
+
+    const poll = await managerMediaPage(access, '?limit=2');
+    expect(poll.ids).toContain(reserved.id);
+
+    const walked = [...first.ids];
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const page = await managerMediaPage(access, `?limit=2&cursor=${encodeURIComponent(cursor)}`);
+      walked.push(...page.ids);
+      cursor = page.nextCursor;
+    }
+    expect(walked).toEqual(order);
+    expect(new Set(walked).size).toBe(order.length);
+
+    const merged = [...poll.ids, ...walked.filter((id) => !poll.ids.includes(id))];
+    expect(new Set(merged)).toEqual(new Set([...order, reserved.id]));
+  });
+
   it('cursor-paginates rows the upload flow actually created', async () => {
     // Seeded rows use synthetic ids; this walks real `crypto.randomUUID()` ids
     // and real `toISOString()` timestamps so the cursor codec cannot drift from
     // the values the upload path writes.
     const access = await eventAccess();
-    const uploaded: SeededMedia[] = [
-      await uploadPending(access, 'page-1'),
-      await uploadPending(access, 'page-2'),
-    ];
-    const order = expectedOrder(uploaded);
+    const uploaded = await Promise.all([
+      uploadPending(access, 'page-1'),
+      uploadPending(access, 'page-2'),
+    ]);
+    const seededUploaded: SeededMedia[] = await Promise.all(uploaded.map(async ({ id }) => {
+      const row = await env.DB.prepare('SELECT stored_at FROM media WHERE id = ?')
+        .bind(id)
+        .first<{ stored_at: string }>();
+      if (!row) throw new Error('Expected the uploaded row to have a storage timestamp.');
+      return { id, storedAt: row.stored_at };
+    }));
+    const order = expectedOrder(seededUploaded);
 
     const first = await managerMediaPage(access, '?limit=1');
     expect(first.ids).toEqual(order.slice(0, 1));
