@@ -2,6 +2,8 @@ import { mkdir } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
+import { measureDocument } from './helpers/geometry';
+
 const event = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
@@ -48,6 +50,7 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/uploads/batch', async (route) => {
     batchAttempt += 1;
+    const uploadOrigin = new URL(page.url()).origin;
     const payload = route.request().postDataJSON() as { files: Array<{ idempotencyKey: string; mimeType: string }> };
     const items = payload.files.map((file, index) => {
       if (batchAttempt === 1 && index === 1) {
@@ -57,7 +60,7 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
         idempotencyKey: file.idempotencyKey,
         status: 'accepted',
         media: { id: `media-${file.idempotencyKey}`, mimeType: file.mimeType || 'image/jpeg' },
-        uploadUrl: `http://127.0.0.1:4173/direct-upload/${file.idempotencyKey}`,
+        uploadUrl: `${uploadOrigin}/direct-upload/${file.idempotencyKey}`,
       };
     });
     await route.fulfill({ status: 201, json: { data: { items }, requestId: 'r' } });
@@ -115,5 +118,6 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   await page.reload();
   await expect(page.getByText('Sending as Taylor Morgan')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Take a photo', exact: true })).toBeVisible();
-  await expect(page.locator('body')).not.toHaveCSS('overflow-x', 'scroll');
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });

@@ -77,7 +77,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   if (error) return <main className="centered-state"><Brand /><ErrorState message={error} /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState /></main>;
   if (fullscreen) return <main className="fullscreen">
-    <div className="fullscreen__bar"><Brand compact /><Link to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
+    <div className="fullscreen__bar"><Brand compact /><Link className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
     {gallery.length
       ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption>{item.caption || item.originalFilename}</figcaption></figure>)}</div>
       : <p>No shared photos yet.</p>}
