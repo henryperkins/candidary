@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
-import { MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import { MANAGER_MEDIA_PAGE_SIZE, MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { LONG_FILENAME, UNBROKEN_NOTE, makeMedia } from './fixtures/ui-data';
 import {
@@ -20,6 +20,9 @@ const DESTINATIONS = ['Intake', 'Gallery', 'Notes', 'Share', 'Settings'] as cons
 const RAIL_WIDTHS = [761, 768, 780, 860, 1024, 1100];
 // 1134 is the first width the old fixed tracks fit inside; everything under it pushed the page sideways.
 const WIDE_WIDTHS = [1101, 1120, 1133, 1134, 1440];
+// The stacked phone modes: one media column below 431, two from 431 up to the compact rail.
+const ONE_COLUMN_WIDTHS = [320, 360, 390, 430];
+const TWO_COLUMN_WIDTHS = [431, 470, 760];
 // The nav label is a destination, not decoration; below this it is an unreadable smudge on a phone.
 const MIN_LABEL_TEXT = 10;
 const MIN_CONTRAST = 4.5;
@@ -52,6 +55,16 @@ async function expectTouchTargets(page: Page, selector: string, label: string) {
   }
 }
 
+// The two shared containment checks, run together because either alone has a blind spot: the document
+// misses anything an `overflow: hidden` ancestor swallows, and the rect scan misses a widened shell.
+// Scoped to the whole shell, so the nav and utility tracks are covered, not only the workspace.
+async function expectContained(page: Page, width: number) {
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth, `document at ${width}`).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  expect(await measureViewportEscapes(page.locator('.manager-shell--intake')), `shell escapes at ${width}`)
+    .toEqual([]);
+}
+
 async function openManager(page: Page) {
   await stubManagerRoutes(page, managerFixture);
   await page.goto(managerUrl);
@@ -80,19 +93,29 @@ test('manager navigation keeps every destination labelled across the compact rai
       expect(fontSize, `${name} label text size at ${width}`).toBeGreaterThanOrEqual(MIN_LABEL_TEXT);
     }
 
-    const documentSize = await measureDocument(page);
-    expect(documentSize.scrollWidth, `document at ${width}`).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+    await expectContained(page, width);
   }
 });
 
-test('manager shell turns over exactly at its two breakpoints', async ({ page }) => {
+test('manager shell and media grid turn over exactly at their breakpoints', async ({ page }) => {
   await openManager(page);
   const shell = page.locator('.manager-shell--intake');
+  const mediaGrid = page.locator('.moderation-grid');
 
   // Under 761 the manager is the stacked two-tier header, so the shell resolves no grid tracks at all.
-  for (const width of [320, 360, 390, 430, 760]) {
+  // The media grid turns over inside it at 431 regardless, which is the manager's fourth breakpoint.
+  for (const width of ONE_COLUMN_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
     expect(await measureGridTracks(shell), `shell tracks at ${width}`).toEqual([]);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(1);
+    await expectContained(page, width);
+  }
+
+  for (const width of TWO_COLUMN_WIDTHS) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await measureGridTracks(shell), `shell tracks at ${width}`).toEqual([]);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(2);
+    await expectContained(page, width);
   }
 
   for (const width of RAIL_WIDTHS) {
@@ -100,6 +123,7 @@ test('manager shell turns over exactly at its two breakpoints', async ({ page })
     const tracks = await measureGridTracks(shell);
     expect(tracks.length, `shell tracks at ${width}`).toBe(2);
     expect(tracks[0], `rail width at ${width}`).toBeCloseTo(104, 0);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(2);
   }
 
   for (const width of WIDE_WIDTHS) {
@@ -108,6 +132,26 @@ test('manager shell turns over exactly at its two breakpoints', async ({ page })
     expect(tracks.length, `shell tracks at ${width}`).toBe(3);
     expect(tracks[0], `rail width at ${width}`).toBeCloseTo(184, 0);
     expect(tracks[2], `utility rail width at ${width}`).toBeCloseTo(330, 0);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(3);
+  }
+});
+
+// The rail is a grid item stretched to the full height of the shell. Without `align-content: start` its
+// two rows stretch with it: the brand floats a third of the way down and the five destinations spread
+// over roughly 600px. Every label stays visible, contained, above 44px and above the contrast floor
+// while that happens, so only a packing measurement can see it.
+test('manager rail keeps its brand and destinations packed at the top', async ({ page }) => {
+  await openManager(page);
+
+  for (const width of [...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
+    await page.setViewportSize({ width, height: 900 });
+
+    const brand = await measureTarget(page.locator('.manager-nav .brand'));
+    expect(brand.height, `brand height at ${width}`).toBeLessThanOrEqual(60);
+
+    // Five buttons of at most 52px plus four 5px gaps is 280; a stretched rail measures over 500.
+    const destinations = await measureTarget(page.locator('.manager-nav nav'));
+    expect(destinations.height, `destination block height at ${width}`).toBeLessThanOrEqual(340);
   }
 });
 
@@ -116,13 +160,36 @@ test('manager shell stays contained where the wide rails return', async ({ page 
 
   for (const width of WIDE_WIDTHS) {
     await page.setViewportSize({ width, height: 900 });
+    // Rects survive clipping, so the shell cannot buy this assertion back with `overflow: hidden`.
+    await expectContained(page, width);
+  }
+});
 
-    const documentSize = await measureDocument(page);
-    expect(documentSize.scrollWidth, `document at ${width}`).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+// The three lifecycle facts share a row while they fit. Without `flex-wrap: wrap` they never overflow —
+// flex items shrink instead — they are silently squeezed until each fact breaks onto a second line, so
+// containment cannot see this and only the fact's own line count can.
+test('the lifecycle facts each stay on one line for an event at capacity', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    mediaPages,
+    messages: [NOTE],
+    event: { storedMediaCount: MAX_EVENT_MEDIA, storedBytes: MAX_EVENT_BYTES },
+  });
+  await page.goto(managerUrl);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  const facts = page.locator('.lifecycle p');
+  await expect(facts).toHaveCount(3);
 
-    // Rects survive clipping, so the workspace cannot buy this assertion back with `overflow: hidden`.
-    expect(await measureViewportEscapes(page.locator('.manager-main')), `workspace escapes at ${width}`)
-      .toEqual([]);
+  for (const width of [...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
+    await page.setViewportSize({ width, height: 900 });
+
+    // Measured in each fact's own line height, because the rule sets none of its own.
+    const lines = await facts.evaluateAll((elements) => elements.map((element) =>
+      element.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(element).lineHeight)));
+    for (const [index, count] of lines.entries()) {
+      expect(count, `lifecycle fact ${index + 1} lines at ${width}`).toBeLessThan(1.5);
+    }
+
+    await expectContained(page, width);
   }
 });
 
@@ -195,11 +262,7 @@ test('a long unbroken guest note stays inside the manager at every width', async
     const noteSize = await measureOverflow(note);
     expect(noteSize.scrollWidth, `note wraps at ${width}`).toBeLessThanOrEqual(noteSize.clientWidth + 1);
 
-    expect(await measureViewportEscapes(page.locator('.manager-main')), `workspace escapes at ${width}`)
-      .toEqual([]);
-
-    const documentSize = await measureDocument(page);
-    expect(documentSize.scrollWidth, `document at ${width}`).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+    await expectContained(page, width);
   }
 });
 
@@ -241,7 +304,13 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     id: 'export-a', state: 'ready', snapshotAt: '2026-09-20T09:00:00Z',
     mediaCount: 2, totalBytes: 256, attempt: 1, partCount: 1, expiresAt: '2026-09-27T09:00:00Z',
   };
-  await stubManagerRoutes(page, { ...managerFixture, exports: [job] });
+  // Unpublished is the Gallery's own default filter and the only state that renders all four card
+  // controls at once, so it is the state the 44px minimums actually have to fit.
+  await stubManagerRoutes(page, {
+    ...managerFixture,
+    mediaPages: { first: { media: makeMedia(2, 'unpublished'), nextCursor: null } },
+    exports: [job],
+  });
   await page.route(`**/api/manage/events/${EVENT_FIXTURE.id}/exports/${job.id}/download`, (route) => route.fulfill({
     json: { data: {
       manifest: { url: 'https://candidary.test/export/manifest.csv', expiresAt: job.expiresAt, filename: 'candidary-export-manifest.csv' },
@@ -251,8 +320,8 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
 
-  // Both manager modes: the phone header and the compact rail the host uses on a tablet.
-  for (const width of [390, 1200]) {
+  // Every media-grid mode: one phone column, the 431 two-column band, and the three-column rail layout.
+  for (const width of [390, 431, 470, 1200]) {
     await page.setViewportSize({ width, height: 900 });
 
     await destination(page, 'Intake').click();
@@ -265,6 +334,13 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
 
+    // The card clips its own corners, so a control pushed past its edge still measures 44x44 and still
+    // stays inside the viewport. Only the row that holds them reports that it ran out of width.
+    const actions = page.locator('.moderation-grid article:first-of-type .intake-card-actions');
+    const actionRow = await measureOverflow(actions);
+    expect(actionRow.scrollWidth, `card controls fit their row at ${width}`)
+      .toBeLessThanOrEqual(actionRow.clientWidth + 1);
+
     await destination(page, 'Notes').click();
     await expectTouchTargets(page, '.manager-messages .button', `note control at ${width}`);
 
@@ -275,7 +351,6 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expect(links.first()).toBeVisible();
     await expectTouchTargets(page, `${width < 761 ? '.manager-export-panel--share' : '.manager-export-panel--utility'} .export-links a`, `export link at ${width}`);
 
-    const documentSize = await measureDocument(page);
-    expect(documentSize.scrollWidth, `document at ${width}`).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+    await expectContained(page, width);
   }
 });
