@@ -72,6 +72,7 @@ export function ManagerPage() {
   // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
+  const loadMoreOwner = useRef<AbortController | null>(null);
 
   const mediaPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
@@ -89,9 +90,18 @@ export function ManagerPage() {
   // immediately, so the host cannot spend the previous query's cursor against the new one.
   const latestMediaPath = useRef(mediaPath);
   useEffect(() => {
+    const superseded = loadMoreOwner.current;
+    loadMoreOwner.current = null;
+    superseded?.abort();
+    setLoadingMore(false);
     latestMediaPath.current = mediaPath;
     setMediaPage((current) => current.cursor === null ? current : { ...current, cursor: null });
   }, [mediaPath]);
+  useEffect(() => () => {
+    const active = loadMoreOwner.current;
+    loadMoreOwner.current = null;
+    active?.abort();
+  }, []);
 
   // Reused verbatim behind Try again, so the prior failure clears the moment the attempt starts and
   // the host watches this load rather than the dead end the last one left.
@@ -134,6 +144,11 @@ export function ManagerPage() {
       setMediaPage((current) => {
         const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
         const retained = current.rows.filter(({ id }) => !refreshedIds.has(id));
+        // A poll can win the race with the initial whole-page load. With no established list or
+        // continuation state, its page is the query state and its cursor is safe to adopt.
+        if (current.rows.length === 0) {
+          return { rows: firstPage.media, cursor: firstPage.nextCursor ?? null };
+        }
         // Sharing no id at all with the rows on screen means the keyset moved by more than a page inside
         // one interval — or emptied. Either way the rows between the new first page and the retained
         // ones are in no list and behind no cursor, so trust the page we can actually see and start
@@ -143,10 +158,11 @@ export function ManagerPage() {
         }
         // Otherwise the poll refreshes only the newest page: its rows lead, every page the host already
         // pulled in stays behind them, and an id carried by both sides appears once. Never rewind a live
-        // continuation cursor; only adopt one when paging had reached the end and arrivals reopened it.
+        // continuation cursor. `null` is an established exhausted state here, not permission to adopt
+        // the first page's cursor again.
         return {
           rows: [...firstPage.media, ...retained],
-          cursor: current.cursor ?? firstPage.nextCursor ?? null,
+          cursor: current.cursor,
         };
       });
     } catch {
@@ -157,9 +173,12 @@ export function ManagerPage() {
   const loadMoreMedia = useCallback(async () => {
     if (!nextMediaCursor || loadingMore) return;
     const requested = nextMediaCursor;
+    const controller = new AbortController();
+    loadMoreOwner.current = controller;
     setLoadingMore(true);
     try {
-      const page = await api<ManagerMediaPage>(mediaPath(requested));
+      const page = await api<ManagerMediaPage>(mediaPath(requested), { signal: controller.signal });
+      if (loadMoreOwner.current !== controller) return;
       // The cursor was issued for the query that was current when the host asked for more.
       if (latestMediaPath.current !== mediaPath) return;
       setMediaPage((current) => {
@@ -174,9 +193,14 @@ export function ManagerPage() {
       });
       setActionError(null);
     } catch (caught) {
+      if (loadMoreOwner.current !== controller) return;
+      if (caught instanceof DOMException && caught.name === 'AbortError') return;
       setActionError({ message: caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.' });
     } finally {
-      setLoadingMore(false);
+      if (loadMoreOwner.current === controller) {
+        loadMoreOwner.current = null;
+        setLoadingMore(false);
+      }
     }
   }, [loadingMore, mediaPath, nextMediaCursor]);
 

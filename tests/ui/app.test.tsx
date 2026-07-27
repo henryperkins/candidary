@@ -343,6 +343,34 @@ describe('manager experience', () => {
     expect(mediaRequests.at(-1)).toContain('cursor=page-three');
   });
 
+  it('keeps an exhausted continuation cursor exhausted after an answered poll', async () => {
+    const rows = makeMedia(7).slice(1);
+    const mediaRequests: string[] = [];
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', managerFetch({
+      first: { media: rows.slice(0, 2), nextCursor: 'page-two' },
+      'page-two': { media: rows.slice(2, 4), nextCursor: 'page-three' },
+      'page-three': { media: rows.slice(4), nextCursor: null },
+    }, mediaRequests));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(4));
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6));
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    expect(poll).toBeTypeOf('function');
+    await act(async () => { (poll as () => void)(); });
+    await waitFor(() => expect(mediaRequests.filter((request) => !request.includes('cursor'))).toHaveLength(2));
+
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6);
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+  });
+
   it('keeps an appended page when a poll resolves before that append has committed', async () => {
     const rows = makeMedia(6).slice(1);
     const mediaRequests: string[] = [];
@@ -569,6 +597,98 @@ describe('manager experience', () => {
     await act(async () => { releaseFiltered(); });
     expect(await screen.findByAltText('Moment 4')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+  });
+
+  it('scopes load-more ownership to the query that started the request', async () => {
+    const rows = makeMedia(9).slice(1);
+    let oldSignal: AbortSignal | undefined;
+    let releaseOldPage!: () => void;
+    const mediaRequests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests.push(url);
+        if (url.includes('cursor=old-page-two')) {
+          oldSignal = init?.signal ?? undefined;
+          return new Promise<Response>((resolve) => {
+            // Deliberately resolve even after abort. Ownership, not a cooperative fake, must keep this
+            // stale answer from changing rows, cursor, loading state, or error state.
+            releaseOldPage = () => {
+              void json({
+                media: rows.slice(2, 4),
+                nextCursor: 'stale-page-three',
+              }).then(resolve);
+            };
+          });
+        }
+        if (url.includes('guestName=Avery') && url.includes('cursor=filtered-page-two')) {
+          return json({ media: rows.slice(6, 7), nextCursor: null });
+        }
+        if (url.includes('guestName=Avery')) {
+          return json({ media: rows.slice(4, 6), nextCursor: 'filtered-page-two' });
+        }
+        return json({ media: rows.slice(0, 2), nextCursor: 'old-page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(oldSignal).toBeDefined());
+
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    expect(await screen.findByAltText('Moment 6')).toBeVisible();
+    const filteredMore = await screen.findByRole('button', { name: 'Load more photos' });
+    expect(oldSignal?.aborted, 'the superseded request receives an abort').toBe(true);
+    expect(filteredMore, 'the old request no longer owns the loading state').toBeEnabled();
+
+    await user.click(filteredMore);
+    expect(await screen.findByAltText('Moment 8')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+    const filteredSources = previewSources();
+
+    await act(async () => { releaseOldPage(); });
+    expect(previewSources()).toEqual(filteredSources);
+    expect(screen.queryByAltText('Moment 4')).not.toBeInTheDocument();
+    expect(screen.queryByAltText('Moment 5')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(mediaRequests.at(-1)).toContain('cursor=filtered-page-two');
+  });
+
+  it('aborts the active load-more request when the manager unmounts', async () => {
+    const rows = makeMedia(3).slice(1);
+    let pageSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        if (url.includes('cursor=page-two')) {
+          pageSignal = init?.signal ?? undefined;
+          return new Promise<Response>(() => undefined);
+        }
+        return json({ media: rows.slice(0, 1), nextCursor: 'page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const view = render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(pageSignal).toBeDefined());
+    view.unmount();
+
+    expect(pageSignal?.aborted).toBe(true);
   });
 
   it('discards media pages that resolve after the guest filter narrowed the list', async () => {

@@ -137,7 +137,7 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |
-| 120-photo intake | 320, 390, 768 | One 24-item page rendered, lazy and async previews, fewer than 24 preview requests, 44 x 44 `Load more photos`, second page appends without duplicates, and — with the intake poll held unanswered — paging state stays stable across a full interval. That last clause is a property of the test's held poll, not of the product under a live one; see "Intake poll and the paging assertion" below |
+| 120-photo intake | 320, 390, 768 | One 24-item page rendered initially, lazy and async previews, fewer than 24 initial preview requests, 44 x 44 `Load more photos`, five genuine 24-row pages append without duplicates, and an answered live first-page poll leaves the exhausted continuation control absent |
 | Mobile export reachability | 390, 768 | Never two export panels on screen at once. The mechanism is a CSS reveal, not DOM uniqueness: on the phone's Intake the rail's copy is the document's only panel and it is hidden; on Share the Share copy is visible below 761 and the utility copy hidden, and the two swap at and above it |
 
 ### Recoverable failures — `tests/e2e/error-recovery.spec.ts`
@@ -244,17 +244,11 @@ Fixed under this task:
 - **Intake count badge at the cap.** At 10,000 photos the widened badge overlaps the Intake icon on a
   phone. The count and the `Intake` label both stay fully legible, and the icon is secondary to the
   label by design, so the overlap is accepted.
-- **Intake poll and the paging assertion.** `manager-scale.spec.ts` holds the intake poll's
-  first-page request open after the initial load. What the poll does with an answer is pinned turn by
-  turn in `tests/ui/app.test.tsx`; here it was only a clock. Removing the hold reproduces the
-  original failure exactly: five seconds after the final page, `ManagerPage`'s merge
-  (`cursor: current.cursor ?? firstPage.nextCursor ?? null`) re-adopts the first page's `nextCursor`
-  and `Load more photos` returns even though nothing arrived. That is cosmetic — the control loads
-  nothing new and disappears again — but it is a real product wart worth an owner. **So the
-  post-interval assertion in that spec proves the test's paging state is stable while the poll is
-  held, and nothing about the product under a live poll.** The matrix row above is worded to match;
-  neither statement should be read as saying the control stays retired in production, because it
-  does not.
+- **Intake poll and the paging assertion.** `manager-scale.spec.ts` exposes all five 24-row pages in
+  its 120-photo fixture, pages to exhaustion, then lets the real five-second intake interval issue a
+  cursor-less first-page request through the normal route stub. The answered poll keeps all 120
+  unique rows and does not restore `Load more photos`. `tests/ui/app.test.tsx` separately pins
+  overlap, discontinuity, stale-query, and concurrent append ordering with controlled timers.
 
 ## Contrast remediation
 

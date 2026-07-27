@@ -1,5 +1,4 @@
 import { expect, test } from '@playwright/test';
-import type { Page, Route } from '@playwright/test';
 
 import { MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
@@ -11,33 +10,27 @@ const STORED_PHOTOS = 120;
 const rows = makeMedia(STORED_PHOTOS);
 const mediaPages = {
   first: { media: rows.slice(0, MANAGER_MEDIA_PAGE_SIZE), nextCursor: 'page-two' },
-  'page-two': { media: rows.slice(MANAGER_MEDIA_PAGE_SIZE, MANAGER_MEDIA_PAGE_SIZE * 2), nextCursor: null },
+  'page-two': {
+    media: rows.slice(MANAGER_MEDIA_PAGE_SIZE, MANAGER_MEDIA_PAGE_SIZE * 2),
+    nextCursor: 'page-three',
+  },
+  'page-three': {
+    media: rows.slice(MANAGER_MEDIA_PAGE_SIZE * 2, MANAGER_MEDIA_PAGE_SIZE * 3),
+    nextCursor: 'page-four',
+  },
+  'page-four': {
+    media: rows.slice(MANAGER_MEDIA_PAGE_SIZE * 3, MANAGER_MEDIA_PAGE_SIZE * 4),
+    nextCursor: 'page-five',
+  },
+  'page-five': {
+    media: rows.slice(MANAGER_MEDIA_PAGE_SIZE * 4),
+    nextCursor: null,
+  },
 };
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
 // `ManagerPage` polls intake on this interval; the number lives there and is mirrored here so the
 // wait below is measured against the real thing rather than a guess.
 const INTAKE_POLL_MS = 5_000;
-
-// Intake re-requests the first page every five seconds while it is on screen. What that poll does with
-// the answer — merge, restart, or keep the continuation cursor — is pinned turn by turn against a fake
-// timer in `tests/ui/app.test.tsx`. Here it is only a clock: on a slow multi-spec run it lands in the
-// middle of the paging assertions and changes the list under them.
-//
-// So the initial load is answered normally and every later first-page request is held open, never
-// answered. `refreshIntake` awaits both halves together, so an unanswered half means the poll reaches
-// no state at all and the host keeps the list they paged through. Nothing is answered falsely, no
-// deadline is stretched, and no assertion is retried — the list simply cannot move on its own.
-// Registered after the fixture so Playwright, which consults handlers newest first, reaches this one.
-async function holdIntakePollsAfterFirstLoad(page: Page) {
-  let firstPageRequests = 0;
-  await page.route(`**/api/manage/events/${EVENT_FIXTURE.id}/media*`, (route: Route) => {
-    // A cursor means the host asked for more; only the cursor-less request is the poll's.
-    if (new URL(route.request().url()).searchParams.get('cursor')) return void route.fallback();
-    firstPageRequests += 1;
-    // The first is the initial load. Later ones are answered by nobody, which is the point.
-    if (firstPageRequests === 1) void route.fallback();
-  });
-}
 
 test('paginates intake instead of loading every stored photo', async ({ page }) => {
   const previewRequests: string[] = [];
@@ -45,7 +38,6 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
     if (/\/api\/media\/[^/]+\/preview$/u.test(request.url())) previewRequests.push(request.url());
   });
   await stubManagerRoutes(page, { mediaPages, event: { storedMediaCount: STORED_PHOTOS } });
-  await holdIntakePollsAfterFirstLoad(page);
 
   // A phone, not whichever viewport the project happens to carry: the claims below are about the phone.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -73,21 +65,23 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await more.click();
-  await expect(previews).toHaveCount(MANAGER_MEDIA_PAGE_SIZE * 2);
+  for (let pageNumber = 2; pageNumber <= 5; pageNumber += 1) {
+    await more.click();
+    await expect(previews).toHaveCount(MANAGER_MEDIA_PAGE_SIZE * pageNumber);
+  }
   const sources = await previews.evaluateAll((images) => images.map((image) => image.getAttribute('src')));
-  expect(new Set(sources).size).toBe(MANAGER_MEDIA_PAGE_SIZE * 2);
-  // The page-two response ends the keyset, so the control that reached it is gone.
+  expect(new Set(sources).size).toBe(STORED_PHOTOS);
+  // The fifth 24-row page ends the 120-photo keyset, so the control that reached it is gone.
   await expect(more).toHaveCount(0);
-  // And stays gone for as long as the poll goes unanswered. This asserts the *test's* paging state is
-  // stable across a full interval — it is not a claim about the product under a live poll. An answered
-  // poll re-adopts the first page's `nextCursor` and brings `Load more photos` back; that wart is real,
-  // is `ManagerPage`'s, and is recorded in `design-qa.md` rather than papered over here.
-  await page.waitForTimeout(INTAKE_POLL_MS + 1_000);
-  await expect(more, 'with the poll held unanswered, the exhausted keyset stays exhausted')
-    .toHaveCount(0);
-  await expect(previews, 'with the poll held unanswered, the pages the host already has do not move')
-    .toHaveCount(MANAGER_MEDIA_PAGE_SIZE * 2);
+  // Let the real interval issue a cursor-less first-page poll and let the normal route answer it.
+  // An exhausted cursor is state, so this overlap refresh must not reopen page two.
+  await page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === `/api/manage/events/${EVENT_FIXTURE.id}/media`
+      && !url.searchParams.has('cursor');
+  }, { timeout: INTAKE_POLL_MS + 3_000 });
+  await expect(more, 'an answered poll keeps the exhausted keyset exhausted').toHaveCount(0);
+  await expect(previews, 'an answered poll retains all five pages').toHaveCount(STORED_PHOTOS);
 
   const secondPageSize = await measureDocument(page);
   expect(secondPageSize.scrollWidth).toBeLessThanOrEqual(secondPageSize.clientWidth + 1);
