@@ -158,6 +158,53 @@ describe('photo upload queue', () => {
     expect(getReceiptCount(result)).toBeNull();
   });
 
+  it('leaves a failure that happened before the cancellation with its own reason', async () => {
+    const controller = new AbortController();
+    const transport = acceptingTransport({
+      reserve: async (items) => items.map(({ id }) => id === 'rejected'
+        ? { id, status: 'rejected' as const, error: 'The event has reached its photo limit.' }
+        : { id, status: 'accepted' as const, reservation: { mediaId: `media-${id}`, uploadUrl: `https://upload.test/${id}`, mimeType: 'image/jpeg' } }),
+      upload: async (uploadItem, _reservation, _progress, signal) => {
+        if (uploadItem.id === 'dropped') throw new Error('Reception dropped out. Try this photo again.');
+        return untilAborted(signal);
+      },
+    });
+
+    const result = await runUploadQueue([item('rejected'), item('dropped'), item('slow')], transport, {
+      concurrency: 2,
+      signal: controller.signal,
+      onChange: (items) => {
+        if (items.some(({ id, state }) => id === 'dropped' && state === 'failed')) controller.abort();
+      },
+    });
+
+    expect(result.find(({ id }) => id === 'rejected')).toMatchObject({
+      state: 'failed',
+      error: 'The event has reached its photo limit.',
+    });
+    expect(result.find(({ id }) => id === 'dropped')).toMatchObject({
+      state: 'failed',
+      error: 'Reception dropped out. Try this photo again.',
+    });
+    expect(result.find(({ id }) => id === 'slow')).toMatchObject({ state: 'failed', error: CANCELLED });
+  });
+
+  it('reports the cancellation when the reservation request itself is aborted', async () => {
+    const controller = new AbortController();
+    const transport = acceptingTransport({
+      reserve: async (_items, signal) => {
+        const aborted = untilAborted(signal);
+        controller.abort();
+        await aborted;
+        return [];
+      },
+    });
+
+    const result = await runUploadQueue([item('a')], transport, { signal: controller.signal });
+
+    expect(result[0]).toMatchObject({ state: 'failed', error: CANCELLED, retryStage: undefined });
+  });
+
   it('keeps a photo delivered before the cancellation and never starts the waiting ones', async () => {
     const controller = new AbortController();
     const transport = acceptingTransport({

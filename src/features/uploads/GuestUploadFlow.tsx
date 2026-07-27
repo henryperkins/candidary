@@ -68,6 +68,19 @@ function cancellation() {
   return new DOMException('Sending was cancelled.', 'AbortError');
 }
 
+function backoff(attempt: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const settle = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', settle);
+      resolve();
+    };
+    const timer = setTimeout(settle, 350 * 2 ** attempt);
+    signal?.addEventListener('abort', settle, { once: true });
+  });
+}
+
 function xhrUpload(
   file: File,
   reservation: UploadReservation,
@@ -144,7 +157,7 @@ function createBrowserTransport(slug: string, guestName: string): UploadTranspor
         } catch (error) {
           lastError = error;
           if (signal?.aborted) break;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
+          if (attempt < 2) await backoff(attempt, signal);
         }
       }
       throw lastError;
@@ -159,7 +172,7 @@ function createBrowserTransport(slug: string, guestName: string): UploadTranspor
           lastError = error;
           if (error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code)) throw error;
           if (signal?.aborted) break;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 350 * 2 ** attempt));
+          if (attempt < 2) await backoff(attempt, signal);
         }
       }
       throw lastError;

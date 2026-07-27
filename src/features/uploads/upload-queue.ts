@@ -49,6 +49,7 @@ export interface RunUploadQueueOptions {
 }
 
 const CANCELLED_MESSAGE = 'Sending was cancelled. Retry when you are ready.';
+const IN_FLIGHT_STATES = new Set<UploadQueueState>(['reserving', 'queued', 'uploading', 'finalizing']);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'This photo could not be sent.';
@@ -87,7 +88,7 @@ export async function runUploadQueue(
       reservations = await transport.reserve(candidates, signal);
     } catch (error) {
       reservationRequestFailed = true;
-      const message = errorMessage(error);
+      const message = signal?.aborted ? CANCELLED_MESSAGE : errorMessage(error);
       current = current.map((item) => candidateIds.has(item.id)
         ? { ...item, state: 'failed', error: message }
         : item);
@@ -135,6 +136,10 @@ export async function runUploadQueue(
         await transport.finalize(queued, queued.reservation, signal);
         update(task.id, { state: 'delivered', progress: 100, error: undefined, retryStage: undefined });
       } catch (error) {
+        if (signal?.aborted) {
+          update(task.id, { state: 'failed', error: CANCELLED_MESSAGE, retryStage: undefined });
+          continue;
+        }
         const retryStage = stage === 'finalize' && !transport.retryUploadAfterFinalizeError?.(error)
           ? 'finalize'
           : undefined;
@@ -147,7 +152,7 @@ export async function runUploadQueue(
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   if (signal?.aborted) {
-    current = current.map((item) => activeIds.has(item.id) && item.state !== 'delivered'
+    current = current.map((item) => activeIds.has(item.id) && IN_FLIGHT_STATES.has(item.state)
       ? { ...item, state: 'failed', error: CANCELLED_MESSAGE, retryStage: undefined }
       : item);
     emit();
