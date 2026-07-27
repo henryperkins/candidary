@@ -14,6 +14,209 @@ import {
 
 beforeEach(resetDatabase);
 
+type Access = Awaited<ReturnType<typeof eventAccess>>;
+type SeededMedia = { id: string; createdAt: string };
+
+const SEED_EPOCH_MS = Date.UTC(2026, 6, 20, 9, 0, 0);
+
+function seedId(index: number, group = 0) {
+  return `${String(group).padStart(8, '0')}-0000-4000-8000-${String(index).padStart(12, '0')}`;
+}
+
+function seedCreatedAt(index: number) {
+  // Indexes 0 and 1 deliberately share a timestamp so a 50-row page boundary
+  // lands on a `created_at` tie and only the id tie-break can resolve it.
+  return new Date(SEED_EPOCH_MS + (index === 1 ? 0 : index) * 60_000).toISOString();
+}
+
+function range(count: number, start = 0) {
+  return Array.from({ length: count }, (_, offset) => start + offset);
+}
+
+/** Insert `stored` rows straight into D1 so `created_at` and ids are deterministic. */
+async function seedStoredMedia(access: Access, indexes: readonly number[], group = 0): Promise<SeededMedia[]> {
+  const session = await env.DB
+    .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+    .bind(access.event.id)
+    .first<{ id: string }>();
+  if (!session) throw new Error('Expected a guest session for the seeded event.');
+
+  const seeded: SeededMedia[] = [];
+  for (const index of indexes) {
+    const id = seedId(index, group);
+    const createdAt = seedCreatedAt(index);
+    await env.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
+        publication_status, idempotency_key, reservation_expires_at, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, ?, NULL, 'stored', 'unpublished', ?, ?, ?)
+    `).bind(
+      id,
+      access.event.id,
+      session.id,
+      `events/${access.event.id}/media/${id}`,
+      `seed-${index}.png`,
+      index % 2 === 0 ? 'Avery Stone' : 'Jordan Lee',
+      `seed-${group}-${index}`,
+      createdAt,
+      createdAt,
+    ).run();
+    seeded.push({ id, createdAt });
+  }
+  return seeded;
+}
+
+/** The exact order `created_at DESC, id DESC` must produce. */
+function expectedOrder(seeded: readonly SeededMedia[]) {
+  return [...seeded]
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+    .map((row) => row.id);
+}
+
+function managerMedia(access: Access, query = '') {
+  return createApp().request(`/api/manage/events/${access.event.id}/media${query}`, {
+    headers: { cookie: access.manager.cookie },
+  }, testEnv);
+}
+
+async function managerMediaPage(access: Access, query = '') {
+  const response = await managerMedia(access, query);
+  expect(response.status).toBe(200);
+  const body = await response.json<any>();
+  return {
+    ids: (body.data.media as Array<{ id: string }>).map((item) => item.id),
+    nextCursor: body.data.nextCursor as string | null,
+  };
+}
+
+describe('manager media pagination', () => {
+  it('cursor-paginates the manager intake in stable pages', async () => {
+    const access = await eventAccess();
+    const seeded = await seedStoredMedia(access, range(51));
+    const order = expectedOrder(seeded);
+
+    const defaults = await managerMediaPage(access);
+    expect(defaults.ids).toHaveLength(24);
+    expect(defaults.ids).toEqual(order.slice(0, 24));
+    expect(defaults.nextCursor).toEqual(expect.any(String));
+
+    const first = await managerMediaPage(access, '?limit=50');
+    expect(first.ids).toHaveLength(50);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const second = await managerMediaPage(access, `?limit=50&cursor=${encodeURIComponent(first.nextCursor!)}`);
+    expect(second.ids).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+
+    expect(first.ids).toEqual(order.slice(0, 50));
+    expect(second.ids).toEqual(order.slice(50));
+    expect(new Set([...first.ids, ...second.ids]).size).toBe(51);
+  });
+
+  it('cursor-paginates past a photo that arrives between page requests', async () => {
+    const access = await eventAccess();
+    const seeded = await seedStoredMedia(access, range(51));
+    const order = expectedOrder(seeded);
+
+    const first = await managerMediaPage(access, '?limit=50');
+    expect(first.ids).toEqual(order.slice(0, 50));
+
+    // A guest delivers a newer photo while the manager is between pages. An
+    // offset-based page two would shift by one and re-serve an already-seen row.
+    const newer = (await seedStoredMedia(access, [80]))[0]!;
+
+    const second = await managerMediaPage(access, `?limit=50&cursor=${encodeURIComponent(first.nextCursor!)}`);
+    expect(second.ids).toHaveLength(1);
+    expect(second.ids).toEqual(order.slice(50));
+    expect(second.ids).not.toContain(newer.id);
+    expect(second.nextCursor).toBeNull();
+    expect(first.ids.filter((id) => second.ids.includes(id))).toEqual([]);
+    expect(new Set([...first.ids, ...second.ids]).size).toBe(51);
+  });
+
+  it('cursor-paginates rows the upload flow actually created', async () => {
+    // Seeded rows use synthetic ids; this walks real `crypto.randomUUID()` ids
+    // and real `toISOString()` timestamps so the cursor codec cannot drift from
+    // the values the upload path writes.
+    const access = await eventAccess();
+    const uploaded: SeededMedia[] = [
+      await uploadPending(access, 'page-1'),
+      await uploadPending(access, 'page-2'),
+    ];
+    const order = expectedOrder(uploaded);
+
+    const first = await managerMediaPage(access, '?limit=1');
+    expect(first.ids).toEqual(order.slice(0, 1));
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const second = await managerMediaPage(access, `?limit=1&cursor=${encodeURIComponent(first.nextCursor!)}`);
+    expect(second.ids).toEqual(order.slice(1));
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('cursor-paginates a guest-name filtered intake', async () => {
+    const access = await eventAccess();
+    const seeded = await seedStoredMedia(access, range(12));
+    const jordan = expectedOrder(seeded.filter((_, index) => index % 2 === 1));
+    expect(jordan).toHaveLength(6);
+
+    const first = await managerMediaPage(access, '?guestName=jordan&limit=4');
+    expect(first.ids).toEqual(jordan.slice(0, 4));
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const second = await managerMediaPage(access, `?guestName=jordan&limit=4&cursor=${encodeURIComponent(first.nextCursor!)}`);
+    expect(second.ids).toEqual(jordan.slice(4));
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('cursor-paginates only within the authenticated event', async () => {
+    const mine = await eventAccess();
+    const theirs = await eventAccess('Rowan & Sky');
+    const myMedia = await seedStoredMedia(mine, range(6));
+    const theirMedia = await seedStoredMedia(theirs, range(6), 1);
+
+    // A cursor minted for another event is just an opaque position marker.
+    const foreign = await managerMediaPage(theirs, '?limit=2');
+    expect(foreign.nextCursor).toEqual(expect.any(String));
+
+    const forged = await managerMediaPage(mine, `?limit=50&cursor=${encodeURIComponent(foreign.nextCursor!)}`);
+    const theirIds = new Set(theirMedia.map((row) => row.id));
+    const myIds = new Set(myMedia.map((row) => row.id));
+    expect(forged.ids.filter((id) => theirIds.has(id))).toEqual([]);
+    expect(forged.ids.every((id) => myIds.has(id))).toBe(true);
+
+    const crossEvent = await createApp().request(`/api/manage/events/${theirs.event.id}/media`, {
+      headers: { cookie: mine.manager.cookie },
+    }, testEnv);
+    expect(crossEvent.status).toBe(403);
+  });
+
+  it('rejects invalid media cursors and out-of-range page limits', async () => {
+    const access = await eventAccess();
+    await seedStoredMedia(access, range(3));
+    const wrongShape = btoa(JSON.stringify({ createdAt: 'not-a-date', id: 'not-a-uuid' }));
+
+    const rejected = [
+      'cursor=not-a-cursor',
+      'cursor=',
+      `cursor=${encodeURIComponent(wrongShape)}`,
+      `cursor=${encodeURIComponent(btoa('"just-a-string"'))}`,
+      'limit=51',
+      'limit=0',
+      'limit=-1',
+      'limit=abc',
+      'limit=99999999999999999999',
+    ];
+    for (const query of rejected) {
+      const response = await managerMedia(access, `?${query}`);
+      expect([query, response.status]).toEqual([query, 422]);
+      expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    }
+  });
+});
+
 describe('manager settings and private photo intake', () => {
   it('uploads and serves an event cover only to event sessions', async () => {
     const access = await eventAccess();

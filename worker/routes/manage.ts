@@ -12,7 +12,13 @@ import { assertCsrf } from '../http/csrf';
 import { LinkService } from '../services/links';
 import { TokensRepository } from '../db/tokens';
 import { decryptGuestSecret } from '../security/crypto';
-import { MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from '../../shared/constants';
+import {
+  MANAGER_MEDIA_MAX_PAGE_SIZE,
+  MANAGER_MEDIA_PAGE_SIZE,
+  MAX_IMAGE_BYTES,
+  SUPPORTED_IMAGE_TYPES,
+} from '../../shared/constants';
+import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
 import { sanitizeFilename } from '../security/filenames';
 import { inspectImageHeader } from '../security/image-metadata';
 import { presignUpload } from '../storage/presign';
@@ -30,6 +36,8 @@ const actionSchema = z.object({
   expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
 });
 const deleteSchema = z.object({ confirmation: z.string() });
+const mediaLimitSchema = z.coerce.number().int().min(1).max(MANAGER_MEDIA_MAX_PAGE_SIZE)
+  .default(MANAGER_MEDIA_PAGE_SIZE);
 const coverSchema = z.object({
   filename: z.string().min(1).max(255), mimeType: z.enum(SUPPORTED_IMAGE_TYPES),
   byteSize: z.number().int().positive().max(MAX_IMAGE_BYTES),
@@ -120,8 +128,22 @@ manageRoutes.get('/manage/events/:eventId/media', async (context) => {
     ? rawStatus as PublicationStatus
     : undefined;
   const guestName = context.req.query('guestName');
-  const media = await new MediaRepository(context.env.DB).listForManager(context.req.param('eventId'), status, guestName);
-  return context.json({ data: { media }, requestId: context.get('requestId') });
+  const limit = mediaLimitSchema.safeParse(context.req.query('limit'));
+  if (!limit.success) {
+    throw new ApiError('VALIDATION_FAILED', `Ask for between 1 and ${MANAGER_MEDIA_MAX_PAGE_SIZE} photos per page.`, 422);
+  }
+  const rawCursor = context.req.query('cursor');
+  const cursor = rawCursor === undefined ? undefined : decodeMediaCursor(rawCursor);
+  const page = await new MediaRepository(context.env.DB).listForManager(context.req.param('eventId'), {
+    status, guestName, cursor, limit: limit.data,
+  });
+  return context.json({
+    data: {
+      media: page.media,
+      nextCursor: page.nextCursor ? encodeMediaCursor(page.nextCursor) : null,
+    },
+    requestId: context.get('requestId'),
+  });
 });
 
 manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => {

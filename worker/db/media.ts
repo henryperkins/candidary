@@ -1,6 +1,12 @@
 import type { PublicationStatus } from '../../shared/contracts';
-import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA, type SupportedImageType } from '../../shared/constants';
+import {
+  MANAGER_MEDIA_PAGE_SIZE,
+  MAX_EVENT_BYTES,
+  MAX_EVENT_MEDIA,
+  type SupportedImageType,
+} from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import type { ManagerMediaCursor } from '../http/media-cursor';
 import type { MediaRecord } from './types';
 
 interface MediaRow {
@@ -70,6 +76,58 @@ function mapMedia(row: MediaRow): MediaRecord {
   };
 }
 
+export interface ManagerMediaOptions {
+  status?: PublicationStatus;
+  guestName?: string;
+  cursor?: ManagerMediaCursor;
+  limit?: number;
+}
+
+export interface ManagerMediaPage {
+  media: MediaRecord[];
+  nextCursor: ManagerMediaCursor | null;
+}
+
+/**
+ * Keyset page over the manager intake. Every predicate is a bound parameter and
+ * `event_id` is always the first one, so a caller-supplied cursor can only move
+ * the position inside the event the session is already authorized for.
+ * Fetches `limit + 1` rows so the caller can tell whether another page exists.
+ */
+export function buildManagerMediaQuery(
+  eventId: string,
+  options: ManagerMediaOptions = {},
+): { sql: string; bindings: unknown[] } {
+  const limit = options.limit ?? MANAGER_MEDIA_PAGE_SIZE;
+  const predicates = ['event_id = ?', "upload_state = 'stored'", 'deleted_at IS NULL'];
+  const bindings: unknown[] = [eventId];
+
+  if (options.status) {
+    predicates.push('publication_status = ?');
+    bindings.push(options.status);
+  }
+  const guestName = options.guestName?.trim();
+  if (guestName) {
+    predicates.push("guest_name LIKE '%' || ? || '%' COLLATE NOCASE");
+    bindings.push(guestName);
+  }
+  if (options.cursor) {
+    predicates.push('(created_at < ? OR (created_at = ? AND id < ?))');
+    bindings.push(options.cursor.createdAt, options.cursor.createdAt, options.cursor.id);
+  }
+  bindings.push(limit + 1);
+
+  return {
+    sql: `
+      SELECT * FROM media
+      WHERE ${predicates.join(' AND ')}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `,
+    bindings,
+  };
+}
+
 export class MediaRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -78,23 +136,18 @@ export class MediaRepository {
     return row ? mapMedia(row) : null;
   }
 
-  async listForManager(eventId: string, status?: PublicationStatus, guestName?: string): Promise<MediaRecord[]> {
-    const normalizedName = guestName?.trim() || null;
-    const result = status
-      ? await this.db.prepare(`
-          SELECT * FROM media
-          WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
-            AND publication_status = ?
-            AND (? IS NULL OR guest_name LIKE '%' || ? || '%' COLLATE NOCASE)
-          ORDER BY created_at DESC, id DESC
-        `).bind(eventId, status, normalizedName, normalizedName).all<MediaRow>()
-      : await this.db.prepare(`
-          SELECT * FROM media
-          WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
-            AND (? IS NULL OR guest_name LIKE '%' || ? || '%' COLLATE NOCASE)
-          ORDER BY created_at DESC, id DESC
-        `).bind(eventId, normalizedName, normalizedName).all<MediaRow>();
-    return result.results.map(mapMedia);
+  async listForManager(eventId: string, options: ManagerMediaOptions = {}): Promise<ManagerMediaPage> {
+    const limit = options.limit ?? MANAGER_MEDIA_PAGE_SIZE;
+    const query = buildManagerMediaQuery(eventId, { ...options, limit });
+    // One extra row tells us whether another page exists without a second query.
+    const result = await this.db.prepare(query.sql).bind(...query.bindings).all<MediaRow>();
+    const media = result.results.slice(0, limit).map(mapMedia);
+    const last = media[media.length - 1];
+    const hasMore = result.results.length > limit;
+    return {
+      media,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+    };
   }
 
   async listGallery(eventId: string): Promise<MediaRecord[]> {

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { EventsRepository } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
-import { MediaRepository } from '../../worker/db/media';
+import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
 import { SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
 
@@ -269,6 +269,67 @@ describe('media reservation and lifecycle', () => {
 
     expect((delivered as unknown as { publicationStatus: string }).publicationStatus).toBe('unpublished');
     expect(snapshot.map(({ id }) => id)).toEqual(['media-private']);
+  });
+});
+
+describe('manager media pagination', () => {
+  async function seedStored(count: number, eventId = 'event-a') {
+    const sessionId = await seedGuestSession(eventId);
+    for (const index of Array.from({ length: count }, (_, offset) => offset)) {
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+      const createdAt = new Date(Date.UTC(2026, 6, 20, 9, 0, 0) + index * 60_000).toISOString();
+      await env.DB.prepare(`
+        INSERT INTO media (
+          id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+          declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
+          publication_status, idempotency_key, reservation_expires_at, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, 'Avery', NULL, 'stored', 'unpublished', ?, ?, ?)
+      `).bind(id, eventId, sessionId, `events/${eventId}/media/${id}`, `${index}.png`, `idem-${index}`, createdAt, createdAt).run();
+    }
+  }
+
+  async function planFor(options: Parameters<typeof buildManagerMediaQuery>[1]) {
+    const query = buildManagerMediaQuery('event-a', options);
+    const explained = await env.DB.prepare(`EXPLAIN QUERY PLAN ${query.sql}`)
+      .bind(...query.bindings)
+      .all<{ detail: string }>();
+    return explained.results.map((row) => row.detail).join(' | ');
+  }
+
+  it('plans both manager pages through the dedicated partial indexes without sorting', async () => {
+    await seedEvent();
+    await seedStored(3);
+    const cursor = { createdAt: '2026-07-20T09:02:00.000Z', id: '00000000-0000-4000-8000-000000000002' };
+
+    const unfiltered = await planFor({ limit: 24 });
+    const unfilteredWithCursor = await planFor({ limit: 24, cursor });
+    const filtered = await planFor({ limit: 24, status: 'published' });
+    const filteredWithCursor = await planFor({ limit: 24, status: 'published', cursor });
+
+    expect(unfiltered).toContain('media_manager_page_all');
+    expect(unfilteredWithCursor).toContain('media_manager_page_all');
+    expect(filtered).toContain('media_manager_page_status');
+    expect(filteredWithCursor).toContain('media_manager_page_status');
+    for (const plan of [unfiltered, unfilteredWithCursor, filtered, filteredWithCursor]) {
+      expect(plan).not.toContain('TEMP B-TREE');
+      expect(plan).not.toContain('SCAN media');
+    }
+  });
+
+  it('closes the cursor on a last page that is exactly full', async () => {
+    await seedEvent();
+    await seedStored(48);
+    const repository = new MediaRepository(env.DB);
+
+    const first = await repository.listForManager('event-a', { limit: 24 });
+    expect(first.media).toHaveLength(24);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = await repository.listForManager('event-a', { limit: 24, cursor: first.nextCursor! });
+    expect(second.media).toHaveLength(24);
+    expect(second.nextCursor).toBeNull();
+    expect(new Set([...first.media, ...second.media].map(({ id }) => id)).size).toBe(48);
   });
 });
 
