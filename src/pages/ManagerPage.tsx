@@ -14,6 +14,16 @@ import { ErrorState, LoadingState } from '../components/States';
 type Section = 'intake' | 'gallery' | 'messages' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
 
+// The rows and the cursor that continues them are one value. Polling has to compare an incoming first
+// page against the rows on screen and decide the cursor from that same verdict, and React only
+// guarantees an accurate `current` inside a functional updater — so both live in one state and every
+// write is an updater. Anything held outside the update queue, a ref included, lags the committed list
+// by at least a scheduler turn, which is long enough for a poll to overwrite a page just appended.
+interface MediaPageState {
+  rows: MediaView[];
+  cursor: string | null;
+}
+
 function formatBytes(bytes = 0) {
   if (bytes < 1024 ** 2) return `${Math.max(0, Math.round(bytes / 1024))} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
@@ -26,7 +36,8 @@ const STORAGE_CAP = `${Math.round(MAX_EVENT_BYTES / 1024 ** 3)} GB`;
 export function ManagerPage() {
   const { eventId = '' } = useParams();
   const [event, setEvent] = useState<EventView | null>(null);
-  const [media, setMedia] = useState<MediaView[]>([]);
+  const [mediaPage, setMediaPage] = useState<MediaPageState>({ rows: [], cursor: null });
+  const { rows: media, cursor: nextMediaCursor } = mediaPage;
   const [messages, setMessages] = useState<MessageView[]>([]);
   const [exports, setExports] = useState<ExportView[]>([]);
   const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
@@ -38,7 +49,6 @@ export function ManagerPage() {
   const [searchInput, setSearchInput] = useState('');
   const [guestFilter, setGuestFilter] = useState('');
   const [error, setError] = useState('');
-  const [nextMediaCursor, setNextMediaCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState('');
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
@@ -62,13 +72,8 @@ export function ManagerPage() {
   const latestMediaPath = useRef(mediaPath);
   useEffect(() => {
     latestMediaPath.current = mediaPath;
-    setNextMediaCursor(null);
+    setMediaPage((current) => current.cursor === null ? current : { ...current, cursor: null });
   }, [mediaPath]);
-
-  // Mirrors the rendered rows so the poll can compare an incoming first page against them without
-  // taking `media` as a dependency, which would restart the five-second interval on every arrival.
-  const renderedMedia = useRef<MediaView[]>([]);
-  useEffect(() => { renderedMedia.current = media; }, [media]);
 
   const refresh = useCallback(async () => {
     try {
@@ -84,8 +89,7 @@ export function ManagerPage() {
       // merges rather than replaces, so a stale list here would sit behind every later poll forever.
       // Only the media half is query-scoped; notes, exports, and links are the same either way.
       if (latestMediaPath.current === mediaPath) {
-        setMedia(mediaData.media);
-        setNextMediaCursor(mediaData.nextCursor ?? null);
+        setMediaPage({ rows: mediaData.media, cursor: mediaData.nextCursor ?? null });
       }
       setMessages(messageData.messages);
       setExports(exportData.exports);
@@ -107,24 +111,24 @@ export function ManagerPage() {
       setEvent(eventData.event);
       // A poll opened under the previous filter must not merge its rows back over the narrowed list.
       if (latestMediaPath.current !== mediaPath) return;
-      const current = renderedMedia.current;
-      const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
-      const retained = current.filter(({ id }) => !refreshedIds.has(id));
-      // Sharing no id at all with the rows on screen means the keyset moved by more than a page inside
-      // one interval — or emptied. Either way the rows between the new first page and the retained ones
-      // are in no list and behind no cursor, so trust the page we can actually see and start again from
-      // its cursor rather than stitch together a list with an invisible hole in it.
-      if (current.length > 0 && retained.length === current.length) {
-        setMedia(firstPage.media);
-        setNextMediaCursor(firstPage.nextCursor ?? null);
-        return;
-      }
-      // Otherwise the poll refreshes only the newest page: its rows lead, every page the host already
-      // pulled in stays behind them, and an id carried by both sides appears once.
-      setMedia([...firstPage.media, ...retained]);
-      // Never rewind a live continuation cursor to the first page's own; only adopt one when paging
-      // had already reached the end and newer deliveries reopened it.
-      setNextMediaCursor((cursor) => cursor ?? firstPage.nextCursor ?? null);
+      setMediaPage((current) => {
+        const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
+        const retained = current.rows.filter(({ id }) => !refreshedIds.has(id));
+        // Sharing no id at all with the rows on screen means the keyset moved by more than a page inside
+        // one interval — or emptied. Either way the rows between the new first page and the retained
+        // ones are in no list and behind no cursor, so trust the page we can actually see and start
+        // again from its cursor rather than stitch together a list with an invisible hole in it.
+        if (current.rows.length > 0 && retained.length === current.rows.length) {
+          return { rows: firstPage.media, cursor: firstPage.nextCursor ?? null };
+        }
+        // Otherwise the poll refreshes only the newest page: its rows lead, every page the host already
+        // pulled in stays behind them, and an id carried by both sides appears once. Never rewind a live
+        // continuation cursor; only adopt one when paging had reached the end and arrivals reopened it.
+        return {
+          rows: [...firstPage.media, ...retained],
+          cursor: current.cursor ?? firstPage.nextCursor ?? null,
+        };
+      });
     } catch {
       // Keep the last usable intake visible; the next poll or a host action retries.
     }
@@ -132,16 +136,22 @@ export function ManagerPage() {
 
   const loadMoreMedia = useCallback(async () => {
     if (!nextMediaCursor || loadingMore) return;
+    const requested = nextMediaCursor;
     setLoadingMore(true);
     try {
-      const page = await api<ManagerMediaPage>(mediaPath(nextMediaCursor));
+      const page = await api<ManagerMediaPage>(mediaPath(requested));
       // The cursor was issued for the query that was current when the host asked for more.
       if (latestMediaPath.current !== mediaPath) return;
-      setMedia((current) => {
-        const known = new Set(current.map(({ id }) => id));
-        return [...current, ...page.media.filter(({ id }) => !known.has(id))];
+      setMediaPage((current) => {
+        // A poll may have restarted the list while this page was in flight. It continues a keyset the
+        // list no longer follows, so appending it would splice in rows from an abandoned ordering.
+        if (current.cursor !== requested) return current;
+        const known = new Set(current.rows.map(({ id }) => id));
+        return {
+          rows: [...current.rows, ...page.media.filter(({ id }) => !known.has(id))],
+          cursor: page.nextCursor ?? null,
+        };
       });
-      setNextMediaCursor(page.nextCursor ?? null);
       setActionError('');
     } catch (caught) {
       setActionError(caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.');

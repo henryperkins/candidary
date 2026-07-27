@@ -320,6 +320,107 @@ describe('manager experience', () => {
     expect(mediaRequests.at(-1)).toContain('cursor=page-three');
   });
 
+  it('keeps an appended page when a poll resolves before that append has committed', async () => {
+    const rows = makeMedia(6).slice(1);
+    const mediaRequests: string[] = [];
+    let releaseLoadMore!: () => void;
+    let releasePoll!: () => void;
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests.push(url);
+        if (url.includes('cursor=page-two')) {
+          return new Promise<Response>((resolve) => {
+            releaseLoadMore = () => resolve(json({ media: rows.slice(2, 4), nextCursor: 'page-three' }));
+          });
+        }
+        if (url.includes('cursor=page-three')) return json({ media: rows.slice(4), nextCursor: null });
+        const firstPage = { media: rows.slice(0, 2), nextCursor: 'page-two' };
+        // The second cursor-less request is the poll's; hold it so it can be interleaved with the append.
+        if (mediaRequests.filter((request) => !request.includes('cursor')).length === 2) {
+          return new Promise<Response>((resolve) => { releasePoll = () => resolve(json(firstPage)); });
+        }
+        return json(firstPage);
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    await act(async () => { (poll as () => void)(); });
+
+    // Both answers land in one microtask drain, so React has not committed the append — let alone run a
+    // passive effect — by the time the poll decides what the list contains.
+    await act(async () => { releaseLoadMore(); releasePoll(); });
+
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(4));
+    expect(screen.getByAltText('Moment 4'), 'the appended page survives the poll').toBeVisible();
+    expect(screen.getByAltText('Moment 5')).toBeVisible();
+
+    // The cursor still follows the rows on screen, so nothing has been left behind it.
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(5));
+    expect(mediaRequests.at(-1)).toContain('cursor=page-three');
+  });
+
+  it('drops an in-flight page onto a list the poll has already restarted', async () => {
+    const rows = makeMedia(8).slice(1);
+    const mediaRequests: string[] = [];
+    let releaseLoadMore!: () => void;
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaRequests.push(url);
+        if (url.includes('cursor=page-two')) {
+          return new Promise<Response>((resolve) => {
+            releaseLoadMore = () => resolve(json({ media: rows.slice(2, 4), nextCursor: 'page-three' }));
+          });
+        }
+        if (url.includes('cursor=page-four')) return json({ media: rows.slice(6), nextCursor: null });
+        // The poll's first page is a burst that shares nothing with the rows on screen.
+        return mediaRequests.filter((request) => !request.includes('cursor')).length === 2
+          ? json({ media: rows.slice(4, 6), nextCursor: 'page-four' })
+          : json({ media: rows.slice(0, 2), nextCursor: 'page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    await act(async () => { (poll as () => void)(); });
+    await waitFor(() => expect(screen.getByAltText('Moment 6')).toBeVisible());
+
+    await act(async () => { releaseLoadMore(); });
+    // The page in flight continues the keyset the restart abandoned, so appending it would splice rows
+    // from the old ordering into the new one and hand the cursor back to the list nobody can reach.
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
+    for (const caption of ['Moment 2', 'Moment 3', 'Moment 4', 'Moment 5']) {
+      expect(screen.queryByAltText(caption), caption).not.toBeInTheDocument();
+    }
+
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
+    expect(mediaRequests.at(-1)).toContain('cursor=page-four');
+  });
+
   it('never lets a superseded load reinstate its rows or its cursor', async () => {
     const rows = makeMedia(4).slice(1);
     let releaseFiltered!: () => void;
