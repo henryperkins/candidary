@@ -4,6 +4,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react
 import { useParams } from 'react-router-dom';
 
 import { api, mediaOriginal, mediaPreview } from '../app/api';
+import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
 import type { EventView, ExportDownloadView, ExportView, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -17,6 +18,9 @@ function formatBytes(bytes = 0) {
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
+
+const PHOTO_CAP = MAX_EVENT_MEDIA.toLocaleString();
+const STORAGE_CAP = `${Math.round(MAX_EVENT_BYTES / 1024 ** 3)} GB`;
 
 export function ManagerPage() {
   const { eventId = '' } = useParams();
@@ -197,7 +201,7 @@ export function ManagerPage() {
 
     <main className="manager-main">
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
-      <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of 100 GB used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
+      <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
       {section === 'intake' && <section aria-labelledby="intake-title">
         <div className="workspace-heading"><div><p className="section-label">Private collection</p><h2 id="intake-title">Live intake</h2></div></div>
@@ -225,7 +229,7 @@ export function ManagerPage() {
 
     <aside className="manager-utility">
       <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void navigator.clipboard?.writeText(guestLink)}><Copy aria-hidden="true" /> Copy guest link</button></section>
-      <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / 10_000) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of 10,000 · {formatBytes(event.storedBytes)} of 100 GB</small></section>
+      <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(event.storedBytes)} of {STORAGE_CAP}</small></section>
       <section className="manager-utility__export"><p className="section-label">Complete export</p><h2>Keep every original</h2>{exports[0] ? <div className="export-state"><strong>{exports[0].state}</strong><span>{exports[0].mediaCount} photos · {exports[0].partCount || 0} parts · attempt {exports[0].attempt}</span>{exports[0].state === 'ready' && !exportDownloads[exports[0].id] && <button className="button button--secondary" onClick={() => void downloadExport(exports[0]!)}><Download aria-hidden="true" /> Get download links</button>}{exportDownloads[exports[0].id] && <div className="export-links"><a href={exportDownloads[exports[0].id]!.manifest.url}>Manifest</a>{exportDownloads[exports[0].id]!.parts.map((part) => <a href={part.url} key={part.partNumber}>Part {part.partNumber} <small>{part.mediaCount} photos</small></a>)}</div>}{(exports[0].state === 'failed' || exports[0].state === 'expired') && <button className="button button--secondary" onClick={() => void retryExport(exports[0]!)}>Retry export</button>}</div> : <><p>Prepare every delivered original, whether or not it appears in the gallery.</p><button className="button button--primary button--wide" onClick={() => void prepareExport()}><Download aria-hidden="true" /> Prepare download</button></>}</section>
     </aside>
   </div>;

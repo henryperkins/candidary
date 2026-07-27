@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
+import { MAX_EVENT_MEDIA } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 
@@ -53,7 +54,7 @@ export function CreatePage() {
 
   return <div className="public-shell"><PageHeader action={<Link className="text-link" to="/">Back home</Link>} /><main className="create-layout">
     <section className="create-intro"><p className="section-label">Create your event</p><h1>A private home for every point of view.</h1><p>Start with the essentials. You can adjust sharing, moderation, and gallery visibility from your event manager.</p>
-      <ul className="trust-list"><li><Check aria-hidden="true" /> Up to 50 original photos</li><li><Check aria-hidden="true" /> Guest access without accounts</li><li><Check aria-hidden="true" /> Fixed, clear retention dates</li></ul>
+      <ul className="trust-list"><li><Check aria-hidden="true" /> Up to {MAX_EVENT_MEDIA.toLocaleString()} original photos</li><li><Check aria-hidden="true" /> Guest access without accounts</li><li><Check aria-hidden="true" /> Fixed, clear retention dates</li></ul>
     </section>
     <form className="create-form" onSubmit={submit} noValidate>
       <h2>Event details</h2>{error && <p className="form-error" role="alert">{error}</p>}
