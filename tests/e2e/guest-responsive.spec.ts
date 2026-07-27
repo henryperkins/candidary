@@ -1,19 +1,22 @@
 import { expect, test } from '@playwright/test';
-import type { Locator, Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
 import { EVENT_FIXTURE, stubGuestRoutes } from './fixtures/routes';
 import { LONG_FILENAME, makeMedia, UNBROKEN_TOKEN } from './fixtures/ui-data';
-import { measureDocument, measureOverflow, measureTarget } from './helpers/geometry';
+import {
+  measureDocument,
+  measureFold,
+  measureGridTracks,
+  measureOverflow,
+  measureSeparation,
+  measureTarget,
+} from './helpers/geometry';
 
 // The create form caps the welcome message at 500 characters, so this is the worst case a host can save.
 const LONG_WELCOME = `Share the night as you saw it, from every table and every corner. ${UNBROKEN_TOKEN} `
   .padEnd(500, 'We will treasure every frame you send. ');
 const KEEPER = { name: LONG_FILENAME, mimeType: 'image/jpeg', buffer: Buffer.from('keeper') };
 const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
-
-async function countGridTracks(locator: Locator) {
-  return locator.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length);
-}
 
 async function stubUploadDelivery(page: Page) {
   const base = `**/api/event/${EVENT_FIXTURE.slug}`;
@@ -31,25 +34,6 @@ async function stubUploadDelivery(page: Page) {
   await page.route(`${base}/uploads/*/finalize`, (route) => route.fulfill({
     json: { data: { media: { uploadState: 'stored' } }, requestId: 'request-a' },
   }));
-}
-
-// Returns the free space between two boxes: the horizontal gap when they share a row, otherwise the
-// vertical gap left by wrapping. A collision reads as 0 or less either way.
-async function measureSeparation(first: Locator, second: Locator) {
-  const [leading, trailing] = await Promise.all([first.boundingBox(), second.boundingBox()]);
-  if (!leading || !trailing) return 0;
-  const sharesRow = leading.y < trailing.y + trailing.height && trailing.y < leading.y + leading.height;
-  return sharesRow
-    ? trailing.x - (leading.x + leading.width)
-    : trailing.y - (leading.y + leading.height);
-}
-
-async function measureFold(page: Page, locator: Locator) {
-  const box = await locator.boundingBox();
-  const fold = await page.evaluate(() => window.innerHeight);
-  const top = box?.y ?? 0;
-  const bottom = top + (box?.height ?? 0);
-  return { fold, top, bottom, visible: Math.min(bottom, fold) - Math.max(top, 0) };
 }
 
 test('guest secondary sections stay contained at 320 px', async ({ page }) => {
@@ -120,14 +104,14 @@ test('guest media grids widen at the 761 px enhancement boundary', async ({ page
     await page.goto('/event/maya-theo');
     await page.locator('.event-extra summary').filter({ hasText: 'Shared gallery' }).click();
     await expect(page.locator('.photo-grid figure')).toHaveCount(6);
-    expect(await countGridTracks(page.locator('.photo-grid'))).toBe(12);
+    expect((await measureGridTracks(page.locator('.photo-grid'))).length).toBe(12);
 
     const gallerySize = await measureDocument(page);
     expect(gallerySize.scrollWidth).toBeLessThanOrEqual(gallerySize.clientWidth + 1);
 
     await page.goto('/event/maya-theo/fullscreen');
     await expect(page.locator('.fullscreen figure')).toHaveCount(6);
-    expect(await countGridTracks(page.locator('.fullscreen__grid'))).toBe(3);
+    expect((await measureGridTracks(page.locator('.fullscreen__grid'))).length).toBe(3);
 
     const fullscreenSize = await measureDocument(page);
     expect(fullscreenSize.scrollWidth).toBeLessThanOrEqual(fullscreenSize.clientWidth + 1);
