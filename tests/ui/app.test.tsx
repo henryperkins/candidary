@@ -11,6 +11,28 @@ function json(data: unknown, status = 200) {
   }));
 }
 
+// Failures arrive as a bare envelope, not wrapped in `data`.
+function errorJson(body: Record<string, unknown>, status: number) {
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  }));
+}
+
+const CREATED = {
+  event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+  guestLink: 'https://example.test/join/guest-secret',
+  managementLink: 'https://example.test/manage/manager-secret',
+  csrfToken: 'csrf-a',
+};
+
+async function createEvent(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
+  await user.type(screen.getByLabelText('Event date'), '2026-09-19');
+  await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
+  await user.click(screen.getByRole('button', { name: 'Create private event' }));
+  await screen.findByRole('heading', { name: 'Your event is ready.' });
+}
+
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('public Candidary experience', () => {
@@ -22,40 +44,79 @@ describe('public Candidary experience', () => {
   });
 
   it('creates an event and clearly returns both access links', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => json({
-      event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
-      guestLink: 'https://example.test/join/guest-secret',
-      managementLink: 'https://example.test/manage/manager-secret', csrfToken: 'csrf-a',
-    }, 201)));
+    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
     render(<RouterProvider router={createAppRouter(['/create'])} />);
-    const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
-    await user.type(screen.getByLabelText('Event date'), '2026-09-19');
-    await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
-    await user.click(screen.getByRole('button', { name: 'Create private event' }));
-    expect(await screen.findByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
+    await createEvent(userEvent.setup());
+    expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
     expect(screen.getByText('Guest link')).toBeVisible();
     expect(screen.getByText('Management link')).toBeVisible();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
   });
 
+  it('associates create errors with their fields and focuses the first invalid one', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson({
+      code: 'VALIDATION_FAILED',
+      message: 'Check the event details.',
+      fieldErrors: {
+        name: 'Enter an event name.',
+        eventDate: 'Choose an event date.',
+        welcomeMessage: 'Write a welcome message.',
+      },
+      requestId: 'request-a',
+    }, 422)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Create private event' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the event details.');
+
+    const associations = [
+      { label: /Event name/, id: 'name-error', message: 'Enter an event name.' },
+      { label: /Event date/, id: 'eventDate-error', message: 'Choose an event date.' },
+      { label: /Welcome message/, id: 'welcomeMessage-error', message: 'Write a welcome message.' },
+    ];
+    for (const { label, id, message } of associations) {
+      const control = screen.getByLabelText(label);
+      expect(control, `${id} control is invalid`).toHaveAttribute('aria-invalid', 'true');
+      expect(control, `${id} control is described`).toHaveAttribute('aria-describedby', id);
+      // The relation only helps if it resolves to something the user can actually perceive.
+      const description = document.getElementById(id);
+      expect(description, `${id} is rendered`).not.toBeNull();
+      expect(description).toBeVisible();
+      expect(description).toHaveTextContent(message);
+    }
+
+    await waitFor(() => expect(screen.getByLabelText(/Event name/)).toHaveFocus());
+  });
+
+  it('focuses the first invalid field in form order, not the order the server replied in', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson({
+      code: 'VALIDATION_FAILED',
+      message: 'Check the event details.',
+      fieldErrors: {
+        welcomeMessage: 'Write a welcome message.',
+        eventDate: 'Choose an event date.',
+      },
+      requestId: 'request-a',
+    }, 422)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
+    await user.click(screen.getByRole('button', { name: 'Create private event' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the event details.');
+
+    await waitFor(() => expect(screen.getByLabelText(/Event date/)).toHaveFocus());
+    expect(screen.getByLabelText(/Event name/)).not.toHaveAttribute('aria-invalid', 'true');
+  });
+
   it('announces a copied link only after the clipboard write succeeds', async () => {
     let resolveCopy!: () => void;
-    vi.stubGlobal('fetch', vi.fn(() => json({
-      event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
-      guestLink: 'https://example.test/join/guest-secret',
-      managementLink: 'https://example.test/manage/manager-secret', csrfToken: 'csrf-a',
-    }, 201)));
+    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(
       () => new Promise<void>((resolve) => { resolveCopy = resolve; }),
     );
-    await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
-    await user.type(screen.getByLabelText('Event date'), '2026-09-19');
-    await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
-    await user.click(screen.getByRole('button', { name: 'Create private event' }));
-    await screen.findByRole('heading', { name: 'Your event is ready.' });
+    await createEvent(user);
 
     await user.click(screen.getByRole('button', { name: 'Copy guest link' }));
     expect(writeText).toHaveBeenCalledWith('https://example.test/join/guest-secret');
@@ -65,24 +126,49 @@ describe('public Candidary experience', () => {
     expect(await screen.findByText('Copied')).toBeVisible();
   });
 
-  it('reports unavailable clipboard writes without claiming success', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => json({
-      event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
-      guestLink: 'https://example.test/join/guest-secret',
-      managementLink: 'https://example.test/manage/manager-secret', csrfToken: 'csrf-a',
-    }, 201)));
+  it('lets the host reveal and hide the full private link on demand', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+    await createEvent(user);
+
+    const reveal = screen.getByRole('button', { name: 'Show full guest link' });
+    expect(reveal).toHaveAttribute('aria-expanded', 'false');
+    await user.click(reveal);
+
+    const hide = screen.getByRole('button', { name: 'Hide full guest link' });
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    // The control must point at the link it reveals, and that link must be selectable.
+    const revealed = document.getElementById(hide.getAttribute('aria-controls') ?? '');
+    expect(revealed, 'aria-controls resolves').not.toBeNull();
+    expect(revealed).toBeVisible();
+    expect(revealed).toHaveTextContent('https://example.test/join/guest-secret');
+    expect(revealed).toHaveAttribute('tabindex', '0');
+    // The management link keeps its own independent control.
+    expect(screen.getByRole('button', { name: 'Show full management link' })).toHaveAttribute('aria-expanded', 'false');
+
+    await user.click(hide);
+    expect(screen.getByRole('button', { name: 'Show full guest link' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('reports unavailable clipboard writes without claiming success, and reveals the link instead', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     const user = userEvent.setup();
     vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('Permission denied'));
-    await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
-    await user.type(screen.getByLabelText('Event date'), '2026-09-19');
-    await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
-    await user.click(screen.getByRole('button', { name: 'Create private event' }));
-    await screen.findByRole('heading', { name: 'Your event is ready.' });
+    await createEvent(user);
+    expect(screen.getByRole('button', { name: 'Show full guest link' })).toHaveAttribute('aria-expanded', 'false');
 
     await user.click(screen.getByRole('button', { name: 'Copy guest link' }));
-    expect(await screen.findByText('Copy unavailable')).toBeVisible();
+    expect(await screen.findByText('Copy unavailable. Select the link instead.')).toBeVisible();
     expect(screen.queryByText('Copied')).not.toBeInTheDocument();
+
+    const hide = screen.getByRole('button', { name: 'Hide full guest link' });
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    const revealed = document.getElementById(hide.getAttribute('aria-controls') ?? '');
+    expect(revealed, 'aria-controls resolves').not.toBeNull();
+    expect(revealed).toBeVisible();
+    expect(revealed).toHaveTextContent('https://example.test/join/guest-secret');
   });
 });
 

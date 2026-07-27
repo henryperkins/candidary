@@ -72,7 +72,10 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .create-form { max-width: 680px; padding: 40px; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 50px rgb(66 16 59 / 5%); }
 .create-form h2 { font-size: 2rem; margin-bottom: 30px; }.create-form > label, .settings-form > label:not(.toggle), .guest-name { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
 input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: #fffdf8; color: var(--ink); }.create-form textarea { resize: vertical; }.create-form label small { color: var(--danger); font-weight: 500; }
-.cover-field { margin: 6px 0 28px; padding: 17px; display: flex; gap: 14px; align-items: center; border: 1px dashed var(--border); border-radius: 8px; }.cover-field > svg { flex: 0 0 auto; color: var(--apricot); font-size: 1.5rem; }.cover-field div { flex: 1; }.cover-field p { margin: 2px 0 0; color: var(--muted); font-size: .8rem; }.cover-field .button { min-height: 40px; padding: 8px 13px; }
+.cover-field { position: relative; margin: 6px 0 28px; padding: 17px; display: flex; gap: 14px; align-items: center; border: 1px dashed var(--border); border-radius: 8px; }.cover-field > svg { flex: 0 0 auto; color: var(--apricot); font-size: 1.5rem; }.cover-field div { flex: 1; }.cover-field p { margin: 2px 0 0; color: var(--muted); font-size: .8rem; }.cover-field .button { min-height: 40px; padding: 8px 13px; }
+/* The file input is visually hidden, so the whole cover control carries its focus ring instead. */
+.cover-field:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.cover-field__input:focus { outline: 0; }
 .form-note { display: flex; align-items: center; gap: 7px; margin: 15px 0 0; justify-content: center; color: var(--muted); font-size: .8rem; }.form-error { padding: 12px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); }
 .success-layout { grid-template-columns: 1.2fr .8fr; }.success-copy { max-width: 680px; }.success-copy h1 { font-size: clamp(3rem, 5vw, 5rem); margin: 16px 0; }.success-copy > p { color: var(--muted); font-size: 1.1rem; }.success-icon { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 50%; color: var(--moss); background: var(--moss-soft); font-size: 1.5rem; }
 .warning { display: flex; gap: 13px; padding: 17px; margin: 27px 0; background: var(--apricot-soft); border-radius: 8px; }.warning p { margin: 0; }.warning svg { flex: 0 0 auto; }
@@ -304,10 +307,14 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .success-copy, .qr-card, .manager-main, .manager-panel, .share-layout, .share-layout > *, .link-card, .link-card > div, .link-card code { min-width: 0; }
 .success-copy, .manager-panel, .share-layout, .link-card { max-width: 100%; }
 .success-copy h1, .manager-title h1, .workspace-heading h2, .manager-panel h2 { overflow-wrap: anywhere; }
-.link-card > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.link-card > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
 .link-card code { display: block; width: 100%; }
 .link-card .icon-button { display: grid; place-items: center; flex: 0 0 48px; }
 .link-card__error { color: var(--danger) !important; }
+/* Revealed, the link is a readable and selectable block instead of a truncated dead end. */
+.link-card--expanded code { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+/* The card clips its own corners, so keep the code focus ring inside them. */
+.link-card code:focus-visible { outline-offset: -3px; }
 .manager-nav button .manager-nav__label { margin-left: 0; }
 .manager-nav button .manager-nav__count { margin-left: auto; }
 .share-layout { grid-template-columns: minmax(0, 1fr) 220px; }

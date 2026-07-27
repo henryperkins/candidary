@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 
-import { measureDocument, measureFold, measureGridTracks } from './helpers/geometry';
+import { UNBROKEN_TOKEN } from './fixtures/ui-data';
+import {
+  measureDocument,
+  measureFold,
+  measureGridTracks,
+  measureOverflow,
+  measureTarget,
+} from './helpers/geometry';
 
 // The audit's phone matrix. 430 has no fold pair because the audit only records its composition.
 const FOLD_VIEWPORTS = [
@@ -19,6 +26,23 @@ const LANDING_BOUNDARIES = [
   { width: 700, workflowColumns: 2, heroColumns: 1 },
   { width: 899, workflowColumns: 2, heroColumns: 1 },
   { width: 900, workflowColumns: 3, heroColumns: 2 },
+];
+// The design system holds field-level error text inside the caption band.
+const CAPTION_TEXT_RANGE = { min: 12, max: 14 };
+const CREATE_FIELD_ERRORS = {
+  code: 'VALIDATION_FAILED',
+  message: 'Check the event details.',
+  fieldErrors: {
+    name: 'Enter an event name.',
+    eventDate: 'Choose an event date.',
+    welcomeMessage: 'Write a welcome message.',
+  },
+  requestId: 'request-a',
+};
+const CREATE_ERROR_FIELDS = [
+  { control: 'input[name="name"]', id: 'name-error', message: 'Enter an event name.' },
+  { control: 'input[name="eventDate"]', id: 'eventDate-error', message: 'Choose an event date.' },
+  { control: 'textarea[name="welcomeMessage"]', id: 'welcomeMessage-error', message: 'Write a welcome message.' },
 ];
 
 test('the landing headline and primary action lead the first fold on phones', async ({ page }) => {
@@ -82,6 +106,80 @@ test('workflow steps keep a readable text column across the tablet band', async 
 
     const documentSize = await measureDocument(page);
     expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+});
+
+test('create errors reach their fields and the first one across phone widths', async ({ page }) => {
+  await page.route('**/api/events', (route) => route.fulfill({ status: 422, json: CREATE_FIELD_ERRORS }));
+
+  for (const width of PHONE_WIDTHS) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/create');
+    await page.getByRole('button', { name: 'Create private event' }).click();
+    await expect(page.getByRole('alert')).toHaveText('Check the event details.');
+
+    for (const { control, id, message } of CREATE_ERROR_FIELDS) {
+      const field = page.locator(control);
+      await expect(field, `${id} is invalid at ${width}`).toHaveAttribute('aria-invalid', 'true');
+      await expect(field, `${id} is described at ${width}`).toHaveAttribute('aria-describedby', id);
+
+      // The relation only helps if it resolves to something rendered and readable.
+      const description = page.locator(`#${id}`);
+      await expect(description, `${id} is rendered at ${width}`).toBeVisible();
+      await expect(description).toHaveText(message);
+
+      const fontSize = await description.evaluate(
+        (element) => Number.parseFloat(getComputedStyle(element).fontSize),
+      );
+      expect(fontSize, `${id} text size at ${width}`).toBeGreaterThanOrEqual(CAPTION_TEXT_RANGE.min);
+      expect(fontSize, `${id} text size at ${width}`).toBeLessThanOrEqual(CAPTION_TEXT_RANGE.max);
+    }
+
+    await expect(page.locator('input[name="name"]'), `first invalid field focused at ${width}`).toBeFocused();
+
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+});
+
+test('a private link can be revealed and read across phone widths', async ({ page }) => {
+  await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
+    event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+    guestLink: UNBROKEN_TOKEN,
+    managementLink: `${UNBROKEN_TOKEN}-manage`,
+    csrfToken: 'csrf-a',
+  }, requestId: 'request-a' } }));
+
+  for (const width of PHONE_WIDTHS) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/create');
+    await page.getByLabel('Event name').fill('Maya & Theo');
+    await page.getByLabel('Event date').fill('2026-09-19');
+    await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
+    await page.getByRole('button', { name: 'Create private event' }).click();
+
+    const reveal = page.getByRole('button', { name: 'Show full guest link' });
+    await expect(reveal).toBeVisible();
+    const revealSize = await measureTarget(reveal);
+    expect(revealSize.width, `reveal target width at ${width}`).toBeGreaterThanOrEqual(44);
+    expect(revealSize.height, `reveal target height at ${width}`).toBeGreaterThanOrEqual(44);
+
+    const collapsed = await measureDocument(page);
+    expect(collapsed.scrollWidth).toBeLessThanOrEqual(collapsed.clientWidth + 1);
+
+    await reveal.click();
+    const code = page.locator('.link-card--expanded code');
+    await expect(code).toHaveCount(1);
+    await expect(code).toHaveText(UNBROKEN_TOKEN);
+
+    // Read in full, not clipped, and reachable by keyboard so it can be selected by hand.
+    const codeSize = await measureOverflow(code);
+    expect(codeSize.scrollWidth, `revealed link wraps at ${width}`).toBeLessThanOrEqual(codeSize.clientWidth + 1);
+    await code.focus();
+    await expect(code).toBeFocused();
+
+    const expanded = await measureDocument(page);
+    expect(expanded.scrollWidth).toBeLessThanOrEqual(expanded.clientWidth + 1);
   }
 });
 

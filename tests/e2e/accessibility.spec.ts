@@ -2,9 +2,17 @@ import { expect, test } from '@playwright/test';
 import type { Locator } from '@playwright/test';
 
 import { EVENT_FIXTURE } from './fixtures/routes';
+import { measureTarget } from './helpers/geometry';
 
 function animationName(locator: Locator) {
   return locator.evaluate((element) => getComputedStyle(element).animationName);
+}
+
+function outline(locator: Locator) {
+  return locator.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+  });
 }
 
 test('public actions and creation fields are keyboard reachable with named landmarks', async ({ page }, testInfo) => {
@@ -19,6 +27,30 @@ test('public actions and creation fields are keyboard reachable with named landm
   await expect(page.getByLabel('Event name')).toHaveAttribute('required', '');
   await expect(page.getByLabel('Event date')).toHaveAttribute('type', 'date');
   await expect(page.getByLabel('Welcome message')).toHaveAttribute('maxlength', '500');
+});
+
+test('cover photo focus lands on the control the host can actually see', async ({ page }) => {
+  await page.goto('/create');
+  const field = page.locator('.cover-field');
+  const input = page.locator('.cover-field__input');
+  await expect(field).toBeVisible();
+  await expect(input).toHaveAttribute('type', 'file');
+
+  const target = await measureTarget(field);
+  expect(target.width, 'cover control width').toBeGreaterThanOrEqual(44);
+  expect(target.height, 'cover control height').toBeGreaterThanOrEqual(44);
+
+  await page.getByLabel('Welcome message').focus();
+  await page.keyboard.press('Tab');
+  await expect(input).toBeFocused();
+
+  const visibleRing = await outline(field);
+  expect(visibleRing.style, 'the visible cover control draws the focus ring').toBe('solid');
+  expect(visibleRing.width, 'focus ring width').toBeGreaterThanOrEqual(2);
+
+  const hiddenRing = await outline(input);
+  expect(hiddenRing.style, 'no ring on the control the host cannot see').toBe('none');
+  expect(hiddenRing.width).toBe(0);
 });
 
 test('guest photo sources have mobile-sized targets and name errors focus the field', async ({ page }) => {
