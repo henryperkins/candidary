@@ -224,6 +224,31 @@ describe('durable notification outbox', () => {
     expect(await stateOf(id)).toMatchObject({ status: 'sent' });
   });
 
+  it('does not call the provider after a loaded claim loses its live lease', async () => {
+    const { account, eventId } = await hostedEvent();
+    const id = await outboxRow({ accountId: account.id, eventId });
+    const authorization = new NotificationOutboxRepository(env.DB);
+    const authorizeClaimedDelivery = authorization.authorizeClaimedDelivery.bind(authorization);
+    vi.spyOn(NotificationOutboxRepository.prototype, 'authorizeClaimedDelivery')
+      .mockImplementationOnce(async (rowId, claimToken, authorizationTime) => {
+        await env.DB.prepare(`
+          UPDATE host_notification_outbox SET lease_expires_at = ? WHERE id = ?
+        `).bind(authorizationTime, rowId).run();
+        return authorizeClaimedDelivery(rowId, claimToken, authorizationTime);
+      });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    expect(await new NotificationService(testEnv).dispatchPending(new Date()))
+      .toEqual({ sent: 0, retried: 0, retired: 0 });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await stateOf(id)).toMatchObject({
+      status: 'sending',
+      claim_token: expect.any(String),
+      lease_expires_at: expect.any(String),
+    });
+  });
+
   it('retires a row for an opted-out account without sending it', async () => {
     const { account, eventId } = await hostedEvent({ notifications: false });
     const id = await outboxRow({ accountId: account.id, eventId });
@@ -309,21 +334,42 @@ describe('durable notification outbox', () => {
     expect(await stateOf(id)).toMatchObject({ status: 'failed', last_error_code: 'obsolete' });
   });
 
-  it('authorizes each row at send time so an opt-out during a page suppresses later rows', async () => {
-    const first = await hostedEvent({ email: 'first@example.com' });
-    const second = await hostedEvent({ email: 'second@example.com' });
-    const firstId = await outboxRow({ id: 'outbox-a', accountId: first.account.id, eventId: first.eventId });
-    const secondId = await outboxRow({ id: 'outbox-b', accountId: second.account.id, eventId: second.eventId });
-    let calls = 0;
-    vi.spyOn(EmailService.prototype, 'send').mockImplementation(async () => {
-      calls += 1;
-      if (calls === 1) await new AccountsRepository(env.DB).setNotificationsEnabled(second.account.id, false);
-      return { delivered: true };
+  it('finishes a permitted send but denies the next row after opt-out commits', async () => {
+    const first = await hostedEvent({ email: 'host@example.com' });
+    const second = await eventAccess('Second Event');
+    const accounts = new AccountsRepository(env.DB);
+    await accounts.addEventHost(
+      second.event.id,
+      first.account.id,
+      'owner',
+      new Date().toISOString(),
+    );
+    const firstId = await outboxRow({
+      id: 'outbox-a',
+      accountId: first.account.id,
+      eventId: first.eventId,
     });
+    const secondId = await outboxRow({
+      id: 'outbox-b',
+      accountId: first.account.id,
+      eventId: second.event.id,
+    });
+    const authorization = new NotificationOutboxRepository(env.DB);
+    const authorizeClaimedDelivery = authorization.authorizeClaimedDelivery.bind(authorization);
+    vi.spyOn(NotificationOutboxRepository.prototype, 'authorizeClaimedDelivery')
+      .mockImplementation(async (rowId, claimToken, authorizationTime) => {
+        const permit = await authorizeClaimedDelivery(rowId, claimToken, authorizationTime);
+        if (rowId === firstId && permit?.status === 'authorized') {
+          await accounts.setNotificationsEnabled(first.account.id, false);
+        }
+        return permit;
+      });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
 
     expect(await new NotificationService(testEnv).dispatchPending(new Date()))
       .toEqual({ sent: 1, retried: 0, retired: 1 });
-    expect(calls).toBe(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: 'host@example.com' }));
     expect(await stateOf(firstId)).toMatchObject({ status: 'sent' });
     expect(await stateOf(secondId)).toMatchObject({
       status: 'failed', last_error_code: 'suppressed_by_preference',

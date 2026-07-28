@@ -637,11 +637,29 @@ describe('access link rotation', () => {
 
   it('keeps legacy ownerless events recoverable instead of rotating their manager links', async () => {
     const access = await eventAccess();
+    await env.DB.prepare(`
+      UPDATE event_sessions SET expires_at = ?
+      WHERE event_id = ? AND role = 'manager' AND can_claim_owner = 1
+    `).bind(new Date(Date.now() - 1_000).toISOString(), access.event.id).run();
     await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
       .bind(access.event.id).run();
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+    const freshManager = cookiesFrom(exchanged);
+    const freshSessionId = /candidary_session=([^;]+)/u.exec(freshManager.cookie)?.[1]?.split('.')[0];
+    if (!freshSessionId) throw new Error('Expected a fresh manager session.');
+    expect(await env.DB.prepare(`
+      SELECT can_claim_owner FROM event_sessions WHERE id = ?
+    `).bind(freshSessionId).first('can_claim_owner')).toBe(0);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_sessions
+      WHERE event_id = ? AND can_claim_owner = 1
+        AND revoked_at IS NULL AND expires_at > ?
+    `).bind(access.event.id, new Date().toISOString()).first('count')).toBe(0);
 
     const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      method: 'POST', headers: writeHeaders(freshManager), body: '{}',
     }, testEnv);
 
     expect(blocked.status).toBe(409);

@@ -29,6 +29,7 @@ import { AccountsRepository } from '../../worker/db/accounts';
 import { HostSessionsRepository, SessionsRepository } from '../../worker/db/sessions';
 import { digestSecret } from '../../worker/security/crypto';
 import { verifyPassword } from '../../worker/security/passwords';
+import { EmailService } from '../../worker/services/email';
 import { HostAuthService } from '../../worker/services/host-auth';
 import { cookiesFrom, eventAccess, origin, resetDatabase, testEnv } from './helpers';
 
@@ -301,23 +302,73 @@ describe('registration', () => {
     expect((await oldCompletion.json<any>()).code).toBe('LOGIN_CODE_INVALID');
   });
 
-  it('does not activate a snapshot whose code was replaced after it was loaded', async () => {
-    const started = await register('host@example.com');
-    const pending = registrationCookiesFrom(started);
-    const accounts = new AccountsRepository(env.DB);
-    const snapshot = await accounts.getPendingRegistration(pending.token.split('.')[0]!);
-    expect(snapshot).not.toBeNull();
-    const now = new Date();
-    expect(await accounts.replaceRegistrationCode({
-      id: snapshot!.id,
-      browserSecretDigest: snapshot!.browserSecretDigest,
-      codeDigest: 'replacement-code-digest',
-      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
-      now: now.toISOString(),
-    })).toBe(true);
+  it('does not renew the pending cookie when the resend email is undeliverable', async () => {
+    const pending = registrationCookiesFrom(await register('host@example.com'));
+    vi.spyOn(EmailService.prototype, 'send')
+      .mockResolvedValueOnce({ delivered: false, code: 'provider_rejected' });
 
-    expect(await accounts.activateRegistration(snapshot!, now.toISOString())).toBeNull();
-    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(0);
+    const resent = await post('/api/host/register/resend', {}, {
+      cookie: pending.cookie,
+      'CF-Connecting-IP': '203.0.113.13',
+    });
+
+    expect(resent.status).toBe(502);
+    expect(await resent.json<any>()).toMatchObject({ code: 'LOGIN_EMAIL_UNDELIVERABLE' });
+    expect(resent.headers.getSetCookie()).not.toContain(
+      expect.stringContaining('candidary_registration='),
+    );
+  });
+
+  it('does not bind an existing account when resend supersedes its loaded code snapshot', async () => {
+    await registeredHost('host@example.com');
+    const access = await eventAccess();
+    const started = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    const pending = registrationCookiesFrom(started);
+    const code = await forceRegistrationCode('host@example.com');
+    const account = await new AccountsRepository(env.DB).getByEmail('host@example.com');
+    expect(account).not.toBeNull();
+    expect(await env.DB.prepare(`
+      SELECT bind_event_id FROM host_registration_challenges WHERE id = ?
+    `).bind(pending.token.split('.')[0]!).first('bind_event_id')).toBe(access.event.id);
+    const sessionsBefore = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM host_sessions',
+    ).first<number>('count');
+
+    let activationReached!: () => void;
+    const reachedActivation = new Promise<void>((resolve) => { activationReached = resolve; });
+    let resumeActivation!: () => void;
+    const activationRelease = new Promise<void>((resolve) => { resumeActivation = resolve; });
+    const activateRegistration = AccountsRepository.prototype.activateRegistration;
+    vi.spyOn(AccountsRepository.prototype, 'activateRegistration')
+      .mockImplementationOnce(async (snapshot, activatedAt) => {
+        activationReached();
+        await activationRelease;
+        return activateRegistration.call(new AccountsRepository(env.DB), snapshot, activatedAt);
+      });
+
+    const completing = post('/api/host/register/complete', { code }, {
+      cookie: `${pending.cookie}; ${access.manager.cookie}`,
+    });
+    await reachedActivation;
+    const resent = await post('/api/host/register/resend', {}, {
+      cookie: pending.cookie,
+      'CF-Connecting-IP': '203.0.113.14',
+    });
+    resumeActivation();
+    const completed = await completing;
+
+    expect(resent.status).toBe(202);
+    expect(completed.status).toBe(400);
+    expect(await completed.json<any>()).toMatchObject({ code: 'LOGIN_CODE_INVALID' });
+    expect(completed.headers.getSetCookie()).not.toContain(
+      expect.stringContaining('candidary_host='),
+    );
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_sessions').first('count'))
+      .toBe(sessionsBefore);
     expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
     expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
   });

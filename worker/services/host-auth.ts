@@ -233,7 +233,10 @@ export class HostAuthService {
       now: now.toISOString(),
     });
     if (!replaced) throw this.invalidRegistrationCode();
-    await this.sendRegistrationCode(pending.email, code);
+    const outcome = await this.sendRegistrationCode(pending.email, code);
+    if (!outcome.delivered) {
+      throw new ApiError('LOGIN_EMAIL_UNDELIVERABLE', 'That code could not be sent. Try again shortly.', 502);
+    }
     return parsed.token;
   }
 

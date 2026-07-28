@@ -314,6 +314,57 @@ describe('atomic authentication budgets and ownership', () => {
       .rejects.toMatchObject({ code: 'RATE_LIMITED' });
   });
 
+  it('returns a committed activation after cleanup removes its consumed challenge', async () => {
+    await seedEvent();
+    const creatorSessionId = await seedManagerSession('event-a', 'activation-cleanup', true);
+    const accounts = new AccountsRepository(env.DB);
+    await accounts.replacePendingRegistration({
+      id: 'registration-cleanup',
+      email: 'host@example.com',
+      passwordHash: 'password-hash',
+      displayName: 'Host',
+      browserSecretDigest: 'browser-secret-digest',
+      codeDigest: 'code-digest',
+      bindEventId: 'event-a',
+      creatorSessionId,
+      attempts: 0,
+      expiresAt: '2026-07-21T12:15:00.000Z',
+      consumedAt: null,
+      activationNonce: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const pending = await accounts.getPendingRegistration('registration-cleanup');
+    expect(pending).not.toBeNull();
+
+    const cleanupDb = {
+      prepare: env.DB.prepare.bind(env.DB),
+      async batch(statements: D1PreparedStatement[]) {
+        const results = await env.DB.batch(statements);
+        await env.DB.prepare(`
+          DELETE FROM host_registration_challenges
+          WHERE id = ? AND consumed_at IS NOT NULL
+        `).bind(pending!.id).run();
+        return results;
+      },
+    } as unknown as D1Database;
+
+    const activated = await new AccountsRepository(cleanupDb)
+      .activateRegistration(pending!, '2026-07-21T12:01:00.000Z');
+
+    expect(activated).toMatchObject({
+      account: { email: 'host@example.com' },
+      boundEvent: true,
+    });
+    expect(await accounts.getPendingRegistration(pending!.id)).toBeNull();
+    expect(await env.DB.prepare(`
+      SELECT role FROM event_hosts WHERE event_id = ? AND account_id = ?
+    `).bind('event-a', activated!.account.id).first('role')).toBe('owner');
+    expect(await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM host_notification_outbox',
+    ).first('count')).toBe(3);
+  });
+
   it('claims one owner, closes a legacy path, and schedules exactly three rows', async () => {
     await seedEvent();
     await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
