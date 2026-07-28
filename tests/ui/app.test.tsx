@@ -1072,6 +1072,15 @@ describe('host account attachment and recovery', () => {
     expect(screen.queryByText(/already saved to this account/i)).not.toBeInTheDocument();
   });
 
+  it('does not claim a registration email was sent before delivery is known', async () => {
+    stubHostFlow();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(userEvent.setup());
+
+    expect(screen.getByText(/enter the six-digit code if one arrives/i)).toBeVisible();
+    expect(screen.queryByText(/we sent/i)).not.toBeInTheDocument();
+  });
+
   it('relaxes the warning only once completion reports a bound event', async () => {
     stubHostFlow({ boundEvent: true });
     const user = userEvent.setup();

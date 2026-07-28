@@ -76,11 +76,17 @@ export class NotificationService {
     });
   }
 
-  private eventReminderMessage(event: EventRecord, unsubscribe: string) {
+  private eventReminderMessage(event: EventRecord, unsubscribe: string, now: Date) {
+    // Event dates and reminder cutoffs are stored in UTC. A row can be retried
+    // through the end of the event day, so its wording must follow the execution
+    // date rather than the day it first became available.
+    const isEventDay = now.toISOString().slice(0, 10) === event.eventDate;
+    const day = isEventDay ? 'today' : 'tomorrow';
+    const preparationTime = isEventDay ? 'now' : 'tonight';
     return ({
-      subject: `${event.name} is tomorrow — your QR code is ready`,
+      subject: `${event.name} is ${day} — your QR code is ready`,
       text: [
-        `${event.name} is tomorrow. Two things worth doing tonight:`,
+        `${event.name} is ${day}. Two things worth doing ${preparationTime}:`,
         '',
         '1. Open your event and check that photo sending is switched on.',
         '2. Have the QR code ready to show, print, or put on a table card.',
@@ -89,8 +95,8 @@ export class NotificationService {
         '',
         `Stop receiving these emails: ${unsubscribe}`,
       ].join('\n'),
-      html: layout(`${event.name} is tomorrow`, [
-        'Two things worth doing tonight:',
+      html: layout(`${event.name} is ${day}`, [
+        `Two things worth doing ${preparationTime}:`,
         'Check that photo sending is switched on, and have your QR code ready to show, print, or put on a table card.',
         `<a href="${this.origin}/manage/event/${event.id}">Open your event</a>`,
       ], unsubscribe),
@@ -143,7 +149,7 @@ export class NotificationService {
 
     for (const row of rows) {
       const unsubscribe = await unsubscribeUrl(this.env, row.accountId);
-      const built = this.buildMessage(row, unsubscribe);
+      const built = this.buildMessage(row, unsubscribe, now);
       const authorized = await outbox.authorizeClaimedDelivery(
         row.id,
         claimToken,
@@ -182,7 +188,7 @@ export class NotificationService {
     return { sent, retried, retired };
   }
 
-  private buildMessage(row: ClaimedOutboxRow, unsubscribe: string) {
+  private buildMessage(row: ClaimedOutboxRow, unsubscribe: string, now: Date) {
     const event: EventRecord = {
       id: row.eventId,
       name: row.eventName,
@@ -191,7 +197,7 @@ export class NotificationService {
       managementAccessExpiresAt: row.managementAccessExpiresAt,
       purgeAfter: row.purgeAfter,
     } as EventRecord;
-    if (row.kind === 'event_reminder') return this.eventReminderMessage(event, unsubscribe);
+    if (row.kind === 'event_reminder') return this.eventReminderMessage(event, unsubscribe, now);
     if (row.kind === 'retention_warning') return this.accessWarningMessage(event, unsubscribe);
     return this.gettingStartedMessage(event, unsubscribe);
   }

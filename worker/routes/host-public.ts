@@ -47,8 +47,8 @@ hostPublicRoutes.post('/host/unsubscribe/:token', async (context: Context<AppBin
   // mail client mangling the URL than an attack, and confirming which addresses
   // exist would be a poor trade for a marginally clearer error.
   return context.html(page('Email preferences', `
-       <h1 style="font-size:20px;">You are unsubscribed</h1>
-       <p>You will not receive any more event emails from Candidary.</p>
+       <h1 style="font-size:20px;">Email preference request received</h1>
+       <p>If this unsubscribe link is valid, event emails are now turned off.</p>
        <p>Your events and photos are untouched. You can turn these emails back on
           from your account settings at any time.</p>`));
 });

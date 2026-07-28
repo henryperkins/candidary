@@ -1222,6 +1222,7 @@ describe('unsubscribing', () => {
       testEnv,
     );
     expect(forged.status).toBe(200);
+    const forgedReceipt = await forged.text();
     let session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
     expect((await session.json<any>()).data.account.notificationsEnabled).toBe(true);
 
@@ -1237,6 +1238,10 @@ describe('unsubscribing', () => {
       method: 'POST',
     }, testEnv);
     expect(confirmed.status).toBe(200);
+    const confirmedReceipt = await confirmed.text();
+    expect(confirmedReceipt).toBe(forgedReceipt);
+    expect(confirmedReceipt).toContain('Email preference request received');
+    expect(confirmedReceipt).not.toMatch(/you are unsubscribed|you will not receive/iu);
     session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
     expect((await session.json<any>()).data.account.notificationsEnabled).toBe(false);
   });
