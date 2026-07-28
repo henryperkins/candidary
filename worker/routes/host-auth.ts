@@ -16,6 +16,7 @@ import {
   setSessionCookies,
 } from '../http/cookies';
 import { assertCsrf, assertRequestOrigin } from '../http/csrf';
+import { digestSecret } from '../security/crypto';
 import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -90,12 +91,36 @@ function requestIp(context: Context<AppBindings>): string {
   return context.req.header('CF-Connecting-IP')?.trim() || 'unknown';
 }
 
+type HostAuthBoundaryAction =
+  | 'registration_start'
+  | 'registration_resend'
+  | 'registration_complete'
+  | 'login'
+  | 'password_forgot'
+  | 'password_reset';
+
+// The edge binding is a coarse per-IP burst shield. The durable D1 reservations
+// below remain the exact per-address, account, and pending-registration limits.
+async function assertHostAuthBoundary(
+  context: Context<AppBindings>,
+  action: HostAuthBoundaryAction,
+): Promise<void> {
+  const key = await digestSecret(
+    `host-auth-boundary:${action}:ip:${requestIp(context)}`,
+    context.env.LOGIN_HMAC_KEY,
+  );
+  if (!(await context.env.HOST_AUTH_RATE_LIMIT.limit({ key })).success) {
+    throw new ApiError('RATE_LIMITED', 'Too many requests. Try again in a few minutes.', 429);
+  }
+}
+
 // Registration answers the same way whether or not the address was free. The only
 // place the difference shows up is the inbox that already owns the address.
 hostAuthRoutes.post('/host/register', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, registerSchema);
   assertPasswordUsable(body.password);
+  await assertHostAuthBoundary(context, 'registration_start');
 
   // Binding is authorized by the management session in the other cookie, checked
   // before the account exists — possession of the link is the proof of ownership,
@@ -132,8 +157,10 @@ hostAuthRoutes.post('/host/register', async (context) => {
 
 hostAuthRoutes.post('/host/register/resend', async (context) => {
   assertRequestOrigin(context);
+  await assertHostAuthBoundary(context, 'registration_resend');
+  const rawRegistrationToken = getRegistrationCookie(context);
   const registrationToken = await new HostAuthService(context.env).resendRegistration(
-    getRegistrationCookie(context),
+    rawRegistrationToken,
     { ipAddress: requestIp(context) },
   );
   setRegistrationCookie(context, registrationToken, 15 * 60);
@@ -146,11 +173,13 @@ hostAuthRoutes.post('/host/register/resend', async (context) => {
 hostAuthRoutes.post('/host/register/complete', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, codeOnlySchema);
+  await assertHostAuthBoundary(context, 'registration_complete');
+  const registrationToken = getRegistrationCookie(context);
   const creator = await new AuthService(context.env)
     .resolve(getSessionCookie(context, 'event'))
     .catch(() => null);
   const completed = await new HostAuthService(context.env).completeRegistration(
-    getRegistrationCookie(context),
+    registrationToken,
     body.code,
     creator?.kind === 'event' && creator.session.role === 'manager'
       ? creator.session.id
@@ -167,6 +196,7 @@ hostAuthRoutes.post('/host/register/complete', async (context) => {
 hostAuthRoutes.post('/host/login', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, loginSchema);
+  await assertHostAuthBoundary(context, 'login');
   const service = new HostAuthService(context.env);
   await service.reserveLogin(body.email, requestIp(context));
   const account = await service.authenticate(body.email, body.password);
@@ -255,6 +285,7 @@ hostAuthRoutes.post('/host/verify/resend', async (context) => {
 hostAuthRoutes.post('/host/password/forgot', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, forgotSchema);
+  await assertHostAuthBoundary(context, 'password_forgot');
   const service = new HostAuthService(context.env);
   const account = await new AccountsRepository(context.env.DB).getByEmail(body.email);
   await service.reservePasswordReset(body.email, requestIp(context));
@@ -270,6 +301,7 @@ hostAuthRoutes.post('/host/password/reset', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, resetSchema);
   assertPasswordUsable(body.password);
+  await assertHostAuthBoundary(context, 'password_reset');
   const accounts = new AccountsRepository(context.env.DB);
   const account = await accounts.getByEmail(body.email);
   if (!account || account.disabledAt) {
