@@ -1,11 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { RouterProvider } from 'react-router-dom';
+import { MemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { mediaPreview } from '../../src/app/api';
 import { createAppRouter } from '../../src/app/router';
+import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
@@ -27,6 +28,7 @@ const CREATED = {
   managementLink: 'https://example.test/manage/manager-secret',
   csrfToken: 'csrf-a',
 };
+const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
 
 async function createEvent(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
@@ -53,6 +55,9 @@ describe('public Candidary experience', () => {
     expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
     expect(screen.getByText('Guest link')).toBeVisible();
     expect(screen.getByText('Management link')).toBeVisible();
+    expect(screen.getByRole('link', { name: /open event manager/i }))
+      .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
+    expect(screen.getByText(CREATED.managementLink)).toBeInTheDocument();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
   });
 
@@ -1022,5 +1027,293 @@ describe('manager experience', () => {
     ));
     const bulkCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/media/bulk'));
     expect(bulkCall?.[1]?.body).not.toContain('media-b');
+  });
+});
+
+describe('host account attachment and recovery', () => {
+  // Routes the create call, then every host-account call, from one stub so a test
+  // can assert which endpoint the panel actually chose.
+  function stubHostFlow(overrides: Record<string, unknown> = {}) {
+    const fetchMock = vi.fn((url: string) => {
+      const path = String(url);
+      if (path === '/api/events') return json({
+        ...CREATED,
+        event: { ...CREATED.event, id: RECOVERY_EVENT_ID },
+        savedToAccount: false,
+        ...overrides.create as object,
+      }, 201);
+      if (path === '/api/host/register') return json({ registrationPending: true }, 202);
+      if (path === '/api/host/register/resend') return json({ registrationPending: true }, 202);
+      if (path === '/api/host/register/complete') {
+        return json({ registered: true, boundEvent: overrides.boundEvent ?? true });
+      }
+      return json({}, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock as unknown as ReturnType<typeof vi.fn> & { mock: { calls: [string, RequestInit?][] } };
+  }
+
+  async function registerFromCreate(user: ReturnType<typeof userEvent.setup>) {
+    await createEvent(user);
+    await user.type(screen.getByLabelText('Email address'), 'host@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a-sufficiently-long-password');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByRole('heading', { name: 'Check your email.' });
+  }
+
+  it('keeps the lost-link warning while registration is only pending', async () => {
+    stubHostFlow();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(userEvent.setup());
+
+    // Requesting a code is not proof of anything yet, so nothing may imply the
+    // event has become recoverable.
+    expect(screen.getByText(/still depends on its management link/i)).toBeVisible();
+    expect(screen.queryByText(/already saved to this account/i)).not.toBeInTheDocument();
+  });
+
+  it('relaxes the warning only once completion reports a bound event', async () => {
+    stubHostFlow({ boundEvent: true });
+    const user = userEvent.setup();
+    const router = createAppRouter(['/create']);
+    render(<RouterProvider router={router} />);
+    await registerFromCreate(user);
+
+    // Asserted before as well as after: a panel that relaxes the warning when the
+    // code is merely requested would otherwise satisfy the post-condition alone.
+    expect(screen.getByText(/still depends on its management link/i)).toBeVisible();
+
+    await user.type(screen.getByLabelText('Confirmation code'), '424242');
+    await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/manage/event/${RECOVERY_EVENT_ID}`));
+  });
+
+  it('says the event is still link-only when completion binds nothing', async () => {
+    stubHostFlow({ boundEvent: false });
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(user);
+
+    await user.type(screen.getByLabelText('Confirmation code'), '424242');
+    await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
+
+    // The account exists, but this event did not attach. Saying "saved" here is the
+    // exact false promise the warning exists to prevent.
+    await screen.findByText(/still depends on its management link/i);
+    expect(screen.queryByText(/reach this event any time/i)).not.toBeInTheDocument();
+  });
+
+  it('completes and resends a pending registration through the registration endpoints', async () => {
+    const fetchMock = stubHostFlow();
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(user);
+
+    await user.click(screen.getByRole('button', { name: 'Send another code' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register/resend')).toBe(true));
+
+    await user.type(screen.getByLabelText('Confirmation code'), '424242');
+    await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register/complete')).toBe(true));
+
+    // The host-session verification endpoints belong to the standalone account
+    // page; a browser with no account yet has no session to present to them.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/host/verify'))).toBe(false);
+  });
+
+  it('skips registration entirely when creation already saved the event', async () => {
+    stubHostFlow({ create: { savedToAccount: true } });
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await createEvent(userEvent.setup());
+
+    expect(screen.getByText(/Anyone who has it can manage this event/i)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Create account' })).not.toBeInTheDocument();
+  });
+
+  it('moves create-success registration into the addressable pending route', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    const fetchMock = stubHostFlow({ create: { event: { ...CREATED.event, id: eventId } } });
+    const router = createAppRouter(['/create']);
+    const user = userEvent.setup();
+    render(<RouterProvider router={router} />);
+    await createEvent(user);
+    await user.type(screen.getByLabelText('Email address'), 'host@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a-sufficiently-long-password');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
+    expect(router.state.location.search).toBe(`?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}&pending=1`);
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register')).toBe(true);
+  });
+});
+
+describe('host recovery from a dead credential', () => {
+  it('carries the event and a same-origin return path into the manager sign-in link', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson(
+      { code: 'HOST_SESSION_REQUIRED', message: 'Your sign-in has expired.', requestId: 'r' }, 401,
+    )));
+    render(<RouterProvider router={createAppRouter(['/manage/event/11111111-2222-4333-8444-555555555555'])} />);
+
+    const signIn = await screen.findByRole('link', { name: 'Sign in' });
+    // Both halves matter: the return path is what brings the host back, and `adopt`
+    // is what makes the trip worth taking.
+    expect(signIn).toHaveAttribute('href', '/host/login?returnTo=%2Fmanage%2Fevent%2F11111111-2222-4333-8444-555555555555&adopt=11111111-2222-4333-8444-555555555555');
+  });
+
+  it('offers sign-in when a manager route has no usable credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson(
+      { code: 'HOST_SESSION_REQUIRED', message: 'Your sign-in has expired.', requestId: 'r' }, 401,
+    )));
+    render(<RouterProvider router={createAppRouter(['/manage/event/11111111-2222-4333-8444-555555555555'])} />);
+
+    await screen.findByText('Your sign-in has expired.');
+    expect(await screen.findByRole('link', { name: 'Sign in' }))
+      .toHaveAttribute('href', expect.stringContaining('/host/login'));
+  });
+
+  it('adopts the returned event after signing in, before navigating away', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      seen.push(String(url));
+      if (String(url) === '/api/host/session') return json({ account: { id: 'a', email: 'h@e.com', displayName: null, emailVerified: true, notificationsEnabled: true }, events: [] });
+      return json({}, 200);
+    }));
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter([
+      '/host/login?returnTo=%2Fmanage%2Fevent%2F11111111-2222-4333-8444-555555555555&adopt=11111111-2222-4333-8444-555555555555',
+    ])} />);
+
+    await user.type(screen.getByLabelText('Email address'), 'host@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a-sufficiently-long-password');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    // The management-link cookie is still in the browser at this instant and is the
+    // only thing that authorizes the claim, so adoption cannot wait until after the
+    // navigation that discards this page.
+    await waitFor(() => expect(seen).toContain('/api/host/events/11111111-2222-4333-8444-555555555555/adopt'));
+    expect(seen.indexOf('/api/host/events/11111111-2222-4333-8444-555555555555/adopt')).toBeGreaterThan(seen.indexOf('/api/host/login'));
+  });
+
+  it('offers manager registration beside sign-in with the same recovery context', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    vi.stubGlobal('fetch', vi.fn(() => errorJson(
+      { code: 'HOST_SESSION_REQUIRED', message: 'Sign in required.', requestId: 'r' }, 401,
+    )));
+    render(<MemoryRouter><EventAccountCard eventId={eventId} /></MemoryRouter>);
+
+    const signIn = await screen.findByRole('link', { name: 'Sign in' });
+    const register = screen.getByRole('link', { name: 'Create account' });
+    expect(signIn).toHaveAttribute('href', `/host/login?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`);
+    expect(register).toHaveAttribute('href', `/host/register?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`);
+  });
+
+  it('preserves validated recovery context while switching between sign-in and registration', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    const context = `?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`;
+    const router = createAppRouter([`/host/login${context}`]);
+    const user = userEvent.setup();
+    render(<RouterProvider router={router} />);
+
+    await user.click(screen.getByRole('link', { name: 'Create account' }));
+    await screen.findByRole('heading', { name: 'Save this event to your email' });
+    expect(router.state.location.search).toBe(context);
+    await user.click(screen.getByRole('link', { name: 'Sign in' }));
+    await screen.findByRole('heading', { name: 'Sign in to your events' });
+    expect(router.state.location.search).toBe(context);
+  });
+
+  it('resumes registration from the pending URL and lets the host start over durably', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    const pending = `/host/register?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}&pending=1`;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      void init;
+      if (String(url) === '/api/host/register') return json({ registrationPending: true }, 202);
+      return json({}, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter([`/host/register?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`]);
+    const user = userEvent.setup();
+    render(<RouterProvider router={router} />);
+
+    await user.type(screen.getByLabelText('Email address'), 'host@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a-sufficiently-long-password');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByRole('heading', { name: 'Check your email.' });
+    await waitFor(() => expect(router.state.location.pathname + router.state.location.search).toBe(pending));
+
+    const registerCall = fetchMock.mock.calls.find(([url]) => url === '/api/host/register');
+    expect(JSON.parse(String(registerCall?.[1]?.body))).toMatchObject({ bindEventId: eventId });
+
+    cleanup();
+    const resumed = createAppRouter([pending]);
+    render(<RouterProvider router={resumed} />);
+    expect(screen.getByRole('heading', { name: 'Check your email.' })).toBeVisible();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Start over' }));
+    await screen.findByRole('heading', { name: 'Save this event to your email' });
+    expect(resumed.state.location.search).toBe(`?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`);
+
+    cleanup();
+    render(<RouterProvider router={createAppRouter([resumed.state.location.pathname + resumed.state.location.search])} />);
+    expect(screen.getByRole('heading', { name: 'Save this event to your email' })).toBeVisible();
+  });
+
+  it('states the 12-hour creator ownership window on registration and creation success', async () => {
+    render(<RouterProvider router={createAppRouter(['/host/register'])} />);
+    expect(screen.getByText(/earlier of the management deadline and 12 hours after creation/i)).toBeVisible();
+
+    cleanup();
+    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await createEvent(userEvent.setup());
+    expect(screen.getByText(/earlier of the management deadline and 12 hours after creation/i)).toBeVisible();
+  });
+});
+
+describe('host account preferences and sign out', () => {
+  const SESSION = {
+    account: { id: 'a', email: 'host@example.com', displayName: null, emailVerified: true, notificationsEnabled: true },
+    events: [],
+  };
+
+  it('keeps the host on the page when sign out is refused', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (String(url) === '/api/host/session') return json(SESSION);
+      return errorJson({ code: 'INTERNAL_ERROR', message: 'Sign out failed.', requestId: 'r' }, 500);
+    }));
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/host/events'])} />);
+    await screen.findByRole('heading', { name: 'Your events' });
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    // Navigating anyway would show a signed-out page while the server still holds a
+    // live session — the opposite of what the host was told happened.
+    await screen.findByText('Sign out failed.');
+    expect(screen.getByRole('heading', { name: 'Your events' })).toBeVisible();
+  });
+
+  it('turns lifecycle email off and back on from the account page', async () => {
+    let enabled = true;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url) === '/api/host/session') {
+        return json({ ...SESSION, account: { ...SESSION.account, notificationsEnabled: enabled } });
+      }
+      if (String(url) === '/api/host/preferences') {
+        enabled = JSON.parse(String(init?.body ?? '{}')).notificationsEnabled;
+        return json({ account: { ...SESSION.account, notificationsEnabled: enabled } });
+      }
+      return json({}, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/host/events'])} />);
+
+    const toggle = await screen.findByRole('checkbox', { name: /event emails/i });
+    expect(toggle).toBeChecked();
+
+    await user.click(toggle);
+    await waitFor(() => expect(enabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /event emails/i })).not.toBeChecked());
   });
 });

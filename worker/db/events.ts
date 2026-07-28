@@ -1,6 +1,6 @@
 import type { EventRecord } from './types';
 
-interface EventRow {
+export interface EventRow {
   id: string;
   slug: string;
   name: string;
@@ -33,7 +33,7 @@ export interface CreateEventRecord {
   createdAt: string;
 }
 
-function mapEvent(row: EventRow): EventRecord {
+export function mapEvent(row: EventRow): EventRecord {
   return {
     id: row.id,
     slug: row.slug,
@@ -59,8 +59,11 @@ function mapEvent(row: EventRow): EventRecord {
 export class EventsRepository {
   constructor(private readonly db: D1Database) {}
 
-  async create(input: CreateEventRecord): Promise<EventRecord> {
-    await this.db.prepare(`
+  // Exposed as a statement so event creation can commit the event, its tokens, the
+  // creator session, and any account ownership in one batch rather than a sequence
+  // of writes a failure could tear in half.
+  createStatement(input: CreateEventRecord): D1PreparedStatement {
+    return this.db.prepare(`
       INSERT INTO events (
         id, slug, name, event_date, welcome_message, gallery_visible,
         guest_access_expires_at, management_access_expires_at, purge_after, created_at
@@ -75,7 +78,11 @@ export class EventsRepository {
       input.managementAccessExpiresAt,
       input.purgeAfter,
       input.createdAt,
-    ).run();
+    );
+  }
+
+  async create(input: CreateEventRecord): Promise<EventRecord> {
+    await this.createStatement(input).run();
     return (await this.getById(input.id))!;
   }
 

@@ -11,7 +11,7 @@ function registerExchange(path: string, role: Role) {
   exchangeRoutes.get(path, async (context) => {
     const exchanged = await new AuthService(context.env).exchange(context.req.param('token') ?? '', role);
     const maxAge = Math.max(1, Math.floor((Date.parse(exchanged.session.expiresAt) - Date.now()) / 1000));
-    setSessionCookies(context, exchanged.sessionToken, exchanged.csrfToken, maxAge);
+    setSessionCookies(context, 'event', exchanged.sessionToken, exchanged.csrfToken, maxAge);
     const location = role === 'guest'
       ? `/event/${exchanged.event.slug}`
       : `/manage/event/${exchanged.event.id}`;

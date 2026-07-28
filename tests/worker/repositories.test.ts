@@ -2,12 +2,16 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AccountsRepository } from '../../worker/db/accounts';
+import { AuthRateLimitsRepository } from '../../worker/db/auth-rate-limits';
 import { EventsRepository } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
 import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
 import { SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
 import { finalizeStoredMedia } from '../../worker/storage/media';
+import type { AppEnv } from '../../worker/env';
+import { HostAuthService } from '../../worker/services/host-auth';
 import { png } from './helpers';
 
 interface TestMigration {
@@ -20,6 +24,7 @@ const testEnv = env as Env & {
   TEST_MIGRATION_QUERIES: string;
 };
 const now = '2026-07-21T12:00:00.000Z';
+const rateKey = 'repository-rate-key-with-at-least-32-bytes';
 
 async function seedEvent(id = 'event-a', slug = 'maya-theo') {
   const events = new EventsRepository(env.DB);
@@ -39,7 +44,6 @@ async function seedEvent(id = 'event-a', slug = 'maya-theo') {
 
 async function seedGuestSession(eventId = 'event-a', suffix = 'a') {
   const tokens = new TokensRepository(env.DB);
-  const sessions = new SessionsRepository(env.DB);
   await tokens.create({
     id: `token-${suffix}`,
     eventId,
@@ -49,17 +53,58 @@ async function seedGuestSession(eventId = 'event-a', suffix = 'a') {
     expiresAt: '2026-10-19T23:59:59.999Z',
     createdAt: now,
   });
-  await sessions.create({
+  await env.DB.prepare(`
+    INSERT INTO event_sessions (
+      id, secret_digest, csrf_digest, event_id, access_token_id, role, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'guest', ?, ?)
+  `).bind(
+    `session-${suffix}`,
+    `session-digest-${suffix}`,
+    `csrf-${suffix}`,
+    eventId,
+    `token-${suffix}`,
+    '2026-07-28T12:00:00.000Z',
+    now,
+  ).run();
+  return `session-${suffix}`;
+}
+
+async function seedManagerSession(
+  eventId = 'event-a',
+  suffix = 'manager',
+  canClaimOwner = true,
+) {
+  const tokens = new TokensRepository(env.DB);
+  await tokens.create({
+    id: `token-${suffix}`,
+    eventId,
+    role: 'manager',
+    secretDigest: `token-digest-${suffix}`,
+    secretCiphertext: null,
+    expiresAt: '2026-12-18T23:59:59.999Z',
+    createdAt: now,
+  });
+  await new SessionsRepository(env.DB).create({
     id: `session-${suffix}`,
     secretDigest: `session-digest-${suffix}`,
     csrfDigest: `csrf-${suffix}`,
     eventId,
     accessTokenId: `token-${suffix}`,
-    role: 'guest',
+    role: 'manager',
+    canClaimOwner,
     expiresAt: '2026-07-28T12:00:00.000Z',
     createdAt: now,
   });
   return `session-${suffix}`;
+}
+
+async function seedAccount(email: string) {
+  return (await new AccountsRepository(env.DB).create({
+    email,
+    passwordHash: `hash-for-${email}`,
+    displayName: null,
+    createdAt: now,
+  }))!;
 }
 
 beforeEach(async () => {
@@ -191,6 +236,244 @@ describe('event, token, and session repositories', () => {
     const events = await seedEvent();
 
     expect((await events.getById('event-a'))?.galleryVisible).toBe(false);
+  });
+});
+
+describe('atomic authentication budgets and ownership', () => {
+  it('reserves a concurrent budget with one atomic upsert per attempt', async () => {
+    const rates = new AuthRateLimitsRepository(env.DB, rateKey);
+    const at = new Date('2026-07-21T12:14:59.999Z');
+
+    const reservations = await Promise.all(Array.from({ length: 4 }, () => rates.reserve({
+      action: 'registration',
+      scopeKind: 'email',
+      normalizedValue: 'host@example.com',
+      limit: 3,
+      now: at,
+    })));
+
+    expect(reservations.filter(Boolean)).toHaveLength(3);
+    expect(await env.DB.prepare(`
+      SELECT attempts, window_started_at FROM host_auth_rate_limits
+    `).first()).toEqual({
+      attempts: 4,
+      window_started_at: '2026-07-21T12:00:00.000Z',
+    });
+  });
+
+  it('starts a fresh fixed UTC bucket exactly on the quarter hour', async () => {
+    const rates = new AuthRateLimitsRepository(env.DB, rateKey);
+    const input = {
+      action: 'login' as const,
+      scopeKind: 'ip' as const,
+      normalizedValue: 'unknown',
+      limit: 20,
+    };
+
+    await rates.reserve({ ...input, now: new Date('2026-07-21T12:14:59.999Z') });
+    await rates.reserve({ ...input, now: new Date('2026-07-21T12:15:00.000Z') });
+
+    const rows = await env.DB.prepare(`
+      SELECT window_started_at, attempts FROM host_auth_rate_limits
+      ORDER BY window_started_at
+    `).all();
+    expect(rows.results).toEqual([
+      { window_started_at: '2026-07-21T12:00:00.000Z', attempts: 1 },
+      { window_started_at: '2026-07-21T12:15:00.000Z', attempts: 1 },
+    ]);
+  });
+
+  it('enforces the exact login, verification, and reset secondary budgets', async () => {
+    const service = new HostAuthService(env as AppEnv);
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await expect(service.reserveLogin(
+        'Host@Example.com',
+        '203.0.113.20',
+      )).resolves.toBeUndefined();
+    }
+    await expect(service.reserveLogin('host@example.com', '203.0.113.20'))
+      .rejects.toMatchObject({ code: 'RATE_LIMITED' });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(service.reserveVerificationResend(
+        'account-a',
+        '203.0.113.21',
+      )).resolves.toBeUndefined();
+    }
+    await expect(service.reserveVerificationResend('account-a', '203.0.113.21'))
+      .rejects.toMatchObject({ code: 'RATE_LIMITED' });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(service.reservePasswordReset(
+        'Host@Example.com',
+        '203.0.113.22',
+      )).resolves.toBeUndefined();
+    }
+    await expect(service.reservePasswordReset('host@example.com', '203.0.113.22'))
+      .rejects.toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('returns a committed activation after cleanup removes its consumed challenge', async () => {
+    await seedEvent();
+    const creatorSessionId = await seedManagerSession('event-a', 'activation-cleanup', true);
+    const accounts = new AccountsRepository(env.DB);
+    await accounts.replacePendingRegistration({
+      id: 'registration-cleanup',
+      email: 'host@example.com',
+      passwordHash: 'password-hash',
+      displayName: 'Host',
+      browserSecretDigest: 'browser-secret-digest',
+      codeDigest: 'code-digest',
+      bindEventId: 'event-a',
+      creatorSessionId,
+      attempts: 0,
+      expiresAt: '2026-07-21T12:15:00.000Z',
+      consumedAt: null,
+      activationNonce: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const pending = await accounts.getPendingRegistration('registration-cleanup');
+    expect(pending).not.toBeNull();
+
+    const cleanupDb = {
+      prepare: env.DB.prepare.bind(env.DB),
+      async batch(statements: D1PreparedStatement[]) {
+        const results = await env.DB.batch(statements);
+        await env.DB.prepare(`
+          DELETE FROM host_registration_challenges
+          WHERE id = ? AND consumed_at IS NOT NULL
+        `).bind(pending!.id).run();
+        return results;
+      },
+    } as unknown as D1Database;
+
+    const activated = await new AccountsRepository(cleanupDb)
+      .activateRegistration(pending!, '2026-07-21T12:01:00.000Z');
+
+    expect(activated).toMatchObject({
+      account: { email: 'host@example.com' },
+      boundEvent: true,
+    });
+    expect(await accounts.getPendingRegistration(pending!.id)).toBeNull();
+    expect(await env.DB.prepare(`
+      SELECT role FROM event_hosts WHERE event_id = ? AND account_id = ?
+    `).bind('event-a', activated!.account.id).first('role')).toBe('owner');
+    expect(await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM host_notification_outbox',
+    ).first('count')).toBe(3);
+  });
+
+  it('claims one owner, closes a legacy path, and schedules exactly three rows', async () => {
+    await seedEvent();
+    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
+      .bind('event-a').run();
+    const sessionId = await seedManagerSession('event-a', 'legacy', false);
+    const account = await seedAccount('host@example.com');
+    const accounts = new AccountsRepository(env.DB);
+
+    const result = await accounts.claimInitialOwnerAndSchedule(
+      'event-a',
+      account.id,
+      sessionId,
+      '2026-07-21T12:01:00.000Z',
+    );
+
+    expect(result).toBe('claimed');
+    expect(await env.DB.prepare(`
+      SELECT legacy_owner_claim_open FROM events WHERE id = ?
+    `).bind('event-a').first('legacy_owner_claim_open')).toBe(0);
+    const scheduled = await env.DB.prepare(`
+      SELECT kind FROM host_notification_outbox ORDER BY kind
+    `).all<{ kind: string }>();
+    expect(scheduled.results.map(({ kind }) => kind)).toEqual([
+      'event_reminder',
+      'getting_started',
+      'retention_warning',
+    ]);
+  });
+
+  it('refuses a live manager session that was never the creator', async () => {
+    await seedEvent();
+    // Post-0006 event: legacy claim closed, so creator authority is the only route.
+    const delegateSession = await seedManagerSession('event-a', 'delegate', false);
+    const account = await seedAccount('delegate@example.com');
+
+    const result = await new AccountsRepository(env.DB).claimInitialOwnerAndSchedule(
+      'event-a', account.id, delegateSession, '2026-07-21T12:01:00.000Z',
+    );
+
+    // Deleting "can_claim_owner = 1 OR legacy_owner_claim_open = 1" from the insert
+    // would make this 'claimed', and nothing else in the suite would notice.
+    expect(result).toBe('not_authorized');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('lets the creator session claim the event the delegate could not', async () => {
+    await seedEvent();
+    const creatorSession = await seedManagerSession('event-a', 'creator', true);
+    const account = await seedAccount('creator@example.com');
+
+    // The positive half: a guard that refused everything would pass the test above.
+    expect(await new AccountsRepository(env.DB).claimInitialOwnerAndSchedule(
+      'event-a', account.id, creatorSession, '2026-07-21T12:01:00.000Z',
+    )).toBe('claimed');
+  });
+
+  it('does not promote a cohost or close the legacy path on refusal', async () => {
+    await seedEvent();
+    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
+      .bind('event-a').run();
+    const sessionId = await seedManagerSession('event-a', 'legacy', false);
+    const account = await seedAccount('host@example.com');
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, ?, 'cohost', ?)
+    `).bind('event-a', account.id, now).run();
+
+    const result = await new AccountsRepository(env.DB).claimInitialOwnerAndSchedule(
+      'event-a',
+      account.id,
+      sessionId,
+      '2026-07-21T12:01:00.000Z',
+    );
+
+    expect(result).toBe('owned_by_other');
+    expect(await env.DB.prepare(`
+      SELECT role FROM event_hosts WHERE event_id = ? AND account_id = ?
+    `).bind('event-a', account.id).first('role')).toBe('cohost');
+    expect(await env.DB.prepare(`
+      SELECT legacy_owner_claim_open FROM events WHERE id = ?
+    `).bind('event-a').first('legacy_owner_claim_open')).toBe(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('refuses a revoked creator session without closing or scheduling', async () => {
+    await seedEvent();
+    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
+      .bind('event-a').run();
+    const sessionId = await seedManagerSession('event-a', 'revoked', true);
+    await env.DB.prepare('UPDATE event_sessions SET revoked_at = ? WHERE id = ?')
+      .bind('2026-07-21T12:00:30.000Z', sessionId).run();
+    const account = await seedAccount('host@example.com');
+
+    const result = await new AccountsRepository(env.DB).claimInitialOwnerAndSchedule(
+      'event-a',
+      account.id,
+      sessionId,
+      '2026-07-21T12:01:00.000Z',
+    );
+
+    // No membership exists, so the honest answer is that this credential could not
+    // claim it — not that somebody else already had.
+    expect(result).toBe('not_authorized');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+    expect(await env.DB.prepare(`
+      SELECT legacy_owner_claim_open FROM events WHERE id = ?
+    `).bind('event-a').first('legacy_owner_claim_open')).toBe(1);
   });
 });
 

@@ -12,8 +12,8 @@ export class ClientApiError extends Error {
   }
 }
 
-function csrfToken(): string | undefined {
-  return document.cookie.split('; ').find((part) => part.startsWith('candidary_csrf='))?.split('=')[1];
+function cookieValue(name: string): string | undefined {
+  return document.cookie.split('; ').find((part) => part.startsWith(`${name}=`))?.split('=')[1];
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -21,8 +21,13 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = init.method?.toUpperCase() ?? 'GET';
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   if (!['GET', 'HEAD'].includes(method)) {
-    const csrf = csrfToken();
+    // A browser can hold an event session and an account session at once, and the
+    // route decides which one authorizes it. Both tokens are offered; the server
+    // checks only the pair belonging to the credential it accepted.
+    const csrf = cookieValue('candidary_csrf');
     if (csrf) headers.set('x-candidary-csrf', decodeURIComponent(csrf));
+    const hostCsrf = cookieValue('candidary_host_csrf');
+    if (hostCsrf) headers.set('x-candidary-host-csrf', decodeURIComponent(hostCsrf));
   }
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   const payload = await response.json() as Envelope<T> & Partial<ApiErrorBody>;

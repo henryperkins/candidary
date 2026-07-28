@@ -3,27 +3,28 @@ import { z } from 'zod';
 
 import type { ModerationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
+import { requireManager } from '../auth/manager';
 import { AuthService } from '../auth/service';
 import { MessagesRepository } from '../db/messages';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
 
-async function eventAuth(context: Context<AppBindings>, role?: 'guest' | 'manager', write = false) {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
-  const pathEvent = context.req.param('eventId') ?? context.req.param('slug');
-  const matches = pathEvent === auth.event.id || pathEvent === auth.event.slug;
-  if (!matches || (role && auth.session.role !== role)) {
+// Guest notes are a link-session surface; host moderation goes through the shared
+// manager check so an account session reaches it too.
+async function guestAuth(context: Context<AppBindings>, write = false) {
+  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
+  if (auth.session.role !== 'guest' || context.req.param('slug') !== auth.event.slug) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
-  if (write) await assertCsrf(context, auth);
+  if (write) await assertCsrf(context, 'event', auth.session.csrfDigest);
   return auth;
 }
 
 export const messageRoutes = new Hono<AppBindings>();
 
 messageRoutes.post('/event/:slug/messages', async (context) => {
-  const auth = await eventAuth(context, 'guest', true);
+  const auth = await guestAuth(context, true);
   const parsed = z.object({
     guestName: z.string().trim().max(80).nullish(),
     body: z.string().trim().min(1).max(500),
@@ -43,13 +44,13 @@ messageRoutes.post('/event/:slug/messages', async (context) => {
 });
 
 messageRoutes.get('/event/:slug/messages', async (context) => {
-  const auth = await eventAuth(context, 'guest');
+  const auth = await guestAuth(context);
   const items = await new MessagesRepository(context.env.DB).listFeed(auth.event.id, auth.session.id);
   return context.json({ data: { items }, requestId: context.get('requestId') });
 });
 
 messageRoutes.get('/manage/events/:eventId/messages', async (context) => {
-  await eventAuth(context, 'manager');
+  await requireManager(context);
   const rawStatus = context.req.query('status');
   const status = rawStatus && ['pending', 'approved', 'rejected'].includes(rawStatus)
     ? rawStatus as ModerationStatus
@@ -59,7 +60,7 @@ messageRoutes.get('/manage/events/:eventId/messages', async (context) => {
 });
 
 messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (context) => {
-  const auth = await eventAuth(context, 'manager', true);
+  const auth = await requireManager(context, { write: true });
   const parsed = z.object({
     action: z.enum(['approve', 'reject', 'delete']),
     expectedStatus: z.enum(['pending', 'approved', 'rejected']).default('pending'),

@@ -2,21 +2,14 @@ import { Hono, type Context } from 'hono';
 
 import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
-import { AuthService } from '../auth/service';
+import { requireManager } from '../auth/manager';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
-import { getSessionCookie } from '../http/cookies';
-import { assertCsrf } from '../http/csrf';
 import { presignDownload } from '../storage/presign';
 
-async function manager(context: Context<AppBindings>, write = false) {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
-  if (auth.session.role !== 'manager' || auth.event.id !== context.req.param('eventId')) {
-    throw new ApiError('ROLE_FORBIDDEN', 'This management session belongs to a different event.', 403);
-  }
-  if (write) await assertCsrf(context, auth);
-  return auth;
+function manager(context: Context<AppBindings>, write = false) {
+  return requireManager(context, { write });
 }
 
 async function ownedJob(context: Context<AppBindings>) {

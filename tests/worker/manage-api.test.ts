@@ -5,6 +5,7 @@ import { MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { MediaRepository } from '../../worker/db/media';
 import {
+  cookiesFrom,
   eventAccess,
   png,
   resetDatabase,
@@ -551,6 +552,14 @@ describe('access link rotation', () => {
 
   it('returns a one-time replacement management link and revokes the current manager session', async () => {
     const access = await eventAccess();
+    await env.DB.prepare(`
+      INSERT INTO host_accounts (id, email, password_hash, created_at)
+      VALUES ('owner-rotation', 'owner-rotation@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
+    `).run();
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, 'owner-rotation', 'owner', '2026-07-28T00:00:00.000Z')
+    `).bind(access.event.id).run();
     const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
@@ -561,5 +570,130 @@ describe('access link rotation', () => {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
     expect((await oldManager.json<any>()).code).toBe('TOKEN_REVOKED');
+  });
+
+  it('keeps a live creator recovery path intact instead of rotating its manager link', async () => {
+    const access = await eventAccess();
+
+    const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json<any>()).code).toBe('ROLE_FORBIDDEN');
+
+    const originalSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect(originalSession.status).toBe(200);
+
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+    const exchangedSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: cookiesFrom(exchanged).cookie },
+    }, testEnv);
+    expect(exchangedSession.status).toBe(200);
+  });
+
+  it('allows rotation after the creator session expires and no legacy claim remains', async () => {
+    const access = await eventAccess();
+    await env.DB.prepare(`
+      UPDATE event_sessions SET expires_at = ?
+      WHERE event_id = ? AND role = 'manager' AND can_claim_owner = 1
+    `).bind(new Date(Date.now() - 1_000).toISOString(), access.event.id).run();
+    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 0 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+    const freshManager = cookiesFrom(exchanged);
+    const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
+      method: 'POST', headers: writeHeaders(freshManager), body: '{}',
+    }, testEnv);
+
+    expect(rotated.status).toBe(200);
+    expect((await rotated.json<any>()).data.managementLink).not.toBe(access.managementLink);
+  });
+
+  it('continues rotating an event that already has a durable owner', async () => {
+    const access = await eventAccess();
+    await env.DB.prepare(`
+      INSERT INTO host_accounts (id, email, password_hash, created_at)
+      VALUES ('owner-a', 'owner@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
+    `).run();
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, 'owner-a', 'owner', '2026-07-28T00:00:00.000Z')
+    `).bind(access.event.id).run();
+
+    const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+
+    expect(rotated.status).toBe(200);
+  });
+
+  it('keeps legacy ownerless events recoverable instead of rotating their manager links', async () => {
+    const access = await eventAccess();
+    await env.DB.prepare(`
+      UPDATE event_sessions SET expires_at = ?
+      WHERE event_id = ? AND role = 'manager' AND can_claim_owner = 1
+    `).bind(new Date(Date.now() - 1_000).toISOString(), access.event.id).run();
+    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+    const freshManager = cookiesFrom(exchanged);
+    const freshSessionId = /candidary_session=([^;]+)/u.exec(freshManager.cookie)?.[1]?.split('.')[0];
+    if (!freshSessionId) throw new Error('Expected a fresh manager session.');
+    expect(await env.DB.prepare(`
+      SELECT can_claim_owner FROM event_sessions WHERE id = ?
+    `).bind(freshSessionId).first('can_claim_owner')).toBe(0);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_sessions
+      WHERE event_id = ? AND can_claim_owner = 1
+        AND revoked_at IS NULL AND expires_at > ?
+    `).bind(access.event.id, new Date().toISOString()).first('count')).toBe(0);
+
+    const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
+      method: 'POST', headers: writeHeaders(freshManager), body: '{}',
+    }, testEnv);
+
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json<any>()).code).toBe('ROLE_FORBIDDEN');
+  });
+
+  it('does not treat a cohost as durable ownership while creator recovery remains live', async () => {
+    const access = await eventAccess();
+    await env.DB.prepare(`
+      INSERT INTO host_accounts (id, email, password_hash, created_at)
+      VALUES ('cohost-a', 'cohost@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
+    `).run();
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, 'cohost-a', 'cohost', '2026-07-28T00:00:00.000Z')
+    `).bind(access.event.id).run();
+
+    const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json<any>()).code).toBe('ROLE_FORBIDDEN');
+
+    const originalSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect(originalSession.status).toBe(200);
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+    const exchangedSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: cookiesFrom(exchanged).cookie },
+    }, testEnv);
+    expect(exchangedSession.status).toBe(200);
   });
 });

@@ -8,7 +8,7 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/join/*", "/manage/*", "/create", "/event/*"]
+    "run_worker_first": ["/api/*", "/join/*", "/manage/*", "/create", "/event/*", "/host/unsubscribe/*"]
   },
   "d1_databases": [
     {
@@ -27,6 +27,11 @@
   "images": {
     "binding": "IMAGES"
   },
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
   "workflows": [
     {
       "name": "candidary-export",
@@ -35,12 +40,23 @@
     }
   ],
   "triggers": {
-    "crons": ["17 3 * * *"]
+    "crons": ["17 3 * * *", "47 * * * *"]
   },
   "vars": {
-    "APP_ORIGIN": "https://candidary.lfd.workers.dev",
+    "APP_ORIGIN": "https://candidary.online",
     "R2_ACCOUNT_ID": "a77e479f6736120eadd99973dbeb705e",
-    "R2_BUCKET_NAME": "candidary-media"
+    "R2_BUCKET_NAME": "candidary-media",
+    "EMAIL_FROM": "hello@candidary.online"
+  },
+  "secrets": {
+    "required": [
+      "TOKEN_HMAC_KEY",
+      "SESSION_HMAC_KEY",
+      "GUEST_TOKEN_ENCRYPTION_KEY",
+      "LOGIN_HMAC_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_SECRET_ACCESS_KEY"
+    ]
   },
   "observability": {
     "enabled": true

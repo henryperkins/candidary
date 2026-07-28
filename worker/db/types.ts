@@ -1,4 +1,13 @@
-import type { ExportState, ModerationStatus, PublicationStatus, Role, UploadState } from '../../shared/contracts';
+import type {
+  ChallengePurpose,
+  EventHostRole,
+  NotificationKind,
+  ExportState,
+  ModerationStatus,
+  PublicationStatus,
+  Role,
+  UploadState,
+} from '../../shared/contracts';
 import type { SupportedImageType } from '../../shared/constants';
 
 export interface EventRecord {
@@ -33,6 +42,9 @@ export interface TokenRecord {
   createdAt: string;
 }
 
+// Event sessions are authorized by an access token and never double as account
+// sessions. `canClaimOwner` is reserved for the management session created with a
+// new event; exchanged link sessions always carry false.
 export interface SessionRecord {
   id: string;
   secretDigest: string;
@@ -40,9 +52,78 @@ export interface SessionRecord {
   eventId: string;
   accessTokenId: string;
   role: Role;
+  canClaimOwner: boolean;
   expiresAt: string;
   revokedAt: string | null;
   createdAt: string;
+}
+
+export interface HostSessionRecord {
+  id: string;
+  secretDigest: string;
+  csrfDigest: string;
+  accountId: string;
+  authVersion: number;
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export interface HostAccountRecord {
+  id: string;
+  email: string;
+  passwordHash: string;
+  displayName: string | null;
+  emailVerifiedAt: string | null;
+  notificationsEnabled: boolean;
+  authVersion: number;
+  createdAt: string;
+  lastSeenAt: string | null;
+  disabledAt: string | null;
+}
+
+export interface LoginChallengeRecord {
+  id: string;
+  accountId: string;
+  purpose: ChallengePurpose;
+  secretDigest: string;
+  bindEventId: string | null;
+  attempts: number;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
+export interface PendingRegistrationRecord {
+  id: string;
+  email: string;
+  passwordHash: string;
+  displayName: string | null;
+  browserSecretDigest: string;
+  codeDigest: string;
+  bindEventId: string | null;
+  creatorSessionId: string | null;
+  attempts: number;
+  expiresAt: string;
+  consumedAt: string | null;
+  activationNonce: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EventHostRecord {
+  eventId: string;
+  accountId: string;
+  role: EventHostRole;
+  createdAt: string;
+}
+
+export interface NotificationRecord {
+  id: string;
+  accountId: string;
+  eventId: string | null;
+  kind: NotificationKind;
+  sentAt: string;
 }
 
 export interface MediaRecord {
