@@ -87,8 +87,14 @@ export class HostAuthService {
     }
     if (account.disabledAt) throw new ApiError('ACCOUNT_DISABLED', 'This account is no longer active.', 403);
     // The plaintext is in hand exactly once per sign-in, so this is the only free
-    // moment to move an old hash up to the current cost.
-    if (needsRehash) await this.accounts.setPasswordHash(account.id, await hashPassword(password));
+    // moment to move an old hash up to the current cost. The compare-and-swap
+    // preserves a reset that changed either the hash or auth version meanwhile.
+    if (needsRehash) await this.accounts.setPasswordHashIfCurrent(
+      account.id,
+      account.passwordHash,
+      account.authVersion,
+      await hashPassword(password),
+    );
     return account;
   }
 

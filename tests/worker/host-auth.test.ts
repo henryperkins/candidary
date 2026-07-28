@@ -1,12 +1,45 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { scrypt } from 'node:crypto';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const rehashControl = vi.hoisted(() => ({
+  pause: null as null | { arrived: () => void; release: Promise<void> },
+}));
+
+vi.mock('../../worker/security/passwords', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../worker/security/passwords')>();
+  return {
+    ...actual,
+    hashPassword: async (password: string) => {
+      const pause = rehashControl.pause;
+      if (pause) {
+        rehashControl.pause = null;
+        pause.arrived();
+        await pause.release;
+      }
+      return actual.hashPassword(password);
+    },
+  };
+});
 
 import { createApp } from '../../worker/app';
 import { HostSessionsRepository, SessionsRepository } from '../../worker/db/sessions';
 import { digestSecret } from '../../worker/security/crypto';
+import { verifyPassword } from '../../worker/security/passwords';
+import { HostAuthService } from '../../worker/services/host-auth';
 import { cookiesFrom, eventAccess, origin, resetDatabase, testEnv } from './helpers';
 
 const PASSWORD = 'a-sufficiently-long-password';
+
+async function lowerCostHash(password: string): Promise<string> {
+  const salt = Buffer.alloc(16, 7);
+  const key = await new Promise<Buffer>((resolve, reject) => {
+    scrypt(password.normalize('NFKC'), salt, 32, {
+      N: 16384, r: 8, p: 3, maxmem: 64 * 1024 * 1024,
+    }, (error, derived) => (error ? reject(error) : resolve(derived)));
+  });
+  return `scrypt$16384$8$3$${salt.toString('base64url')}$${key.toString('base64url')}`;
+}
 
 function hostCookiesFrom(response: Response) {
   const value = response.headers.getSetCookie().join(', ');
@@ -327,6 +360,42 @@ describe('password reset', () => {
     });
 
     expect(staleSession).toBeNull();
+  });
+
+  it('does not let a stale lower-cost login rehash overwrite a concurrent reset', async () => {
+    await register('host@example.com');
+    await env.DB.prepare('UPDATE host_accounts SET password_hash = ? WHERE email = ?')
+      .bind(await lowerCostHash(PASSWORD), 'host@example.com').run();
+    const before = await env.DB.prepare('SELECT password_hash FROM host_accounts WHERE email = ?')
+      .bind('host@example.com').first<{ password_hash: string }>();
+    expect(await verifyPassword(PASSWORD, before!.password_hash)).toEqual({ valid: true, needsRehash: true });
+
+    let releaseRehash!: () => void;
+    const rehashStarted = new Promise<void>((resolve) => {
+      rehashControl.pause = {
+        arrived: resolve,
+        release: new Promise<void>((release) => { releaseRehash = release; }),
+      };
+    });
+    const staleLogin = new HostAuthService(testEnv).authenticate('host@example.com', PASSWORD);
+    await rehashStarted;
+
+    await post('/api/host/password/forgot', { email: 'host@example.com' });
+    const code = await forceCode('host@example.com', 'reset');
+    const reset = await post('/api/host/password/reset', {
+      email: 'host@example.com', code, password: 'a-brand-new-long-password',
+    });
+    expect(reset.status).toBe(200);
+
+    releaseRehash();
+    await expect(staleLogin).resolves.toMatchObject({ email: 'host@example.com' });
+
+    const after = await env.DB.prepare('SELECT password_hash FROM host_accounts WHERE email = ?')
+      .bind('host@example.com').first<{ password_hash: string }>();
+    expect(await verifyPassword('a-brand-new-long-password', after!.password_hash))
+      .toEqual({ valid: true, needsRehash: false });
+    expect(await verifyPassword(PASSWORD, after!.password_hash))
+      .toEqual({ valid: false, needsRehash: false });
   });
 });
 

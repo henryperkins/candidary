@@ -115,9 +115,19 @@ export class AccountsRepository {
     return (await this.getByEmail(normalized))!;
   }
 
-  async setPasswordHash(id: string, passwordHash: string): Promise<void> {
-    await this.db.prepare('UPDATE host_accounts SET password_hash = ? WHERE id = ?')
-      .bind(passwordHash, id).run();
+  // A successful sign-in may opportunistically raise a legacy hash's cost, but it
+  // must never overwrite a password reset that won the race after verification.
+  async setPasswordHashIfCurrent(
+    id: string,
+    expectedPasswordHash: string,
+    authVersion: number,
+    passwordHash: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE host_accounts SET password_hash = ?
+      WHERE id = ? AND password_hash = ? AND auth_version = ? AND disabled_at IS NULL
+    `).bind(passwordHash, id, expectedPasswordHash, authVersion).run();
+    return (result.meta.changes ?? 0) === 1;
   }
 
   // A password reset has to invalidate even a login that verified the old password
