@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { AccountsRepository } from '../db/accounts';
-import { EventsRepository } from '../db/events';
+import { NotificationOutboxRepository } from '../db/notification-outbox';
 import { HostSessionsRepository } from '../db/sessions';
 import type { AppBindings, AuthenticatedAccount } from '../env';
 import {
@@ -23,7 +23,6 @@ import {
   hashPassword,
 } from '../security/passwords';
 import { HostAuthService } from '../services/host-auth';
-import { NotificationService } from '../services/notifications';
 
 const emailSchema = z.string().trim().min(3).max(254).email('Enter a valid email address.');
 const passwordSchema = z.string().min(MIN_PASSWORD_LENGTH).max(MAX_PASSWORD_LENGTH);
@@ -216,7 +215,7 @@ hostAuthRoutes.post('/host/verify', async (context) => {
   const principal = await requireHost(context, true);
   const body = await parse(context, codeOnlySchema);
   const service = new HostAuthService(context.env);
-  const challenge = await service.consumeCode(principal.account, 'verify', body.code);
+  await service.consumeCode(principal.account, 'verify', body.code);
 
   const accounts = new AccountsRepository(context.env.DB);
   const verifiedAt = new Date().toISOString();
@@ -224,15 +223,13 @@ hostAuthRoutes.post('/host/verify', async (context) => {
 
   // Getting-started waits for a confirmed address on purpose: it is the first
   // message a host would actually miss, and sending it to an unverified inbox is
-  // how a domain earns a spam reputation.
-  const eventId = challenge.bindEventId;
-  if (eventId) {
-    const event = await new EventsRepository(context.env.DB).getById(eventId);
-    const account = await accounts.getById(principal.account.id);
-    if (event && account) {
-      await new NotificationService(context.env).sendGettingStarted(account, event);
-    }
-  }
+  // how a domain earns a spam reputation. It is not sent from here, though —
+  // delivery belongs to the outbox, so a transient provider failure retries instead
+  // of costing the host the message and blocking this response on an external send.
+  // Confirming the address only makes any row that was retired for lacking one
+  // eligible again.
+  await new NotificationOutboxRepository(context.env.DB)
+    .reviveUnverified(principal.account.id, verifiedAt);
   return context.json({ data: { emailVerified: true }, requestId: context.get('requestId') });
 });
 

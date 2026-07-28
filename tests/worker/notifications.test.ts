@@ -43,87 +43,48 @@ function inDays(days: number): string {
   return new Date(Date.now() + days * DAY_MS).toISOString();
 }
 
-async function sentKinds(): Promise<string[]> {
-  const { results } = await env.DB.prepare('SELECT kind FROM host_notifications ORDER BY kind')
-    .all<{ kind: string }>();
-  return results.map((row) => row.kind);
-}
-
 beforeEach(resetDatabase);
 
-describe('lifecycle notifications', () => {
-  it('reminds a host the day before the event', async () => {
-    await hostedEvent({ eventDate: new Date(Date.now() + DAY_MS).toISOString().slice(0, 10) });
-
-    const result = await new NotificationService(testEnv).run();
-
-    expect(result.reminders).toBe(1);
-    expect(await sentKinds()).toEqual(['event_reminder']);
-  });
-
-  it('does not remind a host whose event is not tomorrow', async () => {
-    await hostedEvent({ eventDate: new Date(Date.now() + 5 * DAY_MS).toISOString().slice(0, 10) });
-
-    expect((await new NotificationService(testEnv).run()).reminders).toBe(0);
-    expect(await sentKinds()).toEqual([]);
-  });
-
-  it('warns before management access ends, not before the purge date', async () => {
-    await hostedEvent({ managementExpiresAt: inDays(6.5) });
-
-    const result = await new NotificationService(testEnv).run();
-
-    expect(result.warnings).toBe(1);
-    expect(await sentKinds()).toEqual(['retention_warning']);
-  });
-
-  it('sends each notification once however often the cron runs', async () => {
-    await hostedEvent({ managementExpiresAt: inDays(6.5) });
-
-    const first = await new NotificationService(testEnv).run();
-    const second = await new NotificationService(testEnv).run();
-    const third = await new NotificationService(testEnv).run();
-
-    expect(first.warnings).toBe(1);
-    expect(second.warnings).toBe(0);
-    expect(third.warnings).toBe(0);
-    expect(await sentKinds()).toEqual(['retention_warning']);
-  });
-
-  it('skips a host who has not confirmed their address', async () => {
-    await hostedEvent({ managementExpiresAt: inDays(6.5), verified: false });
-
-    expect((await new NotificationService(testEnv).run()).warnings).toBe(0);
-    expect(await sentKinds()).toEqual([]);
-  });
-
-  it('skips a host who unsubscribed', async () => {
-    await hostedEvent({ managementExpiresAt: inDays(6.5), notifications: false });
-
-    expect((await new NotificationService(testEnv).run()).warnings).toBe(0);
-    expect(await sentKinds()).toEqual([]);
-  });
-
-  it('skips a deleted event', async () => {
-    const { eventId } = await hostedEvent({ managementExpiresAt: inDays(6.5) });
-    await env.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
-      .bind(new Date().toISOString(), eventId).run();
-
-    expect((await new NotificationService(testEnv).run()).warnings).toBe(0);
-  });
-
-  it('sends the getting-started message only after the address is confirmed', async () => {
-    const unverified = await hostedEvent({ email: 'new@example.com', verified: false });
+describe('lifecycle scheduling', () => {
+  // The scan these replace is gone: eligibility now comes from the outbox row that
+  // ownership commits, not from a nightly window query.
+  it('schedules exactly one row per kind when a host takes ownership', async () => {
+    const access = await eventAccess('Scheduled Event');
     const accounts = new AccountsRepository(env.DB);
-    const service = new NotificationService(testEnv);
-    const event = (await accounts.listEventsForAccount(unverified.account.id))[0]!;
+    const now = new Date().toISOString();
+    const account = (await accounts.create({
+      email: 'host@example.com',
+      passwordHash: 'scrypt$32768$8$3$c2FsdA$aGFzaA',
+      displayName: null,
+      createdAt: now,
+    }))!;
+    const session = await env.DB.prepare(
+      "SELECT id FROM event_sessions WHERE event_id = ? AND role = 'manager'",
+    ).bind(access.event.id).first<{ id: string }>();
 
-    expect(await service.sendGettingStarted(unverified.account, event)).toBe(false);
+    expect(await accounts.claimInitialOwnerAndSchedule(
+      access.event.id, account.id, session!.id, now,
+    )).toBe('claimed');
 
-    await accounts.markEmailVerified(unverified.account.id, new Date().toISOString());
-    const confirmed = (await accounts.getById(unverified.account.id))!;
-    expect(await service.sendGettingStarted(confirmed, event)).toBe(true);
-    expect(await sentKinds()).toEqual(['getting_started']);
+    const { results } = await env.DB.prepare(
+      'SELECT kind, available_at, discard_after FROM host_notification_outbox WHERE event_id = ? ORDER BY kind',
+    ).bind(access.event.id).all<{ kind: string; available_at: string; discard_after: string | null }>();
+    expect(results.map((row) => row.kind))
+      .toEqual(['event_reminder', 'getting_started', 'retention_warning']);
+
+    const reminder = results.find((row) => row.kind === 'event_reminder')!;
+    const event = await env.DB.prepare('SELECT event_date, management_access_expires_at FROM events WHERE id = ?')
+      .bind(access.event.id).first<{ event_date: string; management_access_expires_at: string }>();
+    // The day before the event, and discarded once the event day is over.
+    expect(reminder.available_at.slice(0, 10)).toBe(
+      new Date(Date.parse(`${event!.event_date}T00:00:00.000Z`) - DAY_MS).toISOString().slice(0, 10),
+    );
+    expect(reminder.discard_after!.slice(0, 10)).toBe(event!.event_date);
+
+    const warning = results.find((row) => row.kind === 'retention_warning')!;
+    expect(warning.discard_after).toBe(event!.management_access_expires_at);
+    expect(Date.parse(warning.available_at))
+      .toBe(Date.parse(event!.management_access_expires_at) - 7 * DAY_MS);
   });
 });
 

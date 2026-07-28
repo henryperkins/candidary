@@ -145,6 +145,18 @@ export class NotificationOutboxRepository {
     return (result.meta.changes ?? 0) > 0;
   }
 
+  // A row retired only because the address was unconfirmed describes a message the
+  // host still wants. Confirming the address is exactly the condition that was
+  // missing, so the row returns to the queue rather than staying terminal.
+  async reviveUnverified(accountId: string, now: string): Promise<number> {
+    const result = await this.db.prepare(`
+      UPDATE host_notification_outbox
+      SET status = 'pending', retry_at = ?, last_error_code = NULL, updated_at = ?
+      WHERE account_id = ? AND status = 'failed' AND last_error_code = 'address_unverified'
+    `).bind(now, now, accountId).run();
+    return result.meta.changes ?? 0;
+  }
+
   async retryOrFail(
     id: string,
     claimToken: string,

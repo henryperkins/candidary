@@ -626,6 +626,63 @@ describe('email verification', () => {
   });
 });
 
+describe('email verification and lifecycle mail', () => {
+  it('requeues a guide that was retired for an unconfirmed address', async () => {
+    const access = await eventAccess();
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    const account = await new AccountsRepository(env.DB).getByEmail('host@example.com');
+    // The dispatcher retires a row it cannot send yet. Confirming the address is
+    // exactly the condition that was missing, so the message must come back rather
+    // than stay terminal.
+    await env.DB.prepare(`
+      UPDATE host_notification_outbox
+      SET status = 'failed', last_error_code = 'address_unverified'
+      WHERE account_id = ? AND kind = 'getting_started'
+    `).bind(account!.id).run();
+    await env.DB.prepare('UPDATE host_accounts SET email_verified_at = NULL WHERE id = ?')
+      .bind(account!.id).run();
+    await new HostAuthService(testEnv).issueChallenge(account!, 'verify', null);
+    const code = await forceCode('host@example.com', 'verify');
+
+    const verified = await post('/api/host/verify', { code }, hostHeaders(host));
+
+    expect(verified.status).toBe(200);
+    expect(await env.DB.prepare(`
+      SELECT status FROM host_notification_outbox WHERE account_id = ? AND kind = 'getting_started'
+    `).bind(account!.id).first('status')).toBe('pending');
+  });
+
+  it('does not send lifecycle mail from the verification request itself', async () => {
+    const access = await eventAccess();
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    const account = await new AccountsRepository(env.DB).getByEmail('host@example.com');
+    await env.DB.prepare('UPDATE host_accounts SET email_verified_at = NULL WHERE id = ?')
+      .bind(account!.id).run();
+    await new HostAuthService(testEnv).issueChallenge(account!, 'verify', null);
+    const code = await forceCode('host@example.com', 'verify');
+
+    await post('/api/host/verify', { code }, hostHeaders(host));
+
+    // Delivery belongs to the outbox. A send from this request would block the
+    // response on an external call and lose the message if it failed. The direct
+    // path recorded itself in `host_notifications`, so an empty ledger is what
+    // distinguishes "the outbox owns this" from "it was sent from here".
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notifications')
+      .first('count')).toBe(0);
+    expect(await env.DB.prepare(`
+      SELECT status FROM host_notification_outbox WHERE account_id = ? AND kind = 'getting_started'
+    `).bind(account!.id).first('status')).toBe('pending');
+  });
+});
+
 describe('password reset', () => {
   it('answers a forgotten-password request the same for a known and an unknown address', async () => {
     await registerAndComplete('host@example.com');

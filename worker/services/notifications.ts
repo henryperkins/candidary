@@ -1,28 +1,8 @@
-import type { NotificationKind } from '../../shared/contracts';
-import { AccountsRepository } from '../db/accounts';
-import { EventsRepository } from '../db/events';
 import { NotificationOutboxRepository, type ClaimedOutboxRow } from '../db/notification-outbox';
-import type { EventRecord, HostAccountRecord } from '../db/types';
+import type { EventRecord } from '../db/types';
 import type { AppEnv } from '../env';
 import { constantTimeEqual, digestSecret } from '../security/crypto';
 import { EmailService, layout } from './email';
-
-// Lead time on the management deadline, not on the purge date. Access ends 90 days
-// after the event and the photos are not deleted until 120, so a warning keyed to
-// deletion would arrive a month after the host lost the ability to act on it. The
-// deadline that matters is the last day they can still sign in and export.
-const ACCESS_WARNING_LEAD_DAYS = 7;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-interface HostTarget {
-  account: HostAccountRecord;
-  event: EventRecord;
-}
-
-interface AccountEventRow {
-  account_id: string;
-  event_id: string;
-}
 
 export async function unsubscribeUrl(env: AppEnv, accountId: string): Promise<string> {
   const digest = await digestSecret(`unsubscribe:${accountId}`, env.LOGIN_HMAC_KEY);
@@ -67,52 +47,16 @@ function suppressionReason(row: ClaimedOutboxRow, now: Date): string | null {
 }
 
 export class NotificationService {
-  private readonly accounts: AccountsRepository;
   private readonly email: EmailService;
 
+  // Account and event data now arrives on the claimed outbox rows themselves, so
+  // the service no longer reads either repository per recipient.
   constructor(private readonly env: AppEnv) {
-    this.accounts = new AccountsRepository(env.DB);
     this.email = new EmailService(env);
   }
 
   private get origin(): string {
     return this.env.APP_ORIGIN.replace(/\/$/u, '');
-  }
-
-  // Claim, then send, then release on failure. Claiming first is what makes a
-  // second cron run — or two overlapping ones — unable to send twice; releasing on
-  // failure is what stops one bad send from costing the host the message forever.
-  private async deliver(
-    target: HostTarget,
-    kind: NotificationKind,
-    build: (unsubscribe: string) => { subject: string; text: string; html: string },
-    now: Date,
-  ): Promise<boolean> {
-    if (!target.account.notificationsEnabled || !target.account.emailVerifiedAt) return false;
-    const claimed = await this.accounts.claimNotification({
-      accountId: target.account.id,
-      eventId: target.event.id,
-      kind,
-      sentAt: now.toISOString(),
-    });
-    if (!claimed) return false;
-
-    const unsubscribe = await unsubscribeUrl(this.env, target.account.id);
-    const outcome = await this.email.send({
-      to: target.account.email,
-      unsubscribeUrl: unsubscribe,
-      ...build(unsubscribe),
-    });
-    if (!outcome.delivered) {
-      await this.accounts.releaseNotification(target.account.id, target.event.id, kind);
-      return false;
-    }
-    return true;
-  }
-
-  sendGettingStarted(account: HostAccountRecord, event: EventRecord, now = new Date()): Promise<boolean> {
-    return this.deliver({ account, event }, 'getting_started',
-      (unsubscribe) => this.gettingStartedMessage(event, unsubscribe), now);
   }
 
   private gettingStartedMessage(event: EventRecord, unsubscribe: string) {
@@ -146,11 +90,6 @@ export class NotificationService {
     });
   }
 
-  private sendEventReminder(target: HostTarget, now: Date): Promise<boolean> {
-    return this.deliver(target, 'event_reminder',
-      (unsubscribe) => this.eventReminderMessage(target.event, unsubscribe), now);
-  }
-
   private eventReminderMessage(event: EventRecord, unsubscribe: string) {
     return ({
       subject: `${event.name} is tomorrow — your QR code is ready`,
@@ -170,11 +109,6 @@ export class NotificationService {
         `<a href="${this.origin}/manage/event/${event.id}">Open your event</a>`,
       ], unsubscribe),
     });
-  }
-
-  private sendAccessWarning(target: HostTarget, now: Date): Promise<boolean> {
-    return this.deliver(target, 'retention_warning',
-      (unsubscribe) => this.accessWarningMessage(target.event, unsubscribe), now);
   }
 
   private accessWarningMessage(event: EventRecord, unsubscribe: string) {
@@ -203,41 +137,6 @@ export class NotificationService {
       ], unsubscribe),
     });
   }
-
-  // Only ever selects hosts who confirmed their address and left notifications on,
-  // so an unverified or opted-out account is never even a candidate.
-  private async targets(where: string, bindings: unknown[]): Promise<HostTarget[]> {
-    const { results } = await this.env.DB.prepare(`
-      SELECT event_hosts.account_id AS account_id, events.id AS event_id
-      FROM events
-      JOIN event_hosts ON event_hosts.event_id = events.id
-      JOIN host_accounts ON host_accounts.id = event_hosts.account_id
-      WHERE events.deleted_at IS NULL
-        AND host_accounts.disabled_at IS NULL
-        AND host_accounts.notifications_enabled = 1
-        AND host_accounts.email_verified_at IS NOT NULL
-        AND ${where}
-    `).bind(...bindings).all<AccountEventRow>();
-
-    const events = new Map<string, EventRecord | null>();
-    const accounts = new Map<string, HostAccountRecord | null>();
-    const targets: HostTarget[] = [];
-    for (const row of results) {
-      if (!events.has(row.event_id)) {
-        events.set(row.event_id, await new EventsRepository(this.env.DB).getById(row.event_id));
-      }
-      if (!accounts.has(row.account_id)) {
-        accounts.set(row.account_id, await this.accounts.getById(row.account_id));
-      }
-      const event = events.get(row.event_id);
-      const account = accounts.get(row.account_id);
-      if (event && account) targets.push({ account, event });
-    }
-    return targets;
-  }
-
-  // The whole scheduled send, bounded by construction: one reclaim, one claim, one
-  // join, and one outcome write per message. At the default limit that is about 105
   // statements, well inside D1's per-invocation ceiling.
   async dispatchPending(
     now = new Date(),
@@ -307,27 +206,4 @@ export class NotificationService {
     return this.gettingStartedMessage(event, unsubscribe);
   }
 
-  async run(now = new Date()): Promise<{ reminders: number; warnings: number }> {
-    const tomorrow = new Date(now.getTime() + DAY_MS).toISOString().slice(0, 10);
-    const reminderTargets = await this.targets('events.event_date = ?', [tomorrow]);
-    let reminders = 0;
-    for (const target of reminderTargets) {
-      if (await this.sendEventReminder(target, now)) reminders += 1;
-    }
-
-    // A window rather than an equality: the cron runs once a day, and a single
-    // missed run must not skip the warning entirely.
-    const warningOpens = new Date(now.getTime() + (ACCESS_WARNING_LEAD_DAYS - 1) * DAY_MS).toISOString();
-    const warningCloses = new Date(now.getTime() + ACCESS_WARNING_LEAD_DAYS * DAY_MS).toISOString();
-    const warningTargets = await this.targets(
-      'events.management_access_expires_at > ? AND events.management_access_expires_at <= ?',
-      [warningOpens, warningCloses],
-    );
-    let warnings = 0;
-    for (const target of warningTargets) {
-      if (await this.sendAccessWarning(target, now)) warnings += 1;
-    }
-
-    return { reminders, warnings };
-  }
 }
