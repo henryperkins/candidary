@@ -18,9 +18,11 @@ The deployed Worker has a daily `17 3 * * *` trigger and no Queue resource.
    account already exists.
 4. A password reset invalidates every authentication decision made against the
    previous password, including a login that started before the reset.
-5. Only the event's creator session may claim its first owner. A delegate who
-   exchanges the same management link may manage temporarily but may not turn
-   that bearer link into durable account ownership.
+5. For events created after migration 0006, only the creator session may claim
+   the first owner. Because pre-0006 data cannot distinguish a creator from a
+   delegate, each legacy event gets one explicit first-owner claim through a
+   live management credential; the successful claim closes that legacy path.
+   No later link exchange may add another durable owner.
 6. A notification remains retryable after a transient send failure or a missed
    scheduled run. One target cannot abort later targets.
 7. A GET request never changes notification preferences.
@@ -72,12 +74,32 @@ The create-success UI says that a code may be on its way, does not call the
 event saved, and does not relax the lost-link warning until completion returns
 `boundEvent: true`.
 
+Pending registration has its own resend endpoint authenticated by the opaque
+registration cookie. The standalone account-verification page retains the
+existing host-session verification flow; it is not silently redirected through
+registration completion.
+
 ### Rate-limit before expensive or external work
 
 `host_auth_rate_limits` stores HMAC-digested scopes in fixed time buckets.
 One atomic UPSERT increments and returns the count for each IP and
 address/account scope. Registration, login, verification resend, and password
 reset-code requests reserve their limits before scrypt or email work.
+
+The limits are:
+
+- registration start: 10 requests per IP and 3 per email in 15 minutes;
+- registration resend: 10 per IP and 5 per pending registration in 15 minutes;
+- login: 20 per IP and 10 per email in 15 minutes;
+- existing-account verification resend: 10 per IP and 5 per account in
+  15 minutes;
+- password-reset request: 10 per IP and 3 per email in 15 minutes.
+
+The IP scope is `CF-Connecting-IP`; a missing header uses one shared `unknown`
+scope rather than trusting a client-supplied alternative. Scope digests use
+`LOGIN_HMAC_KEY` with explicit domain separation:
+`rate-limit:<action>:<scope-kind>:<normalized-value>`. Exhaustion returns the
+same `429 RATE_LIMITED` response for new and existing addresses.
 
 Challenge replacement uses one D1 batch so concurrent requests cannot both
 leave live codes. Code attempts and consumption remain conditional single-row
@@ -108,10 +130,12 @@ reset and resurrect the previous password.
 
 ### Make creator ownership explicit
 
-Migration 0006 adds `event_sessions.can_claim_owner`, defaulting to false.
-For each pre-0006 event, only its earliest original manager session is
-backfilled true. New event creation marks the management session created in the
-same operation true; every later management-link exchange remains false.
+Migration 0006 adds `event_sessions.can_claim_owner`, defaulting to false, and
+`events.legacy_owner_claim_open`, defaulting to false. Existing events are
+backfilled with the legacy flag true because their sessions contain no reliable
+creator provenance. New event creation marks only the management session
+created in the same operation as claim-capable; every later management-link
+exchange remains false.
 
 `claimInitialOwner(eventId, accountId)` is one conditional database write:
 
@@ -120,14 +144,19 @@ same operation true; every later management-link exchange remains false.
 - it refuses when a different host already exists.
 
 Registration start may retain an event claim only when the current session has
-that capability. Completion re-resolves the same event session before claiming,
-so rotation, expiry, or a different browser cannot replay the pending claim.
-`/host/events/:eventId/adopt` enforces the same creator-session requirement.
+that capability or the event's one-time legacy claim remains open. Completion
+re-resolves the same live event session before claiming, so rotation, expiry,
+or a different browser cannot replay the pending claim.
+`/host/events/:eventId/adopt` enforces the same rule. A successful legacy claim
+closes `legacy_owner_claim_open` in the same batch.
 
 A partial unique index permits only one `owner` row per event. A signed-in host
-creating an event is attached as its initial owner server-side, and the create
-response reports `savedToAccount`. The current PR does not add a cohost
-invitation or removal system; durable cohost access remains out of scope.
+creating an event gets the event, creator session, owner row, and three outbox
+rows in the same D1 batch, and the create response reports
+`savedToAccount: true`. An invalid or expired optional host cookie falls back to
+link-only creation and reports `savedToAccount: false`; it never claims account
+recovery. The current PR does not add a cohost invitation or removal system;
+durable cohost access remains out of scope.
 
 Account activation, any authorized owner claim, and the three corresponding
 outbox rows are committed in one D1 batch. The outbox inserts select through
@@ -136,8 +165,10 @@ schedule mail that implies ownership.
 
 The manager's “Sign in to save it” link carries a validated same-origin return
 path and event ID. After login, the client calls the adoption endpoint while
-the management-link cookie is still present, then returns to the manager.
-Account-originated manager failures offer an actual sign-in link.
+the management-link cookie is still present, then returns to the manager. The
+same return/adopt flow runs after a successful password reset. Manager session
+errors always offer sign-in as a safe recovery option because a plain manager
+URL cannot prove whether it came from an account page or a copied link.
 
 Manager authorization preserves lifecycle errors from the account credential
 while trying an independent management-link fallback. If fallback also fails,
@@ -163,6 +194,7 @@ claim identified by a random `claim_token`. Every outcome update is fenced by
 that token, so an expired worker cannot overwrite the result of a worker that
 reclaimed the lease. Reclaiming still accepts the normal at-least-once duplicate
 risk after an isolate dies between provider acceptance and the final D1 update.
+Leases expire after 10 minutes.
 
 An hourly `47 * * * *` Cron Trigger runs notification delivery separately from
 the existing daily `17 3 * * *` cleanup. The shared scheduled handler selects
@@ -176,6 +208,12 @@ The dispatcher:
 4. catches and records each send independently with claim-token fencing;
 5. stops stale reminder delivery after the event and stale warning delivery
    after management access ends.
+
+Claimed rows whose account is disabled, unverified, or opted out become
+terminal `failed` rows with a non-sensitive reason. A preference change after
+materialization may allow one already in-flight message; later rows are
+suppressed. Concurrent dispatchers cannot process the same live claim, and an
+expired claim token cannot update a reclaimed row.
 
 The query ceiling is therefore about five materialization/claim queries plus
 one outcome write per target, bounded near 105 statements per run. This is
@@ -223,13 +261,21 @@ Every behavior change begins with a failing Worker or UI test:
 - new and existing addresses have indistinguishable start responses;
 - successful completion creates or recovers the account and reports the true
   event-binding result;
+- existing-account completion creates no duplicate account, preserves its
+  password and authentication version, and authenticates only after mailbox
+  proof;
+- registration resend uses the pending-registration cookie while standalone
+  account verification retains its host-session flow;
 - rate-limit reservations are atomic and occur before hashing/sending;
 - an old-version login cannot create a session after reset;
-- a second link holder cannot become a durable owner;
-- signed-in creation attaches the new event;
+- a second link holder cannot become a second durable owner, and a legacy
+  event's one-time first claim closes atomically;
+- signed-in creation attaches the new event and its outbox rows atomically,
+  while a stale host cookie remains explicitly link-only;
 - login return context adopts only the intended event;
 - outbox rows survive send failure, retry independently, and process no more
-  than the fixed batch;
+  than the fixed batch; stale leases are reclaimed and old claim tokens are
+  fenced out;
 - unsubscribe GET is read-only, signed POST opts out, and authenticated
   preferences can opt back in;
 - failed logout does not navigate.

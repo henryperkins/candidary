@@ -21,8 +21,10 @@ Service, Wrangler 4, Vitest Workers pool, Testing Library.
 - Do not deploy or apply migration 0006 to production in this branch task.
 - No account, membership, or host session exists before mailbox-code proof.
 - Registration start remains enumeration-safe for new and existing addresses.
-- Only an event's creator session may create its first durable owner; exchanged
-  management-link sessions are delegates and cannot claim ownership.
+- For post-0006 events, only the creator session may create the first durable
+  owner. Each legacy event has one explicit first-owner claim because its
+  historical sessions do not preserve creator provenance; a successful claim
+  closes that path.
 - Notification dispatch is bounded to 100 rows and about 105 D1 statements
   per scheduled run.
 - GET requests are read-only.
@@ -40,6 +42,8 @@ Service, Wrangler 4, Vitest Workers pool, Testing Library.
 - Modify: `worker/db/sessions.ts`
 - Modify: `worker/auth/service.ts`
 - Modify: `worker/env.ts`
+- Modify: `worker/services/events.ts`
+- Modify: `worker/routes/host-auth.ts`
 - Test: `tests/worker/migration-0006.test.ts`
 - Test: `tests/worker/host-auth.test.ts`
 
@@ -110,9 +114,10 @@ CREATE INDEX host_sessions_account
 
 Fold `auth_version` into the original `CREATE TABLE host_accounts` rather than
 using the shown `ALTER TABLE`, because migration 0006 has never been applied.
-Add `event_sessions.can_claim_owner INTEGER NOT NULL DEFAULT 0`, backfill only
-the earliest manager session for each event, and add a boolean CHECK. New
-creator sessions write 1; link exchanges write 0.
+Add `event_sessions.can_claim_owner INTEGER NOT NULL DEFAULT 0` with a boolean
+CHECK. Add `events.legacy_owner_claim_open INTEGER NOT NULL DEFAULT 0`, set it
+to 1 for the events already present when 0006 runs, and leave new events at 0.
+New creator sessions write `can_claim_owner = 1`; link exchanges write 0.
 
 - [ ] **Step 4: Split account-session persistence from event sessions**
 
@@ -140,6 +145,11 @@ account, and rejects an authentication-version mismatch.
 `createIfAuthVersion`; an empty insert becomes
 `LOGIN_CREDENTIALS_INVALID`.
 
+Update the host-auth routes in this task so logout, reset, and session
+resolution no longer send host-session IDs through the event-session
+repository. Task 1 must leave all existing host-auth tests passing before Task 2
+changes registration semantics.
+
 - [ ] **Step 6: Run focused tests**
 
 ```bash
@@ -158,6 +168,7 @@ Expected: migration regression and existing session tests pass.
 - Modify: `worker/db/types.ts`
 - Modify: `worker/db/accounts.ts`
 - Create: `worker/db/auth-rate-limits.ts`
+- Create: `worker/db/notification-outbox.ts`
 - Modify: `worker/services/host-auth.ts`
 - Modify: `worker/routes/host-auth.ts`
 - Modify: `worker/http/cookies.ts`
@@ -171,10 +182,12 @@ Expected: migration regression and existing session tests pass.
 - Produces: `PendingRegistrationRecord`
 - Produces: `HostAuthService.startRegistration(input, requestScope)`
 - Produces: `HostAuthService.completeRegistration(rawToken, code)`
+- Produces: `HostAuthService.resendRegistration(rawToken, requestScope)`
 - Produces: `AccountsRepository.activateRegistration(pending, now)`
 - Produces: `AccountsRepository.claimInitialOwnerAndSchedule(eventId, accountId, createdAt): Promise<'claimed' | 'existing' | 'owned_by_other'>`
 - Produces: `AccountsRepository.resetPasswordAndAdvanceVersion(...)`
 - Produces: `AuthRateLimitsRepository.reserve(input): Promise<boolean>`
+- Produces: `NotificationOutboxRepository.scheduleStatements(input): D1PreparedStatement[]`
 
 - [ ] **Step 1: Write failing registration-state tests**
 
@@ -197,8 +210,11 @@ it('completes a pending registration and reports the true owner claim', async ()
 });
 ```
 
-Also assert new and existing addresses return the same status, body keys, and
-registration-cookie names.
+Also assert new and existing addresses return the same status, exact body
+values, registration-cookie names, and cookie attributes. Completing a
+challenge for an existing address must not create a duplicate account or
+change its password hash or authentication version; mailbox proof creates only
+the new host session and any authorized initial-owner claim.
 
 - [ ] **Step 2: Run the focused test and verify it fails against immediate account creation**
 
@@ -216,6 +232,12 @@ the creator session ID authorizing that claim, attempts, expiry, consumption,
 and timestamps. Add `host_notification_outbox` here as well so activation and
 membership can schedule durable mail in the same transaction.
 
+Create the outbox repository with `scheduleStatements(input)`, which returns
+the three idempotent prepared INSERT statements for getting started, reminder,
+and access warning. Task 2 owner claims and Task 3 signed-in event creation
+include these statements in their surrounding D1 batches. Task 4 extends this
+same repository with dispatch operations.
+
 `host_auth_rate_limits` uses:
 
 ```sql
@@ -229,6 +251,19 @@ CREATE TABLE host_auth_rate_limits (
 ```
 
 The reservation statement is one UPSERT ending in `RETURNING attempts`.
+Digest `rate-limit:<action>:<scope-kind>:<normalized-value>` with
+`LOGIN_HMAC_KEY`. Trust `CF-Connecting-IP` and use the shared literal `unknown`
+when it is absent.
+
+Use these 15-minute budgets:
+
+- registration: 10/IP and 3/email;
+- registration resend: 10/IP and 5/pending registration;
+- login: 20/IP and 10/email;
+- verification resend: 10/IP and 5/account;
+- password-reset request: 10/IP and 3/email.
+
+Return the same `429 RATE_LIMITED` payload for new and existing addresses.
 
 - [ ] **Step 4: Add registration-cookie helpers**
 
@@ -247,13 +282,19 @@ Start:
 5. send one generic confirmation code;
 6. return the generic 202 response and registration cookie.
 
+`POST /api/host/register/resend` authenticates the pending-registration cookie,
+reserves its IP and pending-registration budgets, atomically replaces the code,
+and returns the same generic 202 payload. Existing-account verification keeps
+using the host-session `/api/host/verify` and `/api/host/verify/resend` flow.
+
 Completion:
 
 1. verify browser token, code attempt, expiry, and single use;
 2. re-resolve the same live creator session for any pending event claim;
-3. call `activateRegistration`, which uses one D1 batch to create or verify the
-   account, conditionally claim the owner, and insert lifecycle outbox rows only
-   through committed membership;
+3. call `activateRegistration`, which uses one D1 batch to create or select the
+   account, conditionally claim the sole owner, close any legacy claim, and
+   insert lifecycle outbox rows only through the membership created in that
+   same batch;
 4. create a host session at the account's current auth version;
 5. clear the pending cookie;
 6. return `{ registered: true, boundEvent }`.
@@ -290,8 +331,10 @@ the final authority check.
 Add a partial unique index on `event_hosts(event_id) WHERE role = 'owner'`.
 Implement `claimInitialOwnerAndSchedule` with one D1 batch. Make registration
 completion and `/host/events/:eventId/adopt` require
-`session.canClaimOwner === true` and report refusal when a different membership
-already exists.
+`session.canClaimOwner === true` for post-0006 events, or a still-open
+`events.legacy_owner_claim_open` for the one legacy initial claim. Close the
+legacy flag in the successful claim batch. Report refusal when an owner already
+exists; an existing non-owner membership does not authorize promotion.
 
 - [ ] **Step 9: Make forgotten-password responses timing-neutral**
 
@@ -304,7 +347,9 @@ context.executionCtx.waitUntil(issueResetCodeIfAccountExists(...));
 
 Return the identical 202 response immediately for known and unknown addresses.
 The tracked operation catches rate-limit and delivery errors internally and
-never leaks account existence.
+never leaks account existence. Reset completion returns the same
+`LOGIN_CODE_INVALID` response for unknown, expired, consumed, and missing
+challenges so it does not reintroduce an address-enumeration oracle.
 
 - [ ] **Step 10: Expire auth scratch state**
 
@@ -331,6 +376,7 @@ pass.
 - Modify: `src/components/HostAccountPanel.tsx`
 - Modify: `src/components/EventAccountCard.tsx`
 - Modify: `src/pages/HostLoginPage.tsx`
+- Modify: `src/pages/HostVerifyPage.tsx`
 - Modify: `src/pages/HostEventsPage.tsx`
 - Modify: `src/components/States.tsx`
 - Modify: `src/pages/ManagerPage.tsx`
@@ -350,11 +396,17 @@ Assert:
 
 - signed-in event creation inserts one owner membership and returns
   `savedToAccount: true`;
+- event creation with a stale optional host cookie remains link-only and returns
+  `savedToAccount: false`;
 - registration start leaves the lost-link warning intact;
 - registration completion changes the copy only when `boundEvent` is true;
+- registration completion with `boundEvent: false` explicitly says the event
+  still depends on its management link;
+- pending-registration resend uses the registration endpoint while standalone
+  account verification still uses the host-session endpoint;
 - the manager sign-in link contains the event and a same-origin return path;
-- login calls adoption before navigating;
-- an expired account-originated manager route offers a sign-in action.
+- login and password reset call adoption before navigating;
+- a manager route without a usable credential offers a sign-in action;
 - account lifecycle errors survive a failed management-link fallback.
 
 - [ ] **Step 2: Run focused tests and confirm the current false-success flows fail**
@@ -367,8 +419,14 @@ XDG_CONFIG_HOME=/tmp/candidary-wrangler npm run test:worker -- --run tests/worke
 - [ ] **Step 3: Attach signed-in creation server-side**
 
 Resolve the optional host cookie in `POST /api/events`. Pass its account ID into
-`EventService.create`; after the event is created, claim its initial owner and
-return the result as `savedToAccount`.
+`EventService.create`. A valid host gets the event, creator session, sole owner
+membership, and three outbox rows in the same D1 batch. An invalid or expired
+optional host cookie follows the anonymous creation path. Return the committed
+result as `savedToAccount`; do not attach ownership in a post-creation write.
+
+`CreatePage` initializes `saved` from `savedToAccount`. When it is true, render
+the saved state without offering registration. When false, preserve the
+management-link recovery warning and account panel.
 
 - [ ] **Step 4: Make registration completion authoritative**
 
@@ -380,7 +438,14 @@ onCompleted?: (result: { boundEvent: boolean }) => void;
 ```
 
 Only a true binding calls `setSaved(true)`. Copy before completion says the
-event still depends on its management link.
+event still depends on its management link. Completion with `boundEvent: false`
+keeps that warning and says the account is ready but this event is still
+link-only.
+
+Give `HostAccountPanel` explicit registration and existing-account-verification
+modes. Registration mode uses `/api/host/register/complete` and
+`/api/host/register/resend`; `HostVerifyPage` retains `/api/host/verify` and
+`/api/host/verify/resend`.
 
 - [ ] **Step 5: Preserve login recovery context**
 
@@ -392,13 +457,16 @@ Generate:
 
 Accept only local paths matching `/host/events` or
 `/manage/event/<uuid>`. After successful login, call adoption when `adopt`
-matches the return event; navigate only after adoption succeeds.
+matches the return event; navigate only after adoption succeeds. Apply the same
+post-authentication adoption path after a successful password reset.
 
 - [ ] **Step 6: Offer sign-in from account-session failure**
 
 Classify a dead host-only credential as `HOST_SESSION_REQUIRED`. Extend
 `ErrorState` with an optional action link and have `ManagerPage` render
-“Sign in” with the validated manager return path.
+“Sign in” with the validated manager return path. Also offer sign-in for the
+generic no-credential state because a plain manager URL cannot reliably reveal
+whether it came from the account page or a copied management link.
 
 Preserve a specific account-side `EVENT_EXPIRED`, `EVENT_DELETED`, or
 `ACCOUNT_DISABLED` failure while trying an independent management-link
@@ -418,7 +486,7 @@ pass.
 - Modify: `shared/contracts.ts`
 - Modify: `worker/db/types.ts`
 - Modify: `worker/db/accounts.ts`
-- Create: `worker/db/notification-outbox.ts`
+- Modify: `worker/db/notification-outbox.ts`
 - Modify: `worker/services/notifications.ts`
 - Modify: `worker/services/host-auth.ts`
 - Modify: `worker/services/events.ts`
@@ -430,11 +498,12 @@ pass.
 
 **Interfaces:**
 
-- Produces: `NotificationOutboxRepository.scheduleEvent(account, event, now)`
-- Produces: `NotificationOutboxRepository.listDue(now, limit)`
-- Produces: `NotificationOutboxRepository.claim(id, now, staleBefore)`
-- Produces: `NotificationOutboxRepository.markSent(id, now)`
-- Produces: `NotificationOutboxRepository.retryOrFail(id, code, retryAt, maxAttempts)`
+- Produces: outbox INSERT statements used inside the owner-claim D1 batches
+- Produces: `NotificationOutboxRepository.reclaimExpired(now, staleBefore)`
+- Produces: `NotificationOutboxRepository.claimDue(now, limit, claimToken)`
+- Produces: `NotificationOutboxRepository.loadClaim(claimToken)`
+- Produces: `NotificationOutboxRepository.markSent(id, claimToken, now)`
+- Produces: `NotificationOutboxRepository.retryOrFail(id, claimToken, code, retryAt, maxAttempts)`
 - Produces: `NotificationService.dispatchPending(now, limit = 100)`
 
 - [ ] **Step 1: Write failing durability and isolation tests**
@@ -455,8 +524,11 @@ it('continues after one recipient fails', async () => {
 });
 ```
 
-Also assert a missed due run remains eligible and `listDue` returns no more
-than 100 rows.
+Also assert a missed due run remains eligible, a claim returns no more than 100
+rows, a 10-minute stale lease can be reclaimed, an old claim token cannot
+update a reclaimed row, and concurrent claimers do not receive the same row.
+Rows for disabled, unverified, or opted-out accounts become terminal without an
+email send.
 
 - [ ] **Step 2: Run notification tests and verify the ledger implementation fails them**
 
@@ -470,7 +542,8 @@ The table created in Task 2 stores `status`, `attempt_count`, immutable
 `available_at`, mutable `retry_at`, `discard_after`, `claimed_at`,
 `claim_token`, `sent_at`, `last_error_code`, and `created_at`; it retains one
 unique row per account, event, and kind with an index on
-`(status, retry_at, id)`. Add the typed repository methods that operate on it.
+`(status, retry_at, id)`. Add the typed, claim-token-fenced repository methods
+listed above. Do not add per-ID claim methods.
 
 - [ ] **Step 4: Schedule lifecycle rows**
 
@@ -489,6 +562,12 @@ Reclaim stale leases, then use one claim token and one
 event fields in one explicit-column JOIN by claim token. For each row, render
 from the joined data, catch the email result, and update with
 `WHERE id = ? AND status = 'sending' AND claim_token = ?`.
+
+Use a 10-minute lease. Mark disabled, unverified, opted-out, or obsolete rows
+terminal with a non-sensitive reason. A preference change after the JOIN may
+allow one in-flight send; all rows materialized after the change are
+suppressed. Accept and document the at-least-once duplicate possibility when an
+isolate dies after provider acceptance but before the fenced success update.
 
 Use retry delays of 5 minutes, 1 hour, 6 hours, and 24 hours, then mark the
 fifth failed attempt `failed`.
@@ -599,6 +678,10 @@ Use the commands from Step 2. Expected: all preference and logout tests pass.
 ```
 
 Add `npx wrangler secret put LOGIN_HMAC_KEY` to deployment instructions.
+The `secrets.required` declaration is the source of truth for type generation
+and causes Wrangler deploy/upload to reject a deployed Worker whose required
+secret binding is missing. The final publication gate still performs a
+read-only remote secret-list preflight before provisioning.
 
 - [ ] **Step 2: Regenerate binding types**
 
@@ -612,9 +695,10 @@ six secrets appear as string bindings.
 
 - [ ] **Step 3: Update operational documentation**
 
-Document pending registration, initial-owner-only adoption, versioned session
-revocation, outbox retry state, the 100-row dispatch bound, GET/POST
-unsubscribe semantics, and the fact that Queues are a later scaling option.
+Document pending registration, creator-only claims for new events, the
+one-time legacy first-owner claim, versioned session revocation, outbox retry
+state, the 100-row dispatch bound, GET/POST unsubscribe semantics, and the fact
+that Queues are a later scaling option.
 
 ### Task 7: Verify, review, and publish the branch
 
@@ -654,9 +738,9 @@ After the branch has passed verification, use the Cloudflare API to add a new
 random 32-byte `LOGIN_HMAC_KEY` to Worker `candidary`. Never print or persist
 the value.
 
-- [ ] **Step 4: Publish one intentional GitHub commit**
+- [ ] **Step 4: Publish the reviewed task commits**
 
-Create the commit from the exact verified tree and advance
+Advance
 `refs/heads/claude/user-auth-host-50qbya` only if it still points at
 `f3253f23ab86a6e8fbae36eb2a8eb912aa95e392`. Do not merge PR 3 or deploy the
 Worker.
