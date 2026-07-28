@@ -78,7 +78,7 @@ export function CreatePage() {
           host out of the recovery they just set up. */}
       <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
       <CopyableLinkCard label="Guest link" value={created.guestLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
-      <a className="button button--primary" href={created.managementLink}>Open event manager</a>
+      <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
     {/* Mounted on whether creation already attached the event, not on `saved`.

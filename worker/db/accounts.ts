@@ -528,6 +528,35 @@ export class AccountsRepository {
     return row ? mapEventHost(row) : null;
   }
 
+  async getEventOwnershipState(
+    eventId: string,
+    now: string,
+  ): Promise<{ hasOwner: boolean; claimStillPossible: boolean } | null> {
+    const row = await this.db.prepare(`
+      SELECT
+        EXISTS (
+          SELECT 1 FROM event_hosts
+          WHERE event_hosts.event_id = events.id AND event_hosts.role = 'owner'
+        ) AS has_owner,
+        (
+          events.legacy_owner_claim_open = 1
+          OR EXISTS (
+            SELECT 1 FROM event_sessions
+            WHERE event_sessions.event_id = events.id
+              AND event_sessions.role = 'manager'
+              AND event_sessions.can_claim_owner = 1
+              AND event_sessions.revoked_at IS NULL
+              AND event_sessions.expires_at > ?
+          )
+        ) AS claim_still_possible
+      FROM events
+      WHERE events.id = ?
+    `).bind(now, eventId).first<{ has_owner: number; claim_still_possible: number }>();
+    return row
+      ? { hasOwner: row.has_owner === 1, claimStillPossible: row.claim_still_possible === 1 }
+      : null;
+  }
+
   async listEventsForAccount(accountId: string): Promise<EventRecord[]> {
     const { results } = await this.db.prepare(`
       SELECT events.* FROM events

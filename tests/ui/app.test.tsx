@@ -53,6 +53,9 @@ describe('public Candidary experience', () => {
     expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
     expect(screen.getByText('Guest link')).toBeVisible();
     expect(screen.getByText('Management link')).toBeVisible();
+    expect(screen.getByRole('link', { name: /open event manager/i }))
+      .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
+    expect(screen.getByText(CREATED.managementLink)).toBeInTheDocument();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
   });
 

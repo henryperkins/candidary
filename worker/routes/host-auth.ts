@@ -315,12 +315,19 @@ hostAuthRoutes.patch('/host/preferences', async (context) => {
 hostAuthRoutes.post('/host/events/:eventId/adopt', async (context) => {
   const principal = await requireHost(context, true);
   const eventId = context.req.param('eventId');
+  const accounts = new AccountsRepository(context.env.DB);
+  if (await accounts.getEventHost(eventId, principal.account.id)) {
+    return context.json({
+      data: { adopted: true, existing: true },
+      requestId: context.get('requestId'),
+    });
+  }
   const link = await new AuthService(context.env).resolve(getSessionCookie(context, 'event'))
     .catch(() => null);
   if (link?.kind !== 'event' || link.session.role !== 'manager' || link.event.id !== eventId) {
     throw new ApiError('ROLE_FORBIDDEN', 'Open this event’s management link first.', 403);
   }
-  const result = await new AccountsRepository(context.env.DB).claimInitialOwnerAndSchedule(
+  const result = await accounts.claimInitialOwnerAndSchedule(
     eventId,
     principal.account.id,
     link.session.id,

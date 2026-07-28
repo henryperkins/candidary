@@ -963,6 +963,38 @@ describe('managing an event through an account', () => {
     expect((await session.json<any>()).data.events).toHaveLength(1);
   });
 
+  it('idempotently adopts an event already owned by the signed-in host without its manager cookie', async () => {
+    const access = await eventAccess('Already Owned');
+    const host = await registeredHost(
+      'owner@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+
+    const adopted = await post(`/api/host/events/${access.event.id}/adopt`, {}, hostHeaders(host));
+
+    expect(adopted.status).toBe(200);
+    expect(await adopted.json<any>()).toMatchObject({ data: { adopted: true, existing: true } });
+  });
+
+  it('idempotently adopts an existing cohost without promoting that membership', async () => {
+    const host = await registeredHost('cohost@example.com');
+    const account = await new AccountsRepository(env.DB).getByEmail('cohost@example.com');
+    const access = await eventAccess('Cohost Event');
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, ?, 'cohost', '2026-07-28T00:00:00.000Z')
+    `).bind(access.event.id, account!.id).run();
+
+    const adopted = await post(`/api/host/events/${access.event.id}/adopt`, {}, hostHeaders(host));
+
+    expect(adopted.status).toBe(200);
+    expect(await adopted.json<any>()).toMatchObject({ data: { adopted: true, existing: true } });
+    expect(await env.DB.prepare(`
+      SELECT role FROM event_hosts WHERE event_id = ? AND account_id = ?
+    `).bind(access.event.id, account!.id).first('role')).toBe('cohost');
+  });
+
   it('refuses to adopt an event the account holds no link for', async () => {
     const host = await registeredHost('host@example.com');
     const access = await eventAccess('Not Yours');

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
+import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
@@ -188,6 +189,17 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
 for (const role of ['guest', 'manager'] as const) {
   manageRoutes.post(`/manage/events/:eventId/links/${role}/rotate`, async (context) => {
     const auth = await managerForEvent(context, true);
+    if (role === 'manager') {
+      const ownership = await new AccountsRepository(context.env.DB)
+        .getEventOwnershipState(auth.event.id, new Date().toISOString());
+      if (ownership && !ownership.hasOwner && ownership.claimStillPossible) {
+        throw new ApiError(
+          'ROLE_FORBIDDEN',
+          'Save this event from its original creator session before rotating its management link.',
+          409,
+        );
+      }
+    }
     const result = await new LinkService(context.env).rotate(auth.event, role);
     return context.json({ data: result, requestId: context.get('requestId') });
   });
