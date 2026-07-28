@@ -48,6 +48,16 @@
     "R2_BUCKET_NAME": "candidary-media",
     "EMAIL_FROM": "hello@candidary.online"
   },
+  "secrets": {
+    "required": [
+      "TOKEN_HMAC_KEY",
+      "SESSION_HMAC_KEY",
+      "GUEST_TOKEN_ENCRYPTION_KEY",
+      "LOGIN_HMAC_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_SECRET_ACCESS_KEY"
+    ]
+  },
   "observability": {
     "enabled": true
   }

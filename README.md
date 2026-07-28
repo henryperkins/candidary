@@ -13,8 +13,8 @@ The primary journey ends with an exact delivery receipt. Shared galleries, notes
 - Required 1-80 character guest-name snapshots remembered on the device.
 - Private R2 originals with authorized Cloudflare Images previews.
 - Live host intake, guest-name search, optional gallery publication, and notes.
-- Optional host accounts with email and password, so an event survives a lost management link.
-- Emailed getting-started, event-day, and access-expiry notices, with one-click unsubscribe.
+- Optional host accounts with email and password, so an event survives a lost management link. An address becomes an account only after an emailed code proves the mailbox.
+- Emailed getting-started, event-day, and access-expiry notices, sent from a durable D1 outbox with one-click unsubscribe.
 - 10,000 photos and 100 GiB per event by design.
 - Complete exports containing every stored original in source-bounded 2 GiB ZIP parts plus a manifest.
 

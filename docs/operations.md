@@ -2,6 +2,11 @@
 
 ## Scheduled lifecycle work
 
+Two triggers share one handler and are selected by `controller.cron`.
+
+The hourly `47 * * * *` handler delivers lifecycle email from the outbox. It is
+independent of retention cleanup: neither can abort the other.
+
 The daily `17 3 * * *` handler performs three idempotent jobs:
 
 1. Delete objects for upload reservations older than fifteen minutes and release event counters.
@@ -63,10 +68,22 @@ The application does not promise recovery for a lost management link, explicit d
 
 ## Host notifications
 
-Three lifecycle emails are sent from the daily `17 3 * * *` trigger, before the retention purge in the same run: a getting-started guide when a host confirms their address, a reminder the day before the event date, and a warning seven days before management access ends.
+Three lifecycle emails are scheduled as `host_notification_outbox` rows in the same D1 batch that commits a host's ownership of an event: a getting-started guide, a reminder the day before the event date, and a warning seven days before management access ends. Because the rows are written with the membership, a refused or rolled-back ownership claim can never leave mail scheduled that implies ownership.
 
 The warning is keyed to `management_access_expires_at`, not `purge_after`. Management access ends 90 days after the event and photos are deleted at 120, so a warning keyed to deletion would reach the host a month after they could still act on it.
 
-Each send is claimed in `host_notifications` before it is attempted and the claim is released if delivery fails, so a cron that runs twice sends once and a transient failure is retried the next night. Hosts who have not confirmed their address, or who unsubscribed, are never selected. A mail failure is logged and swallowed rather than allowed to abort the purge that follows.
+The hourly `47 * * * *` dispatcher reclaims leases older than ten minutes, claims at most 100 due rows in one conditional UPDATE under one random claim token, loads them with account and event data in one explicit-column join, and writes each outcome back fenced by that token. The ceiling is therefore about 105 D1 statements per run, and 100 messages per run is inside the account's 1,000-per-day quota.
+
+Row states are `pending → sending → sent`. A transient provider failure returns the row to `pending` with an incremented attempt count and a retry at 5 minutes, 1 hour, 6 hours, then 24 hours; the fifth failed attempt is terminal. A missed run does not erase eligibility because `available_at` is immutable and `retry_at` only moves forward. `discard_after` retires a reminder once its event has passed and a warning once its deadline has, rather than sending either late.
+
+Rows whose account is disabled, unverified, or opted out are retired with a non-sensitive `last_error_code` and no send. A preference change after a page is materialized may still allow one in-flight message; every row materialized after the change is suppressed. Delivery is at least once: an isolate that dies between provider acceptance and the fenced success update will resend on the next run.
+
+Investigate a growing count of `status = 'failed'` rows by `last_error_code`. `suppressed_by_preference`, `address_unverified`, `account_disabled`, `event_deleted`, and `obsolete` are ordinary; repeated provider codes are not.
+
+## Email preferences
+
+`GET /host/unsubscribe/:token` renders a confirmation form and changes nothing — inbox links are followed by scanners, prefetchers, and preview generators before a person reads them. The signed `POST` to the same URL performs the opt-out, which is what mail providers issue for one-click `List-Unsubscribe`. A signed-in host re-enables lifecycle email from the account page through the authenticated preferences endpoint.
+
+Cloudflare Queues remain the next scaling step rather than part of this design. A durable D1 row would still be written first, because publishing a queue message cannot be atomic with the account and event transaction.
 
 Sending is capped at 1,000 messages per day for the account. Outbound sends appear as **dropped** in the Email Routing summary even when delivered; use the Email Sending metrics instead. A hard-bounced address is added to Cloudflare's suppression list, after which its codes silently stop arriving — the management link is the remaining route for that host.

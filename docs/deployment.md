@@ -28,11 +28,14 @@ Generate independent 32-byte values and store them with Wrangler. The guest encr
 npx wrangler secret put TOKEN_HMAC_KEY
 npx wrangler secret put SESSION_HMAC_KEY
 npx wrangler secret put GUEST_TOKEN_ENCRYPTION_KEY
+npx wrangler secret put LOGIN_HMAC_KEY
 npx wrangler secret put R2_ACCESS_KEY_ID
 npx wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
 Scope the R2 credentials to the single Candidary bucket with object read/write permissions. Never reuse the token or session HMAC key.
+
+All six are listed under `secrets.required` in `wrangler.jsonc`. That declaration is the source of truth for generated binding types and makes Wrangler refuse to deploy a Worker whose required secret is missing, so a forgotten value fails the upload rather than the first host who tries to sign in. Run `npx wrangler types` after changing it.
 
 ## Migrate and deploy
 
