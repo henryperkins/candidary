@@ -343,6 +343,34 @@ describe('atomic authentication budgets and ownership', () => {
     ]);
   });
 
+  it('refuses a live manager session that was never the creator', async () => {
+    await seedEvent();
+    // Post-0006 event: legacy claim closed, so creator authority is the only route.
+    const delegateSession = await seedManagerSession('event-a', 'delegate', false);
+    const account = await seedAccount('delegate@example.com');
+
+    const result = await new AccountsRepository(env.DB).claimInitialOwnerAndSchedule(
+      'event-a', account.id, delegateSession, '2026-07-21T12:01:00.000Z',
+    );
+
+    // Deleting "can_claim_owner = 1 OR legacy_owner_claim_open = 1" from the insert
+    // would make this 'claimed', and nothing else in the suite would notice.
+    expect(result).toBe('not_authorized');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('lets the creator session claim the event the delegate could not', async () => {
+    await seedEvent();
+    const creatorSession = await seedManagerSession('event-a', 'creator', true);
+    const account = await seedAccount('creator@example.com');
+
+    // The positive half: a guard that refused everything would pass the test above.
+    expect(await new AccountsRepository(env.DB).claimInitialOwnerAndSchedule(
+      'event-a', account.id, creatorSession, '2026-07-21T12:01:00.000Z',
+    )).toBe('claimed');
+  });
+
   it('does not promote a cohost or close the legacy path on refusal', async () => {
     await seedEvent();
     await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
@@ -387,7 +415,9 @@ describe('atomic authentication budgets and ownership', () => {
       '2026-07-21T12:01:00.000Z',
     );
 
-    expect(result).toBe('owned_by_other');
+    // No membership exists, so the honest answer is that this credential could not
+    // claim it — not that somebody else already had.
+    expect(result).toBe('not_authorized');
     expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
     expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
     expect(await env.DB.prepare(`

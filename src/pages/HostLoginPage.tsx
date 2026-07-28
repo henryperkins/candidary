@@ -36,10 +36,17 @@ export function HostLoginPage() {
   // page the host came from, and a refusal is worth showing rather than swallowing.
   async function finishAuthenticated() {
     if (adopt) {
-      await api(`/api/host/events/${adopt}/adopt`, { method: 'POST', body: JSON.stringify({}) })
-        // The host is signed in either way. A refused or already-owned claim is not a
-        // reason to strand them on the login form.
-        .catch(() => undefined);
+      try {
+        await api(`/api/host/events/${adopt}/adopt`, { method: 'POST', body: JSON.stringify({}) });
+      } catch (caught) {
+        // The host is signed in either way, so they are not stranded — but the event
+        // did not attach, and silently navigating on would repeat exactly the
+        // false-success this branch exists to remove.
+        setError(caught instanceof ClientApiError
+          ? `You are signed in, but this event was not added to your account: ${caught.message}`
+          : 'You are signed in, but this event could not be added to your account.');
+        return;
+      }
     }
     navigate(returnTo ?? HOST_EVENTS_PATH);
   }

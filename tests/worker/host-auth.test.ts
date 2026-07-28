@@ -1089,7 +1089,13 @@ describe('unsubscribing', () => {
     const account = await env.DB.prepare('SELECT id FROM host_accounts LIMIT 1').first<{ id: string }>();
     const digest = await digestSecret(`unsubscribe:${account!.id}`, testEnv.LOGIN_HMAC_KEY);
 
-    const forged = await createApp().request(`/host/unsubscribe/${account!.id}.not-the-signature`, {}, testEnv);
+    // The forged token has to be spent against the endpoint that actually mutates.
+    // Checking it on the read-only GET proves nothing: that handler writes either way.
+    const forged = await createApp().request(
+      `/host/unsubscribe/${account!.id}.not-the-signature`,
+      { method: 'POST' },
+      testEnv,
+    );
     expect(forged.status).toBe(200);
     let session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
     expect((await session.json<any>()).data.account.notificationsEnabled).toBe(true);

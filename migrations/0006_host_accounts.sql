@@ -101,10 +101,10 @@ CREATE INDEX event_hosts_account ON event_hosts(account_id, created_at);
 CREATE UNIQUE INDEX event_hosts_one_owner
   ON event_hosts(event_id) WHERE role = 'owner';
 
--- The send ledger. The daily cron re-examines every live event on every run, so
--- without a record of what already went out it would resend the same reminder
--- each night. The UNIQUE index is the idempotency guarantee, not the query that
--- selects candidates.
+-- The historical send ledger. It predates the outbox and is retained so an already
+-- delivered message is not resent when this migration lands. Scheduling and delivery
+-- now live in `host_notification_outbox` below; nothing writes to this table on the
+-- dispatch path any more.
 CREATE TABLE host_notifications (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES host_accounts(id) ON DELETE CASCADE,

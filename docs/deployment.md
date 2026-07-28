@@ -44,7 +44,7 @@ npx wrangler d1 migrations apply candidary-core --remote
 npm run deploy
 ```
 
-This applies the private-delivery/publication split and partitioned-export schema, then deploys the export Workflow, Images binding, private asset routing, and daily cleanup trigger. Confirm `APP_ORIGIN` exactly matches the HTTPS origin before printing a QR code.
+This applies the private-delivery/publication split and partitioned-export schema, then deploys the export Workflow, Images binding, private asset routing, the daily cleanup trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the HTTPS origin before printing a QR code.
 
 ## Wedding rehearsal gate
 

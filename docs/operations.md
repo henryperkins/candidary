@@ -7,11 +7,12 @@ Two triggers share one handler and are selected by `controller.cron`.
 The hourly `47 * * * *` handler delivers lifecycle email from the outbox. It is
 independent of retention cleanup: neither can abort the other.
 
-The daily `17 3 * * *` handler performs three idempotent jobs:
+The daily `17 3 * * *` handler performs four idempotent jobs:
 
-1. Delete objects for upload reservations older than fifteen minutes and release event counters.
-2. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
-3. Mark retention-due events inaccessible, revoke tokens and sessions, and sweep their R2 event prefix.
+1. Sweep expired and consumed pending registrations, expired login challenges, and rate-limit buckets older than the enforcement window, in repeated bounded passes until each table is drained.
+2. Delete objects for upload reservations older than fifteen minutes and release event counters.
+3. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
+4. Mark retention-due events inaccessible, revoke tokens and sessions, and sweep their R2 event prefix.
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 

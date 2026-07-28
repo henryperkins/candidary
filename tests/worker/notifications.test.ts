@@ -224,6 +224,68 @@ describe('durable notification outbox', () => {
     expect(await stateOf(id)).toMatchObject({ status: 'failed', last_error_code: 'suppressed_by_preference' });
   });
 
+  it('backs off on repeated failures and gives up on the fifth attempt', async () => {
+    const { account, eventId } = await hostedEvent();
+    const id = await outboxRow({ accountId: account.id, eventId });
+    vi.spyOn(EmailService.prototype, 'send')
+      .mockResolvedValue({ delivered: false, code: 'temporary_failure' });
+
+    const seen: number[] = [];
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await new NotificationService(testEnv).dispatchPending(new Date());
+      const row = await env.DB.prepare(
+        'SELECT attempt_count, status, retry_at FROM host_notification_outbox WHERE id = ?',
+      ).bind(id).first<{ attempt_count: number; status: string; retry_at: string }>();
+      seen.push(row!.attempt_count);
+      if (attempt < 5) {
+        expect(row!.status).toBe('pending');
+        // Force it due again so the next pass exercises the following delay rather
+        // than the backoff simply parking the row out of reach.
+        await env.DB.prepare('UPDATE host_notification_outbox SET retry_at = ? WHERE id = ?')
+          .bind(new Date(Date.now() - 1000).toISOString(), id).run();
+      }
+    }
+
+    expect(seen).toEqual([1, 2, 3, 4, 5]);
+    expect(await stateOf(id)).toMatchObject({ status: 'failed', attempt_count: 5 });
+  });
+
+  it('retires rows for disabled and unverified accounts without sending', async () => {
+    const disabled = await hostedEvent({ email: 'disabled@example.com' });
+    const unverified = await hostedEvent({ email: 'unverified@example.com', verified: false });
+    await env.DB.prepare('UPDATE host_accounts SET disabled_at = ? WHERE id = ?')
+      .bind(new Date().toISOString(), disabled.account.id).run();
+    const disabledId = await outboxRow({ accountId: disabled.account.id, eventId: disabled.eventId });
+    const unverifiedId = await outboxRow({ accountId: unverified.account.id, eventId: unverified.eventId });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await stateOf(disabledId)).toMatchObject({ status: 'failed', last_error_code: 'account_disabled' });
+    expect(await stateOf(unverifiedId)).toMatchObject({ status: 'failed', last_error_code: 'address_unverified' });
+  });
+
+  it('defaults the claim to one hundred rows when no limit is given', async () => {
+    // Pins the documented bound itself, not merely that an explicitly passed limit
+    // is honoured — the two are different guarantees.
+    const { account, eventId } = await hostedEvent();
+    await outboxRow({ accountId: account.id, eventId });
+    const claimed: number[] = [];
+    const outbox = new NotificationOutboxRepository(env.DB);
+    const original = outbox.claimDue.bind(outbox);
+    vi.spyOn(NotificationOutboxRepository.prototype, 'claimDue')
+      .mockImplementation(async function (this: NotificationOutboxRepository, now, limit, token) {
+        claimed.push(limit);
+        return original.call(this, now, limit, token);
+      } as typeof outbox.claimDue);
+    vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+
+    expect(claimed).toEqual([100]);
+  });
+
   it('retires a reminder that is already obsolete rather than sending it late', async () => {
     const { account, eventId } = await hostedEvent();
     const id = await outboxRow({

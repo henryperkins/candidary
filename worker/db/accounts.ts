@@ -456,7 +456,7 @@ export class AccountsRepository {
     accountId: string,
     creatorSessionId: string,
     createdAt: string,
-  ): Promise<'claimed' | 'existing' | 'owned_by_other'> {
+  ): Promise<'claimed' | 'existing' | 'owned_by_other' | 'not_authorized'> {
     const existing = await this.db.prepare(`
       SELECT account_id, role FROM event_hosts WHERE event_id = ?
     `).bind(eventId).all<{ account_id: string; role: EventHostRole }>();
@@ -498,7 +498,17 @@ export class AccountsRepository {
     const owner = await this.db.prepare(`
       SELECT account_id FROM event_hosts WHERE event_id = ? AND role = 'owner'
     `).bind(eventId).first<{ account_id: string }>();
-    return owner?.account_id === accountId ? 'claimed' : 'owned_by_other';
+    if (owner?.account_id === accountId) return 'claimed';
+    if (owner) return 'owned_by_other';
+    // No owner and no membership at all means the guarded insert matched nothing:
+    // this session was not the creator and the legacy claim was already spent.
+    // Reporting that as "someone else owns it" would name a host who does not exist
+    // and hide the real reason. An existing non-owner membership is a different
+    // refusal and keeps the conflict answer.
+    const anyMembership = await this.db.prepare(
+      'SELECT 1 FROM event_hosts WHERE event_id = ?',
+    ).bind(eventId).first();
+    return anyMembership ? 'owned_by_other' : 'not_authorized';
   }
 
   async addEventHost(

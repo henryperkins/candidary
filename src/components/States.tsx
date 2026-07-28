@@ -26,10 +26,12 @@ export function ErrorState({ message, recoveryHint, onRetry, action }: ErrorStat
     <div role="alert">
       <p>{message}</p>
       <p className="state-card__recovery">{recoveryHint}</p>
+      {/* Inside the live region for the same reason the hint is: announcing the
+          failure without the one route out of it is the half that does not help. */}
+      {action && (
+        <a className="button button--secondary" href={action.href}>{action.label}</a>
+      )}
     </div>
-    {action && (
-      <a className="button button--secondary" href={action.href}>{action.label}</a>
-    )}
     {onRetry && (
       <button type="button" className="button button--secondary" onClick={onRetry}>Try again</button>
     )}

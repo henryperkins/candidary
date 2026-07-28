@@ -81,9 +81,11 @@ export function CreatePage() {
       <a className="button button--primary" href={created.managementLink}>Open event manager</a>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
-    {/* A host who created this event while signed in already has it. Offering
-        registration again would ask them to prove an address they have proved. */}
-    {!saved && <HostAccountPanel
+    {/* Mounted on whether creation already attached the event, not on `saved`.
+        Keying it to `saved` would unmount the panel the moment completion
+        succeeded, so the host would click Confirm and watch it disappear instead
+        of being told their address was confirmed. */}
+    {!created.savedToAccount && <HostAccountPanel
       bindEventId={created.event.id}
       onCompleted={({ boundEvent }) => { if (boundEvent) setSaved(true); }}
     />}

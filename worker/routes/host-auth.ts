@@ -329,6 +329,15 @@ hostAuthRoutes.post('/host/events/:eventId/adopt', async (context) => {
   if (result === 'owned_by_other') {
     throw new ApiError('ROLE_FORBIDDEN', 'This event already has an owner.', 409);
   }
+  if (result === 'not_authorized') {
+    // Distinct from the conflict above: nobody owns this event, but this credential
+    // cannot be the one to claim it.
+    throw new ApiError(
+      'ROLE_FORBIDDEN',
+      'Only the link this event was created with can save it to an account.',
+      403,
+    );
+  }
   return context.json({
     data: { adopted: true, existing: result === 'existing' },
     requestId: context.get('requestId'),
