@@ -125,7 +125,7 @@ export function HostAccountPanel({
     return <section className="host-panel">
       <span className="success-icon"><MailCheck aria-hidden="true" /></span>
       <h2>Check your email.</h2>
-      <p>We sent a six-digit code. Entering it confirms your address so we can email you about your event.</p>
+      <p>Enter the six-digit code if one arrives. It confirms your address so we can email you about your event.</p>
       {error && <p className="form-error" role="alert">{error}</p>}
       {notice && <p className="form-note" role="status">{notice}</p>}
       <form className="create-form" onSubmit={confirm} noValidate>

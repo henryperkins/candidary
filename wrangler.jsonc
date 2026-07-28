@@ -32,6 +32,16 @@
       "name": "EMAIL"
     }
   ],
+  "ratelimits": [
+    {
+      "name": "HOST_AUTH_RATE_LIMIT",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    }
+  ],
   "workflows": [
     {
       "name": "candidary-export",

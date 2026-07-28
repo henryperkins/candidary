@@ -334,6 +334,46 @@ describe('durable notification outbox', () => {
     expect(await stateOf(id)).toMatchObject({ status: 'failed', last_error_code: 'obsolete' });
   });
 
+  it('changes a reminder retry from tomorrow to today on the event date', async () => {
+    const dayBefore = new Date('2026-07-27T12:00:00.000Z');
+    const eventDay = new Date('2026-07-28T12:00:00.000Z');
+    const clock = vi.useFakeTimers();
+    try {
+      clock.setSystemTime(dayBefore);
+      const { account, eventId } = await hostedEvent({ eventDate: '2026-07-28' });
+      const id = await outboxRow({
+        accountId: account.id,
+        eventId,
+        kind: 'event_reminder',
+        availableAt: '2026-07-27T00:00:00.000Z',
+        discardAfter: '2026-07-29T00:00:00.000Z',
+      });
+      const send = failSendOnce();
+
+      await new NotificationService(testEnv).dispatchPending(dayBefore);
+      expect(send.mock.calls[0]![0]).toMatchObject({
+        subject: expect.stringContaining('tomorrow'),
+        text: expect.stringContaining('is tomorrow'),
+      });
+      expect(await stateOf(id)).toMatchObject({ status: 'pending', attempt_count: 1 });
+
+      await env.DB.prepare('UPDATE host_notification_outbox SET retry_at = ? WHERE id = ?')
+        .bind(eventDay.toISOString(), id).run();
+      clock.setSystemTime(eventDay);
+      await new NotificationService(testEnv).dispatchPending(eventDay);
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1]![0]).toMatchObject({
+        subject: expect.stringContaining('today'),
+        text: expect.stringContaining('is today'),
+      });
+      expect(send.mock.calls[1]![0].subject).not.toContain('tomorrow');
+      expect(await stateOf(id)).toMatchObject({ status: 'sent', attempt_count: 2 });
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
   it('finishes a permitted send but denies the next row after opt-out commits', async () => {
     const first = await hostedEvent({ email: 'host@example.com' });
     const second = await eventAccess('Second Event');
