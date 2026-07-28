@@ -55,6 +55,11 @@ it('applies 0006 without rebuilding populated event sessions', async () => {
   ]);
 
   await applyD1Migrations(env.DB, [only('0006')]);
+  await env.DB.prepare(`
+    INSERT INTO events (id, slug, name, event_date, welcome_message,
+      guest_access_expires_at, management_access_expires_at, purge_after, created_at)
+    VALUES ('event-2', 'new-event', 'New event', '2026-09-20', 'Welcome.', ?, ?, ?, ?)
+  `).bind(now, now, now, now).run();
 
   expect(await env.DB.prepare(
     "SELECT COUNT(*) AS count FROM event_sessions WHERE id = 'session-1'",
@@ -65,4 +70,10 @@ it('applies 0006 without rebuilding populated event sessions', async () => {
   expect(await env.DB.prepare(
     "SELECT COUNT(*) AS count FROM guest_messages WHERE guest_session_id = 'session-1'",
   ).first('count')).toBe(1);
+  expect(await env.DB.prepare(
+    "SELECT legacy_owner_claim_open FROM events WHERE id = 'event-1'",
+  ).first('legacy_owner_claim_open')).toBe(1);
+  expect(await env.DB.prepare(
+    "SELECT legacy_owner_claim_open FROM events WHERE id = 'event-2'",
+  ).first('legacy_owner_claim_open')).toBe(0);
 });

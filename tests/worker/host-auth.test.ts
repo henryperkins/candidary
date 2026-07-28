@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
+import { HostSessionsRepository, SessionsRepository } from '../../worker/db/sessions';
 import { digestSecret } from '../../worker/security/crypto';
 import { cookiesFrom, eventAccess, origin, resetDatabase, testEnv } from './helpers';
 
@@ -22,6 +23,12 @@ function hostHeaders(access: { cookie: string; csrf: string }, extraCookie = '')
     origin,
     'x-candidary-host-csrf': access.csrf,
   };
+}
+
+function eventSessionId(cookie: string): string {
+  const token = /candidary_session=([^;]+)/u.exec(cookie)?.[1];
+  if (!token) throw new Error(`Expected event session cookie, received: ${cookie}`);
+  return token.split('.')[0]!;
 }
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}) {
@@ -113,6 +120,25 @@ describe('registration', () => {
     const hosts = await env.DB.prepare('SELECT event_id FROM event_hosts').all<{ event_id: string }>();
     expect(hosts.results.map((row) => row.event_id)).toEqual([access.event.id]);
   });
+
+  it('marks the event creator management session as able to claim ownership', async () => {
+    const access = await eventAccess();
+
+    const session = await new SessionsRepository(env.DB).getById(eventSessionId(access.manager.cookie));
+
+    expect(session?.canClaimOwner).toBe(true);
+  });
+
+  it('does not give exchanged management-link sessions ownership claim authority', async () => {
+    const access = await eventAccess();
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+
+    const session = await new SessionsRepository(env.DB).getById(eventSessionId(cookiesFrom(exchanged).cookie));
+
+    expect(session?.canClaimOwner).toBe(false);
+  });
 });
 
 describe('sign in', () => {
@@ -152,6 +178,48 @@ describe('sign in', () => {
 
     expect(response.status).toBe(401);
     expect((await response.json<any>()).code).toBe('SESSION_EXPIRED');
+  });
+
+  it('refuses a host-session insert with a stale account authentication version', async () => {
+    await register('host@example.com');
+    const account = await env.DB.prepare('SELECT id, auth_version FROM host_accounts').first<{
+      id: string;
+      auth_version: number;
+    }>();
+
+    const session = await new HostSessionsRepository(env.DB).createIfAuthVersion({
+      id: 'stale-version-session',
+      secretDigest: 'digest',
+      csrfDigest: 'csrf',
+      accountId: account!.id,
+      authVersion: account!.auth_version + 1,
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      createdAt: '2026-07-28T00:00:00.000Z',
+    });
+
+    expect(session).toBeNull();
+  });
+
+  it('refuses a host-session insert for a disabled account', async () => {
+    await register('host@example.com');
+    const account = await env.DB.prepare('SELECT id, auth_version FROM host_accounts').first<{
+      id: string;
+      auth_version: number;
+    }>();
+    await env.DB.prepare('UPDATE host_accounts SET disabled_at = ? WHERE id = ?')
+      .bind('2026-07-28T00:00:00.000Z', account!.id).run();
+
+    const session = await new HostSessionsRepository(env.DB).createIfAuthVersion({
+      id: 'disabled-account-session',
+      secretDigest: 'digest',
+      csrfDigest: 'csrf',
+      accountId: account!.id,
+      authVersion: account!.auth_version,
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      createdAt: '2026-07-28T00:00:00.000Z',
+    });
+
+    expect(session).toBeNull();
   });
 });
 
@@ -232,6 +300,33 @@ describe('password reset', () => {
     expect(oldPassword.status).toBe(401);
     const newPassword = await post('/api/host/login', { email: 'host@example.com', password: 'a-brand-new-long-password' });
     expect(newPassword.status).toBe(200);
+  });
+
+  it('prevents a login verified before reset from creating a host session afterward', async () => {
+    await register('host@example.com');
+    const account = await env.DB.prepare('SELECT id, auth_version FROM host_accounts').first<{
+      id: string;
+      auth_version: number;
+    }>();
+    await post('/api/host/password/forgot', { email: 'host@example.com' });
+    const code = await forceCode('host@example.com', 'reset');
+
+    const reset = await post('/api/host/password/reset', {
+      email: 'host@example.com', code, password: 'a-brand-new-long-password',
+    });
+    expect(reset.status).toBe(200);
+
+    const staleSession = await new HostSessionsRepository(env.DB).createIfAuthVersion({
+      id: 'login-that-finished-after-reset',
+      secretDigest: 'digest',
+      csrfDigest: 'csrf',
+      accountId: account!.id,
+      authVersion: account!.auth_version,
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      createdAt: '2026-07-28T00:00:00.000Z',
+    });
+
+    expect(staleSession).toBeNull();
   });
 });
 

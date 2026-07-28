@@ -2,10 +2,10 @@
 -- stops being unrecoverable. The link survives as a delegate credential: a host
 -- can still hand `/manage/<token>` to a planner who will never sign up.
 --
--- `event_sessions` keeps its name even though it now also carries account
--- sessions that belong to no event. Renaming it would force a rebuild of `media`
--- and `guest_messages`, which reference it with ON DELETE RESTRICT, and neither
--- table has anything to do with this change.
+-- `event_sessions` remains the event credential table. Account credentials live
+-- in dedicated `host_sessions`, so adding host identity does not require
+-- rebuilding the event table that `media` and `guest_messages` reference with
+-- ON DELETE RESTRICT.
 
 PRAGMA defer_foreign_keys = ON;
 

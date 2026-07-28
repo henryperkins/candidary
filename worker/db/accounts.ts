@@ -120,6 +120,24 @@ export class AccountsRepository {
       .bind(passwordHash, id).run();
   }
 
+  // A password reset has to invalidate even a login that verified the old password
+  // just before the reset and tries to mint its session afterward. Advancing the
+  // version in the same conditional write gives that in-flight login no version it
+  // can use for `createIfAuthVersion`.
+  async setPasswordHashAndAdvanceAuthVersion(
+    id: string,
+    passwordHash: string,
+    authVersion: number,
+  ): Promise<HostAccountRecord | null> {
+    const result = await this.db.prepare(`
+      UPDATE host_accounts
+      SET password_hash = ?, auth_version = auth_version + 1
+      WHERE id = ? AND auth_version = ? AND disabled_at IS NULL
+    `).bind(passwordHash, id, authVersion).run();
+    if ((result.meta.changes ?? 0) !== 1) return null;
+    return this.getById(id);
+  }
+
   async markEmailVerified(id: string, verifiedAt: string): Promise<void> {
     await this.db.prepare('UPDATE host_accounts SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?')
       .bind(verifiedAt, id).run();

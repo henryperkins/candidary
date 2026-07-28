@@ -234,16 +234,23 @@ hostAuthRoutes.post('/host/password/reset', async (context) => {
 
   const service = new HostAuthService(context.env);
   await service.consumeCode(account, 'reset', body.code);
-  await accounts.setPasswordHash(account.id, await hashPassword(body.password));
+  const resetAccount = await accounts.setPasswordHashAndAdvanceAuthVersion(
+    account.id,
+    await hashPassword(body.password),
+    account.authVersion,
+  );
+  if (!resetAccount) {
+    throw new ApiError('LOGIN_CODE_INVALID', 'That code is not correct.', 400);
+  }
   // Everything that was signed in under the old password goes, including whatever
   // session an attacker may have been holding. The new session below is minted
-  // after the revocation so it survives it.
+  // after the revocation with the advanced version, so it survives it.
   await new HostSessionsRepository(context.env.DB).revokeForAccount(account.id, new Date().toISOString());
   // A reset proves the same thing verification does: this person reads that inbox.
   await accounts.markEmailVerified(account.id, new Date().toISOString());
-  await service.sendPasswordChanged(account);
+  await service.sendPasswordChanged(resetAccount);
 
-  await startSession(context, account);
+  await startSession(context, resetAccount);
   return context.json({ data: { reset: true }, requestId: context.get('requestId') });
 });
 
