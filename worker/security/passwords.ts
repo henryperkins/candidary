@@ -60,8 +60,12 @@ export async function verifyPassword(
     return { valid: false, needsRehash: false };
   }
   // A stored record could otherwise name parameters far past what this isolate can
-  // afford, turning one crafted row into a memory exhaustion on every sign-in.
-  if (128 * parameters.N * parameters.r > MAX_MEMORY) return { valid: false, needsRehash: false };
+  // afford, turning one crafted row into memory or CPU exhaustion on every sign-in.
+  // `p` is pure parallel work and is not represented in the memory estimate.
+  if (parameters.p < 1 || parameters.p > PARAMETERS.p
+    || 128 * parameters.N * parameters.r > MAX_MEMORY) {
+    return { valid: false, needsRehash: false };
+  }
 
   const expected = Buffer.from(rawKey, 'base64url');
   let derived: Buffer;

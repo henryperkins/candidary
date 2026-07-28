@@ -12,12 +12,22 @@ import { unsubscribeUrl } from './notifications';
 const CODE_TTL_SECONDS = 15 * 60;
 const MAX_CODE_ATTEMPTS = 5;
 
-// A password verification that always runs, even for an address with no account.
-// Returning early on a miss would make sign-in measurably faster for unregistered
-// addresses, which turns the login form into an account-existence oracle.
-const ABSENT_ACCOUNT_HASH = 'scrypt$32768$8$3$'
-  + 'AAAAAAAAAAAAAAAAAAAAAA$'
-  + 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+// A password verification always runs even when no account exists. Its salt and
+// key are randomized so the dummy is a normal stored-hash shape, but generated
+// lazily so importing the Worker performs no random I/O.
+let absentAccountHash: string | null = null;
+
+function randomBase64Url(byteLength: number): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+function getAbsentAccountHash(): string {
+  absentAccountHash ??= `scrypt$32768$8$3$${randomBase64Url(16)}$${randomBase64Url(32)}`;
+  return absentAccountHash;
+}
 
 function sixDigitCode(): string {
   // Rejection sampling. Taking a modulus of a 32-bit draw would make the low codes
@@ -242,7 +252,10 @@ export class HostAuthService {
 
   async authenticate(email: string, password: string): Promise<HostAccountRecord> {
     const account = await this.accounts.getByEmail(email);
-    const { valid, needsRehash } = await verifyPassword(password, account?.passwordHash ?? ABSENT_ACCOUNT_HASH);
+    const { valid, needsRehash } = await verifyPassword(
+      password,
+      account?.passwordHash ?? getAbsentAccountHash(),
+    );
     if (!account || !valid) {
       throw new ApiError('LOGIN_CREDENTIALS_INVALID', 'Check your email address and password.', 401);
     }
