@@ -2,6 +2,7 @@ import type { AppEnv } from '../env';
 import { NotificationService } from '../services/notifications';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
+import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
 
 async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<void> {
   let cursor: string | undefined;
@@ -40,6 +41,48 @@ export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Prom
   return expired.length;
 }
 
+export async function cleanupAuthScratch(
+  env: AppEnv,
+  now = new Date(),
+): Promise<{ registrations: number; challenges: number; rateLimits: number }> {
+  const timestamp = now.toISOString();
+  const rateLimitCutoff = new Date(now.getTime() - AUTH_RATE_LIMIT_WINDOW_MS).toISOString();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      DELETE FROM host_registration_challenges
+      WHERE id IN (
+        SELECT id FROM host_registration_challenges
+        WHERE consumed_at IS NOT NULL OR expires_at < ?
+        ORDER BY updated_at
+        LIMIT 100
+      )
+    `).bind(timestamp),
+    env.DB.prepare(`
+      DELETE FROM host_login_challenges
+      WHERE id IN (
+        SELECT id FROM host_login_challenges
+        WHERE expires_at < ?
+        ORDER BY expires_at
+        LIMIT 100
+      )
+    `).bind(timestamp),
+    env.DB.prepare(`
+      DELETE FROM host_auth_rate_limits
+      WHERE rowid IN (
+        SELECT rowid FROM host_auth_rate_limits
+        WHERE window_started_at < ?
+        ORDER BY window_started_at
+        LIMIT 100
+      )
+    `).bind(rateLimitCutoff),
+  ]);
+  return {
+    registrations: results[0]?.meta.changes ?? 0,
+    challenges: results[1]?.meta.changes ?? 0,
+    rateLimits: results[2]?.meta.changes ?? 0,
+  };
+}
+
 export async function deleteEventData(env: AppEnv, eventId: string, now = new Date()): Promise<void> {
   const timestamp = now.toISOString();
   await env.DB.batch([
@@ -51,6 +94,7 @@ export async function deleteEventData(env: AppEnv, eventId: string, now = new Da
 }
 
 export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {
+  await cleanupAuthScratch(env, now);
   await cleanupExpiredReservations(env, now);
   await cleanupExpiredExports(env, now);
   // Notifications go out before the purge, not after. The access warning is about

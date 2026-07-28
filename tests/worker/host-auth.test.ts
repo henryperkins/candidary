@@ -2,12 +2,14 @@ import { env } from 'cloudflare:workers';
 import { scrypt } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as PasswordModule from '../../worker/security/passwords';
+
 const rehashControl = vi.hoisted(() => ({
   pause: null as null | { arrived: () => void; release: Promise<void> },
 }));
 
 vi.mock('../../worker/security/passwords', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../worker/security/passwords')>();
+  const actual = await importOriginal<typeof PasswordModule>();
   return {
     ...actual,
     hashPassword: async (password: string) => {
@@ -23,6 +25,7 @@ vi.mock('../../worker/security/passwords', async (importOriginal) => {
 });
 
 import { createApp } from '../../worker/app';
+import { AccountsRepository } from '../../worker/db/accounts';
 import { HostSessionsRepository, SessionsRepository } from '../../worker/db/sessions';
 import { digestSecret } from '../../worker/security/crypto';
 import { verifyPassword } from '../../worker/security/passwords';
@@ -30,6 +33,14 @@ import { HostAuthService } from '../../worker/services/host-auth';
 import { cookiesFrom, eventAccess, origin, resetDatabase, testEnv } from './helpers';
 
 const PASSWORD = 'a-sufficiently-long-password';
+const trackedWaitUntil: Promise<unknown>[] = [];
+
+const executionContext = {
+  waitUntil(promise: Promise<unknown>) {
+    trackedWaitUntil.push(promise);
+  },
+  passThroughOnException() {},
+} as unknown as ExecutionContext;
 
 async function lowerCostHash(password: string): Promise<string> {
   const salt = Buffer.alloc(16, 7);
@@ -47,6 +58,13 @@ function hostCookiesFrom(response: Response) {
   const csrf = /candidary_host_csrf=([^;,]+)/u.exec(value)?.[1];
   if (!session || !csrf) throw new Error(`Expected host cookies, received: ${value}`);
   return { cookie: `candidary_host=${session}; candidary_host_csrf=${csrf}`, csrf };
+}
+
+function registrationCookiesFrom(response: Response) {
+  const value = response.headers.getSetCookie().join(', ');
+  const registration = /candidary_registration=([^;,]+)/u.exec(value)?.[1];
+  if (!registration) throw new Error(`Expected registration cookie, received: ${value}`);
+  return { cookie: `candidary_registration=${registration}`, token: registration };
 }
 
 function hostHeaders(access: { cookie: string; csrf: string }, extraCookie = '') {
@@ -69,11 +87,68 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
     method: 'POST',
     headers: { 'content-type': 'application/json', origin, ...headers },
     body: JSON.stringify(body),
-  }, testEnv);
+  }, testEnv, executionContext);
 }
 
 async function register(email: string, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
   return post('/api/host/register', { email, password: PASSWORD, ...extra }, headers);
+}
+
+async function forceRegistrationCode(
+  email: string,
+  code = '424242',
+): Promise<string> {
+  const row = await env.DB.prepare(`
+    SELECT id FROM host_registration_challenges
+    WHERE email = ? AND consumed_at IS NULL
+    ORDER BY created_at DESC LIMIT 1
+  `).bind(email).first<{ id: string }>();
+  if (!row) throw new Error(`No live registration challenge for ${email}.`);
+  await env.DB.prepare('UPDATE host_registration_challenges SET code_digest = ? WHERE id = ?')
+    .bind(await digestSecret(code, testEnv.LOGIN_HMAC_KEY), row.id).run();
+  return code;
+}
+
+async function completeRegistration(
+  started: Response,
+  email: string,
+  headers: Record<string, string> = {},
+) {
+  const pending = registrationCookiesFrom(started);
+  const code = await forceRegistrationCode(email);
+  return post('/api/host/register/complete', { code }, {
+    ...headers,
+    cookie: [pending.cookie, headers.cookie].filter(Boolean).join('; '),
+  });
+}
+
+async function registerAndComplete(
+  email: string,
+  extra: Record<string, unknown> = {},
+  headers: Record<string, string> = {},
+) {
+  return completeRegistration(
+    await register(email, extra, headers),
+    email.trim().toLowerCase(),
+    headers,
+  );
+}
+
+async function registeredHost(
+  email: string,
+  extra: Record<string, unknown> = {},
+  headers: Record<string, string> = {},
+) {
+  return hostCookiesFrom(await registerAndComplete(email, extra, headers));
+}
+
+async function unverifiedHost(email: string) {
+  const host = await registeredHost(email);
+  await env.DB.prepare('UPDATE host_accounts SET email_verified_at = NULL WHERE email = ?')
+    .bind(email).run();
+  const account = await new AccountsRepository(env.DB).getByEmail(email);
+  await new HostAuthService(testEnv).issueChallenge(account!, 'verify', null);
+  return host;
 }
 
 // Only the digest of a code is ever stored, and recovering the original would mean
@@ -87,6 +162,7 @@ async function forceCode(
   purpose: 'verify' | 'reset',
   code = '424242',
 ): Promise<string> {
+  await Promise.all(trackedWaitUntil.splice(0));
   const row = await env.DB.prepare(`
     SELECT c.id AS id FROM host_login_challenges c
     JOIN host_accounts a ON a.id = c.account_id
@@ -99,38 +175,287 @@ async function forceCode(
   return code;
 }
 
-beforeEach(resetDatabase);
+beforeEach(async () => {
+  await Promise.all(trackedWaitUntil.splice(0));
+  await resetDatabase();
+});
 
 describe('registration', () => {
-  it('creates an account, signs the host in, and issues a verification code', async () => {
-    const response = await register('host@example.com');
+  it('creates no account, owner, or host session before mailbox proof', async () => {
+    const access = await eventAccess();
+    const response = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
 
     expect(response.status).toBe(202);
-    const host = hostCookiesFrom(response);
-    const session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
-    const body = await session.json<any>();
-    expect(body.data.account.email).toBe('host@example.com');
-    expect(body.data.account.emailVerified).toBe(false);
-    expect(body.data.events).toEqual([]);
-
-    const challenge = await env.DB.prepare("SELECT COUNT(*) AS count FROM host_login_challenges WHERE purpose = 'verify'")
-      .first<{ count: number }>();
-    expect(challenge?.count).toBe(1);
+    expect(await response.json<any>()).toMatchObject({ data: { registrationPending: true } });
+    expect(response.headers.getSetCookie().join(', ')).toContain('candidary_registration=');
+    for (const table of ['host_accounts', 'event_hosts', 'host_sessions']) {
+      expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first('count')).toBe(0);
+    }
   });
 
-  it('normalizes the address and answers a taken one identically, without a second account', async () => {
-    const first = await register('Host@Example.com');
+  it('completes a pending registration and reports the true owner claim', async () => {
+    const access = await eventAccess();
+    const started = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+
+    const completed = await completeRegistration(started, 'host@example.com', {
+      cookie: access.manager.cookie,
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json<any>()).toMatchObject({
+      data: { registered: true, boundEvent: true },
+    });
+    expect(hostCookiesFrom(completed).cookie).toContain('candidary_host=');
+    expect(completed.headers.getSetCookie().join(', ')).toContain('candidary_registration=;');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(1);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM event_hosts WHERE role = 'owner'").first('count')).toBe(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_sessions').first('count')).toBe(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(3);
+  });
+
+  it('answers new and existing addresses with indistinguishable start responses and cookies', async () => {
+    const firstStart = await register('Host@Example.com', { displayName: 'Original Host' });
+    const firstComplete = await completeRegistration(firstStart, 'host@example.com');
+    expect(firstComplete.status).toBe(200);
+    const before = await env.DB.prepare(`
+      SELECT password_hash, auth_version, display_name FROM host_accounts WHERE email = ?
+    `).bind('host@example.com').first<{
+      password_hash: string;
+      auth_version: number;
+      display_name: string | null;
+    }>();
+
+    const newAddress = await register('new@example.com');
+    const existingAddress = await register('HOST@example.com', { displayName: 'Replacement Name' });
+    const newBody = await newAddress.json<any>();
+    const existingBody = await existingAddress.json<any>();
+    const cookieWithoutValue = (response: Response) => response.headers.getSetCookie()
+      .map((value) => value.replace(/candidary_registration=[^;]+/u, 'candidary_registration=<opaque>'));
+
+    expect(newAddress.status).toBe(202);
+    expect(existingAddress.status).toBe(202);
+    expect(existingBody.data).toEqual(newBody.data);
+    expect(cookieWithoutValue(existingAddress)).toEqual(cookieWithoutValue(newAddress));
+    expect(cookieWithoutValue(existingAddress)).toEqual([
+      'candidary_registration=<opaque>; Max-Age=900; Path=/; HttpOnly; Secure; SameSite=Lax',
+    ]);
+
+    const existingComplete = await completeRegistration(existingAddress, 'host@example.com');
+    expect(existingComplete.status).toBe(200);
+    expect(hostCookiesFrom(existingComplete).cookie).toContain('candidary_host=');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(1);
+    expect(await env.DB.prepare(`
+      SELECT password_hash, auth_version, display_name FROM host_accounts WHERE email = ?
+    `).bind('host@example.com').first()).toEqual(before);
+  });
+
+  it('atomically replaces concurrent starts so only one browser challenge remains live', async () => {
+    const [first, second] = await Promise.all([
+      register('host@example.com', {}, { 'CF-Connecting-IP': '203.0.113.40' }),
+      register('host@example.com', {}, { 'CF-Connecting-IP': '203.0.113.40' }),
+    ]);
+    const live = await env.DB.prepare(`
+      SELECT id FROM host_registration_challenges
+      WHERE email = ? AND consumed_at IS NULL
+    `).bind('host@example.com').all<{ id: string }>();
+    const cookieIds = [first, second].map((response) =>
+      registrationCookiesFrom(response).token.split('.')[0],
+    );
+
     expect(first.status).toBe(202);
-
-    const second = await register('host@example.com');
-
     expect(second.status).toBe(202);
-    expect(await second.json<any>()).toMatchObject({ data: { registered: true } });
-    // No session is minted for the address it does not own, which is the only way
-    // the two responses differ — and it is not visible in the body.
-    expect(second.headers.getSetCookie().join(',')).not.toContain('candidary_host=');
-    const accounts = await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first<{ count: number }>();
-    expect(accounts?.count).toBe(1);
+    expect(live.results).toHaveLength(1);
+    expect(cookieIds).toContain(live.results[0]!.id);
+  });
+
+  it('resends through the pending cookie and replaces the usable code', async () => {
+    const started = await register('host@example.com');
+    const pending = registrationCookiesFrom(started);
+    const oldCode = await forceRegistrationCode('host@example.com', '111111');
+
+    const resent = await post('/api/host/register/resend', {}, {
+      cookie: pending.cookie,
+      'CF-Connecting-IP': '203.0.113.10',
+    });
+    expect(resent.status).toBe(202);
+    expect(await resent.json<any>()).toMatchObject({ data: { registrationPending: true } });
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM host_registration_challenges
+      WHERE email = ? AND consumed_at IS NULL
+    `).bind('host@example.com').first('count')).toBe(1);
+
+    const oldCompletion = await post('/api/host/register/complete', { code: oldCode }, {
+      cookie: pending.cookie,
+    });
+    expect((await oldCompletion.json<any>()).code).toBe('LOGIN_CODE_INVALID');
+  });
+
+  it('spends registration attempts before comparison and locks after five guesses', async () => {
+    const started = await register('host@example.com');
+    const pending = registrationCookiesFrom(started);
+    const code = await forceRegistrationCode('host@example.com');
+    const wrong = code === '000000' ? '111111' : '000000';
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await post('/api/host/register/complete', { code: wrong }, {
+        cookie: pending.cookie,
+      });
+      expect((await response.json<any>()).code).toBe('LOGIN_CODE_INVALID');
+    }
+
+    const exhausted = await post('/api/host/register/complete', { code }, {
+      cookie: pending.cookie,
+    });
+    expect((await exhausted.json<any>()).code).toBe('LOGIN_CODE_INVALID');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(0);
+  });
+
+  it('requires the exact still-live creator session at completion', async () => {
+    const access = await eventAccess();
+    const started = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    await env.DB.prepare('UPDATE event_sessions SET revoked_at = ? WHERE id = ?')
+      .bind(new Date().toISOString(), eventSessionId(access.manager.cookie)).run();
+
+    const completed = await completeRegistration(started, 'host@example.com', {
+      cookie: access.manager.cookie,
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json<any>()).toMatchObject({
+      data: { registered: true, boundEvent: false },
+    });
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('does not substitute a different valid manager session at completion', async () => {
+    const access = await eventAccess();
+    const started = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+
+    const completed = await completeRegistration(started, 'host@example.com', {
+      cookie: cookiesFrom(exchanged).cookie,
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json<any>()).toMatchObject({
+      data: { registered: true, boundEvent: false },
+    });
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('does not report an existing cohost membership as an owner claim', async () => {
+    await registerAndComplete('host@example.com');
+    const account = await env.DB.prepare('SELECT id FROM host_accounts WHERE email = ?')
+      .bind('host@example.com').first<{ id: string }>();
+    const access = await eventAccess();
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, ?, 'cohost', ?)
+    `).bind(access.event.id, account!.id, '2026-07-21T12:00:00.000Z').run();
+    const started = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+
+    const completed = await completeRegistration(started, 'host@example.com', {
+      cookie: access.manager.cookie,
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json<any>()).toMatchObject({
+      data: { registered: true, boundEvent: false },
+    });
+    expect(await env.DB.prepare(`
+      SELECT role FROM event_hosts WHERE event_id = ? AND account_id = ?
+    `).bind(access.event.id, account!.id).first('role')).toBe('cohost');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('rolls activation back when one scheduled outbox statement fails', async () => {
+    const access = await eventAccess();
+    const started = await register(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    await env.DB.prepare(`
+      CREATE TRIGGER fail_registration_outbox
+      BEFORE INSERT ON host_notification_outbox
+      WHEN NEW.kind = 'event_reminder'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced outbox failure');
+      END
+    `).run();
+
+    const completed = await completeRegistration(started, 'host@example.com', {
+      cookie: access.manager.cookie,
+    });
+
+    expect(completed.status).toBe(500);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM host_registration_challenges WHERE consumed_at IS NULL
+    `).first('count')).toBe(1);
+  });
+
+  it('enforces the exact registration email budget in one normalized scope', async () => {
+    const responses = [];
+    for (const email of ['Host@Example.com', 'host@example.com', ' HOST@example.com ', 'host@example.com']) {
+      responses.push(await register(email, {}, { 'CF-Connecting-IP': '203.0.113.11' }));
+    }
+
+    expect(responses.map(({ status }) => status)).toEqual([202, 202, 202, 429]);
+    expect(await responses[3]!.json<any>()).toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('uses one shared unknown-IP scope with an exact registration budget of ten', async () => {
+    const responses = [];
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      responses.push(await register(`host-${attempt}@example.com`));
+    }
+
+    expect(responses.map(({ status }) => status)).toEqual([
+      202, 202, 202, 202, 202, 202, 202, 202, 202, 202, 429,
+    ]);
+    expect(await responses[10]!.json<any>()).toMatchObject({ code: 'RATE_LIMITED' });
+  });
+
+  it('enforces five registration resends for one pending browser', async () => {
+    const pending = registrationCookiesFrom(await register('host@example.com'));
+    const responses = [];
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      responses.push(await post('/api/host/register/resend', {}, {
+        cookie: pending.cookie,
+        'CF-Connecting-IP': '203.0.113.12',
+      }));
+    }
+
+    expect(responses.map(({ status }) => status)).toEqual([202, 202, 202, 202, 202, 429]);
+    expect(await responses[5]!.json<any>()).toMatchObject({ code: 'RATE_LIMITED' });
   });
 
   it('refuses a short password with a field error', async () => {
@@ -143,11 +468,15 @@ describe('registration', () => {
   it('binds the event named by a live management session and ignores one that is not', async () => {
     const access = await eventAccess();
 
-    const bound = await register('host@example.com', { bindEventId: access.event.id }, { cookie: access.manager.cookie });
+    const bound = await registerAndComplete(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
     expect((await bound.json<any>()).data.boundEvent).toBe(true);
 
     const other = await eventAccess('Someone Else');
-    const unbound = await register('thief@example.com', { bindEventId: other.event.id });
+    const unbound = await registerAndComplete('thief@example.com', { bindEventId: other.event.id });
     expect((await unbound.json<any>()).data.boundEvent).toBe(false);
 
     const hosts = await env.DB.prepare('SELECT event_id FROM event_hosts').all<{ event_id: string }>();
@@ -176,7 +505,7 @@ describe('registration', () => {
 
 describe('sign in', () => {
   it('accepts the right password and rejects a wrong one identically to an unknown address', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
 
     const good = await post('/api/host/login', { email: 'host@example.com', password: PASSWORD });
     expect(good.status).toBe(200);
@@ -192,7 +521,7 @@ describe('sign in', () => {
   });
 
   it('refuses a cross-origin sign-in', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
 
     const response = await createApp().request('/api/host/login', {
       method: 'POST',
@@ -204,7 +533,7 @@ describe('sign in', () => {
   });
 
   it('rejects a host session whose account authentication version changed', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await registeredHost('host@example.com');
     await env.DB.prepare('UPDATE host_accounts SET auth_version = auth_version + 1').run();
 
     const response = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
@@ -214,7 +543,7 @@ describe('sign in', () => {
   });
 
   it('refuses a host-session insert with a stale account authentication version', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
     const account = await env.DB.prepare('SELECT id, auth_version FROM host_accounts').first<{
       id: string;
       auth_version: number;
@@ -234,7 +563,7 @@ describe('sign in', () => {
   });
 
   it('refuses a host-session insert for a disabled account', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
     const account = await env.DB.prepare('SELECT id, auth_version FROM host_accounts').first<{
       id: string;
       auth_version: number;
@@ -258,7 +587,7 @@ describe('sign in', () => {
 
 describe('email verification', () => {
   it('verifies with the issued code and refuses to reuse it', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await unverifiedHost('host@example.com');
     const code = await forceCode('host@example.com', 'verify');
 
     const verified = await post('/api/host/verify', { code }, hostHeaders(host));
@@ -269,7 +598,7 @@ describe('email verification', () => {
   });
 
   it('locks the code after five wrong guesses', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await unverifiedHost('host@example.com');
     const code = await forceCode('host@example.com', 'verify');
     const wrong = code === '000000' ? '111111' : '000000';
 
@@ -285,7 +614,7 @@ describe('email verification', () => {
   });
 
   it('requires the host CSRF header, not the event one', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await unverifiedHost('host@example.com');
     const code = await forceCode('host@example.com', 'verify');
 
     const response = await post('/api/host/verify', { code }, {
@@ -299,19 +628,97 @@ describe('email verification', () => {
 
 describe('password reset', () => {
   it('answers a forgotten-password request the same for a known and an unknown address', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
 
     const known = await post('/api/host/password/forgot', { email: 'host@example.com' });
+    const trackedForKnown = trackedWaitUntil.length;
     const unknown = await post('/api/host/password/forgot', { email: 'nobody@example.com' });
 
     expect(known.status).toBe(202);
     expect(unknown.status).toBe(202);
-    expect(await known.json<any>()).toMatchObject({ data: { sent: true } });
-    expect(await unknown.json<any>()).toMatchObject({ data: { sent: true } });
+    expect((await known.json<any>()).data).toEqual({ sent: true });
+    expect((await unknown.json<any>()).data).toEqual({ sent: true });
+    expect(known.headers.getSetCookie()).toEqual([]);
+    expect(unknown.headers.getSetCookie()).toEqual([]);
+    expect(trackedForKnown).toBe(1);
+    expect(trackedWaitUntil).toHaveLength(1);
+  });
+
+  it('rate-limits known and unknown forgotten-password addresses identically', async () => {
+    await registerAndComplete('host@example.com');
+    const responses = [];
+    for (const email of [
+      'host@example.com', 'HOST@example.com', ' host@example.com ', 'host@example.com',
+      'nobody@example.com', 'NOBODY@example.com', ' nobody@example.com ', 'nobody@example.com',
+    ]) {
+      responses.push(await post('/api/host/password/forgot', { email }, {
+        'CF-Connecting-IP': '203.0.113.30',
+      }));
+    }
+    const known = responses[3]!;
+    const unknown = responses[7]!;
+    const knownBody = await known.json<any>();
+    const unknownBody = await unknown.json<any>();
+
+    expect(known.status).toBe(429);
+    expect(unknown.status).toBe(429);
+    expect({ code: knownBody.code, message: knownBody.message })
+      .toEqual({ code: unknownBody.code, message: unknownBody.message });
+    expect(knownBody.code).toBe('RATE_LIMITED');
+  });
+
+  it('answers missing reset challenges identically for known and unknown addresses', async () => {
+    await registerAndComplete('host@example.com');
+
+    const known = await post('/api/host/password/reset', {
+      email: 'host@example.com', code: '424242', password: 'a-brand-new-long-password',
+    });
+    const unknown = await post('/api/host/password/reset', {
+      email: 'nobody@example.com', code: '424242', password: 'a-brand-new-long-password',
+    });
+    const knownBody = await known.json<any>();
+    const unknownBody = await unknown.json<any>();
+
+    expect(known.status).toBe(400);
+    expect(unknown.status).toBe(400);
+    expect(knownBody.code).toBe('LOGIN_CODE_INVALID');
+    expect({ code: knownBody.code, message: knownBody.message })
+      .toEqual({ code: unknownBody.code, message: unknownBody.message });
+  });
+
+  it('normalizes expired and consumed reset challenges to the same invalid-code response', async () => {
+    await registerAndComplete('host@example.com');
+    await post('/api/host/password/forgot', { email: 'host@example.com' });
+    await Promise.all(trackedWaitUntil.splice(0));
+    await env.DB.prepare(`
+      UPDATE host_login_challenges SET expires_at = ?
+      WHERE purpose = 'reset' AND consumed_at IS NULL
+    `).bind('2000-01-01T00:00:00.000Z').run();
+    const expired = await post('/api/host/password/reset', {
+      email: 'host@example.com', code: '424242', password: 'a-brand-new-long-password',
+    });
+
+    await post('/api/host/password/forgot', { email: 'host@example.com' });
+    await Promise.all(trackedWaitUntil.splice(0));
+    await env.DB.prepare(`
+      UPDATE host_login_challenges SET consumed_at = ?
+      WHERE purpose = 'reset' AND consumed_at IS NULL
+    `).bind(new Date().toISOString()).run();
+    const consumed = await post('/api/host/password/reset', {
+      email: 'host@example.com', code: '424242', password: 'a-brand-new-long-password',
+    });
+    const expiredBody = await expired.json<any>();
+    const consumedBody = await consumed.json<any>();
+
+    expect(expired.status).toBe(400);
+    expect(consumed.status).toBe(400);
+    expect({ code: expiredBody.code, message: expiredBody.message })
+      .toEqual({ code: consumedBody.code, message: consumedBody.message });
+    expect(expiredBody.code).toBe('LOGIN_CODE_INVALID');
   });
 
   it('changes the password, revokes open sessions, and verifies the address', async () => {
-    const first = hostCookiesFrom(await register('host@example.com'));
+    const first = await registeredHost('host@example.com');
     await post('/api/host/password/forgot', { email: 'host@example.com' });
     const code = await forceCode('host@example.com', 'reset');
 
@@ -336,7 +743,7 @@ describe('password reset', () => {
   });
 
   it('prevents a login verified before reset from creating a host session afterward', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
     const account = await env.DB.prepare('SELECT id, auth_version FROM host_accounts').first<{
       id: string;
       auth_version: number;
@@ -363,7 +770,7 @@ describe('password reset', () => {
   });
 
   it('does not let a stale lower-cost login rehash overwrite a concurrent reset', async () => {
-    await register('host@example.com');
+    await registerAndComplete('host@example.com');
     await env.DB.prepare('UPDATE host_accounts SET password_hash = ? WHERE email = ?')
       .bind(await lowerCostHash(PASSWORD), 'host@example.com').run();
     const before = await env.DB.prepare('SELECT password_hash FROM host_accounts WHERE email = ?')
@@ -402,8 +809,10 @@ describe('password reset', () => {
 describe('managing an event through an account', () => {
   it('reaches every host surface without the management link', async () => {
     const access = await eventAccess();
-    const host = hostCookiesFrom(
-      await register('host@example.com', { bindEventId: access.event.id }, { cookie: access.manager.cookie }),
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
     );
 
     const settings = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
@@ -430,7 +839,7 @@ describe('managing an event through an account', () => {
 
   it('refuses an account that does not host the event', async () => {
     const access = await eventAccess();
-    const stranger = hostCookiesFrom(await register('stranger@example.com'));
+    const stranger = await registeredHost('stranger@example.com');
 
     const response = await createApp().request(`/api/manage/events/${access.event.id}`, {
       headers: { cookie: stranger.cookie },
@@ -442,8 +851,10 @@ describe('managing an event through an account', () => {
 
   it('keeps both credentials usable at once', async () => {
     const access = await eventAccess();
-    const host = hostCookiesFrom(
-      await register('host@example.com', { bindEventId: access.event.id }, { cookie: access.manager.cookie }),
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
     );
 
     // Registering must not have disturbed the management link session sharing the
@@ -461,8 +872,10 @@ describe('managing an event through an account', () => {
 
   it('falls back to the management link when the account session has lapsed', async () => {
     const access = await eventAccess();
-    const host = hostCookiesFrom(
-      await register('host@example.com', { bindEventId: access.event.id }, { cookie: access.manager.cookie }),
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
     );
     await env.DB.prepare('UPDATE host_sessions SET revoked_at = ?')
       .bind(new Date().toISOString()).run();
@@ -482,7 +895,7 @@ describe('managing an event through an account', () => {
   });
 
   it('adopts an event held by link into a signed-in account', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await registeredHost('host@example.com');
     const access = await eventAccess('Later Wedding');
 
     const adopted = await post(`/api/host/events/${access.event.id}/adopt`, {},
@@ -494,18 +907,42 @@ describe('managing an event through an account', () => {
   });
 
   it('refuses to adopt an event the account holds no link for', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await registeredHost('host@example.com');
     const access = await eventAccess('Not Yours');
 
     const response = await post(`/api/host/events/${access.event.id}/adopt`, {}, hostHeaders(host));
 
     expect(response.status).toBe(403);
   });
+
+  it('refuses a second durable owner without scheduling lifecycle mail', async () => {
+    const access = await eventAccess('One Owner');
+    await registerAndComplete(
+      'first@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    const second = await registeredHost('second@example.com');
+
+    const response = await post(
+      `/api/host/events/${access.event.id}/adopt`,
+      {},
+      hostHeaders(second, access.manager.cookie),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_hosts WHERE event_id = ? AND role = 'owner'
+    `).bind(access.event.id).first('count')).toBe(1);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM host_notification_outbox WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(3);
+  });
 });
 
 describe('sign out', () => {
   it('revokes the session and clears the cookie', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await registeredHost('host@example.com');
 
     const response = await post('/api/host/logout', {}, hostHeaders(host));
     expect(response.status).toBe(200);
@@ -517,7 +954,7 @@ describe('sign out', () => {
 
 describe('unsubscribing', () => {
   it('turns notifications off from a signed link and ignores a forged one', async () => {
-    const host = hostCookiesFrom(await register('host@example.com'));
+    const host = await registeredHost('host@example.com');
     const account = await env.DB.prepare('SELECT id FROM host_accounts LIMIT 1').first<{ id: string }>();
     const digest = await digestSecret(`unsubscribe:${account!.id}`, testEnv.LOGIN_HMAC_KEY);
 
@@ -550,7 +987,11 @@ describe('guest sessions', () => {
 // still finds the event cookies now that a response may carry two pairs.
 it('keeps the event and host cookie pairs distinct', async () => {
   const access = await eventAccess();
-  const response = await register('host@example.com', { bindEventId: access.event.id }, { cookie: access.manager.cookie });
+  const response = await registerAndComplete(
+    'host@example.com',
+    { bindEventId: access.event.id },
+    { cookie: access.manager.cookie },
+  );
 
   const cookies = response.headers.getSetCookie().join(', ');
   expect(cookies).toContain('candidary_host=');

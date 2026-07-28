@@ -65,6 +65,7 @@ const LOAD_FAILURE_KIND = {
   LOGIN_CODE_INVALID: 'retry',
   LOGIN_CODE_EXPIRED: 'retry',
   LOGIN_RATE_LIMITED: 'retry',
+  RATE_LIMITED: 'retry',
   LOGIN_EMAIL_UNDELIVERABLE: 'retry',
   // Signing in again cannot lift this one. The management link is the only route
   // left, which is what the lifecycle hint already says.

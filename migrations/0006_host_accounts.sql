@@ -50,6 +50,42 @@ CREATE TABLE host_login_challenges (
 CREATE INDEX host_login_challenges_account
   ON host_login_challenges(account_id, purpose, consumed_at, created_at);
 
+CREATE UNIQUE INDEX host_login_challenges_one_live
+  ON host_login_challenges(account_id, purpose) WHERE consumed_at IS NULL;
+
+-- Registration is an untrusted proposal until both the opaque browser secret and
+-- the mailbox code are proved. In particular, this table has no account foreign
+-- key: no durable identity exists yet.
+CREATE TABLE host_registration_challenges (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL CHECK (length(email) BETWEEN 3 AND 254),
+  password_hash TEXT NOT NULL,
+  display_name TEXT CHECK (display_name IS NULL OR length(display_name) BETWEEN 1 AND 80),
+  browser_secret_digest TEXT NOT NULL,
+  code_digest TEXT NOT NULL,
+  bind_event_id TEXT REFERENCES events(id) ON DELETE SET NULL,
+  creator_session_id TEXT REFERENCES event_sessions(id) ON DELETE SET NULL,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX host_registration_one_live_address
+  ON host_registration_challenges(email) WHERE consumed_at IS NULL;
+
+CREATE INDEX host_registration_expiry
+  ON host_registration_challenges(expires_at, consumed_at);
+
+CREATE TABLE host_auth_rate_limits (
+  scope_digest TEXT NOT NULL,
+  action TEXT NOT NULL,
+  window_started_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL CHECK (attempts >= 1),
+  PRIMARY KEY (scope_digest, action, window_started_at)
+);
+
 -- Ownership lives here rather than on `events`, so co-hosts and a multi-event
 -- list are a query rather than a second schema change.
 CREATE TABLE event_hosts (
@@ -61,6 +97,9 @@ CREATE TABLE event_hosts (
 );
 
 CREATE INDEX event_hosts_account ON event_hosts(account_id, created_at);
+
+CREATE UNIQUE INDEX event_hosts_one_owner
+  ON event_hosts(event_id) WHERE role = 'owner';
 
 -- The send ledger. The daily cron re-examines every live event on every run, so
 -- without a record of what already went out it would resend the same reminder
@@ -76,6 +115,33 @@ CREATE TABLE host_notifications (
 
 CREATE UNIQUE INDEX host_notifications_once
   ON host_notifications(account_id, event_id, kind);
+
+-- Durable lifecycle work. Task 2 only schedules these rows; dispatch and lease
+-- transitions are added in the notification task.
+CREATE TABLE host_notification_outbox (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES host_accounts(id) ON DELETE CASCADE,
+  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('getting_started', 'event_reminder', 'retention_warning')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+  available_at TEXT NOT NULL,
+  retry_at TEXT NOT NULL,
+  discard_after TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  claimed_at TEXT,
+  claim_token TEXT,
+  lease_expires_at TEXT,
+  sent_at TEXT,
+  last_error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX host_notification_outbox_once
+  ON host_notification_outbox(account_id, event_id, kind);
+
+CREATE INDEX host_notification_outbox_due
+  ON host_notification_outbox(status, retry_at, id);
 
 CREATE TABLE host_sessions (
   id TEXT PRIMARY KEY,

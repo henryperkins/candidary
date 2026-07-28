@@ -76,4 +76,26 @@ it('applies 0006 without rebuilding populated event sessions', async () => {
   expect(await env.DB.prepare(
     "SELECT legacy_owner_claim_open FROM events WHERE id = 'event-2'",
   ).first('legacy_owner_claim_open')).toBe(0);
+  const schema = await env.DB.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE name IN (
+      'host_registration_challenges',
+      'host_auth_rate_limits',
+      'host_notification_outbox',
+      'host_registration_one_live_address',
+      'host_login_challenges_one_live',
+      'event_hosts_one_owner',
+      'host_notification_outbox_once'
+    )
+    ORDER BY name
+  `).all<{ name: string }>();
+  expect(schema.results.map(({ name }) => name)).toEqual([
+    'event_hosts_one_owner',
+    'host_auth_rate_limits',
+    'host_login_challenges_one_live',
+    'host_notification_outbox',
+    'host_notification_outbox_once',
+    'host_registration_challenges',
+    'host_registration_one_live_address',
+  ]);
 });

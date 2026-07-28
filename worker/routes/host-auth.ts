@@ -9,7 +9,10 @@ import { HostSessionsRepository } from '../db/sessions';
 import type { AppBindings, AuthenticatedAccount } from '../env';
 import {
   clearSessionCookies,
+  clearRegistrationCookie,
+  getRegistrationCookie,
   getSessionCookie,
+  setRegistrationCookie,
   setSessionCookies,
 } from '../http/cookies';
 import { assertCsrf, assertRequestOrigin } from '../http/csrf';
@@ -84,6 +87,10 @@ async function startSession(context: Context<AppBindings>, account: Authenticate
 
 export const hostAuthRoutes = new Hono<AppBindings>();
 
+function requestIp(context: Context<AppBindings>): string {
+  return context.req.header('CF-Connecting-IP')?.trim() || 'unknown';
+}
+
 // Registration answers the same way whether or not the address was free. The only
 // place the difference shows up is the inbox that already owns the address.
 hostAuthRoutes.post('/host/register', async (context) => {
@@ -95,6 +102,7 @@ hostAuthRoutes.post('/host/register', async (context) => {
   // before the account exists — possession of the link is the proof of ownership,
   // and it has to be spent here rather than trusted from a request field.
   let bindEventId: string | null = null;
+  let creatorSessionId: string | null = null;
   if (body.bindEventId) {
     const principal = await new AuthService(context.env).resolve(getSessionCookie(context, 'event'))
       .catch(() => null);
@@ -102,27 +110,66 @@ hostAuthRoutes.post('/host/register', async (context) => {
       && principal.session.role === 'manager'
       && principal.event.id === body.bindEventId) {
       bindEventId = body.bindEventId;
+      creatorSessionId = principal.session.id;
     }
   }
 
-  const account = await new HostAuthService(context.env).register({
+  const started = await new HostAuthService(context.env).startRegistration({
     email: body.email,
     password: body.password,
     displayName: body.displayName ?? null,
     bindEventId,
+  }, {
+    ipAddress: requestIp(context),
+    creatorSessionId,
   });
 
-  if (account) await startSession(context, account);
+  setRegistrationCookie(context, started.registrationToken);
   return context.json({
-    data: { registered: true, boundEvent: Boolean(account && bindEventId) },
+    data: { registrationPending: true },
     requestId: context.get('requestId'),
   }, 202);
+});
+
+hostAuthRoutes.post('/host/register/resend', async (context) => {
+  assertRequestOrigin(context);
+  await new HostAuthService(context.env).resendRegistration(
+    getRegistrationCookie(context),
+    { ipAddress: requestIp(context) },
+  );
+  return context.json({
+    data: { registrationPending: true },
+    requestId: context.get('requestId'),
+  }, 202);
+});
+
+hostAuthRoutes.post('/host/register/complete', async (context) => {
+  assertRequestOrigin(context);
+  const body = await parse(context, codeOnlySchema);
+  const creator = await new AuthService(context.env)
+    .resolve(getSessionCookie(context, 'event'))
+    .catch(() => null);
+  const completed = await new HostAuthService(context.env).completeRegistration(
+    getRegistrationCookie(context),
+    body.code,
+    creator?.kind === 'event' && creator.session.role === 'manager'
+      ? creator.session.id
+      : null,
+  );
+  await startSession(context, completed.account);
+  clearRegistrationCookie(context);
+  return context.json({
+    data: { registered: true, boundEvent: completed.boundEvent },
+    requestId: context.get('requestId'),
+  });
 });
 
 hostAuthRoutes.post('/host/login', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, loginSchema);
-  const account = await new HostAuthService(context.env).authenticate(body.email, body.password);
+  const service = new HostAuthService(context.env);
+  await service.reserveLogin(body.email, requestIp(context));
+  const account = await service.authenticate(body.email, body.password);
   await new AccountsRepository(context.env.DB).touch(account.id, new Date().toISOString());
   await startSession(context, account);
   return context.json({
@@ -194,6 +241,8 @@ hostAuthRoutes.post('/host/verify/resend', async (context) => {
   if (principal.account.emailVerifiedAt) {
     return context.json({ data: { sent: false, emailVerified: true }, requestId: context.get('requestId') });
   }
+  await new HostAuthService(context.env)
+    .reserveVerificationResend(principal.account.id, requestIp(context));
   const events = await new AccountsRepository(context.env.DB).listEventsForAccount(principal.account.id);
   const issued = await new HostAuthService(context.env)
     .issueChallenge(principal.account, 'verify', events[0]?.id ?? null);
@@ -208,14 +257,13 @@ hostAuthRoutes.post('/host/verify/resend', async (context) => {
 hostAuthRoutes.post('/host/password/forgot', async (context) => {
   assertRequestOrigin(context);
   const body = await parse(context, forgotSchema);
+  const service = new HostAuthService(context.env);
   const account = await new AccountsRepository(context.env.DB).getByEmail(body.email);
+  await service.reservePasswordReset(body.email, requestIp(context));
   if (account && !account.disabledAt) {
-    await new HostAuthService(context.env).issueChallenge(account, 'reset', null)
-      .catch((error) => {
-        // A throttled request must still answer like every other one.
-        if (error instanceof ApiError && error.code === 'LOGIN_RATE_LIMITED') return;
-        throw error;
-      });
+    context.executionCtx.waitUntil(
+      service.issueChallenge(account, 'reset', null).then(() => undefined).catch(() => undefined),
+    );
   }
   return context.json({ data: { sent: true }, requestId: context.get('requestId') }, 202);
 });
@@ -233,11 +281,14 @@ hostAuthRoutes.post('/host/password/reset', async (context) => {
   }
 
   const service = new HostAuthService(context.env);
-  await service.consumeCode(account, 'reset', body.code);
-  const resetAccount = await accounts.setPasswordHashAndAdvanceAuthVersion(
+  await service.consumeCode(account, 'reset', body.code).catch(() => {
+    throw new ApiError('LOGIN_CODE_INVALID', 'That code is not correct.', 400);
+  });
+  const resetAccount = await accounts.resetPasswordAndAdvanceVersion(
     account.id,
     await hashPassword(body.password),
     account.authVersion,
+    new Date().toISOString(),
   );
   if (!resetAccount) {
     throw new ApiError('LOGIN_CODE_INVALID', 'That code is not correct.', 400);
@@ -245,9 +296,6 @@ hostAuthRoutes.post('/host/password/reset', async (context) => {
   // Everything that was signed in under the old password goes, including whatever
   // session an attacker may have been holding. The new session below is minted
   // after the revocation with the advanced version, so it survives it.
-  await new HostSessionsRepository(context.env.DB).revokeForAccount(account.id, new Date().toISOString());
-  // A reset proves the same thing verification does: this person reads that inbox.
-  await accounts.markEmailVerified(account.id, new Date().toISOString());
   await service.sendPasswordChanged(resetAccount);
 
   await startSession(context, resetAccount);
@@ -275,7 +323,17 @@ hostAuthRoutes.post('/host/events/:eventId/adopt', async (context) => {
   if (link?.kind !== 'event' || link.session.role !== 'manager' || link.event.id !== eventId) {
     throw new ApiError('ROLE_FORBIDDEN', 'Open this event’s management link first.', 403);
   }
-  await new AccountsRepository(context.env.DB)
-    .addEventHost(eventId, principal.account.id, 'owner', new Date().toISOString());
-  return context.json({ data: { adopted: true }, requestId: context.get('requestId') });
+  const result = await new AccountsRepository(context.env.DB).claimInitialOwnerAndSchedule(
+    eventId,
+    principal.account.id,
+    link.session.id,
+    new Date().toISOString(),
+  );
+  if (result === 'owned_by_other') {
+    throw new ApiError('ROLE_FORBIDDEN', 'This event already has an owner.', 409);
+  }
+  return context.json({
+    data: { adopted: true, existing: result === 'existing' },
+    requestId: context.get('requestId'),
+  });
 });

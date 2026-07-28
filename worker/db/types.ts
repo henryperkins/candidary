@@ -94,6 +94,22 @@ export interface LoginChallengeRecord {
   createdAt: string;
 }
 
+export interface PendingRegistrationRecord {
+  id: string;
+  email: string;
+  passwordHash: string;
+  displayName: string | null;
+  browserSecretDigest: string;
+  codeDigest: string;
+  bindEventId: string | null;
+  creatorSessionId: string | null;
+  attempts: number;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface EventHostRecord {
   eventId: string;
   accountId: string;

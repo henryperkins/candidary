@@ -21,4 +21,13 @@ export interface ApiSuccess<T> {
   requestId: string;
 }
 
+export interface RegistrationPendingResponse {
+  registrationPending: true;
+}
+
+export interface RegistrationCompleteResponse {
+  registered: true;
+  boundEvent: boolean;
+}
+
 export type ApiResult<T> = ApiSuccess<T> | ApiErrorBody;

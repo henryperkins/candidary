@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { AuthService } from '../../worker/auth/service';
 import { MediaRepository } from '../../worker/db/media';
-import { cleanupExpiredReservations, deleteEventData } from '../../worker/workflows/cleanup';
+import {
+  cleanupAuthScratch,
+  cleanupExpiredReservations,
+  deleteEventData,
+} from '../../worker/workflows/cleanup';
 import { eventAccess, png, resetDatabase, testEnv } from './helpers';
 
 describe('lifecycle cleanup', () => {
@@ -34,5 +38,76 @@ describe('lifecycle cleanup', () => {
     expect(event.deleted_at).toBeTruthy();
     const tokens = await testEnv.DB.prepare('SELECT count(*) AS count FROM event_access_tokens WHERE event_id = ? AND revoked_at IS NULL').bind(access.event.id).first<any>();
     expect(tokens.count).toBe(0);
+  });
+
+  it('deletes bounded expired auth scratch while retaining live boundary rows', async () => {
+    const accountId = crypto.randomUUID();
+    await testEnv.DB.prepare(`
+      INSERT INTO host_accounts (id, email, password_hash, created_at)
+      VALUES (?, 'host@example.com', 'hash', '2026-07-21T11:00:00.000Z')
+    `).bind(accountId).run();
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        INSERT INTO host_registration_challenges (
+          id, email, password_hash, browser_secret_digest, code_digest,
+          expires_at, consumed_at, created_at, updated_at
+        ) VALUES (?, ?, 'hash', 'browser', 'code', ?, ?, ?, ?)
+      `).bind(
+        'pending-consumed',
+        'consumed@example.com',
+        '2026-07-21T13:00:00.000Z',
+        '2026-07-21T12:01:00.000Z',
+        '2026-07-21T12:00:00.000Z',
+        '2026-07-21T12:01:00.000Z',
+      ),
+      testEnv.DB.prepare(`
+        INSERT INTO host_registration_challenges (
+          id, email, password_hash, browser_secret_digest, code_digest,
+          expires_at, created_at, updated_at
+        ) VALUES (?, ?, 'hash', 'browser', 'code', ?, ?, ?)
+      `).bind(
+        'pending-boundary',
+        'boundary@example.com',
+        '2026-07-21T12:15:00.000Z',
+        '2026-07-21T12:00:00.000Z',
+        '2026-07-21T12:00:00.000Z',
+      ),
+      testEnv.DB.prepare(`
+        INSERT INTO host_login_challenges (
+          id, account_id, purpose, secret_digest, expires_at, created_at
+        ) VALUES ('login-expired', ?, 'verify', 'digest', ?, ?)
+      `).bind(accountId, '2026-07-21T12:14:59.999Z', '2026-07-21T12:00:00.000Z'),
+      testEnv.DB.prepare(`
+        INSERT INTO host_login_challenges (
+          id, account_id, purpose, secret_digest, expires_at, created_at
+        ) VALUES ('login-boundary', ?, 'reset', 'digest', ?, ?)
+      `).bind(accountId, '2026-07-21T12:15:00.000Z', '2026-07-21T12:00:00.000Z'),
+      testEnv.DB.prepare(`
+        INSERT INTO host_auth_rate_limits (
+          scope_digest, action, window_started_at, attempts
+        ) VALUES ('old', 'login', '2026-07-21T11:59:59.999Z', 1)
+      `),
+      testEnv.DB.prepare(`
+        INSERT INTO host_auth_rate_limits (
+          scope_digest, action, window_started_at, attempts
+        ) VALUES ('boundary', 'login', '2026-07-21T12:00:00.000Z', 1)
+      `),
+    ]);
+
+    const result = await cleanupAuthScratch(
+      testEnv,
+      new Date('2026-07-21T12:15:00.000Z'),
+    );
+
+    expect(result).toEqual({ registrations: 1, challenges: 1, rateLimits: 1 });
+    expect(await testEnv.DB.prepare(`
+      SELECT id FROM host_registration_challenges
+    `).all()).toMatchObject({ results: [{ id: 'pending-boundary' }] });
+    expect(await testEnv.DB.prepare(`
+      SELECT id FROM host_login_challenges
+    `).all()).toMatchObject({ results: [{ id: 'login-boundary' }] });
+    expect(await testEnv.DB.prepare(`
+      SELECT scope_digest FROM host_auth_rate_limits
+    `).all()).toMatchObject({ results: [{ scope_digest: 'boundary' }] });
   });
 });

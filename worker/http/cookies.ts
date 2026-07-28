@@ -9,6 +9,7 @@ import type { AppBindings } from '../env';
 // them — must not be silently signed out of their account, and the reverse flow
 // has to keep working for a planner who has no account at all.
 export type CookieScope = 'event' | 'host';
+const REGISTRATION_COOKIE = 'candidary_registration';
 
 const COOKIE_NAMES = {
   event: { session: 'candidary_session', csrf: 'candidary_csrf' },
@@ -57,4 +58,30 @@ export function getCsrfCookie(
   scope: CookieScope = 'event',
 ): string | undefined {
   return getCookie(context, COOKIE_NAMES[scope].csrf);
+}
+
+export function setRegistrationCookie(
+  context: Context<AppBindings>,
+  registration: SecretToken,
+): void {
+  setCookie(context, REGISTRATION_COOKIE, registration.token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: 15 * 60,
+  });
+}
+
+export function getRegistrationCookie(context: Context<AppBindings>): string | undefined {
+  return getCookie(context, REGISTRATION_COOKIE);
+}
+
+export function clearRegistrationCookie(context: Context<AppBindings>): void {
+  deleteCookie(context, REGISTRATION_COOKIE, {
+    path: '/',
+    secure: true,
+    httpOnly: true,
+    sameSite: 'Lax',
+  });
 }

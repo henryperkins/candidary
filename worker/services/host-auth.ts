@@ -1,19 +1,16 @@
 import type { ChallengePurpose } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { AccountsRepository, normalizeEmail } from '../db/accounts';
-import type { HostAccountRecord } from '../db/types';
+import { AuthRateLimitsRepository, type AuthRateLimitAction, type AuthRateLimitScopeKind } from '../db/auth-rate-limits';
+import type { HostAccountRecord, PendingRegistrationRecord } from '../db/types';
 import type { AppEnv } from '../env';
-import { constantTimeEqual, digestSecret } from '../security/crypto';
+import { constantTimeEqual, createSecretToken, digestSecret } from '../security/crypto';
 import { hashPassword, verifyPassword } from '../security/passwords';
 import { EmailService, layout } from './email';
 import { unsubscribeUrl } from './notifications';
 
 const CODE_TTL_SECONDS = 15 * 60;
 const MAX_CODE_ATTEMPTS = 5;
-// Five requests per quarter hour is far above any honest use — a host asks once,
-// maybe twice — and far below what makes an inbox flood worth attempting.
-const MAX_CODES_PER_WINDOW = 5;
-const CODE_WINDOW_SECONDS = 15 * 60;
 
 // A password verification that always runs, even for an address with no account.
 // Returning early on a miss would make sign-in measurably faster for unregistered
@@ -41,6 +38,15 @@ export interface IssuedChallenge {
   delivered: boolean;
 }
 
+export interface RegistrationRequestScope {
+  ipAddress: string;
+  creatorSessionId: string | null;
+}
+
+export interface StartedRegistration {
+  registrationToken: ReturnType<typeof createSecretToken>;
+}
+
 export class HostAuthService {
   private readonly accounts: AccountsRepository;
   private readonly email: EmailService;
@@ -50,33 +56,183 @@ export class HostAuthService {
     this.email = new EmailService(env);
   }
 
-  async register(input: {
+  private async reserveScopes(input: {
+    action: AuthRateLimitAction;
+    ipAddress: string;
+    ipLimit: number;
+    scopeKind: AuthRateLimitScopeKind;
+    scopeValue: string;
+    scopeLimit: number;
+    now?: Date;
+  }): Promise<void> {
+    const rates = new AuthRateLimitsRepository(this.env.DB, this.env.LOGIN_HMAC_KEY);
+    const ipAllowed = await rates.reserve({
+      action: input.action,
+      scopeKind: 'ip',
+      normalizedValue: input.ipAddress,
+      limit: input.ipLimit,
+      now: input.now,
+    });
+    const scopeAllowed = await rates.reserve({
+      action: input.action,
+      scopeKind: input.scopeKind,
+      normalizedValue: input.scopeValue,
+      limit: input.scopeLimit,
+      now: input.now,
+    });
+    if (!ipAllowed || !scopeAllowed) {
+      throw new ApiError('RATE_LIMITED', 'Too many requests. Try again in a few minutes.', 429);
+    }
+  }
+
+  async reserveLogin(email: string, ipAddress: string, now = new Date()): Promise<void> {
+    await this.reserveScopes({
+      action: 'login',
+      ipAddress,
+      ipLimit: 20,
+      scopeKind: 'email',
+      scopeValue: normalizeEmail(email),
+      scopeLimit: 10,
+      now,
+    });
+  }
+
+  async reserveVerificationResend(
+    accountId: string,
+    ipAddress: string,
+    now = new Date(),
+  ): Promise<void> {
+    await this.reserveScopes({
+      action: 'verification_resend',
+      ipAddress,
+      ipLimit: 10,
+      scopeKind: 'account',
+      scopeValue: accountId,
+      scopeLimit: 5,
+      now,
+    });
+  }
+
+  async reservePasswordReset(
+    email: string,
+    ipAddress: string,
+    now = new Date(),
+  ): Promise<void> {
+    await this.reserveScopes({
+      action: 'password_reset_request',
+      ipAddress,
+      ipLimit: 10,
+      scopeKind: 'email',
+      scopeValue: normalizeEmail(email),
+      scopeLimit: 3,
+      now,
+    });
+  }
+
+  async startRegistration(input: {
     email: string;
     password: string;
     displayName: string | null;
     bindEventId: string | null;
-  }, now = new Date()): Promise<HostAccountRecord | null> {
+  }, requestScope: RegistrationRequestScope, now = new Date()): Promise<StartedRegistration> {
+    const email = normalizeEmail(input.email);
+    await this.reserveScopes({
+      action: 'registration',
+      ipAddress: requestScope.ipAddress,
+      ipLimit: 10,
+      scopeKind: 'email',
+      scopeValue: email,
+      scopeLimit: 3,
+      now,
+    });
     const passwordHash = await hashPassword(input.password);
-    const account = await this.accounts.create({
-      email: input.email,
+    const registrationToken = createSecretToken();
+    const code = sixDigitCode();
+    const timestamp = now.toISOString();
+    await this.accounts.replacePendingRegistration({
+      id: registrationToken.id,
+      email,
       passwordHash,
       displayName: input.displayName,
-      createdAt: now.toISOString(),
+      browserSecretDigest: await digestSecret(registrationToken.secret, this.env.LOGIN_HMAC_KEY),
+      codeDigest: await digestSecret(code, this.env.LOGIN_HMAC_KEY),
+      bindEventId: input.bindEventId,
+      creatorSessionId: input.bindEventId ? requestScope.creatorSessionId : null,
+      attempts: 0,
+      expiresAt: new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString(),
+      consumedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
     });
+    await this.sendRegistrationCode(email, code);
+    return { registrationToken };
+  }
 
-    if (!account) {
-      // The address is taken. The caller answers exactly as it would for a new
-      // account, so the only signal goes to the inbox that actually owns it.
-      const existing = await this.accounts.getByEmail(input.email);
-      if (existing) await this.sendAlreadyRegistered(existing);
-      return null;
+  async completeRegistration(
+    rawToken: string | undefined,
+    code: string,
+    creatorSessionId: string | null,
+    now = new Date(),
+  ): Promise<{ account: HostAccountRecord; boundEvent: boolean }> {
+    const parsed = this.parseRegistrationToken(rawToken);
+    const pending = await this.accounts.getPendingRegistration(parsed.id);
+    if (!pending || pending.consumedAt || Date.parse(pending.expiresAt) <= now.getTime()) {
+      throw this.invalidRegistrationCode();
     }
+    const browserDigest = await digestSecret(parsed.secret, this.env.LOGIN_HMAC_KEY);
+    if (!constantTimeEqual(browserDigest, pending.browserSecretDigest)) {
+      throw this.invalidRegistrationCode();
+    }
+    if (!await this.accounts.spendRegistrationAttempt(
+      pending.id,
+      MAX_CODE_ATTEMPTS,
+      now.toISOString(),
+    )) throw this.invalidRegistrationCode();
+    const supplied = await digestSecret(code, this.env.LOGIN_HMAC_KEY);
+    if (!constantTimeEqual(supplied, pending.codeDigest)) throw this.invalidRegistrationCode();
 
-    if (input.bindEventId) {
-      await this.accounts.addEventHost(input.bindEventId, account.id, 'owner', now.toISOString());
+    const authorizedPending: PendingRegistrationRecord = pending.creatorSessionId
+      && pending.creatorSessionId === creatorSessionId
+      ? pending
+      : { ...pending, bindEventId: null, creatorSessionId: null };
+    const activated = await this.accounts.activateRegistration(authorizedPending, now.toISOString());
+    if (!activated) throw this.invalidRegistrationCode();
+    return activated;
+  }
+
+  async resendRegistration(
+    rawToken: string | undefined,
+    requestScope: Pick<RegistrationRequestScope, 'ipAddress'>,
+    now = new Date(),
+  ): Promise<void> {
+    const parsed = this.parseRegistrationToken(rawToken);
+    const pending = await this.accounts.getPendingRegistration(parsed.id);
+    if (!pending || pending.consumedAt || Date.parse(pending.expiresAt) <= now.getTime()) {
+      throw this.invalidRegistrationCode();
     }
-    await this.issueChallenge(account, 'verify', input.bindEventId, now);
-    return account;
+    const browserDigest = await digestSecret(parsed.secret, this.env.LOGIN_HMAC_KEY);
+    if (!constantTimeEqual(browserDigest, pending.browserSecretDigest)) {
+      throw this.invalidRegistrationCode();
+    }
+    await this.reserveScopes({
+      action: 'registration_resend',
+      ipAddress: requestScope.ipAddress,
+      ipLimit: 10,
+      scopeKind: 'pending_registration',
+      scopeValue: pending.id,
+      scopeLimit: 5,
+      now,
+    });
+    const code = sixDigitCode();
+    const replaced = await this.accounts.replaceRegistrationCode({
+      id: pending.id,
+      browserSecretDigest: pending.browserSecretDigest,
+      codeDigest: await digestSecret(code, this.env.LOGIN_HMAC_KEY),
+      expiresAt: new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString(),
+      now: now.toISOString(),
+    });
+    if (!replaced) throw this.invalidRegistrationCode();
+    await this.sendRegistrationCode(pending.email, code);
   }
 
   async authenticate(email: string, password: string): Promise<HostAccountRecord> {
@@ -106,15 +262,8 @@ export class HostAuthService {
     bindEventId: string | null,
     now = new Date(),
   ): Promise<IssuedChallenge> {
-    const windowStart = new Date(now.getTime() - CODE_WINDOW_SECONDS * 1000).toISOString();
-    const recent = await this.accounts.countRecentChallenges(account.id, purpose, windowStart);
-    if (recent >= MAX_CODES_PER_WINDOW) {
-      throw new ApiError('LOGIN_RATE_LIMITED', 'Too many codes requested. Try again in a few minutes.', 429);
-    }
-
     const code = sixDigitCode();
-    await this.accounts.supersedeChallenges(account.id, purpose, now.toISOString());
-    const challenge = await this.accounts.createChallenge({
+    const challenge = await this.accounts.replaceChallenge({
       id: crypto.randomUUID(),
       accountId: account.id,
       purpose,
@@ -181,21 +330,28 @@ export class HostAuthService {
     });
   }
 
-  private sendAlreadyRegistered(account: HostAccountRecord) {
-    const origin = this.env.APP_ORIGIN.replace(/\/$/u, '');
+  private sendRegistrationCode(email: string, code: string) {
     return this.email.send({
-      to: account.email,
-      subject: 'You already have a Candidary account',
-      text: `Someone tried to create a Candidary account with this address, which already has one.\n\n`
-        + `Sign in instead: ${origin}/host/login\n\n`
-        + 'If that was you and you have forgotten your password, you can reset it from the sign-in page. '
-        + 'If it was not you, no action is needed — nothing about your account changed.',
-      html: layout('You already have an account', [
-        'Someone tried to create a Candidary account with this address, which already has one.',
-        `<a href="${origin}/host/login">Sign in instead</a>`,
-        'If that was you and you have forgotten your password, you can reset it from the sign-in page. If it was not you, no action is needed — nothing about your account changed.',
+      to: email,
+      subject: `${code} is your Candidary registration code`,
+      text: `Your Candidary registration code is ${code}. It expires in 15 minutes.\n\n`
+        + 'If you did not request this code, ignore this message.',
+      html: layout('Finish setting up Candidary', [
+        `Your registration code is <strong style="font-size:22px;letter-spacing:2px;">${code}</strong>`,
+        'It expires in 15 minutes.',
+        'If you did not request this code, ignore this message.',
       ]),
     });
+  }
+
+  private parseRegistrationToken(rawToken: string | undefined): { id: string; secret: string } {
+    const [id, secret, extra] = rawToken?.split('.') ?? [];
+    if (!id || !secret || extra) throw this.invalidRegistrationCode();
+    return { id, secret };
+  }
+
+  private invalidRegistrationCode(): ApiError {
+    return new ApiError('LOGIN_CODE_INVALID', 'That code is not correct.', 400);
   }
 
   async sendPasswordChanged(account: HostAccountRecord) {

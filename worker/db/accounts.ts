@@ -5,7 +5,9 @@ import type {
   EventRecord,
   HostAccountRecord,
   LoginChallengeRecord,
+  PendingRegistrationRecord,
 } from './types';
+import { NotificationOutboxRepository } from './notification-outbox';
 
 interface AccountRow {
   id: string;
@@ -37,6 +39,22 @@ interface EventHostRow {
   account_id: string;
   role: EventHostRole;
   created_at: string;
+}
+
+interface PendingRegistrationRow {
+  id: string;
+  email: string;
+  password_hash: string;
+  display_name: string | null;
+  browser_secret_digest: string;
+  code_digest: string;
+  bind_event_id: string | null;
+  creator_session_id: string | null;
+  attempts: number;
+  expires_at: string;
+  consumed_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 function mapAccount(row: AccountRow): HostAccountRecord {
@@ -74,6 +92,24 @@ function mapEventHost(row: EventHostRow): EventHostRecord {
     accountId: row.account_id,
     role: row.role,
     createdAt: row.created_at,
+  };
+}
+
+function mapPendingRegistration(row: PendingRegistrationRow): PendingRegistrationRecord {
+  return {
+    id: row.id,
+    email: row.email,
+    passwordHash: row.password_hash,
+    displayName: row.display_name,
+    browserSecretDigest: row.browser_secret_digest,
+    codeDigest: row.code_digest,
+    bindEventId: row.bind_event_id,
+    creatorSessionId: row.creator_session_id,
+    attempts: row.attempts,
+    expiresAt: row.expires_at,
+    consumedAt: row.consumed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -130,22 +166,35 @@ export class AccountsRepository {
     return (result.meta.changes ?? 0) === 1;
   }
 
-  // A password reset has to invalidate even a login that verified the old password
-  // just before the reset and tries to mint its session afterward. Advancing the
-  // version in the same conditional write gives that in-flight login no version it
-  // can use for `createIfAuthVersion`.
-  async setPasswordHashAndAdvanceAuthVersion(
+  async resetPasswordAndAdvanceVersion(
     id: string,
     passwordHash: string,
     authVersion: number,
+    now: string,
   ): Promise<HostAccountRecord | null> {
-    const result = await this.db.prepare(`
-      UPDATE host_accounts
-      SET password_hash = ?, auth_version = auth_version + 1
-      WHERE id = ? AND auth_version = ? AND disabled_at IS NULL
-    `).bind(passwordHash, id, authVersion).run();
-    if ((result.meta.changes ?? 0) !== 1) return null;
-    return this.getById(id);
+    await this.db.batch([
+      this.db.prepare(`
+        UPDATE host_accounts
+        SET password_hash = ?,
+            auth_version = auth_version + 1,
+            email_verified_at = COALESCE(email_verified_at, ?)
+        WHERE id = ? AND auth_version = ? AND disabled_at IS NULL
+      `).bind(passwordHash, now, id, authVersion),
+      this.db.prepare(`
+        UPDATE host_sessions
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE account_id = ?
+          AND EXISTS (
+            SELECT 1 FROM host_accounts
+            WHERE id = ? AND auth_version = ? AND password_hash = ?
+          )
+      `).bind(now, id, id, authVersion + 1, passwordHash),
+    ]);
+    const account = await this.getById(id);
+    return account?.authVersion === authVersion + 1
+      && account.passwordHash === passwordHash
+      ? account
+      : null;
   }
 
   async markEmailVerified(id: string, verifiedAt: string): Promise<void> {
@@ -160,31 +209,6 @@ export class AccountsRepository {
 
   async touch(id: string, lastSeenAt: string): Promise<void> {
     await this.db.prepare('UPDATE host_accounts SET last_seen_at = ? WHERE id = ?').bind(lastSeenAt, id).run();
-  }
-
-  async createChallenge(input: {
-    id: string;
-    accountId: string;
-    purpose: ChallengePurpose;
-    secretDigest: string;
-    bindEventId: string | null;
-    expiresAt: string;
-    createdAt: string;
-  }): Promise<LoginChallengeRecord> {
-    await this.db.prepare(`
-      INSERT INTO host_login_challenges (
-        id, account_id, purpose, secret_digest, bind_event_id, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      input.id,
-      input.accountId,
-      input.purpose,
-      input.secretDigest,
-      input.bindEventId,
-      input.expiresAt,
-      input.createdAt,
-    ).run();
-    return (await this.getChallenge(input.id))!;
   }
 
   async getChallenge(id: string): Promise<LoginChallengeRecord | null> {
@@ -204,14 +228,6 @@ export class AccountsRepository {
       ORDER BY created_at DESC LIMIT 1
     `).bind(accountId, purpose, now).first<ChallengeRow>();
     return row ? mapChallenge(row) : null;
-  }
-
-  async countRecentChallenges(accountId: string, purpose: ChallengePurpose, since: string): Promise<number> {
-    const row = await this.db.prepare(`
-      SELECT COUNT(*) AS count FROM host_login_challenges
-      WHERE account_id = ? AND purpose = ? AND created_at >= ?
-    `).bind(accountId, purpose, since).first<{ count: number }>();
-    return row?.count ?? 0;
   }
 
   // Burns one attempt and reports whether the challenge was still live to burn.
@@ -236,13 +252,253 @@ export class AccountsRepository {
     return (result.meta.changes ?? 0) === 1;
   }
 
-  // Requesting a fresh code retires the ones before it, so an older message
-  // sitting in an inbox cannot be replayed after the host asks again.
-  async supersedeChallenges(accountId: string, purpose: ChallengePurpose, now: string): Promise<void> {
-    await this.db.prepare(`
-      UPDATE host_login_challenges SET consumed_at = ?
-      WHERE account_id = ? AND purpose = ? AND consumed_at IS NULL
-    `).bind(now, accountId, purpose).run();
+  async replaceChallenge(input: {
+    id: string;
+    accountId: string;
+    purpose: ChallengePurpose;
+    secretDigest: string;
+    bindEventId: string | null;
+    expiresAt: string;
+    createdAt: string;
+  }): Promise<LoginChallengeRecord> {
+    await this.db.batch([
+      this.db.prepare(`
+        UPDATE host_login_challenges SET consumed_at = ?
+        WHERE account_id = ? AND purpose = ? AND consumed_at IS NULL
+      `).bind(input.createdAt, input.accountId, input.purpose),
+      this.db.prepare(`
+        INSERT INTO host_login_challenges (
+          id, account_id, purpose, secret_digest, bind_event_id, expires_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        input.id,
+        input.accountId,
+        input.purpose,
+        input.secretDigest,
+        input.bindEventId,
+        input.expiresAt,
+        input.createdAt,
+      ),
+    ]);
+    return (await this.getChallenge(input.id))!;
+  }
+
+  async replacePendingRegistration(input: PendingRegistrationRecord): Promise<void> {
+    await this.db.batch([
+      this.db.prepare(`
+        UPDATE host_registration_challenges
+        SET consumed_at = ?, updated_at = ?
+        WHERE email = ? AND consumed_at IS NULL
+      `).bind(input.createdAt, input.createdAt, input.email),
+      this.db.prepare(`
+        INSERT INTO host_registration_challenges (
+          id, email, password_hash, display_name, browser_secret_digest,
+          code_digest, bind_event_id, creator_session_id, attempts,
+          expires_at, consumed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)
+      `).bind(
+        input.id,
+        input.email,
+        input.passwordHash,
+        input.displayName,
+        input.browserSecretDigest,
+        input.codeDigest,
+        input.bindEventId,
+        input.creatorSessionId,
+        input.expiresAt,
+        input.createdAt,
+        input.updatedAt,
+      ),
+    ]);
+  }
+
+  async getPendingRegistration(id: string): Promise<PendingRegistrationRecord | null> {
+    const row = await this.db.prepare(`
+      SELECT * FROM host_registration_challenges WHERE id = ?
+    `).bind(id).first<PendingRegistrationRow>();
+    return row ? mapPendingRegistration(row) : null;
+  }
+
+  async spendRegistrationAttempt(id: string, maxAttempts: number, now: string): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE host_registration_challenges
+      SET attempts = attempts + 1, updated_at = ?
+      WHERE id = ? AND consumed_at IS NULL AND attempts < ? AND expires_at > ?
+    `).bind(now, id, maxAttempts, now).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async replaceRegistrationCode(input: {
+    id: string;
+    browserSecretDigest: string;
+    codeDigest: string;
+    expiresAt: string;
+    now: string;
+  }): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE host_registration_challenges
+      SET code_digest = ?, attempts = 0, expires_at = ?, updated_at = ?
+      WHERE id = ? AND browser_secret_digest = ? AND consumed_at IS NULL AND expires_at > ?
+    `).bind(
+      input.codeDigest,
+      input.expiresAt,
+      input.now,
+      input.id,
+      input.browserSecretDigest,
+      input.now,
+    ).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async activateRegistration(
+    pending: PendingRegistrationRecord,
+    now: string,
+  ): Promise<{ account: HostAccountRecord; boundEvent: boolean } | null> {
+    const proposedAccountId = crypto.randomUUID();
+    const statements: D1PreparedStatement[] = [
+      this.db.prepare(`
+        UPDATE host_registration_challenges
+        SET consumed_at = ?, updated_at = ?
+        WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM host_accounts
+            WHERE email = ? AND disabled_at IS NOT NULL
+          )
+      `).bind(now, now, pending.id, now, pending.email),
+      this.db.prepare(`
+        INSERT OR IGNORE INTO host_accounts (
+          id, email, password_hash, display_name, email_verified_at, created_at
+        )
+        SELECT ?, email, password_hash, display_name, ?, ?
+        FROM host_registration_challenges
+        WHERE id = ? AND consumed_at = ?
+      `).bind(proposedAccountId, now, now, pending.id, now),
+      this.db.prepare(`
+        UPDATE host_accounts
+        SET email_verified_at = COALESCE(email_verified_at, ?)
+        WHERE email = ?
+          AND EXISTS (
+            SELECT 1 FROM host_registration_challenges
+            WHERE id = ? AND consumed_at = ?
+          )
+      `).bind(now, pending.email, pending.id, now),
+    ];
+
+    if (pending.bindEventId && pending.creatorSessionId) {
+      statements.push(
+        this.db.prepare(`
+          INSERT OR IGNORE INTO event_hosts (event_id, account_id, role, created_at)
+          SELECT events.id, host_accounts.id, 'owner', ?
+          FROM events
+          JOIN host_accounts ON host_accounts.email = ?
+          JOIN event_sessions
+            ON event_sessions.id = ?
+            AND event_sessions.event_id = events.id
+          WHERE events.id = ?
+            AND event_sessions.role = 'manager'
+            AND event_sessions.revoked_at IS NULL
+            AND event_sessions.expires_at > ?
+            AND host_accounts.disabled_at IS NULL
+            AND (event_sessions.can_claim_owner = 1 OR events.legacy_owner_claim_open = 1)
+            AND NOT EXISTS (
+              SELECT 1 FROM event_hosts WHERE event_hosts.event_id = events.id
+            )
+            AND EXISTS (
+              SELECT 1 FROM host_registration_challenges
+              WHERE id = ? AND consumed_at = ?
+            )
+        `).bind(
+          now,
+          pending.email,
+          pending.creatorSessionId,
+          pending.bindEventId,
+          now,
+          pending.id,
+          now,
+        ),
+        this.db.prepare(`
+          UPDATE events
+          SET legacy_owner_claim_open = 0
+          WHERE id = ? AND legacy_owner_claim_open = 1
+            AND EXISTS (
+              SELECT 1 FROM event_hosts
+              JOIN host_accounts ON host_accounts.id = event_hosts.account_id
+              WHERE event_hosts.event_id = events.id
+                AND event_hosts.role = 'owner'
+                AND event_hosts.created_at = ?
+                AND host_accounts.email = ?
+            )
+        `).bind(pending.bindEventId, now, pending.email),
+      );
+      statements.push(...new NotificationOutboxRepository(this.db).scheduleStatements({
+        accountId: null,
+        accountEmail: pending.email,
+        eventId: pending.bindEventId,
+        createdAt: now,
+        ownerCreatedAt: now,
+      }));
+    }
+
+    await this.db.batch(statements);
+    const consumed = await this.getPendingRegistration(pending.id);
+    if (consumed?.consumedAt !== now) return null;
+    const account = await this.getByEmail(pending.email);
+    if (!account) return null;
+    const membership = pending.bindEventId
+      ? await this.getEventHost(pending.bindEventId, account.id)
+      : null;
+    const boundEvent = membership?.role === 'owner';
+    return { account, boundEvent };
+  }
+
+  async claimInitialOwnerAndSchedule(
+    eventId: string,
+    accountId: string,
+    creatorSessionId: string,
+    createdAt: string,
+  ): Promise<'claimed' | 'existing' | 'owned_by_other'> {
+    const existing = await this.db.prepare(`
+      SELECT account_id, role FROM event_hosts WHERE event_id = ?
+    `).bind(eventId).all<{ account_id: string; role: EventHostRole }>();
+    if (existing.results.some((row) => row.account_id === accountId && row.role === 'owner')) {
+      return 'existing';
+    }
+    if (existing.results.length > 0) return 'owned_by_other';
+
+    await this.db.batch([
+      this.db.prepare(`
+        INSERT OR IGNORE INTO event_hosts (event_id, account_id, role, created_at)
+        SELECT events.id, ?, 'owner', ?
+        FROM events
+        JOIN event_sessions ON event_sessions.id = ?
+          AND event_sessions.event_id = events.id
+        WHERE events.id = ?
+          AND event_sessions.role = 'manager'
+          AND event_sessions.revoked_at IS NULL
+          AND event_sessions.expires_at > ?
+          AND (event_sessions.can_claim_owner = 1 OR events.legacy_owner_claim_open = 1)
+          AND NOT EXISTS (SELECT 1 FROM event_hosts WHERE event_id = events.id)
+      `).bind(accountId, createdAt, creatorSessionId, eventId, createdAt),
+      this.db.prepare(`
+        UPDATE events SET legacy_owner_claim_open = 0
+        WHERE id = ? AND legacy_owner_claim_open = 1
+          AND EXISTS (
+            SELECT 1 FROM event_hosts
+            WHERE event_id = ? AND account_id = ? AND role = 'owner' AND created_at = ?
+          )
+      `).bind(eventId, eventId, accountId, createdAt),
+      ...new NotificationOutboxRepository(this.db).scheduleStatements({
+        accountId,
+        accountEmail: null,
+        eventId,
+        createdAt,
+        ownerCreatedAt: createdAt,
+      }),
+    ]);
+    const owner = await this.db.prepare(`
+      SELECT account_id FROM event_hosts WHERE event_id = ? AND role = 'owner'
+    `).bind(eventId).first<{ account_id: string }>();
+    return owner?.account_id === accountId ? 'claimed' : 'owned_by_other';
   }
 
   async addEventHost(
