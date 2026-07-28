@@ -14,6 +14,7 @@ interface AccountRow {
   display_name: string | null;
   email_verified_at: string | null;
   notifications_enabled: number;
+  auth_version: number;
   created_at: string;
   last_seen_at: string | null;
   disabled_at: string | null;
@@ -46,6 +47,7 @@ function mapAccount(row: AccountRow): HostAccountRecord {
     displayName: row.display_name,
     emailVerifiedAt: row.email_verified_at,
     notificationsEnabled: row.notifications_enabled === 1,
+    authVersion: row.auth_version,
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     disabledAt: row.disabled_at,

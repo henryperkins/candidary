@@ -143,6 +143,16 @@ describe('sign in', () => {
 
     expect((await response.json<any>()).code).toBe('ORIGIN_FORBIDDEN');
   });
+
+  it('rejects a host session whose account authentication version changed', async () => {
+    const host = hostCookiesFrom(await register('host@example.com'));
+    await env.DB.prepare('UPDATE host_accounts SET auth_version = auth_version + 1').run();
+
+    const response = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
+
+    expect(response.status).toBe(401);
+    expect((await response.json<any>()).code).toBe('SESSION_EXPIRED');
+  });
 });
 
 describe('email verification', () => {
@@ -290,7 +300,7 @@ describe('managing an event through an account', () => {
     const host = hostCookiesFrom(
       await register('host@example.com', { bindEventId: access.event.id }, { cookie: access.manager.cookie }),
     );
-    await env.DB.prepare("UPDATE event_sessions SET revoked_at = ? WHERE role = 'host'")
+    await env.DB.prepare('UPDATE host_sessions SET revoked_at = ?')
       .bind(new Date().toISOString()).run();
 
     const both = await createApp().request(`/api/manage/events/${access.event.id}`, {

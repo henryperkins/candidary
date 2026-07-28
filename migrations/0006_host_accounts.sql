@@ -23,6 +23,7 @@ CREATE TABLE host_accounts (
   -- must not be able to lock a host out of an event they already own.
   email_verified_at TEXT,
   notifications_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notifications_enabled IN (0, 1)),
+  auth_version INTEGER NOT NULL DEFAULT 1 CHECK (auth_version >= 1),
   created_at TEXT NOT NULL,
   last_seen_at TEXT,
   disabled_at TEXT
@@ -76,32 +77,29 @@ CREATE TABLE host_notifications (
 CREATE UNIQUE INDEX host_notifications_once
   ON host_notifications(account_id, event_id, kind);
 
--- One session table for all three subjects. A guest or manager session is
--- authorized by an access token against one event; a host session is authorized
--- by an account and spans every event that account hosts. The CHECK is what
--- keeps a row from claiming both authorities or neither.
-DROP TABLE event_sessions;
-
-CREATE TABLE event_sessions (
+CREATE TABLE host_sessions (
   id TEXT PRIMARY KEY,
   secret_digest TEXT NOT NULL,
   csrf_digest TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('guest', 'manager', 'host')),
-  event_id TEXT REFERENCES events(id) ON DELETE CASCADE,
-  access_token_id TEXT REFERENCES event_access_tokens(id) ON DELETE CASCADE,
-  account_id TEXT REFERENCES host_accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES host_accounts(id) ON DELETE CASCADE,
+  auth_version INTEGER NOT NULL CHECK (auth_version >= 1),
   expires_at TEXT NOT NULL,
   revoked_at TEXT,
-  created_at TEXT NOT NULL,
-  CHECK (
-    (role IN ('guest', 'manager')
-      AND event_id IS NOT NULL AND access_token_id IS NOT NULL AND account_id IS NULL)
-    OR
-    (role = 'host'
-      AND account_id IS NOT NULL AND event_id IS NULL AND access_token_id IS NULL)
-  )
+  created_at TEXT NOT NULL
 );
 
-CREATE INDEX event_sessions_event_role ON event_sessions(event_id, role, revoked_at);
-CREATE INDEX event_sessions_token ON event_sessions(access_token_id, revoked_at);
-CREATE INDEX event_sessions_account ON event_sessions(account_id, revoked_at);
+CREATE INDEX host_sessions_account
+  ON host_sessions(account_id, revoked_at, expires_at);
+
+-- Keep the event-session table in place: media and guest messages restrict-delete
+-- against it. A creator session can later claim the ownership of its own event;
+-- exchanged link sessions never receive that authority.
+ALTER TABLE event_sessions
+  ADD COLUMN can_claim_owner INTEGER NOT NULL DEFAULT 0 CHECK (can_claim_owner IN (0, 1));
+
+-- Events created before host accounts existed are eligible for a one-time legacy
+-- ownership claim. New rows retain the schema default of zero.
+ALTER TABLE events
+  ADD COLUMN legacy_owner_claim_open INTEGER NOT NULL DEFAULT 0 CHECK (legacy_owner_claim_open IN (0, 1));
+
+UPDATE events SET legacy_owner_claim_open = 1;

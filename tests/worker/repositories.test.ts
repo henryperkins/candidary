@@ -39,7 +39,6 @@ async function seedEvent(id = 'event-a', slug = 'maya-theo') {
 
 async function seedGuestSession(eventId = 'event-a', suffix = 'a') {
   const tokens = new TokensRepository(env.DB);
-  const sessions = new SessionsRepository(env.DB);
   await tokens.create({
     id: `token-${suffix}`,
     eventId,
@@ -49,16 +48,19 @@ async function seedGuestSession(eventId = 'event-a', suffix = 'a') {
     expiresAt: '2026-10-19T23:59:59.999Z',
     createdAt: now,
   });
-  await sessions.create({
-    id: `session-${suffix}`,
-    secretDigest: `session-digest-${suffix}`,
-    csrfDigest: `csrf-${suffix}`,
+  await env.DB.prepare(`
+    INSERT INTO event_sessions (
+      id, secret_digest, csrf_digest, event_id, access_token_id, role, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'guest', ?, ?)
+  `).bind(
+    `session-${suffix}`,
+    `session-digest-${suffix}`,
+    `csrf-${suffix}`,
     eventId,
-    accessTokenId: `token-${suffix}`,
-    role: 'guest',
-    expiresAt: '2026-07-28T12:00:00.000Z',
-    createdAt: now,
-  });
+    `token-${suffix}`,
+    '2026-07-28T12:00:00.000Z',
+    now,
+  ).run();
   return `session-${suffix}`;
 }
 

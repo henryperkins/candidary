@@ -67,6 +67,7 @@ export class EventService {
       eventId,
       accessTokenId: managerToken.id,
       role: 'manager',
+      canClaimOwner: true,
       expiresAt: sessionExpiresAt,
       createdAt: now.toISOString(),
     });

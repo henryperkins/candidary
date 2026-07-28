@@ -23,18 +23,7 @@ function only(name: string): Migration {
 
 beforeEach(reset);
 
-// KNOWN DEFECT, asserted rather than described. Every other suite applies the whole
-// migration set to an empty database, which is the one case where 0006 cannot fail —
-// so nothing caught that `DROP TABLE event_sessions` violates the ON DELETE RESTRICT
-// references `media` and `guest_messages` hold against it. `PRAGMA
-// defer_foreign_keys` does not cover this: RESTRICT is enforced immediately even for
-// deferred constraints.
-//
-// `it.fails` keeps this green while the defect stands and turns it red the moment
-// the migration or the deployment procedure fixes it, which is the point — whoever
-// fixes it has to come here and drop the `.fails` rather than leave a test that
-// quietly asserts the old broken behaviour forever.
-it.fails('applies 0006 to a database that already holds sessions and media', async () => {
+it('applies 0006 without rebuilding populated event sessions', async () => {
   await applyD1Migrations(env.DB, upTo('0006'));
 
   const now = new Date().toISOString();
@@ -59,10 +48,21 @@ it.fails('applies 0006 to a database that already holds sessions and media', asy
       VALUES ('media-1', 'event-1', 'session-1', 'events/event-1/a.jpg', 'a.jpg', 'image/jpeg',
         1024, 'Ada', 'stored', 'unpublished', 'key-1', ?, ?)
     `).bind(now, now),
+    env.DB.prepare(`
+      INSERT INTO guest_messages (id, event_id, guest_session_id, guest_name, body, moderation_status, created_at)
+      VALUES ('message-1', 'event-1', 'session-1', 'Ada', 'Congratulations!', 'approved', ?)
+    `).bind(now),
   ]);
 
   await applyD1Migrations(env.DB, [only('0006')]);
 
-  const accounts = await env.DB.prepare("SELECT name FROM sqlite_master WHERE name = 'host_accounts'").first();
-  expect(accounts).not.toBeNull();
+  expect(await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM event_sessions WHERE id = 'session-1'",
+  ).first('count')).toBe(1);
+  expect(await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM media WHERE uploader_session_id = 'session-1'",
+  ).first('count')).toBe(1);
+  expect(await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM guest_messages WHERE guest_session_id = 'session-1'",
+  ).first('count')).toBe(1);
 });

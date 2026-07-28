@@ -1,4 +1,4 @@
-import type { EventRecord, HostAccountRecord, SessionRecord, TokenRecord } from './db/types';
+import type { EventRecord, HostAccountRecord, HostSessionRecord, SessionRecord, TokenRecord } from './db/types';
 
 export interface AppEnv extends Cloudflare.Env {
   TOKEN_HMAC_KEY: string;
@@ -17,16 +17,12 @@ export interface AuthenticatedSession {
 
 export interface AuthenticatedAccount {
   account: HostAccountRecord;
-  session: SessionRecord;
+  session: HostSessionRecord;
 }
 
-// A session either speaks for one event, by way of an access token, or for an
-// account that may host several. Which one it is decides where the event on a
-// request comes from: the session itself, or a membership lookup against the
-// event named in the path.
-export type Principal =
-  | ({ kind: 'event' } & AuthenticatedSession)
-  | ({ kind: 'account' } & AuthenticatedAccount);
+// Link sessions speak for one event by way of an access token. Account sessions
+// resolve separately through `host_sessions`.
+export type Principal = { kind: 'event' } & AuthenticatedSession;
 
 export type AppBindings = {
   Bindings: AppEnv;

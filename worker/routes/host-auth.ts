@@ -5,7 +5,7 @@ import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
-import { SessionsRepository } from '../db/sessions';
+import { HostSessionsRepository } from '../db/sessions';
 import type { AppBindings, AuthenticatedAccount } from '../env';
 import {
   clearSessionCookies,
@@ -75,8 +75,8 @@ async function requireHost(context: Context<AppBindings>, write = false): Promis
   return principal;
 }
 
-async function startSession(context: Context<AppBindings>, accountId: string) {
-  const created = await new AuthService(context.env).createHostSession(accountId);
+async function startSession(context: Context<AppBindings>, account: AuthenticatedAccount['account']) {
+  const created = await new AuthService(context.env).createHostSession(account.id, account.authVersion);
   const maxAge = Math.max(1, Math.floor((Date.parse(created.expiresAt) - Date.now()) / 1000));
   setSessionCookies(context, 'host', created.sessionToken, created.csrfToken, maxAge);
   return created;
@@ -112,7 +112,7 @@ hostAuthRoutes.post('/host/register', async (context) => {
     bindEventId,
   });
 
-  if (account) await startSession(context, account.id);
+  if (account) await startSession(context, account);
   return context.json({
     data: { registered: true, boundEvent: Boolean(account && bindEventId) },
     requestId: context.get('requestId'),
@@ -124,7 +124,7 @@ hostAuthRoutes.post('/host/login', async (context) => {
   const body = await parse(context, loginSchema);
   const account = await new HostAuthService(context.env).authenticate(body.email, body.password);
   await new AccountsRepository(context.env.DB).touch(account.id, new Date().toISOString());
-  await startSession(context, account.id);
+  await startSession(context, account);
   return context.json({
     data: {
       account: {
@@ -141,7 +141,7 @@ hostAuthRoutes.post('/host/login', async (context) => {
 
 hostAuthRoutes.post('/host/logout', async (context) => {
   const principal = await requireHost(context, true);
-  await new SessionsRepository(context.env.DB).revoke(principal.session.id, new Date().toISOString());
+  await new HostSessionsRepository(context.env.DB).revoke(principal.session.id, new Date().toISOString());
   clearSessionCookies(context, 'host');
   return context.json({ data: { signedOut: true }, requestId: context.get('requestId') });
 });
@@ -238,12 +238,12 @@ hostAuthRoutes.post('/host/password/reset', async (context) => {
   // Everything that was signed in under the old password goes, including whatever
   // session an attacker may have been holding. The new session below is minted
   // after the revocation so it survives it.
-  await new SessionsRepository(context.env.DB).revokeForAccount(account.id, new Date().toISOString());
+  await new HostSessionsRepository(context.env.DB).revokeForAccount(account.id, new Date().toISOString());
   // A reset proves the same thing verification does: this person reads that inbox.
   await accounts.markEmailVerified(account.id, new Date().toISOString());
   await service.sendPasswordChanged(account);
 
-  await startSession(context, account.id);
+  await startSession(context, account);
   return context.json({ data: { reset: true }, requestId: context.get('requestId') });
 });
 

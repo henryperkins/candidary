@@ -6,7 +6,6 @@ import type {
   ModerationStatus,
   PublicationStatus,
   Role,
-  SessionRole,
   UploadState,
 } from '../../shared/contracts';
 import type { SupportedImageType } from '../../shared/constants';
@@ -43,17 +42,28 @@ export interface TokenRecord {
   createdAt: string;
 }
 
-// `eventId`/`accessTokenId` are set for guest and manager sessions, `accountId`
-// for host sessions. The schema CHECK guarantees exactly one of those two shapes,
-// so a narrowed `role` is enough to know which fields are present.
+// Event sessions are authorized by an access token and never double as account
+// sessions. `canClaimOwner` is reserved for the management session created with a
+// new event; exchanged link sessions always carry false.
 export interface SessionRecord {
   id: string;
   secretDigest: string;
   csrfDigest: string;
-  eventId: string | null;
-  accessTokenId: string | null;
-  accountId: string | null;
-  role: SessionRole;
+  eventId: string;
+  accessTokenId: string;
+  role: Role;
+  canClaimOwner: boolean;
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export interface HostSessionRecord {
+  id: string;
+  secretDigest: string;
+  csrfDigest: string;
+  accountId: string;
+  authVersion: number;
   expiresAt: string;
   revokedAt: string | null;
   createdAt: string;
@@ -66,6 +76,7 @@ export interface HostAccountRecord {
   displayName: string | null;
   emailVerifiedAt: string | null;
   notificationsEnabled: boolean;
+  authVersion: number;
   createdAt: string;
   lastSeenAt: string | null;
   disabledAt: string | null;
