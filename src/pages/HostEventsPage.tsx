@@ -35,6 +35,9 @@ export function HostEventsPage() {
   const [session, setSession] = useState<HostSession | null>(null);
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [busy, setBusy] = useState(false);
+  // Kept apart from `failure`: these are refused actions on a page that loaded fine,
+  // so they must not replace the events with an error screen.
+  const [actionError, setActionError] = useState('');
 
   const load = useCallback(async () => {
     setFailure(null);
@@ -55,13 +58,35 @@ export function HostEventsPage() {
   useEffect(() => { void load(); }, [load]);
 
   async function signOut() {
-    setBusy(true);
+    setBusy(true); setActionError('');
     try {
       await api('/api/host/logout', { method: 'POST', body: JSON.stringify({}) });
-    } finally {
-      setBusy(false);
+      // Only once the server has confirmed the revocation. Leaving on a rejection
+      // would show a signed-out page while the session is still live.
       navigate('/host/login');
-    }
+    } catch (caught) {
+      setActionError(caught instanceof ClientApiError
+        ? caught.message
+        : 'You could not be signed out. Try again.');
+    } finally { setBusy(false); }
+  }
+
+  async function setNotifications(enabled: boolean) {
+    setBusy(true); setActionError('');
+    try {
+      await api('/api/host/preferences', {
+        method: 'PATCH', body: JSON.stringify({ notificationsEnabled: enabled }),
+      });
+      // Local state follows the server, never leads it, so a refused change does not
+      // leave the control showing a preference that was never saved.
+      setSession((current) => (current
+        ? { ...current, account: { ...current.account, notificationsEnabled: enabled } }
+        : current));
+    } catch (caught) {
+      setActionError(caught instanceof ClientApiError
+        ? caught.message
+        : 'That preference could not be saved. Try again.');
+    } finally { setBusy(false); }
   }
 
   async function resendVerification() {
@@ -80,6 +105,18 @@ export function HostEventsPage() {
       <section className="host-panel">
         <p className="section-label">{session.account.email}</p>
         <h1>Your events</h1>
+
+        {actionError && <p className="form-error" role="alert">{actionError}</p>}
+
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={session.account.notificationsEnabled}
+            disabled={busy}
+            onChange={(changed) => void setNotifications(changed.target.checked)}
+          />
+          <span>Send me event emails</span>
+        </label>
 
         {!session.account.emailVerified && <div className="warning">
           <MailWarning aria-hidden="true" />

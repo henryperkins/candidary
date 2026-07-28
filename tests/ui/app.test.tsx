@@ -1169,3 +1169,51 @@ describe('host recovery from a dead credential', () => {
     expect(seen.indexOf('/api/host/events/11111111-2222-4333-8444-555555555555/adopt')).toBeGreaterThan(seen.indexOf('/api/host/login'));
   });
 });
+
+describe('host account preferences and sign out', () => {
+  const SESSION = {
+    account: { id: 'a', email: 'host@example.com', displayName: null, emailVerified: true, notificationsEnabled: true },
+    events: [],
+  };
+
+  it('keeps the host on the page when sign out is refused', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (String(url) === '/api/host/session') return json(SESSION);
+      return errorJson({ code: 'INTERNAL_ERROR', message: 'Sign out failed.', requestId: 'r' }, 500);
+    }));
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/host/events'])} />);
+    await screen.findByRole('heading', { name: 'Your events' });
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    // Navigating anyway would show a signed-out page while the server still holds a
+    // live session — the opposite of what the host was told happened.
+    await screen.findByText('Sign out failed.');
+    expect(screen.getByRole('heading', { name: 'Your events' })).toBeVisible();
+  });
+
+  it('turns lifecycle email off and back on from the account page', async () => {
+    let enabled = true;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url) === '/api/host/session') {
+        return json({ ...SESSION, account: { ...SESSION.account, notificationsEnabled: enabled } });
+      }
+      if (String(url) === '/api/host/preferences') {
+        enabled = JSON.parse(String(init?.body ?? '{}')).notificationsEnabled;
+        return json({ account: { ...SESSION.account, notificationsEnabled: enabled } });
+      }
+      return json({}, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/host/events'])} />);
+
+    const toggle = await screen.findByRole('checkbox', { name: /event emails/i });
+    expect(toggle).toBeChecked();
+
+    await user.click(toggle);
+    await waitFor(() => expect(enabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /event emails/i })).not.toBeChecked());
+  });
+});

@@ -1037,10 +1037,36 @@ describe('unsubscribing', () => {
     let session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
     expect((await session.json<any>()).data.account.notificationsEnabled).toBe(true);
 
-    const real = await createApp().request(`/host/unsubscribe/${account!.id}.${digest}`, {}, testEnv);
-    expect(real.status).toBe(200);
+    // A GET is a link preview, a prefetch, or a scanner as often as it is a person.
+    // It may confirm, and it may not decide anything.
+    const visited = await createApp().request(`/host/unsubscribe/${account!.id}.${digest}`, {}, testEnv);
+    expect(visited.status).toBe(200);
+    expect(await visited.text()).toContain('<form');
+    session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
+    expect((await session.json<any>()).data.account.notificationsEnabled).toBe(true);
+
+    const confirmed = await createApp().request(`/host/unsubscribe/${account!.id}.${digest}`, {
+      method: 'POST',
+    }, testEnv);
+    expect(confirmed.status).toBe(200);
     session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
     expect((await session.json<any>()).data.account.notificationsEnabled).toBe(false);
+  });
+
+  it('lets a signed-in host turn lifecycle email back on', async () => {
+    const host = await registeredHost('host@example.com');
+    const account = await env.DB.prepare('SELECT id FROM host_accounts LIMIT 1').first<{ id: string }>();
+    const digest = await digestSecret(`unsubscribe:${account!.id}`, testEnv.LOGIN_HMAC_KEY);
+    await createApp().request(`/host/unsubscribe/${account!.id}.${digest}`, { method: 'POST' }, testEnv);
+
+    const restored = await createApp().request('/api/host/preferences', {
+      method: 'PATCH', headers: hostHeaders(host),
+      body: JSON.stringify({ notificationsEnabled: true }),
+    }, testEnv);
+
+    expect(restored.status).toBe(200);
+    const session = await createApp().request('/api/host/session', { headers: { cookie: host.cookie } }, testEnv);
+    expect((await session.json<any>()).data.account.notificationsEnabled).toBe(true);
   });
 });
 
