@@ -15,6 +15,13 @@ export function LandingPage() {
             <Link className="button button--primary" to="/create">Create your event <ArrowRight aria-hidden="true" /></Link>
             <a className="button button--quiet" href="#how-it-works">See how it works</a>
           </div>
+          {/* Until now the account system could only be entered from a manager card or a typed URL,
+              so a returning host had no way back to their events from here. It sits below the primary
+              CTA rather than in the header, where a third exit cannot hold its 44px beside the brand
+              at 320 — see the header exit matrix in `accessibility.spec.ts`. */}
+          <p className="hero__account">Already have an account?{' '}
+            <Link className="text-link" to="/host/login">Sign in to your events</Link>
+          </p>
         </div>
         <figure className="hero__image"><img src="/assets/candidary-hero.png" alt="Friends celebrating together at a candlelit outdoor table" /></figure>
       </section>
