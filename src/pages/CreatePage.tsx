@@ -1,13 +1,14 @@
 import { Check, ImagePlus, LockKeyhole, QrCode } from 'lucide-react';
 import QRCode from 'qrcode';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
 import { MAX_EVENT_MEDIA } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { HostAccountPanel } from '../components/HostAccountPanel';
+import { hostRegisterHref } from '../app/recovery';
 
 interface Created {
   event: { id: string; name: string; slug: string };
@@ -23,6 +24,7 @@ interface Created {
 const CREATE_FIELDS = ['name', 'eventDate', 'welcomeMessage'] as const;
 
 export function CreatePage() {
+  const navigate = useNavigate();
   const [created, setCreated] = useState<Created | null>(null);
   const [saved, setSaved] = useState(false);
   const [cover, setCover] = useState<File | null>(null);
@@ -72,7 +74,7 @@ export function CreatePage() {
   }
 
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
-    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
+    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p><p className="form-note">The creator session’s ownership eligibility ends at the earlier of the management deadline and 12 hours after creation.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
       {/* The warning is only true while the link is the sole way in. Once the event
           is saved to an account it stops being true, and leaving it up would talk a
           host out of the recovery they just set up. */}
@@ -88,6 +90,7 @@ export function CreatePage() {
     {!created.savedToAccount && <HostAccountPanel
       bindEventId={created.event.id}
       onCompleted={({ boundEvent }) => { if (boundEvent) setSaved(true); }}
+      onStarted={() => navigate(hostRegisterHref(created.event.id, `/manage/event/${created.event.id}`, true))}
     />}
   </main></div>;
 

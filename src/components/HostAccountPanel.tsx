@@ -12,6 +12,12 @@ interface HostAccountPanelProps {
   // Reports what the server actually committed. Registration alone binds nothing,
   // so only a true `boundEvent` may be treated as the event becoming recoverable.
   onCompleted?: (result: { boundEvent: boolean }) => void;
+  // The route owns durable presentation state. This fires only once the server has
+  // accepted registration and the browser can resume its pending challenge.
+  onStarted?: () => void;
+  // Starting over changes only the local presentation and lets a route clear its
+  // pending hint; it never consumes or changes the server-side challenge.
+  onRestarted?: () => void;
   // `code` lets a host who skipped confirmation come back to it later without
   // re-registering, which is the only way back once the panel has been left.
   initialStage?: 'form' | 'code';
@@ -29,6 +35,8 @@ type Stage = 'form' | 'code' | 'done';
 export function HostAccountPanel({
   bindEventId,
   onCompleted,
+  onStarted,
+  onRestarted,
   initialStage = 'form',
   mode = 'registration',
 }: HostAccountPanelProps) {
@@ -54,6 +62,7 @@ export function HostAccountPanel({
       // Only the stage moves. Nothing is bound until the mailbox code is proved,
       // so the caller is deliberately not told anything here.
       setStage('code');
+      onStarted?.();
     } catch (caught) {
       if (caught instanceof ClientApiError) { setError(caught.message); setFields(caught.fieldErrors ?? {}); }
       else setError('Your account could not be created. Try again.');
@@ -84,6 +93,16 @@ export function HostAccountPanel({
     } catch (caught) {
       setError(caught instanceof ClientApiError ? caught.message : 'That code could not be sent. Try again.');
     } finally { setBusy(false); }
+  }
+
+  function restart() {
+    setStage('form');
+    setBusy(false);
+    setError('');
+    setFields({});
+    setNotice('');
+    setBoundEvent(false);
+    onRestarted?.();
   }
 
   if (stage === 'done') {
@@ -120,6 +139,7 @@ export function HostAccountPanel({
         </button>
       </form>
       <button type="button" className="text-link" onClick={resend} disabled={busy}>Send another code</button>
+      {mode === 'registration' && <button type="button" className="text-link" onClick={restart} disabled={busy}>Start over</button>}
       {/* Skippable on purpose. Confirming gates the emails, never the event itself —
           but until the code is entered nothing has been saved, so this must not say
           it has. */}

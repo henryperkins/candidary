@@ -32,20 +32,6 @@ function formatTimestamp(value: string): string {
   });
 }
 
-// Decided from the row that was just materialized, so a preference changed after the
-// join may still allow one in-flight send while everything materialized afterwards is
-// suppressed. The codes are deliberately non-sensitive: they end up in logs.
-function suppressionReason(row: ClaimedOutboxRow, now: Date): string | null {
-  if (row.accountDisabled) return 'account_disabled';
-  if (!row.emailVerified) return 'address_unverified';
-  if (!row.notificationsEnabled) return 'suppressed_by_preference';
-  if (row.eventDeleted) return 'event_deleted';
-  // A reminder for an event that already happened, or a warning past the deadline it
-  // was warning about, is worse than no message at all.
-  if (row.discardAfter && Date.parse(row.discardAfter) <= now.getTime()) return 'obsolete';
-  return null;
-}
-
 export class NotificationService {
   private readonly email: EmailService;
 
@@ -156,24 +142,28 @@ export class NotificationService {
     let retired = 0;
 
     for (const row of rows) {
-      // Read from the joined row, so a page of messages costs no extra queries.
-      const suppression = suppressionReason(row, now);
-      if (suppression) {
-        await outbox.retire(row.id, claimToken, suppression, timestamp);
+      const unsubscribe = await unsubscribeUrl(this.env, row.accountId);
+      const built = this.buildMessage(row, unsubscribe);
+      const authorized = await outbox.authorizeClaimedDelivery(
+        row.id,
+        claimToken,
+        new Date().toISOString(),
+      );
+      if (!authorized) continue;
+      if (authorized.status === 'retired') {
         retired += 1;
         continue;
       }
 
-      const unsubscribe = await unsubscribeUrl(this.env, row.accountId);
-      const built = this.buildMessage(row, unsubscribe);
       const outcome = await this.email.send({
         to: row.email,
         unsubscribeUrl: unsubscribe,
         ...built,
       });
 
+      const outcomeAt = new Date().toISOString();
       if (outcome.delivered) {
-        await outbox.markSent(row.id, claimToken, timestamp);
+        await outbox.markSent(row.id, claimToken, outcomeAt);
         sent += 1;
         continue;
       }
@@ -184,7 +174,7 @@ export class NotificationService {
         claimToken,
         outcome.code ?? 'send_failed',
         row.attemptCount,
-        timestamp,
+        outcomeAt,
       );
       if (next === 'pending') retried += 1; else retired += 1;
     }

@@ -5,6 +5,7 @@ import { AccountsRepository } from '../../worker/db/accounts';
 import { NotificationOutboxRepository } from '../../worker/db/notification-outbox';
 import { EmailService } from '../../worker/services/email';
 import { NotificationService } from '../../worker/services/notifications';
+import worker from '../../worker/index';
 import { eventAccess, resetDatabase, testEnv } from './helpers';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -96,6 +97,7 @@ describe('durable notification outbox', () => {
   // Rows are inserted directly so each test pins one scheduling state exactly,
   // rather than depending on whatever the claim path happened to schedule.
   async function outboxRow(input: {
+    id?: string;
     accountId: string;
     eventId: string;
     kind?: string;
@@ -105,7 +107,7 @@ describe('durable notification outbox', () => {
     leaseExpiresAt?: string | null;
     discardAfter?: string | null;
   }) {
-    const id = crypto.randomUUID();
+    const id = input.id ?? crypto.randomUUID();
     const at = input.availableAt ?? new Date(Date.now() - 1000).toISOString();
     await env.DB.prepare(`
       INSERT INTO host_notification_outbox (
@@ -123,8 +125,16 @@ describe('durable notification outbox', () => {
 
   async function stateOf(id: string) {
     return env.DB.prepare(`
-      SELECT status, attempt_count, claim_token, last_error_code FROM host_notification_outbox WHERE id = ?
-    `).bind(id).first<{ status: string; attempt_count: number; claim_token: string | null; last_error_code: string | null }>();
+      SELECT status, attempt_count, claim_token, claimed_at, lease_expires_at, last_error_code
+      FROM host_notification_outbox WHERE id = ?
+    `).bind(id).first<{
+      status: string;
+      attempt_count: number;
+      claim_token: string | null;
+      claimed_at: string | null;
+      lease_expires_at: string | null;
+      last_error_code: string | null;
+    }>();
   }
 
   function failSendOnce() {
@@ -297,5 +307,81 @@ describe('durable notification outbox', () => {
     await new NotificationService(testEnv).dispatchPending(new Date());
     expect(send).not.toHaveBeenCalled();
     expect(await stateOf(id)).toMatchObject({ status: 'failed', last_error_code: 'obsolete' });
+  });
+
+  it('authorizes each row at send time so an opt-out during a page suppresses later rows', async () => {
+    const first = await hostedEvent({ email: 'first@example.com' });
+    const second = await hostedEvent({ email: 'second@example.com' });
+    const firstId = await outboxRow({ id: 'outbox-a', accountId: first.account.id, eventId: first.eventId });
+    const secondId = await outboxRow({ id: 'outbox-b', accountId: second.account.id, eventId: second.eventId });
+    let calls = 0;
+    vi.spyOn(EmailService.prototype, 'send').mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) await new AccountsRepository(env.DB).setNotificationsEnabled(second.account.id, false);
+      return { delivered: true };
+    });
+
+    expect(await new NotificationService(testEnv).dispatchPending(new Date()))
+      .toEqual({ sent: 1, retried: 0, retired: 1 });
+    expect(calls).toBe(1);
+    expect(await stateOf(firstId)).toMatchObject({ status: 'sent' });
+    expect(await stateOf(secondId)).toMatchObject({
+      status: 'failed', last_error_code: 'suppressed_by_preference',
+      claim_token: null, claimed_at: null, lease_expires_at: null,
+    });
+  });
+
+  it('retires a claimed row that becomes obsolete before its provider call', async () => {
+    const { account, eventId } = await hostedEvent();
+    const current = Date.now();
+    const id = await outboxRow({
+      accountId: account.id,
+      eventId,
+      availableAt: new Date(current - 10_000).toISOString(),
+      discardAfter: new Date(current - 1_000).toISOString(),
+    });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date(current - 5_000));
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await stateOf(id)).toMatchObject({
+      status: 'failed', last_error_code: 'obsolete',
+      claim_token: null, claimed_at: null, lease_expires_at: null,
+    });
+  });
+
+  it('uses cron execution time for notification authorization and records scheduled time separately', async () => {
+    const { account, eventId } = await hostedEvent();
+    const scheduledAt = new Date('2026-07-21T12:00:00.000Z');
+    const executedAt = new Date('2026-07-21T12:10:00.000Z');
+    const id = await outboxRow({
+      accountId: account.id,
+      eventId,
+      availableAt: '2026-07-21T11:00:00.000Z',
+      discardAfter: '2026-07-21T12:05:00.000Z',
+    });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const scheduled: Promise<unknown>[] = [];
+    const clock = vi.useFakeTimers();
+    clock.setSystemTime(executedAt);
+
+    worker.scheduled!({ cron: '47 * * * *', scheduledTime: scheduledAt.getTime() } as ScheduledController,
+      testEnv,
+      { waitUntil: (promise: Promise<unknown>) => scheduled.push(promise), passThroughOnException() {} } as unknown as ExecutionContext);
+    await Promise.all(scheduled);
+    clock.useRealTimers();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await stateOf(id)).toMatchObject({
+      status: 'failed', last_error_code: 'obsolete',
+      claim_token: null, claimed_at: null, lease_expires_at: null,
+    });
+    expect(logged.mock.calls.map(([entry]) => JSON.parse(String(entry)))).toContainEqual(expect.objectContaining({
+      event: 'notifications_dispatched',
+      scheduledAt: scheduledAt.toISOString(),
+      executedAt: executedAt.toISOString(),
+    }));
   });
 });

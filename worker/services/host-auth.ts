@@ -4,7 +4,7 @@ import { AccountsRepository, normalizeEmail } from '../db/accounts';
 import { AuthRateLimitsRepository, type AuthRateLimitAction, type AuthRateLimitScopeKind } from '../db/auth-rate-limits';
 import type { HostAccountRecord, PendingRegistrationRecord } from '../db/types';
 import type { AppEnv } from '../env';
-import { constantTimeEqual, createSecretToken, digestSecret } from '../security/crypto';
+import { constantTimeEqual, createSecretToken, digestSecret, type SecretToken } from '../security/crypto';
 import { hashPassword, verifyPassword } from '../security/passwords';
 import { EmailService, layout } from './email';
 import { unsubscribeUrl } from './notifications';
@@ -161,6 +161,7 @@ export class HostAuthService {
       attempts: 0,
       expiresAt: new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString(),
       consumedAt: null,
+      activationNonce: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     });
@@ -204,7 +205,7 @@ export class HostAuthService {
     rawToken: string | undefined,
     requestScope: Pick<RegistrationRequestScope, 'ipAddress'>,
     now = new Date(),
-  ): Promise<void> {
+  ): Promise<SecretToken> {
     const parsed = this.parseRegistrationToken(rawToken);
     const pending = await this.accounts.getPendingRegistration(parsed.id);
     if (!pending || pending.consumedAt || Date.parse(pending.expiresAt) <= now.getTime()) {
@@ -233,6 +234,7 @@ export class HostAuthService {
     });
     if (!replaced) throw this.invalidRegistrationCode();
     await this.sendRegistrationCode(pending.email, code);
+    return parsed.token;
   }
 
   async authenticate(email: string, password: string): Promise<HostAccountRecord> {
@@ -344,10 +346,10 @@ export class HostAuthService {
     });
   }
 
-  private parseRegistrationToken(rawToken: string | undefined): { id: string; secret: string } {
+  private parseRegistrationToken(rawToken: string | undefined): { id: string; secret: string; token: SecretToken } {
     const [id, secret, extra] = rawToken?.split('.') ?? [];
     if (!id || !secret || extra) throw this.invalidRegistrationCode();
-    return { id, secret };
+    return { id, secret, token: { id, secret, token: rawToken! } };
   }
 
   private invalidRegistrationCode(): ApiError {

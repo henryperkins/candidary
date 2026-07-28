@@ -287,6 +287,9 @@ describe('registration', () => {
     });
     expect(resent.status).toBe(202);
     expect(await resent.json<any>()).toMatchObject({ data: { registrationPending: true } });
+    expect(resent.headers.getSetCookie()).toContain(
+      `candidary_registration=${pending.token}; Max-Age=900; Path=/; HttpOnly; Secure; SameSite=Lax`,
+    );
     expect(await env.DB.prepare(`
       SELECT COUNT(*) AS count FROM host_registration_challenges
       WHERE email = ? AND consumed_at IS NULL
@@ -296,6 +299,44 @@ describe('registration', () => {
       cookie: pending.cookie,
     });
     expect((await oldCompletion.json<any>()).code).toBe('LOGIN_CODE_INVALID');
+  });
+
+  it('does not activate a snapshot whose code was replaced after it was loaded', async () => {
+    const started = await register('host@example.com');
+    const pending = registrationCookiesFrom(started);
+    const accounts = new AccountsRepository(env.DB);
+    const snapshot = await accounts.getPendingRegistration(pending.token.split('.')[0]!);
+    expect(snapshot).not.toBeNull();
+    const now = new Date();
+    expect(await accounts.replaceRegistrationCode({
+      id: snapshot!.id,
+      browserSecretDigest: snapshot!.browserSecretDigest,
+      codeDigest: 'replacement-code-digest',
+      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      now: now.toISOString(),
+    })).toBe(true);
+
+    expect(await accounts.activateRegistration(snapshot!, now.toISOString())).toBeNull();
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts').first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox').first('count')).toBe(0);
+  });
+
+  it('lets exactly one identical registration completion consume its activation snapshot', async () => {
+    const started = await register('host@example.com');
+    const pending = registrationCookiesFrom(started);
+    const code = await forceRegistrationCode('host@example.com');
+    const now = new Date();
+    const service = new HostAuthService(testEnv);
+
+    const completions = await Promise.allSettled([
+      service.completeRegistration(pending.token, code, null, now),
+      service.completeRegistration(pending.token, code, null, now),
+    ]);
+
+    expect(completions.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+    expect(completions.filter(({ status }) => status === 'rejected')).toHaveLength(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_accounts').first('count')).toBe(1);
   });
 
   it('spends registration attempts before comparison and locks after five guesses', async () => {
@@ -456,6 +497,7 @@ describe('registration', () => {
 
     expect(responses.map(({ status }) => status)).toEqual([202, 202, 202, 202, 202, 429]);
     expect(await responses[5]!.json<any>()).toMatchObject({ code: 'RATE_LIMITED' });
+    expect(responses[5]!.headers.getSetCookie()).not.toContain(expect.stringContaining('candidary_registration='));
   });
 
   it('refuses a short password with a field error', async () => {

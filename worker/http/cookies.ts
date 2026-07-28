@@ -63,13 +63,14 @@ export function getCsrfCookie(
 export function setRegistrationCookie(
   context: Context<AppBindings>,
   registration: SecretToken,
+  maxAgeSeconds = 15 * 60,
 ): void {
   setCookie(context, REGISTRATION_COOKIE, registration.token, {
     httpOnly: true,
     secure: true,
     sameSite: 'Lax',
     path: '/',
-    maxAge: 15 * 60,
+    maxAge: maxAgeSeconds,
   });
 }
 

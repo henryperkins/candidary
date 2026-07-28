@@ -11,14 +11,6 @@ const MANAGER_PATH = /^\/manage\/event\/([0-9a-f-]+)$/iu;
 
 export const HOST_EVENTS_PATH = '/host/events';
 
-// Built rather than concatenated at each call site, so every entry point produces
-// the identical shape the login page knows how to read back.
-export function hostSignInHref(eventId?: string | null): string {
-  if (!eventId || !EVENT_ID.test(eventId)) return '/host/login';
-  const returnTo = encodeURIComponent(`/manage/event/${eventId}`);
-  return `/host/login?returnTo=${returnTo}&adopt=${eventId}`;
-}
-
 // A path is usable only if it is local, is one of the two known destinations, and —
 // for a manager path — names a well-formed event.
 export function safeReturnTo(value: string | null | undefined): string | null {
@@ -34,4 +26,36 @@ export function safeReturnTo(value: string | null | undefined): string | null {
 export function adoptTargetFor(returnTo: string | null, adopt: string | null | undefined): string | null {
   if (!adopt || !EVENT_ID.test(adopt) || !returnTo) return null;
   return MANAGER_PATH.exec(returnTo)?.[1]?.toLowerCase() === adopt.toLowerCase() ? adopt : null;
+}
+
+function hostRecoveryHref(
+  path: '/host/login' | '/host/register',
+  eventId?: string | null,
+  returnTo?: string | null,
+  pending = false,
+): string {
+  const validEventId = eventId && EVENT_ID.test(eventId) ? eventId : null;
+  // A valid manager event supplies its own safe return destination. Otherwise a
+  // caller may only keep a separately validated path; raw query state never wins.
+  const safeDestination = safeReturnTo(returnTo)
+    ?? (validEventId ? `/manage/event/${validEventId}` : null);
+  const adopt = adoptTargetFor(safeDestination, validEventId);
+  const search = new URLSearchParams();
+  if (safeDestination) search.set('returnTo', safeDestination);
+  if (adopt) search.set('adopt', adopt);
+  if (pending) search.set('pending', '1');
+  const query = search.toString();
+  return query ? `${path}?${query}` : path;
+}
+
+// Built rather than concatenated at each call site, so every entry point produces
+// the identical shape the login page knows how to read back.
+export function hostSignInHref(eventId?: string | null, returnTo?: string | null): string {
+  return hostRecoveryHref('/host/login', eventId, returnTo);
+}
+
+// The pending bit is only a presentation hint for resuming a registration cookie;
+// it does not make an event claim valid and the server still resolves that claim.
+export function hostRegisterHref(eventId?: string | null, returnTo?: string | null, pending = false): string {
+  return hostRecoveryHref('/host/register', eventId, returnTo, pending);
 }

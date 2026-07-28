@@ -68,6 +68,7 @@ CREATE TABLE host_registration_challenges (
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   expires_at TEXT NOT NULL,
   consumed_at TEXT,
+  activation_nonce TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

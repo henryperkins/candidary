@@ -119,6 +119,54 @@ export class NotificationOutboxRepository {
     }));
   }
 
+  // This conditional update is the durable send permit. Eligibility is decided
+  // from live account and event state immediately before the provider call, not
+  // from the data snapshot used to render the claimed page.
+  async authorizeClaimedDelivery(
+    id: string,
+    claimToken: string,
+    now: string,
+  ): Promise<{ status: 'authorized' } | { status: 'retired'; reason: string } | null> {
+    const row = await this.db.prepare(`
+      WITH decision AS (
+        SELECT CASE
+          WHEN accounts.disabled_at IS NOT NULL THEN 'account_disabled'
+          WHEN accounts.email_verified_at IS NULL THEN 'address_unverified'
+          WHEN accounts.notifications_enabled = 0 THEN 'suppressed_by_preference'
+          WHEN events.deleted_at IS NOT NULL THEN 'event_deleted'
+          WHEN host_notification_outbox.discard_after IS NOT NULL
+            AND host_notification_outbox.discard_after <= ? THEN 'obsolete'
+          ELSE NULL
+        END AS reason
+        FROM host_notification_outbox
+        JOIN host_accounts AS accounts ON accounts.id = host_notification_outbox.account_id
+        JOIN events ON events.id = host_notification_outbox.event_id
+        WHERE host_notification_outbox.id = ?
+      )
+      UPDATE host_notification_outbox
+      SET status = CASE WHEN (SELECT reason FROM decision) IS NULL THEN status ELSE 'failed' END,
+        last_error_code = CASE
+          WHEN (SELECT reason FROM decision) IS NULL THEN last_error_code
+          ELSE (SELECT reason FROM decision)
+        END,
+        claim_token = CASE WHEN (SELECT reason FROM decision) IS NULL THEN claim_token ELSE NULL END,
+        claimed_at = CASE WHEN (SELECT reason FROM decision) IS NULL THEN claimed_at ELSE NULL END,
+        lease_expires_at = CASE WHEN (SELECT reason FROM decision) IS NULL THEN lease_expires_at ELSE NULL END,
+        updated_at = CASE WHEN (SELECT reason FROM decision) IS NULL THEN updated_at ELSE ? END
+      WHERE id = ?
+        AND status = 'sending'
+        AND claim_token = ?
+        AND lease_expires_at > ?
+      RETURNING status, last_error_code
+    `).bind(now, id, now, id, claimToken, now).first<{
+      status: 'sending' | 'failed';
+      last_error_code: string | null;
+    }>();
+    if (!row) return null;
+    if (row.status === 'sending') return { status: 'authorized' };
+    return { status: 'retired', reason: row.last_error_code! };
+  }
+
   // Every outcome write is fenced by the claim token, so a worker whose lease was
   // reclaimed cannot overwrite the result of the worker that took over.
   async markSent(id: string, claimToken: string, now: string): Promise<boolean> {
@@ -197,7 +245,12 @@ export class NotificationOutboxRepository {
     eventId: string;
     createdAt: string;
     ownerCreatedAt: string;
-  }): D1PreparedStatement[] {
+  }, activationGuard?: { challengeId: string; activationNonce: string }): D1PreparedStatement[] {
+    const activationGuardSql = activationGuard ? `
+        AND EXISTS (
+          SELECT 1 FROM host_registration_challenges
+          WHERE id = ? AND activation_nonce = ?
+        )` : '';
     const prepare = (
       kind: ScheduledKind,
       availableSql: string,
@@ -220,6 +273,7 @@ export class NotificationOutboxRepository {
         )
         AND event_hosts.role = 'owner'
         AND event_hosts.created_at = ?
+        ${activationGuardSql}
     `).bind(
       crypto.randomUUID(),
       kind,
@@ -231,6 +285,7 @@ export class NotificationOutboxRepository {
       input.accountId,
       input.accountEmail ?? null,
       input.ownerCreatedAt,
+      ...(activationGuard ? [activationGuard.challengeId, activationGuard.activationNonce] : []),
     );
 
     return [

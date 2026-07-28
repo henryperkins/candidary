@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
-import { hostSignInHref } from '../app/recovery';
+import { hostRegisterHref, hostSignInHref } from '../app/recovery';
 
 interface HostSession {
   account: { email: string };
@@ -57,7 +57,8 @@ export function EventAccountCard({ eventId }: { eventId: string }) {
     {/* The link carries the event so the host comes back here and the claim happens
         while this page's management cookie is still the thing authorizing it. */}
     {!session && <p>This event is reachable only by its management link.
-      {' '}<Link className="text-link" to={hostSignInHref(eventId)}>Sign in</Link> to save it to an account,
+      {' '}<Link className="text-link" to={hostSignInHref(eventId)}>Sign in</Link> or
+      {' '}<Link className="text-link" to={hostRegisterHref(eventId)}>Create account</Link> to save it to an account,
       so losing the link stops being permanent.</p>}
   </div>;
 }

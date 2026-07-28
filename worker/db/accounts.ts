@@ -53,6 +53,7 @@ interface PendingRegistrationRow {
   attempts: number;
   expires_at: string;
   consumed_at: string | null;
+  activation_nonce: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -108,6 +109,7 @@ function mapPendingRegistration(row: PendingRegistrationRow): PendingRegistratio
     attempts: row.attempts,
     expiresAt: row.expires_at,
     consumedAt: row.consumed_at,
+    activationNonce: row.activation_nonce,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -355,33 +357,46 @@ export class AccountsRepository {
     now: string,
   ): Promise<{ account: HostAccountRecord; boundEvent: boolean } | null> {
     const proposedAccountId = crypto.randomUUID();
+    const activationNonce = crypto.randomUUID();
     const statements: D1PreparedStatement[] = [
       this.db.prepare(`
         UPDATE host_registration_challenges
-        SET consumed_at = ?, updated_at = ?
-        WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
+        SET consumed_at = ?, activation_nonce = ?, updated_at = ?
+        WHERE id = ?
+          AND consumed_at IS NULL
+          AND expires_at > ?
+          AND browser_secret_digest = ?
+          AND code_digest = ?
           AND NOT EXISTS (
             SELECT 1 FROM host_accounts
-            WHERE email = ? AND disabled_at IS NOT NULL
+            WHERE email = host_registration_challenges.email AND disabled_at IS NOT NULL
           )
-      `).bind(now, now, pending.id, now, pending.email),
+      `).bind(
+        now,
+        activationNonce,
+        now,
+        pending.id,
+        now,
+        pending.browserSecretDigest,
+        pending.codeDigest,
+      ),
       this.db.prepare(`
         INSERT OR IGNORE INTO host_accounts (
           id, email, password_hash, display_name, email_verified_at, created_at
         )
         SELECT ?, email, password_hash, display_name, ?, ?
         FROM host_registration_challenges
-        WHERE id = ? AND consumed_at = ?
-      `).bind(proposedAccountId, now, now, pending.id, now),
+        WHERE id = ? AND activation_nonce = ?
+      `).bind(proposedAccountId, now, now, pending.id, activationNonce),
       this.db.prepare(`
         UPDATE host_accounts
         SET email_verified_at = COALESCE(email_verified_at, ?)
         WHERE email = ?
           AND EXISTS (
             SELECT 1 FROM host_registration_challenges
-            WHERE id = ? AND consumed_at = ?
+            WHERE id = ? AND activation_nonce = ?
           )
-      `).bind(now, pending.email, pending.id, now),
+      `).bind(now, pending.email, pending.id, activationNonce),
     ];
 
     if (pending.bindEventId && pending.creatorSessionId) {
@@ -405,7 +420,7 @@ export class AccountsRepository {
             )
             AND EXISTS (
               SELECT 1 FROM host_registration_challenges
-              WHERE id = ? AND consumed_at = ?
+              WHERE id = ? AND activation_nonce = ?
             )
         `).bind(
           now,
@@ -414,7 +429,7 @@ export class AccountsRepository {
           pending.bindEventId,
           now,
           pending.id,
-          now,
+          activationNonce,
         ),
         this.db.prepare(`
           UPDATE events
@@ -428,7 +443,11 @@ export class AccountsRepository {
                 AND event_hosts.created_at = ?
                 AND host_accounts.email = ?
             )
-        `).bind(pending.bindEventId, now, pending.email),
+            AND EXISTS (
+              SELECT 1 FROM host_registration_challenges
+              WHERE id = ? AND activation_nonce = ?
+            )
+        `).bind(pending.bindEventId, now, pending.email, pending.id, activationNonce),
       );
       statements.push(...new NotificationOutboxRepository(this.db).scheduleStatements({
         accountId: null,
@@ -436,12 +455,11 @@ export class AccountsRepository {
         eventId: pending.bindEventId,
         createdAt: now,
         ownerCreatedAt: now,
-      }));
+      }, { challengeId: pending.id, activationNonce }));
     }
 
-    await this.db.batch(statements);
-    const consumed = await this.getPendingRegistration(pending.id);
-    if (consumed?.consumedAt !== now) return null;
+    const results = await this.db.batch(statements);
+    if ((results[0]?.meta.changes ?? 0) !== 1) return null;
     const account = await this.getByEmail(pending.email);
     if (!account) return null;
     const membership = pending.bindEventId

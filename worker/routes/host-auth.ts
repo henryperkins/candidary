@@ -132,10 +132,11 @@ hostAuthRoutes.post('/host/register', async (context) => {
 
 hostAuthRoutes.post('/host/register/resend', async (context) => {
   assertRequestOrigin(context);
-  await new HostAuthService(context.env).resendRegistration(
+  const registrationToken = await new HostAuthService(context.env).resendRegistration(
     getRegistrationCookie(context),
     { ipAddress: requestIp(context) },
   );
+  setRegistrationCookie(context, registrationToken, 15 * 60);
   return context.json({
     data: { registrationPending: true },
     requestId: context.get('requestId'),

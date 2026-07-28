@@ -16,19 +16,24 @@ export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }
 
 const NOTIFICATION_CRON = '47 * * * *';
 
-// One scheduled handler, two jobs, chosen by the expression that fired. The
-// scheduled time is the operation time so a delayed invocation still reasons about
-// the moment it was meant to run.
+// One scheduled handler, two jobs, chosen by the expression that fired. Work uses
+// wall-clock execution time; scheduled time remains telemetry for delayed Crons.
 export default {
   fetch: app.fetch,
   scheduled(controller: ScheduledController, env: AppEnv, context: ExecutionContext) {
-    const now = new Date(controller.scheduledTime);
+    const scheduledAt = new Date(controller.scheduledTime);
+    const executedAt = new Date();
     if (controller.cron === NOTIFICATION_CRON) {
       // A dispatcher-level failure fails this Cron event and is worth retrying;
       // per-recipient failures never reach here, they stay in the outbox.
-      context.waitUntil(new NotificationService(env).dispatchPending(now).then(
+      context.waitUntil(new NotificationService(env).dispatchPending(executedAt).then(
         (summary) => {
-          console.log(JSON.stringify({ event: 'notifications_dispatched', ...summary }));
+          console.log(JSON.stringify({
+            event: 'notifications_dispatched',
+            scheduledAt: scheduledAt.toISOString(),
+            executedAt: executedAt.toISOString(),
+            ...summary,
+          }));
         },
         (error: unknown) => {
           console.error(JSON.stringify({ event: 'notifications_failed', message: String(error) }));
@@ -37,6 +42,6 @@ export default {
       ));
       return;
     }
-    context.waitUntil(scheduledCleanup(env, now));
+    context.waitUntil(scheduledCleanup(env, executedAt));
   },
 } satisfies ExportedHandler<AppEnv>;

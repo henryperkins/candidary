@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthService } from '../../worker/auth/service';
 import { MediaRepository } from '../../worker/db/media';
@@ -7,6 +7,7 @@ import {
   cleanupExpiredReservations,
   deleteEventData,
 } from '../../worker/workflows/cleanup';
+import worker from '../../worker/index';
 import { eventAccess, png, resetDatabase, testEnv } from './helpers';
 
 describe('lifecycle cleanup', () => {
@@ -109,5 +110,25 @@ describe('lifecycle cleanup', () => {
     expect(await testEnv.DB.prepare(`
       SELECT scope_digest FROM host_auth_rate_limits
     `).all()).toMatchObject({ results: [{ scope_digest: 'boundary' }] });
+  });
+
+  it('uses wall-clock execution time rather than nominal cron time for cleanup', async () => {
+    const access = await eventAccess();
+    const scheduledAt = new Date('2026-07-21T12:00:00.000Z');
+    const executedAt = new Date('2026-07-21T12:10:00.000Z');
+    await testEnv.DB.prepare('UPDATE events SET purge_after = ? WHERE id = ?')
+      .bind('2026-07-21T12:05:00.000Z', access.event.id).run();
+    const scheduled: Promise<unknown>[] = [];
+    const clock = vi.useFakeTimers();
+    clock.setSystemTime(executedAt);
+
+    worker.scheduled!({ cron: '0 0 * * *', scheduledTime: scheduledAt.getTime() } as ScheduledController,
+      testEnv,
+      { waitUntil: (promise: Promise<unknown>) => scheduled.push(promise), passThroughOnException() {} } as unknown as ExecutionContext);
+    await Promise.all(scheduled);
+    clock.useRealTimers();
+
+    expect(await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+      .bind(access.event.id).first('deleted_at')).toBe(executedAt.toISOString());
   });
 });

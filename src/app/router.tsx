@@ -9,6 +9,7 @@ import { EventPage } from '../pages/EventPage';
 import { LandingPage } from '../pages/LandingPage';
 import { HostEventsPage } from '../pages/HostEventsPage';
 import { HostLoginPage } from '../pages/HostLoginPage';
+import { HostRegisterPage } from '../pages/HostRegisterPage';
 import { HostVerifyPage } from '../pages/HostVerifyPage';
 import { ManagerPage } from '../pages/ManagerPage';
 
@@ -19,6 +20,7 @@ const routes: RouteObject[] = [
   { path: '/event/:slug/fullscreen', element: <EventPage fullscreen /> },
   { path: '/manage/event/:eventId', element: <ManagerPage /> },
   { path: '/host/login', element: <HostLoginPage /> },
+  { path: '/host/register', element: <HostRegisterPage /> },
   { path: '/host/events', element: <HostEventsPage /> },
   { path: '/host/verify', element: <HostVerifyPage /> },
   { path: '*', element: <main className="centered-state"><h1>That page wandered off.</h1><a href="/">Return to Candidary</a></main> },

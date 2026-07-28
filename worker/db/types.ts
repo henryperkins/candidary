@@ -106,6 +106,7 @@ export interface PendingRegistrationRecord {
   attempts: number;
   expiresAt: string;
   consumedAt: string | null;
+  activationNonce: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -2,7 +2,7 @@ import { type FormEvent, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
-import { adoptTargetFor, HOST_EVENTS_PATH, safeReturnTo } from '../app/recovery';
+import { adoptTargetFor, hostRegisterHref, HOST_EVENTS_PATH, safeReturnTo } from '../app/recovery';
 import { MIN_HOST_PASSWORD_LENGTH } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 
@@ -128,6 +128,7 @@ export function HostLoginPage() {
           {mode === 'signin'
             ? <button type="button" className="text-link" onClick={() => switchTo('forgot')}>Forgotten your password?</button>
             : <button type="button" className="text-link" onClick={() => switchTo('signin')}>Back to sign in</button>}
+          {mode === 'signin' && <Link className="text-link" to={hostRegisterHref(adopt, returnTo)}>Create account</Link>}
           <Link className="text-link" to="/create">Create a new event</Link>
         </div>
       </section>

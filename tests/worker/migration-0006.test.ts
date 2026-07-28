@@ -98,4 +98,8 @@ it('applies 0006 without rebuilding populated event sessions', async () => {
     'host_registration_challenges',
     'host_registration_one_live_address',
   ]);
+  const registrationColumns = await env.DB.prepare(
+    'SELECT name FROM pragma_table_info(\'host_registration_challenges\') ORDER BY cid',
+  ).all<{ name: string }>();
+  expect(registrationColumns.results.map(({ name }) => name)).toContain('activation_nonce');
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { adoptTargetFor, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
+import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
 
 const EVENT = '11111111-2222-4333-8444-555555555555';
 
@@ -54,5 +54,21 @@ describe('host recovery paths', () => {
   it('falls back to a bare sign-in link for an unusable event id', () => {
     expect(hostSignInHref('not-a-uuid')).toBe('/host/login');
     expect(hostSignInHref(null)).toBe('/host/login');
+  });
+
+  it('builds a registration href from only validated recovery context', () => {
+    const href = hostRegisterHref(EVENT, `/manage/event/${EVENT}`, true);
+    expect(href).toBe(`/host/register?returnTo=%2Fmanage%2Fevent%2F${EVENT}&adopt=${EVENT}&pending=1`);
+
+    const search = new URLSearchParams(href.slice(href.indexOf('?') + 1));
+    const returnTo = safeReturnTo(search.get('returnTo'));
+    expect(returnTo).toBe(`/manage/event/${EVENT}`);
+    expect(adoptTargetFor(returnTo, search.get('adopt'))).toBe(EVENT);
+  });
+
+  it('refuses unsafe or mismatched registration recovery context', () => {
+    const other = '99999999-2222-4333-8444-555555555555';
+    expect(hostRegisterHref(EVENT, 'https://evil.example.com', true)).toBe('/host/register?returnTo=%2Fmanage%2Fevent%2F11111111-2222-4333-8444-555555555555&adopt=11111111-2222-4333-8444-555555555555&pending=1');
+    expect(hostRegisterHref(other, `/manage/event/${EVENT}`)).toBe(`/host/register?returnTo=%2Fmanage%2Fevent%2F${EVENT}`);
   });
 });
