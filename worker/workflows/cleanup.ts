@@ -1,5 +1,4 @@
 import type { AppEnv } from '../env';
-import { NotificationService } from '../services/notifications';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
@@ -97,14 +96,9 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   await cleanupAuthScratch(env, now);
   await cleanupExpiredReservations(env, now);
   await cleanupExpiredExports(env, now);
-  // Notifications go out before the purge, not after. The access warning is about
-  // a deadline this same run may be enforcing, and sending it to a host whose event
-  // has just been deleted would be worse than not sending it at all.
-  await new NotificationService(env).run(now).catch((error: unknown) => {
-    // Cleanup is the job that must not be skipped. A mail failure is logged and
-    // dropped rather than allowed to abort the purge that follows it.
-    console.error(JSON.stringify({ event: 'notifications_failed', message: String(error) }));
-  });
+  // Notification delivery is no longer part of this run. It has its own hourly
+  // trigger and its own durable state, so a mail failure and a retention purge no
+  // longer share a failure boundary in either direction.
   const purged = await env.DB.prepare(`
     SELECT id FROM events WHERE deleted_at IS NULL AND purge_after <= ? LIMIT 100
   `).bind(now.toISOString()).all<{ id: string }>();

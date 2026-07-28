@@ -39,8 +39,11 @@
       "class_name": "ExportWorkflow"
     }
   ],
+  // Two independent schedules. Notification delivery runs hourly so a failed send
+  // retries within the hour instead of waiting a day; retention cleanup keeps its
+  // own daily slot and its own failure boundary.
   "triggers": {
-    "crons": ["17 3 * * *"]
+    "crons": ["17 3 * * *", "47 * * * *"]
   },
   "vars": {
     "APP_ORIGIN": "https://candidary.online",

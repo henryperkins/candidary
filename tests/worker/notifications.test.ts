@@ -1,7 +1,9 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AccountsRepository } from '../../worker/db/accounts';
+import { NotificationOutboxRepository } from '../../worker/db/notification-outbox';
+import { EmailService } from '../../worker/services/email';
 import { NotificationService } from '../../worker/services/notifications';
 import { eventAccess, resetDatabase, testEnv } from './helpers';
 
@@ -122,5 +124,155 @@ describe('lifecycle notifications', () => {
     const confirmed = (await accounts.getById(unverified.account.id))!;
     expect(await service.sendGettingStarted(confirmed, event)).toBe(true);
     expect(await sentKinds()).toEqual(['getting_started']);
+  });
+});
+
+describe('durable notification outbox', () => {
+  // Spies on the email boundary are per-test; without this a later assertion sees
+  // the call counts of every test before it.
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  // Rows are inserted directly so each test pins one scheduling state exactly,
+  // rather than depending on whatever the claim path happened to schedule.
+  async function outboxRow(input: {
+    accountId: string;
+    eventId: string;
+    kind?: string;
+    availableAt?: string;
+    status?: string;
+    claimToken?: string | null;
+    leaseExpiresAt?: string | null;
+    discardAfter?: string | null;
+  }) {
+    const id = crypto.randomUUID();
+    const at = input.availableAt ?? new Date(Date.now() - 1000).toISOString();
+    await env.DB.prepare(`
+      INSERT INTO host_notification_outbox (
+        id, account_id, event_id, kind, status, available_at, retry_at, discard_after,
+        claimed_at, claim_token, lease_expires_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      id, input.accountId, input.eventId, input.kind ?? 'getting_started',
+      input.status ?? 'pending', at, at, input.discardAfter ?? null,
+      input.claimToken ? at : null, input.claimToken ?? null, input.leaseExpiresAt ?? null,
+      at, at,
+    ).run();
+    return id;
+  }
+
+  async function stateOf(id: string) {
+    return env.DB.prepare(`
+      SELECT status, attempt_count, claim_token, last_error_code FROM host_notification_outbox WHERE id = ?
+    `).bind(id).first<{ status: string; attempt_count: number; claim_token: string | null; last_error_code: string | null }>();
+  }
+
+  function failSendOnce() {
+    let calls = 0;
+    return vi.spyOn(EmailService.prototype, 'send').mockImplementation(async () => {
+      calls += 1;
+      return calls === 1 ? { delivered: false, code: 'temporary_failure' } : { delivered: true };
+    });
+  }
+
+  it('retains a failed message as pending and sends it on the next run', async () => {
+    const { account, eventId } = await hostedEvent();
+    const id = await outboxRow({ accountId: account.id, eventId });
+    failSendOnce();
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+    expect(await stateOf(id)).toMatchObject({ status: 'pending', attempt_count: 1 });
+    // The retry is scheduled into the future, so it only becomes due later.
+    await env.DB.prepare("UPDATE host_notification_outbox SET retry_at = ? WHERE id = ?")
+      .bind(new Date(Date.now() - 1000).toISOString(), id).run();
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+    expect(await stateOf(id)).toMatchObject({ status: 'sent', attempt_count: 2 });
+  });
+
+  it('continues delivering after one recipient fails', async () => {
+    const first = await hostedEvent({ email: 'one@example.com' });
+    const second = await hostedEvent({ email: 'two@example.com' });
+    const third = await hostedEvent({ email: 'three@example.com' });
+    await outboxRow({ accountId: first.account.id, eventId: first.eventId });
+    await outboxRow({ accountId: second.account.id, eventId: second.eventId });
+    await outboxRow({ accountId: third.account.id, eventId: third.eventId });
+
+    let call = 0;
+    vi.spyOn(EmailService.prototype, 'send').mockImplementation(async () => {
+      call += 1;
+      return call === 2 ? { delivered: false, code: 'temporary_failure' } : { delivered: true };
+    });
+
+    expect(await new NotificationService(testEnv).dispatchPending(new Date()))
+      .toMatchObject({ sent: 2, retried: 1 });
+  });
+
+  it('claims no more than the fixed batch in one run', async () => {
+    // One row per event: the outbox is unique per account, event, and kind, so a
+    // batch of seven means seven events.
+    for (let index = 0; index < 7; index += 1) {
+      const hosted = await hostedEvent({ email: `host${index}@example.com` });
+      await outboxRow({ accountId: hosted.account.id, eventId: hosted.eventId });
+    }
+    vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    const result = await new NotificationService(testEnv).dispatchPending(new Date(), 3);
+    expect(result.sent).toBe(3);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM host_notification_outbox WHERE status = 'pending'")
+      .first('count')).toBe(4);
+  });
+
+  it('keeps a run that was missed entirely still eligible', async () => {
+    const { account, eventId } = await hostedEvent();
+    // Due three days ago and never picked up: a fixed one-run window would have
+    // dropped it, an outbox must not.
+    const id = await outboxRow({ accountId: account.id, eventId, availableAt: inDays(-3) });
+    vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+    expect(await stateOf(id)).toMatchObject({ status: 'sent' });
+  });
+
+  it('reclaims a lease whose worker died and fences out its old token', async () => {
+    const { account, eventId } = await hostedEvent();
+    const id = await outboxRow({
+      accountId: account.id, eventId, status: 'sending',
+      claimToken: 'dead-worker-token',
+      leaseExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+    const after = await stateOf(id);
+    expect(after).toMatchObject({ status: 'sent' });
+    expect(after!.claim_token).not.toBe('dead-worker-token');
+
+    // The dead worker waking up late must not be able to overwrite the result.
+    const outbox = new NotificationOutboxRepository(env.DB);
+    expect(await outbox.markSent(id, 'dead-worker-token', new Date().toISOString())).toBe(false);
+    expect(await stateOf(id)).toMatchObject({ status: 'sent' });
+  });
+
+  it('retires a row for an opted-out account without sending it', async () => {
+    const { account, eventId } = await hostedEvent({ notifications: false });
+    const id = await outboxRow({ accountId: account.id, eventId });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+    expect(send).not.toHaveBeenCalled();
+    expect(await stateOf(id)).toMatchObject({ status: 'failed', last_error_code: 'suppressed_by_preference' });
+  });
+
+  it('retires a reminder that is already obsolete rather than sending it late', async () => {
+    const { account, eventId } = await hostedEvent();
+    const id = await outboxRow({
+      accountId: account.id, eventId, kind: 'event_reminder',
+      availableAt: inDays(-5), discardAfter: inDays(-2),
+    });
+    const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
+
+    await new NotificationService(testEnv).dispatchPending(new Date());
+    expect(send).not.toHaveBeenCalled();
+    expect(await stateOf(id)).toMatchObject({ status: 'failed', last_error_code: 'obsolete' });
   });
 });
