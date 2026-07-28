@@ -1,20 +1,32 @@
 import { Check, ImagePlus, LockKeyhole, QrCode } from 'lucide-react';
 import QRCode from 'qrcode';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
 import { MAX_EVENT_MEDIA } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
+import { HostAccountPanel } from '../components/HostAccountPanel';
+import { hostRegisterHref } from '../app/recovery';
 
-interface Created { event: { id: string; name: string; slug: string }; guestLink: string; managementLink: string; csrfToken: string }
+interface Created {
+  event: { id: string; name: string; slug: string };
+  guestLink: string;
+  managementLink: string;
+  csrfToken: string;
+  // Committed server-side when a signed-in host created the event, so the success
+  // screen never has to guess whether the event is already recoverable.
+  savedToAccount?: boolean;
+}
 
 // Form order, not response order: the host should be taken to the first problem they would reach anyway.
 const CREATE_FIELDS = ['name', 'eventDate', 'welcomeMessage'] as const;
 
 export function CreatePage() {
+  const navigate = useNavigate();
   const [created, setCreated] = useState<Created | null>(null);
+  const [saved, setSaved] = useState(false);
   const [cover, setCover] = useState<File | null>(null);
   const [coverError, setCoverError] = useState('');
   const [qr, setQr] = useState('');
@@ -43,6 +55,7 @@ export function CreatePage() {
         name: data.get('name'), eventDate: data.get('eventDate'), welcomeMessage: data.get('welcomeMessage'),
       }) });
       setCreated(result);
+      setSaved(result.savedToAccount === true);
       if (cover) {
         try {
           const upload = await api<{ objectKey: string; url: string }>(`/api/manage/events/${result.event.id}/cover`, { method: 'POST', body: JSON.stringify({ filename: cover.name, mimeType: cover.type, byteSize: cover.size }) });
@@ -61,12 +74,24 @@ export function CreatePage() {
   }
 
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
-    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
-      <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />It cannot be recovered in this MVP.</p></div>
+    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p><p className="form-note">The creator session’s ownership eligibility ends at the earlier of the management deadline and 12 hours after creation.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
+      {/* The warning is only true while the link is the sole way in. Once the event
+          is saved to an account it stops being true, and leaving it up would talk a
+          host out of the recovery they just set up. */}
+      <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
       <CopyableLinkCard label="Guest link" value={created.guestLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
-      <a className="button button--primary" href={created.managementLink}>Open event manager</a>
+      <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
+    {/* Mounted on whether creation already attached the event, not on `saved`.
+        Keying it to `saved` would unmount the panel the moment completion
+        succeeded, so the host would click Confirm and watch it disappear instead
+        of being told their address was confirmed. */}
+    {!created.savedToAccount && <HostAccountPanel
+      bindEventId={created.event.id}
+      onCompleted={({ boundEvent }) => { if (boundEvent) setSaved(true); }}
+      onStarted={() => navigate(hostRegisterHref(created.event.id, `/manage/event/${created.event.id}`, true))}
+    />}
   </main></div>;
 
   return <div className="public-shell"><PageHeader action={<Link className="text-link" to="/">Back home</Link>} /><main className="create-layout">

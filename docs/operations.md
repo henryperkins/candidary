@@ -2,11 +2,17 @@
 
 ## Scheduled lifecycle work
 
-The daily `17 3 * * *` handler performs three idempotent jobs:
+Two triggers share one handler and are selected by `controller.cron`.
 
-1. Delete objects for upload reservations older than fifteen minutes and release event counters.
-2. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
-3. Mark retention-due events inaccessible, revoke tokens and sessions, and sweep their R2 event prefix.
+The hourly `47 * * * *` handler delivers lifecycle email from the outbox. It is
+independent of retention cleanup: neither can abort the other.
+
+The daily `17 3 * * *` handler performs four idempotent jobs:
+
+1. Sweep expired and consumed pending registrations, expired login challenges, and rate-limit buckets older than the enforcement window, in repeated bounded passes until each table is drained.
+2. Delete objects for upload reservations older than fifteen minutes and release event counters.
+3. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
+4. Mark retention-due events inaccessible, revoke tokens and sessions, and sweep their R2 event prefix.
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 
@@ -60,3 +66,25 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 ## Recovery boundaries
 
 The application does not promise recovery for a lost management link, explicit deletion, or retention purge. Do not restore an object without its matching D1 lifecycle state. Preview generation can be retried safely; an unavailable preview does not mean the original failed delivery. Never copy an original into the preview key as a fallback: every served derivative must pass through the Images binding so original metadata is not exposed.
+
+## Host notifications
+
+Three lifecycle emails are scheduled as `host_notification_outbox` rows in the same D1 batch that commits a host's ownership of an event: a getting-started guide, a reminder the day before the event date, and a warning seven days before management access ends. Because the rows are written with the membership, a refused or rolled-back ownership claim can never leave mail scheduled that implies ownership.
+
+The warning is keyed to `management_access_expires_at`, not `purge_after`. Management access ends 90 days after the event and photos are deleted at 120, so a warning keyed to deletion would reach the host a month after they could still act on it.
+
+The hourly `47 * * * *` dispatcher reclaims leases older than ten minutes, claims at most 100 due rows in one conditional UPDATE under one random claim token, loads them with account and event data in one explicit-column join, then obtains a fresh conditional authorization immediately before each provider call. That authorization is the durable send permit: a row that opts out, becomes unverified or disabled, is deleted, or expires after page load is retired without a send. The ceiling is therefore 203 D1 statements per run, and 100 messages per run is inside the account's 1,000-per-day quota.
+
+Row states are `pending → sending → sent`. A transient provider failure returns the row to `pending` with an incremented attempt count and a retry at 5 minutes, 1 hour, 6 hours, then 24 hours; the fifth failed attempt is terminal. A missed run does not erase eligibility because `available_at` is immutable and `retry_at` only moves forward. `discard_after` retires a reminder once its event has passed and a warning once its deadline has, rather than sending either late.
+
+Rows whose account is disabled, unverified, or opted out are retired with a non-sensitive `last_error_code` and no send. A provider call already holding its authorization permit may finish if an opt-out commits just before the external invocation; every later row must obtain a new permit and is suppressed. Scheduled jobs use wall-clock execution time for both dispatch and cleanup, while recording the nominal schedule time separately in telemetry. Delivery is at least once: an isolate that dies between provider acceptance and the fenced success update will resend on the next run.
+
+Investigate a growing count of `status = 'failed'` rows by `last_error_code`. `suppressed_by_preference`, `address_unverified`, `account_disabled`, `event_deleted`, and `obsolete` are ordinary; repeated provider codes are not.
+
+## Email preferences
+
+`GET /host/unsubscribe/:token` renders a confirmation form and changes nothing — inbox links are followed by scanners, prefetchers, and preview generators before a person reads them. The signed `POST` to the same URL performs the opt-out, which is what mail providers issue for one-click `List-Unsubscribe`. A signed-in host re-enables lifecycle email from the account page through the authenticated preferences endpoint.
+
+Cloudflare Queues remain the next scaling step rather than part of this design. A durable D1 row would still be written first, because publishing a queue message cannot be atomic with the account and event transaction.
+
+Sending is capped at 1,000 messages per day for the account. Outbound sends appear as **dropped** in the Email Routing summary even when delivered; use the Email Sending metrics instead. A hard-bounced address is added to Cloudflare's suppression list, after which its codes silently stop arriving — the management link is the remaining route for that host.

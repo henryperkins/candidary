@@ -13,6 +13,8 @@ The primary journey ends with an exact delivery receipt. Shared galleries, notes
 - Required 1-80 character guest-name snapshots remembered on the device.
 - Private R2 originals with authorized Cloudflare Images previews.
 - Live host intake, guest-name search, optional gallery publication, and notes.
+- Optional host accounts with email and password, so an event survives a lost management link. An address becomes an account only after an emailed code proves the mailbox.
+- Emailed getting-started, event-day, and access-expiry notices, sent from a durable D1 outbox with one-click unsubscribe.
 - 10,000 photos and 100 GiB per event by design.
 - Complete exports containing every stored original in source-bounded 2 GiB ZIP parts plus a manifest.
 
@@ -33,7 +35,9 @@ Generate independent local secrets with Node:
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Run that command three times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `GUEST_TOKEN_ENCRYPTION_KEY`. Direct upload URLs also require an R2 API token in `.dev.vars`.
+Run that command four times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and `LOGIN_HMAC_KEY`. Direct upload URLs also require an R2 API token in `.dev.vars`.
+
+Outbound email needs no local configuration: `wrangler dev` simulates the `EMAIL` binding and writes each message to a file it names in the console. Real sending is described in [deployment.md](docs/deployment.md).
 
 ## Verification
 
@@ -51,7 +55,7 @@ The load command is a dry run unless an operator supplies a dedicated rehearsal 
 ## Architecture
 
 - `src/` — React event drop, upload queue, secondary guest content, and host intake.
-- `worker/` — Hono API, authorization, D1 repositories, private R2 storage, Images previews, exports, and cleanup.
+- `worker/` — Hono API, authorization, host accounts, D1 repositories, private R2 storage, Images previews, exports, notifications, and cleanup.
 - `migrations/` — D1 schema and state constraints.
 - `shared/` — contracts, limits, and stable errors.
 - `tests/` — unit, Worker integration, and real-browser coverage.

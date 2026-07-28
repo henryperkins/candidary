@@ -20,3 +20,7 @@ export const MANAGER_MEDIA_MAX_PAGE_SIZE = 50;
 export const MANAGER_BULK_SELECTION_MAX = 50;
 export const UPLOAD_URL_TTL_SECONDS = 10 * 60;
 export const UPLOAD_RESERVATION_TTL_SECONDS = 15 * 60;
+// The security notes name this file as the single source of truth for limits, so
+// the password floor lives here rather than being asserted twice.
+export const MIN_HOST_PASSWORD_LENGTH = 12;
+export const MAX_HOST_PASSWORD_LENGTH = 256;

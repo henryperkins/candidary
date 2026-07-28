@@ -38,8 +38,8 @@ function mapToken(row: TokenRow): TokenRecord {
 export class TokensRepository {
   constructor(private readonly db: D1Database) {}
 
-  async create(input: CreateTokenRecord): Promise<TokenRecord> {
-    await this.db.prepare(`
+  createStatement(input: CreateTokenRecord): D1PreparedStatement {
+    return this.db.prepare(`
       INSERT INTO event_access_tokens (
         id, event_id, role, secret_digest, secret_ciphertext, expires_at, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -51,7 +51,11 @@ export class TokensRepository {
       input.secretCiphertext,
       input.expiresAt,
       input.createdAt,
-    ).run();
+    );
+  }
+
+  async create(input: CreateTokenRecord): Promise<TokenRecord> {
+    await this.createStatement(input).run();
     return (await this.getById(input.id))!;
   }
 

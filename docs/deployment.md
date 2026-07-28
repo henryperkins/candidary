@@ -11,7 +11,7 @@ npx wrangler r2 bucket create candidary-media
 
 The Worker uses an `IMAGES` binding for metadata-free browser previews, including HEIC and HEIF. Confirm the account plan and Images availability before deploying; preview failure never removes an already delivered original, but hosts need the binding to view phone formats cross-browser.
 
-Set the R2 CORS policy after replacing the example origin:
+The R2 CORS policy names the application origin, so it has to be reset whenever `APP_ORIGIN` changes — a signed browser `PUT` comes from the page, not from the Worker, and a stale origin fails every upload while leaving the rest of the app working. Set it after replacing the example origin:
 
 ```powershell
 Copy-Item config/r2-cors.example.json config/r2-cors.json
@@ -28,11 +28,14 @@ Generate independent 32-byte values and store them with Wrangler. The guest encr
 npx wrangler secret put TOKEN_HMAC_KEY
 npx wrangler secret put SESSION_HMAC_KEY
 npx wrangler secret put GUEST_TOKEN_ENCRYPTION_KEY
+npx wrangler secret put LOGIN_HMAC_KEY
 npx wrangler secret put R2_ACCESS_KEY_ID
 npx wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
 Scope the R2 credentials to the single Candidary bucket with object read/write permissions. Never reuse the token or session HMAC key.
+
+All six are listed under `secrets.required` in `wrangler.jsonc`. That declaration is the source of truth for generated binding types and makes Wrangler refuse to deploy a Worker whose required secret is missing, so a forgotten value fails the upload rather than the first host who tries to sign in. Run `npx wrangler types` after changing it.
 
 ## Migrate and deploy
 
@@ -41,7 +44,7 @@ npx wrangler d1 migrations apply candidary-core --remote
 npm run deploy
 ```
 
-This applies the private-delivery/publication split and partitioned-export schema, then deploys the export Workflow, Images binding, private asset routing, and daily cleanup trigger. Confirm `APP_ORIGIN` exactly matches the HTTPS origin before printing a QR code.
+This applies the private-delivery/publication split and partitioned-export schema, then deploys the export Workflow, Images binding, private asset routing, the daily cleanup trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the HTTPS origin before printing a QR code.
 
 ## Wedding rehearsal gate
 
@@ -105,3 +108,19 @@ emulator, a simulator, or a desktop browser's device mode does not count.
 ## Public-launch gate
 
 The event-creation endpoint is suitable for a controlled deployment. Before unrestricted public traffic, add Cloudflare rate limiting and Turnstile to `POST /api/events`, alert on creation/upload spikes, and assign an abuse-response owner.
+
+## Email
+
+Host accounts send confirmation codes, password resets, and lifecycle notifications through the `EMAIL` binding (Cloudflare Email Service).
+
+`candidary.online` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.online`, set in `EMAIL_FROM`. The account quota is 1,000 messages per day.
+
+Setting up a different domain means repeating three things:
+
+1. Create a sending subdomain for the zone and let Cloudflare write its SPF, DKIM, and DMARC records. A `workers.dev` subdomain cannot be used — those records need DNS you control.
+2. Point `EMAIL_FROM` at an address on that domain.
+3. Confirm the account is on the Workers Paid plan. The free plan can only send to verified destination addresses in your own account, which is not enough for real hosts.
+
+`LOGIN_HMAC_KEY` is a secret like the others and is required whether or not mail is configured — it signs the emailed codes and the unsubscribe links.
+
+Without remote bindings, `wrangler dev` simulates sending and writes each message to a local file, so local development needs no mail configuration at all. Add `"remote": true` to the `send_email` binding to send real mail from a local Worker.

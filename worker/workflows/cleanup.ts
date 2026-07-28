@@ -1,6 +1,7 @@
 import type { AppEnv } from '../env';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
+import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
 
 async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<void> {
   let cursor: string | undefined;
@@ -39,6 +40,73 @@ export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Prom
   return expired.length;
 }
 
+// Each pass deletes at most this many rows per table, and the sweep repeats until a
+// pass comes back short. A single 100-row pass per day could not keep up: fifteen
+// minute windows mean one busy address alone can leave ~96 rate-limit buckets a day,
+// and pending registrations hold a scrypt hash until they are swept.
+const AUTH_SCRATCH_BATCH = 100;
+const AUTH_SCRATCH_MAX_PASSES = 50;
+
+export async function cleanupAuthScratch(
+  env: AppEnv,
+  now = new Date(),
+): Promise<{ registrations: number; challenges: number; rateLimits: number }> {
+  const total = { registrations: 0, challenges: 0, rateLimits: 0 };
+  for (let pass = 0; pass < AUTH_SCRATCH_MAX_PASSES; pass += 1) {
+    const swept = await sweepAuthScratch(env, now);
+    total.registrations += swept.registrations;
+    total.challenges += swept.challenges;
+    total.rateLimits += swept.rateLimits;
+    // A short pass means every table is drained; the cap is only a runaway guard.
+    if (swept.registrations < AUTH_SCRATCH_BATCH
+      && swept.challenges < AUTH_SCRATCH_BATCH
+      && swept.rateLimits < AUTH_SCRATCH_BATCH) break;
+  }
+  return total;
+}
+
+async function sweepAuthScratch(
+  env: AppEnv,
+  now: Date,
+): Promise<{ registrations: number; challenges: number; rateLimits: number }> {
+  const timestamp = now.toISOString();
+  const rateLimitCutoff = new Date(now.getTime() - AUTH_RATE_LIMIT_WINDOW_MS).toISOString();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      DELETE FROM host_registration_challenges
+      WHERE id IN (
+        SELECT id FROM host_registration_challenges
+        WHERE consumed_at IS NOT NULL OR expires_at < ?
+        ORDER BY updated_at
+        LIMIT ?
+      )
+    `).bind(timestamp, AUTH_SCRATCH_BATCH),
+    env.DB.prepare(`
+      DELETE FROM host_login_challenges
+      WHERE id IN (
+        SELECT id FROM host_login_challenges
+        WHERE expires_at < ?
+        ORDER BY expires_at
+        LIMIT ?
+      )
+    `).bind(timestamp, AUTH_SCRATCH_BATCH),
+    env.DB.prepare(`
+      DELETE FROM host_auth_rate_limits
+      WHERE rowid IN (
+        SELECT rowid FROM host_auth_rate_limits
+        WHERE window_started_at < ?
+        ORDER BY window_started_at
+        LIMIT ?
+      )
+    `).bind(rateLimitCutoff, AUTH_SCRATCH_BATCH),
+  ]);
+  return {
+    registrations: results[0]?.meta.changes ?? 0,
+    challenges: results[1]?.meta.changes ?? 0,
+    rateLimits: results[2]?.meta.changes ?? 0,
+  };
+}
+
 export async function deleteEventData(env: AppEnv, eventId: string, now = new Date()): Promise<void> {
   const timestamp = now.toISOString();
   await env.DB.batch([
@@ -50,8 +118,12 @@ export async function deleteEventData(env: AppEnv, eventId: string, now = new Da
 }
 
 export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {
+  await cleanupAuthScratch(env, now);
   await cleanupExpiredReservations(env, now);
   await cleanupExpiredExports(env, now);
+  // Notification delivery is no longer part of this run. It has its own hourly
+  // trigger and its own durable state, so a mail failure and a retention purge no
+  // longer share a failure boundary in either direction.
   const purged = await env.DB.prepare(`
     SELECT id FROM events WHERE deleted_at IS NULL AND purge_after <= ? LIMIT 100
   `).bind(now.toISOString()).all<{ id: string }>();

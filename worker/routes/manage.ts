@@ -3,12 +3,11 @@ import { z } from 'zod';
 
 import type { PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
-import { AuthService } from '../auth/service';
+import { requireManager } from '../auth/manager';
+import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
-import { getSessionCookie } from '../http/cookies';
-import { assertCsrf } from '../http/csrf';
 import { LinkService } from '../services/links';
 import { TokensRepository } from '../db/tokens';
 import { decryptGuestSecret } from '../security/crypto';
@@ -52,13 +51,8 @@ const coverSchema = z.object({
   byteSize: z.number().int().positive().max(MAX_IMAGE_BYTES),
 });
 
-async function managerForEvent(context: Context<AppBindings>, write = false) {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
-  if (auth.session.role !== 'manager' || auth.event.id !== context.req.param('eventId')) {
-    throw new ApiError('ROLE_FORBIDDEN', 'This management session belongs to a different event.', 403);
-  }
-  if (write) await assertCsrf(context, auth);
-  return auth;
+function managerForEvent(context: Context<AppBindings>, write = false) {
+  return requireManager(context, { write });
 }
 
 function publicationTarget(action: 'publish' | 'hide'): PublicationStatus {
@@ -195,7 +189,18 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
 for (const role of ['guest', 'manager'] as const) {
   manageRoutes.post(`/manage/events/:eventId/links/${role}/rotate`, async (context) => {
     const auth = await managerForEvent(context, true);
-    const result = await new LinkService(context.env).rotate(auth, role);
+    if (role === 'manager') {
+      const ownership = await new AccountsRepository(context.env.DB)
+        .getEventOwnershipState(auth.event.id, new Date().toISOString());
+      if (ownership && !ownership.hasOwner && ownership.claimStillPossible) {
+        throw new ApiError(
+          'ROLE_FORBIDDEN',
+          'Save this event from its original creator session before rotating its management link.',
+          409,
+        );
+      }
+    }
+    const result = await new LinkService(context.env).rotate(auth.event, role);
     return context.json({ data: result, requestId: context.get('requestId') });
   });
 }

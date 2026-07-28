@@ -23,6 +23,14 @@ export type ApiErrorCode =
   | 'VALIDATION_FAILED'
   | 'CSRF_INVALID'
   | 'ORIGIN_FORBIDDEN'
+  | 'HOST_SESSION_REQUIRED'
+  | 'LOGIN_CREDENTIALS_INVALID'
+  | 'LOGIN_CODE_INVALID'
+  | 'LOGIN_CODE_EXPIRED'
+  | 'LOGIN_RATE_LIMITED'
+  | 'RATE_LIMITED'
+  | 'LOGIN_EMAIL_UNDELIVERABLE'
+  | 'ACCOUNT_DISABLED'
   | 'INTERNAL_ERROR';
 
 export interface ApiErrorBody {
@@ -66,4 +74,3 @@ export function toErrorResponse(error: unknown, requestId: string): { status: nu
     },
   };
 }
-

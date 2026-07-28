@@ -19,6 +19,8 @@ export default defineConfig({
           TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
           SESSION_HMAC_KEY: 'test-session-hmac-key-with-at-least-32-bytes',
           GUEST_TOKEN_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',
+          LOGIN_HMAC_KEY: 'test-login-hmac-key-with-at-least-32-bytes',
+          EMAIL_FROM: 'hello@candidary.test',
           R2_ACCOUNT_ID: 'local',
           R2_ACCESS_KEY_ID: 'test-r2-access-key',
           R2_SECRET_ACCESS_KEY: 'test-r2-secret-key',
@@ -31,5 +33,8 @@ export default defineConfig({
   ],
   test: {
     include: ['tests/worker/**/*.test.ts'],
+    // Password hashing is deliberately expensive, and a test that registers and
+    // signs in several times spends real time in scrypt rather than waiting on IO.
+    testTimeout: 20_000,
   },
 });

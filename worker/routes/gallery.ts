@@ -9,7 +9,7 @@ import { getSessionCookie } from '../http/cookies';
 export const galleryRoutes = new Hono<AppBindings>();
 
 galleryRoutes.get('/event/:slug/gallery', async (context) => {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
+  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
   if (auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
@@ -21,7 +21,7 @@ galleryRoutes.get('/event/:slug/gallery', async (context) => {
 });
 
 galleryRoutes.get('/event/:slug/contributions', async (context) => {
-  const auth = await new AuthService(context.env).resolve(getSessionCookie(context));
+  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
   if (auth.session.role !== 'guest' || auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
