@@ -53,10 +53,10 @@ Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCi
 
 ### Allowed above-the-fold copy
 
-Public: `Candidary`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three workflow labels.
+Public: `Candidary`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three workflow labels. The returning-host entry point is also allowed, worded exactly `Already have an account?` and `Sign in to your events`. It is permitted because a host who already has an account otherwise reaches their events only from a manager card or a typed URL; it sits below the primary actions, and it clears the fold at 320 x 568 but not at 360 x 640 or 390 x 844.
 
 Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
 
 Manager: `Candidary`, event name/date, guest-upload state, capacity/lifecycle facts, and the active section title.
 
-No eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.
+Apart from that entry point, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.
