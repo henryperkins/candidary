@@ -66,6 +66,10 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .hero__copy { max-width: 710px; grid-row: 1; }
 .hero h1 { margin-bottom: 30px; font-size: 3.15rem; }
 .hero__copy > p { max-width: 600px; margin-bottom: 35px; color: var(--muted); font-size: clamp(1.05rem, 1.5vw, 1.3rem); }
+/* The returning-host entry point. Sized under the lede rather than at it, because it speaks to the
+   minority of visitors who already have an account; the link itself still carries the 44px floor. */
+.hero__copy > p.hero__account { margin: 24px 0 0; font-size: .95rem; }
+.hero__account .text-link { min-height: 44px; display: inline-flex; align-items: center; }
 .hero__image { height: clamp(280px, 82vw, 360px); max-height: 650px; grid-row: 2; position: relative; }
 .hero__image::before { content: ''; position: absolute; inset: -17px 20px 17px -17px; background: var(--apricot-soft); border-radius: 48% 48% 10px 10px; transform: rotate(-2deg); }
 .hero__image img { width: 100%; height: 100%; position: relative; object-fit: cover; border-radius: 48% 48% 9px 9px; }
