@@ -78,8 +78,8 @@ function mapHostSession(row: HostSessionRow): HostSessionRecord {
 export class SessionsRepository {
   constructor(private readonly db: D1Database) {}
 
-  async create(input: CreateSessionRecord): Promise<SessionRecord> {
-    await this.db.prepare(`
+  createStatement(input: CreateSessionRecord): D1PreparedStatement {
+    return this.db.prepare(`
       INSERT INTO event_sessions (
         id, secret_digest, csrf_digest, event_id, access_token_id, role, can_claim_owner, expires_at, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -93,7 +93,11 @@ export class SessionsRepository {
       input.canClaimOwner ? 1 : 0,
       input.expiresAt,
       input.createdAt,
-    ).run();
+    );
+  }
+
+  async create(input: CreateSessionRecord): Promise<SessionRecord> {
+    await this.createStatement(input).run();
     return (await this.getById(input.id))!;
   }
 

@@ -1024,3 +1024,148 @@ describe('manager experience', () => {
     expect(bulkCall?.[1]?.body).not.toContain('media-b');
   });
 });
+
+describe('host account attachment and recovery', () => {
+  // Routes the create call, then every host-account call, from one stub so a test
+  // can assert which endpoint the panel actually chose.
+  function stubHostFlow(overrides: Record<string, unknown> = {}) {
+    const fetchMock = vi.fn((url: string) => {
+      const path = String(url);
+      if (path === '/api/events') return json({ ...CREATED, savedToAccount: false, ...overrides.create as object }, 201);
+      if (path === '/api/host/register') return json({ registrationPending: true }, 202);
+      if (path === '/api/host/register/resend') return json({ registrationPending: true }, 202);
+      if (path === '/api/host/register/complete') {
+        return json({ registered: true, boundEvent: overrides.boundEvent ?? true });
+      }
+      return json({}, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock as unknown as ReturnType<typeof vi.fn> & { mock: { calls: [string, RequestInit?][] } };
+  }
+
+  async function registerFromCreate(user: ReturnType<typeof userEvent.setup>) {
+    await createEvent(user);
+    await user.type(screen.getByLabelText('Email address'), 'host@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a-sufficiently-long-password');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByRole('heading', { name: 'Check your email.' });
+  }
+
+  it('keeps the lost-link warning while registration is only pending', async () => {
+    stubHostFlow();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(userEvent.setup());
+
+    // Requesting a code is not proof of anything yet, so nothing may imply the
+    // event has become recoverable.
+    expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
+    expect(screen.queryByText(/already saved to this account/i)).not.toBeInTheDocument();
+  });
+
+  it('relaxes the warning only once completion reports a bound event', async () => {
+    stubHostFlow({ boundEvent: true });
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(user);
+
+    // Asserted before as well as after: a panel that relaxes the warning when the
+    // code is merely requested would otherwise satisfy the post-condition alone.
+    expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
+
+    await user.type(screen.getByLabelText('Confirmation code'), '424242');
+    await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
+
+    await waitFor(() => expect(screen.getByText(/Anyone who has it can manage this event/i)).toBeVisible());
+    expect(screen.queryByText(/cannot be recovered/i)).not.toBeInTheDocument();
+  });
+
+  it('says the event is still link-only when completion binds nothing', async () => {
+    stubHostFlow({ boundEvent: false });
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(user);
+
+    await user.type(screen.getByLabelText('Confirmation code'), '424242');
+    await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
+
+    // The account exists, but this event did not attach. Saying "saved" here is the
+    // exact false promise the warning exists to prevent.
+    await screen.findByText(/still depends on its management link/i);
+    expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
+  });
+
+  it('completes and resends a pending registration through the registration endpoints', async () => {
+    const fetchMock = stubHostFlow();
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await registerFromCreate(user);
+
+    await user.click(screen.getByRole('button', { name: 'Send another code' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register/resend')).toBe(true));
+
+    await user.type(screen.getByLabelText('Confirmation code'), '424242');
+    await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register/complete')).toBe(true));
+
+    // The host-session verification endpoints belong to the standalone account
+    // page; a browser with no account yet has no session to present to them.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/host/verify'))).toBe(false);
+  });
+
+  it('skips registration entirely when creation already saved the event', async () => {
+    stubHostFlow({ create: { savedToAccount: true } });
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await createEvent(userEvent.setup());
+
+    expect(screen.getByText(/Anyone who has it can manage this event/i)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Create account' })).not.toBeInTheDocument();
+  });
+});
+
+describe('host recovery from a dead credential', () => {
+  it('carries the event and a same-origin return path into the manager sign-in link', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson(
+      { code: 'HOST_SESSION_REQUIRED', message: 'Your sign-in has expired.', requestId: 'r' }, 401,
+    )));
+    render(<RouterProvider router={createAppRouter(['/manage/event/11111111-2222-4333-8444-555555555555'])} />);
+
+    const signIn = await screen.findByRole('link', { name: 'Sign in' });
+    // Both halves matter: the return path is what brings the host back, and `adopt`
+    // is what makes the trip worth taking.
+    expect(signIn).toHaveAttribute('href', '/host/login?returnTo=%2Fmanage%2Fevent%2F11111111-2222-4333-8444-555555555555&adopt=11111111-2222-4333-8444-555555555555');
+  });
+
+  it('offers sign-in when a manager route has no usable credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson(
+      { code: 'HOST_SESSION_REQUIRED', message: 'Your sign-in has expired.', requestId: 'r' }, 401,
+    )));
+    render(<RouterProvider router={createAppRouter(['/manage/event/11111111-2222-4333-8444-555555555555'])} />);
+
+    await screen.findByText('Your sign-in has expired.');
+    expect(await screen.findByRole('link', { name: 'Sign in' }))
+      .toHaveAttribute('href', expect.stringContaining('/host/login'));
+  });
+
+  it('adopts the returned event after signing in, before navigating away', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      seen.push(String(url));
+      if (String(url) === '/api/host/session') return json({ account: { id: 'a', email: 'h@e.com', displayName: null, emailVerified: true, notificationsEnabled: true }, events: [] });
+      return json({}, 200);
+    }));
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter([
+      '/host/login?returnTo=%2Fmanage%2Fevent%2F11111111-2222-4333-8444-555555555555&adopt=11111111-2222-4333-8444-555555555555',
+    ])} />);
+
+    await user.type(screen.getByLabelText('Email address'), 'host@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a-sufficiently-long-password');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    // The management-link cookie is still in the browser at this instant and is the
+    // only thing that authorizes the claim, so adoption cannot wait until after the
+    // navigation that discards this page.
+    await waitFor(() => expect(seen).toContain('/api/host/events/11111111-2222-4333-8444-555555555555/adopt'));
+    expect(seen.indexOf('/api/host/events/11111111-2222-4333-8444-555555555555/adopt')).toBeGreaterThan(seen.indexOf('/api/host/login'));
+  });
+});

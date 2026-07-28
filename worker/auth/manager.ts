@@ -80,6 +80,15 @@ async function fromLink(
 // Either credential is sufficient, and a browser may hold both. The account is
 // tried first so that a host who is signed in keeps acting as themselves even when
 // a stale management link is still sitting in the other cookie.
+// A lifecycle refusal describes the event itself, so it stays true no matter which
+// credential asked. Losing it to the link fallback would tell a host who owns an
+// expired event that they lack permission for it.
+const LIFECYCLE_CODES = new Set(['EVENT_EXPIRED', 'EVENT_DELETED', 'EVENT_NOT_FOUND', 'ACCOUNT_DISABLED']);
+
+function lifecycleFailure(error: unknown): ApiError | null {
+  return error instanceof ApiError && LIFECYCLE_CODES.has(error.code) ? error : null;
+}
+
 export async function resolveManager(
   context: Context<AppBindings>,
   eventId: string,
@@ -89,8 +98,18 @@ export async function resolveManager(
   // days still gets in with the link sitting in the other cookie. Failures from the
   // link path are left to propagate: a revoked link has a specific answer worth
   // giving, and nothing further to fall back to.
-  const account = await fromAccount(context, eventId).catch(() => null);
-  return account ?? (await fromLink(context, eventId));
+  let lifecycle: ApiError | null = null;
+  const account = await fromAccount(context, eventId).catch((error: unknown) => {
+    lifecycle = lifecycleFailure(error);
+    return null;
+  });
+  if (account) return account;
+
+  const link = await fromLink(context, eventId);
+  if (link) return link;
+  // The link had nothing to add, so the account's answer is still the honest one.
+  if (lifecycle) throw lifecycle;
+  return null;
 }
 
 // The single entry point for every host-only route. `eventId` defaults to the path

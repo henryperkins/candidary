@@ -11,9 +11,13 @@ interface ErrorStateProps {
   message: string;
   recoveryHint: string;
   onRetry?: () => void;
+  // Some failures are not retryable but still have exactly one way out — signing in.
+  // Naming it as a link keeps that route reachable without pretending a repeat of
+  // the same request would answer differently.
+  action?: { label: string; href: string };
 }
 
-export function ErrorState({ message, recoveryHint, onRetry }: ErrorStateProps) {
+export function ErrorState({ message, recoveryHint, onRetry, action }: ErrorStateProps) {
   // The failure and the way out are announced together. Most of these states offer no button, no
   // heading, and nothing else focusable, so a live region carrying only the failure would tell a
   // screen-reader user what broke and never mention the one thing that recovers it.
@@ -23,6 +27,9 @@ export function ErrorState({ message, recoveryHint, onRetry }: ErrorStateProps) 
       <p>{message}</p>
       <p className="state-card__recovery">{recoveryHint}</p>
     </div>
+    {action && (
+      <a className="button button--secondary" href={action.href}>{action.label}</a>
+    )}
     {onRetry && (
       <button type="button" className="button button--secondary" onClick={onRetry}>Try again</button>
     )}
@@ -99,6 +106,9 @@ export interface LoadFailure {
   message: string;
   recoveryHint: string;
   retryable: boolean;
+  // Set by the code, not by the surface: whether signing in is a route out of this
+  // particular failure.
+  offerSignIn: boolean;
 }
 
 // The code decides recoverability, never the prose: rewording a message must not be able to turn an
@@ -111,13 +121,21 @@ export function describeLoadFailure(
   const message = caught instanceof Error && caught.message ? caught.message : fallback;
   const kind = caught instanceof ClientApiError ? classifyApiErrorCode(caught.code) : 'retry';
   if (kind === 'latest-link') {
-    return { message, recoveryHint: LINK_RECOVERY_HINT[role], retryable: false };
+    // A manager URL cannot reveal whether it came from an account page or a copied
+    // link, so sign-in is offered alongside the link hint rather than instead of it.
+    return {
+      message,
+      recoveryHint: LINK_RECOVERY_HINT[role],
+      retryable: false,
+      offerSignIn: role === 'manager',
+    };
   }
   if (kind === 'ended-event') {
-    return { message, recoveryHint: LIFECYCLE_HINT[role], retryable: false };
+    // Signing in cannot reopen a closed or deleted event, so it is not offered here.
+    return { message, recoveryHint: LIFECYCLE_HINT[role], retryable: false, offerSignIn: false };
   }
   if (kind === 'sign-in') {
-    return { message, recoveryHint: SIGN_IN_HINT, retryable: false };
+    return { message, recoveryHint: SIGN_IN_HINT, retryable: false, offerSignIn: true };
   }
-  return { message, recoveryHint: RETRY_HINT, retryable: true };
+  return { message, recoveryHint: RETRY_HINT, retryable: true, offerSignIn: false };
 }

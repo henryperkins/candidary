@@ -2,8 +2,9 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
+import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
-import { setSessionCookies } from '../http/cookies';
+import { getSessionCookie, setSessionCookies } from '../http/cookies';
 import { assertRequestOrigin } from '../http/csrf';
 import { EventService } from '../services/events';
 
@@ -31,7 +32,18 @@ publicRoutes.post('/events', async (context) => {
   if (!parsed.success) {
     throw new ApiError('VALIDATION_FAILED', 'Check the highlighted event details.', 422, fieldErrors(parsed.error));
   }
-  const created = await new EventService(context.env).create(parsed.data);
+  // Creation stays open to anyone, so the account cookie is strictly optional here.
+  // A host who is signed in gets the event attached in the same transaction; a
+  // stale or revoked cookie falls through to the ordinary link-only path rather
+  // than failing a creation that never needed an account.
+  const hostCookie = getSessionCookie(context, 'host');
+  const accountId = hostCookie
+    ? await new AuthService(context.env).resolveHostSession(hostCookie)
+      .then((principal) => principal.account.id)
+      .catch(() => null)
+    : null;
+
+  const created = await new EventService(context.env).create(parsed.data, accountId);
   const maxAge = Math.max(1, Math.floor((Date.parse(created.sessionExpiresAt) - Date.now()) / 1000));
   setSessionCookies(context, 'event', created.managementSession, created.csrfToken, maxAge);
   return context.json({
@@ -40,6 +52,7 @@ publicRoutes.post('/events', async (context) => {
       guestLink: created.guestLink,
       managementLink: created.managementLink,
       csrfToken: created.csrfToken,
+      savedToAccount: created.savedToAccount,
     },
     requestId: context.get('requestId'),
   }, 201);

@@ -938,6 +938,80 @@ describe('managing an event through an account', () => {
       SELECT COUNT(*) AS count FROM host_notification_outbox WHERE event_id = ?
     `).bind(access.event.id).first('count')).toBe(3);
   });
+
+  it('attaches a signed-in creation to the account in the creating request', async () => {
+    const host = await registeredHost('host@example.com');
+
+    const created = await createApp().request('/api/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, cookie: host.cookie },
+      body: JSON.stringify({
+        name: 'Saved On Create', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+      }),
+    }, testEnv);
+
+    expect(created.status).toBe(201);
+    const body = await created.json<any>();
+    expect(body.data.savedToAccount).toBe(true);
+
+    const account = await new AccountsRepository(env.DB).getByEmail('host@example.com');
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_hosts
+      WHERE event_id = ? AND account_id = ? AND role = 'owner'
+    `).bind(body.data.event.id, account!.id).first('count')).toBe(1);
+    // Ownership and its lifecycle mail commit together, so a create that reports
+    // itself saved can never be a create whose reminder was never scheduled.
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM host_notification_outbox WHERE event_id = ?
+    `).bind(body.data.event.id).first('count')).toBe(3);
+  });
+
+  it('keeps a creation held by a stale host cookie explicitly link-only', async () => {
+    const host = await registeredHost('host@example.com');
+    // Revoking after the cookie was issued is the ordinary way a browser ends up
+    // presenting a host credential the server will not honour.
+    await env.DB.prepare('UPDATE host_sessions SET revoked_at = ?')
+      .bind(new Date().toISOString()).run();
+
+    const created = await createApp().request('/api/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, cookie: host.cookie },
+      body: JSON.stringify({
+        name: 'Link Only', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+      }),
+    }, testEnv);
+
+    expect(created.status).toBe(201);
+    const body = await created.json<any>();
+    expect(body.data.savedToAccount).toBe(false);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM event_hosts')
+      .first('count')).toBe(0);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM host_notification_outbox')
+      .first('count')).toBe(0);
+  });
+
+  it('keeps an account-side lifecycle failure after an unusable link falls through', async () => {
+    const access = await eventAccess('Expired Event');
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+    // The account still owns the event; the event itself has aged out. A second,
+    // unrelated management link is what the browser has left to fall back to.
+    await env.DB.prepare('UPDATE events SET management_access_expires_at = ? WHERE id = ?')
+      .bind(new Date(Date.now() - 1000).toISOString(), access.event.id).run();
+    const other = await eventAccess('Someone Else');
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: `${host.cookie}; ${other.manager.cookie}` },
+    }, testEnv);
+
+    // Flattening this to ROLE_FORBIDDEN would tell the host they lack permission
+    // for an event they own, and hide the deadline that actually ended access.
+    expect(response.status).toBe(410);
+    expect((await response.json<any>()).code).toBe('EVENT_EXPIRED');
+  });
 });
 
 describe('sign out', () => {

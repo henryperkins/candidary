@@ -9,7 +9,15 @@ import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { HostAccountPanel } from '../components/HostAccountPanel';
 
-interface Created { event: { id: string; name: string; slug: string }; guestLink: string; managementLink: string; csrfToken: string }
+interface Created {
+  event: { id: string; name: string; slug: string };
+  guestLink: string;
+  managementLink: string;
+  csrfToken: string;
+  // Committed server-side when a signed-in host created the event, so the success
+  // screen never has to guess whether the event is already recoverable.
+  savedToAccount?: boolean;
+}
 
 // Form order, not response order: the host should be taken to the first problem they would reach anyway.
 const CREATE_FIELDS = ['name', 'eventDate', 'welcomeMessage'] as const;
@@ -45,6 +53,7 @@ export function CreatePage() {
         name: data.get('name'), eventDate: data.get('eventDate'), welcomeMessage: data.get('welcomeMessage'),
       }) });
       setCreated(result);
+      setSaved(result.savedToAccount === true);
       if (cover) {
         try {
           const upload = await api<{ objectKey: string; url: string }>(`/api/manage/events/${result.event.id}/cover`, { method: 'POST', body: JSON.stringify({ filename: cover.name, mimeType: cover.type, byteSize: cover.size }) });
@@ -72,7 +81,12 @@ export function CreatePage() {
       <a className="button button--primary" href={created.managementLink}>Open event manager</a>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
-    <HostAccountPanel bindEventId={created.event.id} onRegistered={() => setSaved(true)} />
+    {/* A host who created this event while signed in already has it. Offering
+        registration again would ask them to prove an address they have proved. */}
+    {!saved && <HostAccountPanel
+      bindEventId={created.event.id}
+      onCompleted={({ boundEvent }) => { if (boundEvent) setSaved(true); }}
+    />}
   </main></div>;
 
   return <div className="public-shell"><PageHeader action={<Link className="text-link" to="/">Back home</Link>} /><main className="create-layout">

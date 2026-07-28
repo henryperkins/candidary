@@ -1,4 +1,5 @@
 import { EventsRepository } from '../db/events';
+import { NotificationOutboxRepository } from '../db/notification-outbox';
 import { SessionsRepository } from '../db/sessions';
 import { TokensRepository } from '../db/tokens';
 import type { AppEnv } from '../env';
@@ -19,7 +20,11 @@ export interface CreateEventInput {
 export class EventService {
   constructor(private readonly env: AppEnv) {}
 
-  async create(input: CreateEventInput, now = new Date()) {
+  // `accountId` is the resolved host account when the creator was signed in, and
+  // null otherwise. It is never taken from the request body: the caller resolves
+  // the account cookie first, so an unusable credential simply creates a link-only
+  // event instead of claiming a recovery the host does not have.
+  async create(input: CreateEventInput, accountId: string | null = null, now = new Date()) {
     const events = new EventsRepository(this.env.DB);
     const tokens = new TokensRepository(this.env.DB);
     const sessions = new SessionsRepository(this.env.DB);
@@ -29,48 +34,80 @@ export class EventService {
     const managementSession = createSecretToken();
     const csrfToken = createSecretToken().secret;
     const lifecycle = calculateLifecycle(input.eventDate, now);
-    const event = await events.create({
-      id: eventId,
-      slug: eventSlug(input.name, guestToken.id.slice(0, 6)),
-      name: input.name,
-      eventDate: input.eventDate,
-      welcomeMessage: input.welcomeMessage,
-      ...lifecycle,
-      createdAt: now.toISOString(),
-    });
-    await tokens.create({
-      id: guestToken.id,
-      eventId,
-      role: 'guest',
-      secretDigest: await digestSecret(guestToken.secret, this.env.TOKEN_HMAC_KEY),
-      secretCiphertext: await encryptGuestSecret(guestToken.secret, this.env.GUEST_TOKEN_ENCRYPTION_KEY),
-      expiresAt: lifecycle.guestAccessExpiresAt,
-      createdAt: now.toISOString(),
-    });
-    await tokens.create({
-      id: managerToken.id,
-      eventId,
-      role: 'manager',
-      secretDigest: await digestSecret(managerToken.secret, this.env.TOKEN_HMAC_KEY),
-      secretCiphertext: null,
-      expiresAt: lifecycle.managementAccessExpiresAt,
-      createdAt: now.toISOString(),
-    });
+    const createdAt = now.toISOString();
     const sessionExpiresAt = new Date(Math.min(
       Date.parse(lifecycle.managementAccessExpiresAt),
       now.getTime() + 12 * 60 * 60 * 1000,
     )).toISOString();
-    await sessions.create({
-      id: managementSession.id,
-      secretDigest: await digestSecret(managementSession.secret, this.env.SESSION_HMAC_KEY),
-      csrfDigest: await digestSecret(csrfToken, this.env.SESSION_HMAC_KEY),
-      eventId,
-      accessTokenId: managerToken.id,
-      role: 'manager',
-      canClaimOwner: true,
-      expiresAt: sessionExpiresAt,
-      createdAt: now.toISOString(),
-    });
+
+    const statements = [
+      events.createStatement({
+        id: eventId,
+        slug: eventSlug(input.name, guestToken.id.slice(0, 6)),
+        name: input.name,
+        eventDate: input.eventDate,
+        welcomeMessage: input.welcomeMessage,
+        ...lifecycle,
+        createdAt,
+      }),
+      tokens.createStatement({
+        id: guestToken.id,
+        eventId,
+        role: 'guest',
+        secretDigest: await digestSecret(guestToken.secret, this.env.TOKEN_HMAC_KEY),
+        secretCiphertext: await encryptGuestSecret(guestToken.secret, this.env.GUEST_TOKEN_ENCRYPTION_KEY),
+        expiresAt: lifecycle.guestAccessExpiresAt,
+        createdAt,
+      }),
+      tokens.createStatement({
+        id: managerToken.id,
+        eventId,
+        role: 'manager',
+        secretDigest: await digestSecret(managerToken.secret, this.env.TOKEN_HMAC_KEY),
+        secretCiphertext: null,
+        expiresAt: lifecycle.managementAccessExpiresAt,
+        createdAt,
+      }),
+      sessions.createStatement({
+        id: managementSession.id,
+        secretDigest: await digestSecret(managementSession.secret, this.env.SESSION_HMAC_KEY),
+        csrfDigest: await digestSecret(csrfToken, this.env.SESSION_HMAC_KEY),
+        eventId,
+        accessTokenId: managerToken.id,
+        role: 'manager',
+        canClaimOwner: true,
+        expiresAt: sessionExpiresAt,
+        createdAt,
+      }),
+    ];
+
+    if (accountId) {
+      // Selected through `host_accounts` rather than inserted blind, so a disabled
+      // account cannot acquire ownership between resolving the cookie and committing.
+      statements.push(this.env.DB.prepare(`
+        INSERT INTO event_hosts (event_id, account_id, role, created_at)
+        SELECT ?, id, 'owner', ? FROM host_accounts WHERE id = ? AND disabled_at IS NULL
+      `).bind(eventId, createdAt, accountId));
+      // Each insert selects through the membership committed just above, so mail
+      // that implies ownership cannot outlive a refused claim.
+      statements.push(...new NotificationOutboxRepository(this.env.DB).scheduleStatements({
+        accountId,
+        accountEmail: null,
+        eventId,
+        createdAt,
+        ownerCreatedAt: createdAt,
+      }));
+    }
+
+    await this.env.DB.batch(statements);
+
+    const event = (await events.getById(eventId))!;
+    // Reported from what actually committed, never from the request's intent.
+    const savedToAccount = accountId
+      ? Boolean(await this.env.DB.prepare(`
+          SELECT 1 FROM event_hosts WHERE event_id = ? AND account_id = ? AND role = 'owner'
+        `).bind(eventId, accountId).first())
+      : false;
 
     const origin = this.env.APP_ORIGIN.replace(/\/$/u, '');
     return {
@@ -80,6 +117,7 @@ export class EventService {
       managementSession,
       csrfToken,
       sessionExpiresAt,
+      savedToAccount,
     };
   }
 }

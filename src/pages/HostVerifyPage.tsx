@@ -9,7 +9,9 @@ export function HostVerifyPage() {
   return <div className="public-shell">
     <PageHeader action={<Link className="text-link" to="/host/events">Your events</Link>} />
     <main className="host-layout">
-      <HostAccountPanel initialStage="code" />
+      {/* The account already exists and is signed in, so this confirms an address
+          through the host session rather than through a pending registration. */}
+      <HostAccountPanel initialStage="code" mode="verification" />
     </main>
   </div>;
 }

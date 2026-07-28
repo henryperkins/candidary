@@ -9,22 +9,38 @@ interface HostAccountPanelProps {
   // re-checks that the browser holds this event's management session; passing the
   // id here only says which event to bind, never that binding is allowed.
   bindEventId?: string;
-  onRegistered?: () => void;
+  // Reports what the server actually committed. Registration alone binds nothing,
+  // so only a true `boundEvent` may be treated as the event becoming recoverable.
+  onCompleted?: (result: { boundEvent: boolean }) => void;
   // `code` lets a host who skipped confirmation come back to it later without
   // re-registering, which is the only way back once the panel has been left.
   initialStage?: 'form' | 'code';
+  // Two different proofs share this panel. `registration` finishes a pending
+  // registration that has no account yet, so it answers to the registration cookie.
+  // `verification` confirms the address of an account that is already signed in,
+  // so it answers to the host session. They are never interchangeable.
+  mode?: 'registration' | 'verification';
 }
 
 type Stage = 'form' | 'code' | 'done';
 
 // Registration and confirmation in one place, because on the create-success screen
 // they are one thought: "make sure I can get back into this."
-export function HostAccountPanel({ bindEventId, onRegistered, initialStage = 'form' }: HostAccountPanelProps) {
+export function HostAccountPanel({
+  bindEventId,
+  onCompleted,
+  initialStage = 'form',
+  mode = 'registration',
+}: HostAccountPanelProps) {
   const [stage, setStage] = useState<Stage>(initialStage);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [fields, setFields] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState('');
+  const [boundEvent, setBoundEvent] = useState(false);
+
+  const completeEndpoint = mode === 'registration' ? '/api/host/register/complete' : '/api/host/verify';
+  const resendEndpoint = mode === 'registration' ? '/api/host/register/resend' : '/api/host/verify/resend';
 
   async function register(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setFields({});
@@ -35,8 +51,9 @@ export function HostAccountPanel({ bindEventId, onRegistered, initialStage = 'fo
         password: data.get('password'),
         ...(bindEventId ? { bindEventId } : {}),
       }) });
+      // Only the stage moves. Nothing is bound until the mailbox code is proved,
+      // so the caller is deliberately not told anything here.
       setStage('code');
-      onRegistered?.();
     } catch (caught) {
       if (caught instanceof ClientApiError) { setError(caught.message); setFields(caught.fieldErrors ?? {}); }
       else setError('Your account could not be created. Try again.');
@@ -47,8 +64,13 @@ export function HostAccountPanel({ bindEventId, onRegistered, initialStage = 'fo
     event.preventDefault(); setBusy(true); setError('');
     const data = new FormData(event.currentTarget);
     try {
-      await api('/api/host/verify', { method: 'POST', body: JSON.stringify({ code: data.get('code') }) });
+      const result = await api<{ boundEvent?: boolean }>(completeEndpoint, {
+        method: 'POST', body: JSON.stringify({ code: data.get('code') }),
+      });
+      const bound = result?.boundEvent === true;
+      setBoundEvent(bound);
       setStage('done');
+      onCompleted?.({ boundEvent: bound });
     } catch (caught) {
       setError(caught instanceof ClientApiError ? caught.message : 'That code could not be checked. Try again.');
     } finally { setBusy(false); }
@@ -57,7 +79,7 @@ export function HostAccountPanel({ bindEventId, onRegistered, initialStage = 'fo
   async function resend() {
     setBusy(true); setError(''); setNotice('');
     try {
-      await api('/api/host/verify/resend', { method: 'POST', body: JSON.stringify({}) });
+      await api(resendEndpoint, { method: 'POST', body: JSON.stringify({}) });
       setNotice('A new code is on its way.');
     } catch (caught) {
       setError(caught instanceof ClientApiError ? caught.message : 'That code could not be sent. Try again.');
@@ -68,9 +90,15 @@ export function HostAccountPanel({ bindEventId, onRegistered, initialStage = 'fo
     return <section className="host-panel">
       <span className="success-icon"><ShieldCheck aria-hidden="true" /></span>
       <h2>Your email is confirmed.</h2>
-      <p>You can sign in to reach this event any time, even without the management link.
-        We’ll email you a short guide, a reminder the day before, and a warning before your
-        access ends so you never lose the photos.</p>
+      {/* Two genuinely different outcomes. Claiming the first when only the second
+          happened is what would talk a host out of keeping their link. */}
+      {boundEvent || !bindEventId
+        ? <p>You can sign in to reach this event any time, even without the management link.
+          We’ll email you a short guide, a reminder the day before, and a warning before your
+          access ends so you never lose the photos.</p>
+        : <p>Your account is ready, but this event still depends on its management link —
+          it was not added to your account. Keep the link, then open it and choose
+          <strong> Add to my account</strong>.</p>}
     </section>;
   }
 
@@ -92,8 +120,12 @@ export function HostAccountPanel({ bindEventId, onRegistered, initialStage = 'fo
         </button>
       </form>
       <button type="button" className="text-link" onClick={resend} disabled={busy}>Send another code</button>
-      {/* Skippable on purpose. Confirming gates the emails, never the event itself. */}
-      <p className="form-note">You can do this later — your event is already saved to this account.</p>
+      {/* Skippable on purpose. Confirming gates the emails, never the event itself —
+          but until the code is entered nothing has been saved, so this must not say
+          it has. */}
+      <p className="form-note">{bindEventId
+        ? 'Until you enter it, this event still depends on its management link.'
+        : 'You can do this later. Confirming only gates the emails we send you.'}</p>
     </section>;
   }
 

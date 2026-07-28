@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 import { api, mediaOriginal, mediaPreview } from '../app/api';
+import { hostSignInHref } from '../app/recovery';
 import {
   MANAGER_BULK_SELECTION_MAX,
   MAX_EVENT_BYTES,
@@ -368,10 +369,14 @@ export function ManagerPage() {
     </>;
   }
 
+  // Offered for the plain no-credential state as well as a dead account session: a
+  // bare manager URL cannot prove whether it arrived from the account page or from a
+  // copied management link, and signing in is safe either way.
   if (failure) return <main className="centered-state"><Brand /><ErrorState
     message={failure.message}
     recoveryHint={failure.recoveryHint}
     onRetry={failure.retryable ? () => void refresh() : undefined}
+    action={failure.offerSignIn ? { label: 'Sign in', href: hostSignInHref(eventId) } : undefined}
   /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 

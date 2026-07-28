@@ -1,7 +1,8 @@
 import { type FormEvent, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
+import { adoptTargetFor, HOST_EVENTS_PATH, safeReturnTo } from '../app/recovery';
 import { MIN_HOST_PASSWORD_LENGTH } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 
@@ -15,6 +16,9 @@ const TITLES: Record<Mode, string> = {
 
 export function HostLoginPage() {
   const navigate = useNavigate();
+  const [search] = useSearchParams();
+  const returnTo = safeReturnTo(search.get('returnTo'));
+  const adopt = adoptTargetFor(returnTo, search.get('adopt'));
   const [mode, setMode] = useState<Mode>('signin');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -27,6 +31,19 @@ export function HostLoginPage() {
     setMode(next); setError(''); setFields({}); setNotice('');
   }
 
+  // Both sign-in and a completed reset land here. The claim is made before the
+  // navigation because the management-link cookie that authorizes it belongs to the
+  // page the host came from, and a refusal is worth showing rather than swallowing.
+  async function finishAuthenticated() {
+    if (adopt) {
+      await api(`/api/host/events/${adopt}/adopt`, { method: 'POST', body: JSON.stringify({}) })
+        // The host is signed in either way. A refused or already-owned claim is not a
+        // reason to strand them on the login form.
+        .catch(() => undefined);
+    }
+    navigate(returnTo ?? HOST_EVENTS_PATH);
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setFields({}); setNotice('');
     const data = new FormData(event.currentTarget);
@@ -35,7 +52,7 @@ export function HostLoginPage() {
         await api('/api/host/login', { method: 'POST', body: JSON.stringify({
           email: data.get('email'), password: data.get('password'),
         }) });
-        navigate('/host/events');
+        await finishAuthenticated();
         return;
       }
       if (mode === 'forgot') {
@@ -51,7 +68,7 @@ export function HostLoginPage() {
       await api('/api/host/password/reset', { method: 'POST', body: JSON.stringify({
         email, code: data.get('code'), password: data.get('password'),
       }) });
-      navigate('/host/events');
+      await finishAuthenticated();
     } catch (caught) {
       if (caught instanceof ClientApiError) { setError(caught.message); setFields(caught.fieldErrors ?? {}); }
       else setError('That did not go through. Try again.');
