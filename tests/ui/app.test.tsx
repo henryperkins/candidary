@@ -7,6 +7,7 @@ import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../share
 import { mediaPreview } from '../../src/app/api';
 import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
+import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
@@ -39,6 +40,24 @@ async function createEvent(user: ReturnType<typeof userEvent.setup>) {
 }
 
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe('management link recovery', () => {
+  it('marks an invalid management link and returns focus to it', async () => {
+    render(<ManagementLinkRecovery />);
+    const user = userEvent.setup();
+
+    expect(screen.getByLabelText('Management link')).toHaveAttribute('autocomplete', 'off');
+    expect(screen.getByLabelText('Management link')).toHaveAttribute('spellcheck', 'false');
+    expect(screen.getByRole('button', { name: 'Open event manager' })).toBeVisible();
+
+    await user.type(screen.getByLabelText('Management link'), '/manage/event');
+    await user.click(screen.getByRole('button', { name: 'Open event manager' }));
+
+    expect(screen.getByLabelText('Management link')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('Enter a Candidary management link from this site.')).toBeVisible();
+    expect(screen.getByLabelText('Management link')).toHaveFocus();
+  });
+});
 
 describe('public Candidary experience', () => {
   it('presents the approved value proposition and workflow', () => {

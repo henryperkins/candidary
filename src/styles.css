@@ -525,3 +525,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .account-card h3 { margin-bottom: 10px; font-family: 'Manrope', sans-serif; font-size: 1.05rem; }
 .account-card p { margin-bottom: 14px; font-size: .95rem; }
 .account-card p svg, .account-card button svg { width: 16px; height: 16px; vertical-align: -3px; }
+
+/* This is shared by recovery screens, so it stays a one-column card before a route places it. */
+.management-link-recovery { width: 100%; max-width: 560px; padding: 24px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); color: var(--ink); }
+.management-link-recovery h2 { margin: 0 0 8px; font-size: 1.6rem; }
+.management-link-recovery > p { margin: 0 0 20px; color: var(--muted); }
+.management-link-recovery form, .management-link-recovery__field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.management-link-recovery form { gap: 18px; }
+.management-link-recovery__field > label { font-weight: 600; }
+.management-link-recovery__error { margin: 0; color: var(--danger); font-size: .875rem; }
+.management-link-recovery .button { width: 100%; }
