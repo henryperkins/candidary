@@ -1,23 +1,47 @@
-import { readFileSync } from 'node:fs';
 import type { Page } from '@playwright/test';
 
+import type {
+  EventThemeConfigV1,
+  EventThemeOverridesV1,
+  EventThemePresetId,
+  EventView,
+  GuestEventView,
+} from '../../../shared/contracts';
+import { resolveEventTheme } from '../../../shared/event-theme';
+import { PHOTOGRAPHIC_COVER } from './cover-images';
 import { makeMedia } from './ui-data';
 
-const preview = readFileSync('public/assets/candidary-hero.png');
+export function eventTheme(
+  presetId: EventThemePresetId,
+  overrides: EventThemeOverridesV1 = {},
+) {
+  return resolveEventTheme({ version: 1, presetId, overrides });
+}
 
-export const EVENT_FIXTURE = {
+export const GUEST_EVENT_FIXTURE: GuestEventView = {
   id: 'event-a',
   slug: 'maya-theo',
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.',
+  coverObjectKey: null,
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
+  theme: eventTheme('candidary-default'),
+};
+
+export const EVENT_FIXTURE: EventView = {
+  ...GUEST_EVENT_FIXTURE,
+  reservedMediaCount: 0,
   storedMediaCount: 1,
+  reservedBytes: 0,
   storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z',
+  createdAt: '2026-07-29T00:00:00Z',
+  deletedAt: null,
 };
 
 interface GuestMessage {
@@ -29,22 +53,24 @@ interface GuestMessage {
 }
 
 interface GuestRouteOptions {
-  event?: Partial<typeof EVENT_FIXTURE>;
+  event?: Partial<GuestEventView>;
   gallery?: ReturnType<typeof makeMedia>;
   contributions?: ReturnType<typeof makeMedia>;
   messages?: GuestMessage[];
+  cover?: Buffer;
 }
 
 interface ManagerRouteOptions {
-  event?: Partial<typeof EVENT_FIXTURE>;
+  event?: Partial<EventView>;
   // Keyed by the cursor the client sends back; `first` answers a request that carries no cursor.
   mediaPages: Record<string, { media: ReturnType<typeof makeMedia>; nextCursor: string | null }>;
   messages?: GuestMessage[];
   exports?: unknown[];
+  cover?: Buffer;
 }
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
-  const event = { ...EVENT_FIXTURE, ...options.event };
+  const event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
   const gallery = options.gallery ?? makeMedia(1);
   const contributions = options.contributions ?? gallery;
   const messages = options.messages ?? [];
@@ -53,8 +79,15 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   await page.route('**/api/media/*/preview', (route) => route.fulfill({
     status: 200,
     contentType: 'image/png',
-    body: preview,
+    body: PHOTOGRAPHIC_COVER,
   }));
+  if (event.coverObjectKey) {
+    await page.route(`${base}/cover`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: options.cover ?? PHOTOGRAPHIC_COVER,
+    }));
+  }
   await page.route(base, (route) => route.fulfill({
     json: { data: { event, role: 'guest' }, requestId: 'request-a' },
   }));
@@ -76,8 +109,15 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   await page.route('**/api/media/*/preview', (route) => route.fulfill({
     status: 200,
     contentType: 'image/png',
-    body: preview,
+    body: PHOTOGRAPHIC_COVER,
   }));
+  if (event.coverObjectKey) {
+    await page.route(`${base}/cover`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: options.cover ?? PHOTOGRAPHIC_COVER,
+    }));
+  }
   await page.route(`${base}/media*`, (route) => {
     // `cursor=` is a 422, so the client omits the parameter for the first page.
     const cursor = new URL(route.request().url()).searchParams.get('cursor') ?? 'first';
@@ -99,4 +139,13 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       requestId: 'request-a',
     },
   }));
+  await page.route(`${base}/theme`, (route) => {
+    const config = route.request().postDataJSON() as EventThemeConfigV1;
+    return route.fulfill({
+      json: {
+        data: { event: { ...event, theme: eventTheme(config.presetId, config.overrides) } },
+        requestId: 'request-a',
+      },
+    });
+  });
 }

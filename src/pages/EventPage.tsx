@@ -2,17 +2,22 @@ import { ArrowRight, ChevronDown, Expand, ImagePlus, MessageCircle, X } from 'lu
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import type { GuestEventView } from '../../shared/contracts';
+import { DEFAULT_EVENT_THEME_CONFIG, resolveEventTheme } from '../../shared/event-theme';
 import { api, mediaPreview } from '../app/api';
+import { eventThemeStyle } from '../app/event-theme-style';
 import { readGuestName } from '../app/guest-name-storage';
-import type { EventView, MediaView, MessageView } from '../app/types';
+import type { MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
 import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
 
+const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
+
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const { slug = '' } = useParams();
-  const [event, setEvent] = useState<EventView | null>(null);
+  const [event, setEvent] = useState<GuestEventView | null>(null);
   const [gallery, setGallery] = useState<MediaView[]>([]);
   const [contributions, setContributions] = useState<MediaView[]>([]);
   const [messages, setMessages] = useState<MessageView[]>([]);
@@ -43,7 +48,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     const ticket = (loadTicket.current += 1);
     setFailure(null);
     try {
-      const { event: eventView } = await api<{ event: EventView; role: string }>(`/api/event/${slug}`);
+      const { event: eventView } = await api<{ event: GuestEventView; role: string }>(`/api/event/${slug}`);
       if (loadTicket.current !== ticket) return;
       setEvent(eventView);
       if (fullscreen && eventView.galleryVisible) {
@@ -94,7 +99,8 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     onRetry={failure.retryable ? () => void loadEvent() : undefined}
   /></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState /></main>;
-  if (fullscreen) return <main className="fullscreen">
+  const themeStyle = eventThemeStyle((event.theme ?? DEFAULT_GUEST_THEME).tokens);
+  if (fullscreen) return <main className="fullscreen" style={themeStyle}>
     {/* The full-screen gallery is its own route and had no level-one heading at all, so a screen
         reader arrived with nothing naming the view. The name belongs to the page, not to the layout,
         so it is announced rather than drawn — the bar's approved copy is unchanged. */}
@@ -105,7 +111,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       : <p>No shared photos yet.</p>}
   </main>;
 
-  return <div className="guest-shell guest-shell--drop">
+  return <div className="guest-shell guest-shell--drop" style={themeStyle}>
     <main className="guest-drop-main">
       <GuestUploadFlow
         event={event}

@@ -1,5 +1,6 @@
 import type {
   ChallengePurpose,
+  EventThemeConfigV1,
   EventHostRole,
   NotificationKind,
   ExportState,
@@ -16,6 +17,7 @@ export interface EventRecord {
   name: string;
   eventDate: string;
   welcomeMessage: string;
+  themeConfig: EventThemeConfigV1;
   coverObjectKey: string | null;
   uploadsEnabled: boolean;
   galleryVisible: boolean;

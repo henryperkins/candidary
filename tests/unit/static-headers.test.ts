@@ -18,6 +18,7 @@ describe('static asset security headers', () => {
 
   it('matches the Worker security header policy', () => {
     expect(headers).toContain("Content-Security-Policy: default-src 'self'");
+    expect(headers).toContain("script-src 'self'");
     expect(headers).toContain("connect-src 'self' https://*.r2.cloudflarestorage.com");
     expect(headers).toContain('Referrer-Policy: no-referrer');
     expect(headers).toContain('X-Content-Type-Options: nosniff');

@@ -1,10 +1,12 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
-import type { Locator, Page } from '@playwright/test';
+import type { Locator, Page, TestInfo } from '@playwright/test';
 
-import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import { EVENT_THEME_PRESETS } from '../../shared/event-theme';
+import { EVENT_FIXTURE, eventTheme, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
 import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
 import { measureContrast, measureDocument, measureSeparation, measureTarget } from './helpers/geometry';
+import { computedStyleContrast } from './helpers/theme-contrast';
 
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
 const HEADER_WIDTHS = [320, 768];
@@ -44,6 +46,26 @@ const MANAGER_SECTIONS = [
 // specs. A green axe run is not touch-target conformance. Which rules still do not run, and why
 // that is acceptable, is recorded in `design-qa.md`.
 const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
+
+const THEME_ACCESSIBILITY_CASES = [
+  ...EVENT_THEME_PRESETS.map(({ id, name }) => ({ name, theme: eventTheme(id) })),
+  {
+    name: 'custom black',
+    theme: eventTheme('candidary-default', { primaryColor: '#000000', accentColor: '#000000' }),
+  },
+  {
+    name: 'custom white',
+    theme: eventTheme('candidary-default', { primaryColor: '#ffffff', accentColor: '#ffffff' }),
+  },
+  {
+    name: 'custom mid-tone',
+    theme: eventTheme('coastal-light', { primaryColor: '#767676', accentColor: '#767676' }),
+  },
+];
+
+function onlyOnce(testInfo: TestInfo) {
+  test.skip(testInfo.project.name === 'mobile', 'Viewport-pinned accessibility evidence runs once.');
+}
 
 // The engine runs over the whole document with axe's default rule set plus `target-size`. Narrowing
 // it to make a surface pass would leave it proving nothing. Violations are reported by rule id,
@@ -136,6 +158,8 @@ test('cover photo focus lands on the control the host can actually see', async (
 
   await page.getByLabel('Welcome message').focus();
   await page.keyboard.press('Tab');
+  await expect(page.getByRole('radio', { name: /Candidary Default/u })).toBeFocused();
+  await page.keyboard.press('Tab');
   await expect(input).toBeFocused();
 
   const visibleRing = await outline(field);
@@ -151,6 +175,7 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event: {
     id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Help us remember tonight.',
     uploadsEnabled: true, galleryVisible: false, moderationRequired: true,
+    coverObjectKey: null, theme: eventTheme('candidary-default'),
   }, role: 'guest' }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
@@ -178,7 +203,12 @@ test('reduced motion stops every guest spinner instead of racing it', async ({ p
 
   await page.route(base, async (route) => {
     await eventGate;
-    await route.fulfill({ json: { data: { event: EVENT_FIXTURE, role: 'guest' }, requestId: 'r' } });
+    await route.fulfill({
+      json: {
+        data: { event: { ...EVENT_FIXTURE, theme: eventTheme('midnight-film') }, role: 'guest' },
+        requestId: 'r',
+      },
+    });
   });
   await page.route(`${base}/contributions`, (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
   await page.route(`${base}/messages`, (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
@@ -216,9 +246,11 @@ test('reduced motion stops every guest spinner instead of racing it', async ({ p
 
 test('manager navigation exposes visible labels, selected state, and mobile-sized targets', async ({ page }) => {
   const event = {
-    id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
-    uploadsEnabled: true, galleryVisible: false, moderationRequired: true, storedMediaCount: 0, storedBytes: 0,
-    guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+    ...EVENT_FIXTURE,
+    welcomeMessage: 'Welcome.',
+    galleryVisible: false,
+    storedMediaCount: 0,
+    storedBytes: 0,
   };
   await page.route('**/api/manage/events/event-a', (route) => route.fulfill({ json: { data: { event }, requestId: 'r' } }));
   await page.route('**/api/manage/events/event-a/media*', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
@@ -341,7 +373,7 @@ test('the public surfaces carry no automated accessibility violation', async ({ 
   // The success state is the same route with a different document: a QR aside, both private links,
   // and the reveal control. It is where the host's only copy of the management link lives.
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
-    event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+    event: EVENT_FIXTURE,
     guestLink: UNBROKEN_TOKEN,
     managementLink: `${UNBROKEN_TOKEN}-manage`,
     csrfToken: 'csrf-a',
@@ -381,6 +413,86 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
   await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
   await expect(page.locator('.fullscreen figure')).toHaveCount(3);
   await expectNoAxeViolations(page, 'fullscreen gallery');
+});
+
+for (const { name, theme } of THEME_ACCESSIBILITY_CASES) {
+  test(`${name} guest theme passes Axe and computed text, action, boundary, and focus contrast`, async ({ page }, testInfo) => {
+    onlyOnce(testInfo);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await stubGuestRoutes(page, { event: { theme } });
+    await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+    await expect(page.getByRole('heading', { name: EVENT_FIXTURE.welcomeMessage })).toBeVisible();
+    await expectNoAxeViolations(page, `${name} guest theme`);
+
+    const nameInput = page.getByLabel('Your name');
+    const helper = page.getByText('No account needed. Your name is remembered here.');
+    const action = page.getByRole('button', { name: 'Take a photo', exact: true });
+    expect(await measureContrast(helper), `${name} text contrast`).toBeGreaterThanOrEqual(4.5);
+    expect(await measureContrast(action), `${name} action text contrast`).toBeGreaterThanOrEqual(4.5);
+    expect(
+      await computedStyleContrast(nameInput, 'borderTopColor'),
+      `${name} input boundary contrast`,
+    ).toBeGreaterThanOrEqual(3);
+
+    await nameInput.focus();
+    expect(
+      await computedStyleContrast(nameInput, 'outlineColor', page.locator('.photo-drop')),
+      `${name} focus contrast`,
+    ).toBeGreaterThanOrEqual(3);
+  });
+}
+
+test('theme radios have textual names, native checked state, and a full-document manager Settings Axe pass', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 390, height: 1400 });
+  await page.goto('/create');
+  for (const preset of EVENT_THEME_PRESETS) {
+    const radio = page.getByRole('radio', { name: new RegExp(preset.name, 'u') });
+    await expect(radio).toHaveAccessibleName(new RegExp(preset.name, 'u'));
+    await radio.check();
+    await expect(radio).toBeChecked();
+  }
+
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Event appearance editor' })).toBeVisible();
+  await expect(page.locator('.event-appearance-preview')).toBeVisible();
+  const colorInputBorder = await page.getByLabel('Primary color picker').evaluate((element) => {
+    const tokenProbe = document.createElement('span');
+    tokenProbe.style.color = 'var(--border)';
+    document.body.append(tokenProbe);
+    const expected = getComputedStyle(tokenProbe).color;
+    tokenProbe.remove();
+    return {
+      actual: getComputedStyle(element).borderTopColor,
+      expected,
+    };
+  });
+  expect(colorInputBorder.actual, 'Manager color input uses the global border token').toBe(colorInputBorder.expected);
+  for (const toggle of await page.locator('.settings-form .toggle').all()) {
+    const target = await measureTarget(toggle);
+    expect(target.width, 'Settings toggle label width').toBeGreaterThanOrEqual(44);
+    expect(target.height, 'Settings toggle label height').toBeGreaterThanOrEqual(44);
+    const checkbox = await measureTarget(toggle.locator('input'));
+    expect(checkbox.width, 'Settings checkbox width').toBeGreaterThanOrEqual(24);
+    expect(checkbox.height, 'Settings checkbox height').toBeGreaterThanOrEqual(24);
+  }
+  for (const preset of EVENT_THEME_PRESETS) {
+    const radio = page.getByRole('radio', { name: new RegExp(preset.name, 'u') });
+    await expect(radio).toHaveAccessibleName(new RegExp(preset.name, 'u'));
+    await radio.check();
+    await expect(radio).toBeChecked();
+  }
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    document.documentElement.style.scrollBehavior = 'auto';
+    window.scrollTo(0, 0);
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expectNoAxeViolations(page, 'manager Settings editor and preview');
 });
 
 test('every manager section carries no automated accessibility violation', async ({ page }) => {

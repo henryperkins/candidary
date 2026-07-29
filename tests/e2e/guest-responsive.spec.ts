@@ -1,8 +1,8 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
-import { EVENT_FIXTURE, stubGuestRoutes } from './fixtures/routes';
-import { LONG_FILENAME, makeMedia, UNBROKEN_TOKEN } from './fixtures/ui-data';
+import { EVENT_FIXTURE, eventTheme, stubGuestRoutes } from './fixtures/routes';
+import { LONG_FILENAME, LONG_WELCOME, makeMedia } from './fixtures/ui-data';
 import {
   measureDocument,
   measureFold,
@@ -12,9 +12,6 @@ import {
   measureTarget,
 } from './helpers/geometry';
 
-// The create form caps the welcome message at 500 characters, so this is the worst case a host can save.
-const LONG_WELCOME = `Share the night as you saw it, from every table and every corner. ${UNBROKEN_TOKEN} `
-  .padEnd(500, 'We will treasure every frame you send. ');
 const KEEPER = { name: LONG_FILENAME, mimeType: 'image/jpeg', buffer: Buffer.from('keeper') };
 const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
 
@@ -139,7 +136,9 @@ test('View full screen remains a 44 by 44 target across guest layout widths', as
 
 test('a 500-character welcome keeps both photo sources on the first fold at 320 by 568', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 });
-  await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });
+  await stubGuestRoutes(page, {
+    event: { welcomeMessage: LONG_WELCOME, theme: eventTheme('garden-party') },
+  });
 
   await page.goto('/event/maya-theo');
   const camera = page.getByRole('button', { name: 'Take a photo', exact: true });
@@ -161,6 +160,7 @@ test('a 500-character welcome keeps both photo sources on the first fold at 320 
   await toggle.click();
   const expanded = page.getByRole('button', { name: 'Show less' });
   await expect(expanded).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.photo-drop__hero')).toHaveClass(/photo-drop__hero--welcome-expanded/u);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
 
   const expandedSize = await measureDocument(page);
@@ -227,7 +227,9 @@ test('the long welcome keeps both photo sources reachable through the 500 to 567
 // the surface with the most to lose: 450 px of height is shorter than any phone this app supports.
 test('the guest photo drop holds the 1280-at-200%-zoom layout at 640 by 450', async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 450 });
-  await stubGuestRoutes(page, { event: { welcomeMessage: LONG_WELCOME } });
+  await stubGuestRoutes(page, {
+    event: { welcomeMessage: LONG_WELCOME, theme: eventTheme('coastal-light') },
+  });
 
   await page.goto('/event/maya-theo');
   const camera = page.getByRole('button', { name: 'Take a photo', exact: true });

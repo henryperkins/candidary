@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 
+import { EVENT_FIXTURE } from './fixtures/routes';
 import { UNBROKEN_TOKEN } from './fixtures/ui-data';
 import {
   measureDocument,
@@ -167,7 +168,7 @@ test('the event date stays inside its field under iOS native date sizing', async
 
 test('a private link can be revealed and read across the width matrix', async ({ page }) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
-    event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+    event: EVENT_FIXTURE,
     guestLink: UNBROKEN_TOKEN,
     managementLink: `${UNBROKEN_TOKEN}-manage`,
     csrfToken: 'csrf-a',

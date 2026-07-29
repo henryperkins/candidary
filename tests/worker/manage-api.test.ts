@@ -300,6 +300,13 @@ describe('manager settings and private photo intake', () => {
     }, testEnv);
     expect(cover.status).toBe(200);
     expect(cover.headers.get('cache-control')).toBe('private, no-store');
+
+    const managerCover = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect(managerCover.status).toBe(200);
+    expect(managerCover.headers.get('content-type')).toBe('image/png');
+    expect(managerCover.headers.get('cache-control')).toBe('private, no-store');
   });
 
   it('keeps every delivery in intake, filters by guest name, and publishes separately', async () => {

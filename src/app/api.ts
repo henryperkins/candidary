@@ -43,4 +43,12 @@ export function mediaOriginal(id: string): string {
   return `/api/media/${encodeURIComponent(id)}/original`;
 }
 
+export function guestEventCoverPath(slug: string): string {
+  return `/api/event/${encodeURIComponent(slug)}/cover`;
+}
+
+export function managerEventCoverPath(eventId: string): string {
+  return `/api/manage/events/${encodeURIComponent(eventId)}/cover`;
+}
+
 export const mediaContent = mediaPreview;

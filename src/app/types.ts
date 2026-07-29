@@ -1,19 +1,4 @@
-export interface EventView {
-  id: string;
-  slug: string;
-  name: string;
-  eventDate: string;
-  welcomeMessage: string;
-  coverObjectKey?: string | null;
-  uploadsEnabled: boolean;
-  galleryVisible: boolean;
-  moderationRequired: boolean;
-  storedMediaCount?: number;
-  storedBytes?: number;
-  guestAccessExpiresAt?: string;
-  managementAccessExpiresAt?: string;
-  purgeAfter?: string;
-}
+export type { EventView, GuestEventView } from '../../shared/contracts';
 
 export interface MediaView {
   id: string;

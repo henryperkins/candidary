@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,7 @@ vi.mock('../../src/app/management-link', async (importOriginal) => ({
 vi.mock('qrcode', () => ({ default: { toDataURL: qrToDataURL } }));
 
 import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
 import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
@@ -142,7 +143,8 @@ describe('public Candidary experience', () => {
   });
 
   it('creates an event and clearly returns both access links', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
+    const fetchMock = vi.fn<typeof fetch>(() => json(CREATED, 201));
+    vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     await createEvent(userEvent.setup());
     expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
@@ -152,6 +154,11 @@ describe('public Candidary experience', () => {
       .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
     expect(screen.getByText(CREATED.managementLink)).toBeInTheDocument();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, request] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      theme: { version: 1, presetId: 'candidary-default', overrides: {} },
+    });
   });
 
   it('associates create errors with their fields and focuses the first invalid one', async () => {
@@ -337,9 +344,11 @@ describe('guest event experience', () => {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
+  welcomeMessage: 'Welcome.', coverObjectKey: null,
+  uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+  theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
 };
 
 interface MediaPage { media: unknown[]; nextCursor: string | null }
@@ -395,6 +404,25 @@ describe('manager experience', () => {
       expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
     },
   );
+
+  it('keeps appearance inside Settings between its form and account controls', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+
+    const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
+    expect(within(navigation).getAllByRole('button')).toHaveLength(5);
+    await userEvent.setup().click(within(navigation).getByRole('button', { name: /settings/i }));
+
+    const settingsForm = screen.getByRole('button', { name: 'Save settings' }).closest('form');
+    const editor = screen.getByRole('region', { name: 'Event appearance editor' });
+    const account = document.querySelector('.account-card');
+    const danger = document.querySelector('.danger-zone');
+    expect(settingsForm?.contains(editor)).toBe(false);
+    expect(settingsForm!.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(editor.compareDocumentPosition(account!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(editor.compareDocumentPosition(danger!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 
   it('appends the next media page and keeps every row unique', async () => {
     const rows = makeMedia(MANAGER_MEDIA_PAGE_SIZE + 1);

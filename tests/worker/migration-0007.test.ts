@@ -1,0 +1,100 @@
+import { env } from 'cloudflare:workers';
+import { applyD1Migrations, reset } from 'cloudflare:test';
+import { beforeEach, expect, it } from 'vitest';
+
+import type { AppEnv } from '../../worker/env';
+
+interface Migration { name: string; queries: string[] }
+
+const testEnv = env as AppEnv & { TEST_MIGRATIONS: string };
+const migrations = JSON.parse(testEnv.TEST_MIGRATIONS) as Migration[];
+const defaultTheme = '{"version":1,"presetId":"candidary-default","overrides":{}}';
+
+function upTo(name: string): Migration[] {
+  const index = migrations.findIndex((migration) => migration.name.startsWith(name));
+  if (index === -1) throw new Error(`No migration named ${name}.`);
+  return migrations.slice(0, index);
+}
+
+function only(name: string): Migration {
+  const found = migrations.find((migration) => migration.name.startsWith(name));
+  if (!found) throw new Error(`No migration named ${name}.`);
+  return found;
+}
+
+beforeEach(reset);
+
+it('adds canonical theme configuration without rebuilding populated event records', async () => {
+  await applyD1Migrations(env.DB, upTo('0007'));
+
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO events (id, slug, name, event_date, welcome_message,
+        guest_access_expires_at, management_access_expires_at, purge_after, created_at)
+      VALUES ('event-1', 'maya-theo', 'Maya & Theo', '2026-09-19', 'Welcome.', ?, ?, ?, ?)
+    `).bind(now, now, now, now),
+    env.DB.prepare(`
+      INSERT INTO event_access_tokens (id, event_id, role, secret_digest, secret_ciphertext, expires_at, created_at)
+      VALUES ('token-1', 'event-1', 'guest', 'digest', 'cipher', ?, ?)
+    `).bind(now, now),
+    env.DB.prepare(`
+      INSERT INTO event_sessions (id, secret_digest, csrf_digest, event_id, access_token_id, role, expires_at, created_at)
+      VALUES ('session-1', 'digest', 'csrf', 'event-1', 'token-1', 'guest', ?, ?)
+    `).bind(now, now),
+    env.DB.prepare(`
+      INSERT INTO media (id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        declared_byte_size, guest_name, upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at)
+      VALUES ('media-1', 'event-1', 'session-1', 'events/event-1/a.jpg', 'a.jpg', 'image/jpeg',
+        1024, 'Ada', 'stored', 'unpublished', 'key-1', ?, ?)
+    `).bind(now, now),
+    env.DB.prepare(`
+      INSERT INTO guest_messages (id, event_id, guest_session_id, guest_name, body, moderation_status, created_at)
+      VALUES ('message-1', 'event-1', 'session-1', 'Ada', 'Congratulations!', 'approved', ?)
+    `).bind(now),
+    env.DB.prepare(`
+      INSERT INTO host_accounts (id, email, password_hash, created_at)
+      VALUES ('account-1', 'host@example.com', 'password-hash', ?)
+    `).bind(now),
+    env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES ('event-1', 'account-1', 'owner', ?)
+    `).bind(now),
+  ]);
+
+  await applyD1Migrations(env.DB, [only('0007')]);
+  await env.DB.prepare(`
+    INSERT INTO events (id, slug, name, event_date, welcome_message,
+      guest_access_expires_at, management_access_expires_at, purge_after, created_at)
+    VALUES ('event-2', 'new-event', 'New event', '2026-09-20', 'Welcome.', ?, ?, ?, ?)
+  `).bind(now, now, now, now).run();
+
+  expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM event_access_tokens WHERE id = 'token-1'")
+    .first('count')).toBe(1);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM event_sessions WHERE id = 'session-1'")
+    .first('count')).toBe(1);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM media WHERE id = 'media-1'")
+    .first('count')).toBe(1);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM guest_messages WHERE id = 'message-1'")
+    .first('count')).toBe(1);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM event_hosts WHERE event_id = 'event-1' AND account_id = 'account-1'")
+    .first('count')).toBe(1);
+  expect(await env.DB.prepare(`
+    SELECT id, theme_config FROM events WHERE id IN ('event-1', 'event-2') ORDER BY id
+  `).all()).toEqual({
+    results: [
+      { id: 'event-1', theme_config: defaultTheme },
+      { id: 'event-2', theme_config: defaultTheme },
+    ],
+    success: true,
+    meta: expect.any(Object),
+  });
+
+  await expect(env.DB.prepare('UPDATE events SET theme_config = ? WHERE id = ?')
+    .bind('{', 'event-1').run()).rejects.toThrow();
+  await expect(env.DB.prepare('UPDATE events SET theme_config = ? WHERE id = ?')
+    .bind('[]', 'event-1').run()).rejects.toThrow();
+  await expect(env.DB.prepare('UPDATE events SET theme_config = ? WHERE id = ?')
+    .bind(JSON.stringify({ padding: 'x'.repeat(512) }), 'event-1').run()).rejects.toThrow();
+});
