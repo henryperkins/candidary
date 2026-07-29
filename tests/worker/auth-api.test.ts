@@ -1,7 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AuthService } from '../../worker/auth/service';
 import { decryptGuestSecret } from '../../worker/security/crypto';
 import { createApp } from '../../worker/app';
 import type { AppEnv } from '../../worker/env';
@@ -35,6 +36,10 @@ beforeEach(async () => {
     name: '0001_core.sql',
     queries: JSON.parse(testEnv.TEST_MIGRATION_QUERIES) as string[],
   }]);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('event creation', () => {
@@ -222,6 +227,26 @@ describe('token exchange and session authorization', () => {
 
   it('classifies an unexpected manager exchange failure as retryable', () => {
     expect(classifyExchangeFailure(new Error('unexpected'))).toBe('retry');
+  });
+
+  it('reports unexpected manager document failures before token-free retry recovery', async () => {
+    vi.spyOn(AuthService.prototype, 'exchange')
+      .mockRejectedValueOnce(new Error('database unavailable'));
+    const report = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const response = await createApp().request('/manage/not-a-real.token', {
+      redirect: 'manual',
+      headers: { 'sec-fetch-mode': 'navigate' },
+    }, testEnv);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe('/recover/manage?kind=retry');
+    expect(report).toHaveBeenCalledTimes(1);
+    const entry = String(report.mock.calls[0]?.[0]);
+    expect(entry).toContain('"event":"manager_exchange_failed"');
+    expect(entry).toContain('"errorName":"Error"');
+    expect(entry).not.toContain('not-a-real.token');
+    expect(entry).not.toContain('database unavailable');
   });
 });
 

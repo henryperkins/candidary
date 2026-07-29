@@ -1253,6 +1253,25 @@ describe('manager experience', () => {
     expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
   });
 
+  it('keeps the readable guest link usable when QR generation rejects', async () => {
+    qrToDataURL.mockRejectedValueOnce(new Error('QR generation failed'));
+    vi.stubGlobal('fetch', managerFetch({
+      first: { media: makeMedia(2).slice(1), nextCursor: null },
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(qrToDataURL).toHaveBeenCalledTimes(1));
+    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    expect(screen.getByText('https://example.test/join/guest')).toBeVisible();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+      expect(copy).toBeEnabled();
+    }
+  });
+
   it('keeps creator-session recovery out of a refused manager-link rotation', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

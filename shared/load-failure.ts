@@ -51,8 +51,12 @@ const LOAD_FAILURE_DECISION = {
   INTERNAL_ERROR: decision('retry'),
 } as const satisfies Record<ApiErrorCode, LoadFailureDecision>;
 
-export function failureDecisionForCode(code: ApiErrorCode): LoadFailureDecision {
-  return LOAD_FAILURE_DECISION[code];
+const UNKNOWN_FAILURE_DECISION = decision('retry');
+
+export function failureDecisionForCode(code: string): LoadFailureDecision {
+  return Object.prototype.hasOwnProperty.call(LOAD_FAILURE_DECISION, code)
+    ? LOAD_FAILURE_DECISION[code as ApiErrorCode]
+    : UNKNOWN_FAILURE_DECISION;
 }
 
 export function classifyApiErrorCode(code: ApiErrorCode): LoadFailureKind {

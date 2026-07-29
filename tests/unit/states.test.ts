@@ -4,6 +4,7 @@ import {
   classifyApiErrorCode,
   failureDecisionForCode,
 } from '../../shared/load-failure';
+import type { ApiErrorCode } from '../../shared/errors';
 import { ClientApiError } from '../../src/app/api';
 import { describeLoadFailure } from '../../src/components/States';
 
@@ -35,6 +36,27 @@ describe('load failure classification', () => {
     expect(failureDecisionForCode('ACCOUNT_DISABLED'))
       .toEqual({ kind: 'latest-link', offerSignIn: false });
   });
+
+  it.each(['FUTURE_ERROR', 'toString', 'constructor', '__proto__'])(
+    'fails safely when a newer Worker returns the unknown code %s',
+    (code) => {
+      expect(failureDecisionForCode(code))
+        .toEqual({ kind: 'retry', offerSignIn: false });
+
+      expect(describeLoadFailure(
+        new ClientApiError(
+          code as ApiErrorCode,
+          'A newer server returned an unfamiliar failure.',
+        ),
+        'manager',
+        'fallback',
+      )).toMatchObject({
+        kind: 'retry',
+        offerSignIn: false,
+        retryable: true,
+      });
+    },
+  );
 
   it('exposes shared failure decisions through component descriptions', () => {
     const disabled = describeLoadFailure(

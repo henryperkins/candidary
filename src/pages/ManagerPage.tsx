@@ -305,6 +305,9 @@ export function ManagerPage() {
         color: { dark: '#42103b', light: '#fffaf3' },
       }).then((nextQr) => {
         if (current) setQr(nextQr);
+      }).catch(() => {
+        // The readable link remains available; a failed render must not create an
+        // unhandled rejection or revive a previous QR.
       });
     }
     return () => { current = false; };

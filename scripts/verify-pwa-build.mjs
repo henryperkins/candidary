@@ -55,7 +55,7 @@ if (/<link[^>]+rel="manifest"[^>]+crossorigin/iu.test(html)) {
 }
 
 const headers = contents.get('_headers').toString();
-if (!/\/manifest\.webmanifest\s+Content-Type: application\/manifest\+json/u.test(headers)) {
+if (!/^\/manifest\.webmanifest[ \t]*\r?\n[ \t]+Content-Type: application\/manifest\+json[ \t]*\r?$/mu.test(headers)) {
   throw new Error('Built static headers are missing the manifest content type.');
 }
 

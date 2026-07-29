@@ -39,6 +39,15 @@ exchangeRoutes.get('/manage/:token', async (context) => {
     return await exchange(context, 'manager');
   } catch (error) {
     if (!isDocumentNavigation(context.req.raw)) throw error;
+    if (!(error instanceof ApiError)) {
+      // Preserve token-free document recovery without logging the bearer token or
+      // an exception message that may contain request data.
+      console.error(JSON.stringify({
+        event: 'manager_exchange_failed',
+        requestId: context.get('requestId'),
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }));
+    }
     return context.redirect(`/recover/manage?kind=${classifyExchangeFailure(error)}`, 302);
   }
 });

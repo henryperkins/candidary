@@ -103,6 +103,15 @@ describe('iOS web app metadata', () => {
     expect(existsSync(fromRoot('scripts/generate-app-icons.mjs'))).toBe(true);
     expect(existsSync(fromRoot('scripts/verify-pwa-build.mjs'))).toBe(true);
   });
+
+  it('enforces resolved PWA artifact verification in the deployment command', () => {
+    const packageJson = JSON.parse(readText('package.json')) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(packageJson.scripts?.deploy)
+      .toBe('npm run build && npm run verify:pwa-build && wrangler deploy');
+  });
 });
 
 describe('installation remains user-initiated and online-only', () => {
