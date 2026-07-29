@@ -8,7 +8,10 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/join/*", "/manage/*", "/create", "/event/*", "/host/unsubscribe/*"]
+    "run_worker_first": [
+      "/api/*", "/join/*", "/manage/*", "/create", "/event/*",
+      "/host/unsubscribe/*", "/host/login", "/host/register", "/host/events", "/host/verify"
+    ]
   },
   "d1_databases": [
     {
