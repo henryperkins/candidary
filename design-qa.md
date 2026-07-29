@@ -123,7 +123,10 @@ Three existing Default files are deliberately updated:
 `guest-long-welcome-320-mobile-win32.png` and
 `guest-landscape-844x390-mobile-win32.png` for the corrected empty input boundary/placeholder.
 `guest-default-notes-390-mobile-win32.png` is a new approved image, not a fourth existing update.
-The final evidence revision changed no PNG.
+The final Task 8 evidence revision changed no PNG. A later independent-review
+correction replaced the Manager color input's undefined border variable with
+the global `--border` token and regenerated only
+`manager-event-appearance-390-mobile-win32.png`.
 
 The following pre-theme files are protected and pixel-identical:
 

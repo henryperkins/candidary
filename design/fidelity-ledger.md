@@ -50,7 +50,9 @@ full route, state, width, and baseline matrix.
 
 The Default Notes image is a new approved theme baseline, not one of the three
 existing Default baseline updates. The final Task 8 evidence revision changed
-no PNG.
+no PNG. A later independent-review correction replaced the Manager color
+input's undefined border variable with the global `--border` token and
+regenerated only `manager-event-appearance-390-mobile-win32.png`.
 
 Three existing Default baselines changed intentionally:
 
