@@ -45,7 +45,7 @@ export function CreatePage() {
     });
   }
 
-  useEffect(() => { if (created) void QRCode.toDataURL(created.guestLink, { width: 260, margin: 2, color: { dark: '#42103b', light: '#fffaf3' } }).then(setQr); }, [created]);
+  useEffect(() => { if (created) void QRCode.toDataURL(created.guestLink, { width: 260, margin: 2, color: { dark: '#4a2415', light: '#fffaf3' } }).then(setQr); }, [created]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setFields({});

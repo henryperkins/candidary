@@ -9,7 +9,7 @@
 
 ## Visual contract
 
-Candidary is editorial and intimate rather than celebratory-software generic. True warm parchment is the page ground, aubergine anchors actions and typography, apricot marks active/selected states, and moss communicates safe completion. Surfaces use thin warm-gray rules, restrained 8–12px radii, and almost-flat shadows.
+Candidary is editorial and intimate rather than celebratory-software generic. True warm parchment is the page ground, chestnut anchors actions and typography, denim marks active/selected states, and moss communicates safe completion. Surfaces use thin warm-gray rules, restrained 8–12px radii, and almost-flat shadows.
 
 ### Tokens
 
@@ -17,17 +17,17 @@ Candidary is editorial and intimate rather than celebratory-software generic. Tr
 | --- | --- |
 | Parchment page | `#f7f1e7` |
 | Paper surface | `#fffaf3` |
-| Ink | `#2b1728` |
+| Ink | `#2b1d17` |
 | Muted ink | `#766c70` |
-| Aubergine | `#42103b` |
-| Aubergine strong | `#2c0c2a` |
-| Apricot | `#f3a578` |
-| Apricot soft | `#f9ddc4` |
+| Chestnut | `#4a2415` |
+| Chestnut strong | `#31170c` |
+| Denim | `#3f6d95` |
+| Denim soft | `#dde7f0` |
 | Moss | `#68763d` |
 | Moss soft | `#e8ecd8` |
 | Danger | `#b54033` |
 | Border | `#d9cec2` |
-| Focus | `#8b3f79` |
+| Focus | `#2c5c85` |
 
 Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The manager uses a 184px navigation rail, open Live intake workspace, and 330px utility rail at wide widths.
 
@@ -40,10 +40,10 @@ Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. C
 
 ### Components and states
 
-- Buttons: filled aubergine primary, outlined aubergine secondary, quiet text tertiary, moss completion, danger hide/delete.
+- Buttons: filled chestnut primary, outlined chestnut secondary, quiet text tertiary, moss completion, danger hide/delete.
 - Fields: 48px minimum height, parchment/paper fill, 1px border, 2px focus outline with 2px offset.
 - Toggles: 44px hit area, moss on, warm gray off.
-- Media: 8px radius, natural cover crop, apricot selected/new treatment, and an explicit remove control before delivery.
+- Media: 8px radius, natural cover crop, denim selected/new treatment, and an explicit remove control before delivery.
 - Status: textual state plus icon; never color alone. Upload states are selected, preparing, queued, sending, confirming, delivered, and needs attention. Publication states are unpublished, published, and hidden.
 - Motion: 160–220ms for disclosure/selection; disable nonessential transforms under `prefers-reduced-motion`.
 

@@ -24,6 +24,7 @@ describe('static asset security headers', () => {
     expect(headers).toContain('X-Content-Type-Options: nosniff');
     expect(headers).toContain('Permissions-Policy: camera=(), microphone=(), geolocation=()');
     expect(headers).toContain('Cross-Origin-Opener-Policy: same-origin');
+    expect(headers).toContain('Strict-Transport-Security: max-age=31536000; includeSubDomains');
   });
 
   it('routes every clean SPA path through the Worker security middleware', () => {

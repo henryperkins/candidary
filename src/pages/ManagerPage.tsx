@@ -243,7 +243,7 @@ export function ManagerPage() {
     return () => window.clearInterval(interval);
   }, [refreshIntake, section]);
   useEffect(() => {
-    if (guestLink) void QRCode.toDataURL(guestLink, { width: 220, margin: 2, color: { dark: '#42103b', light: '#fffaf3' } }).then(setQr);
+    if (guestLink) void QRCode.toDataURL(guestLink, { width: 220, margin: 2, color: { dark: '#4a2415', light: '#fffaf3' } }).then(setQr);
   }, [guestLink]);
 
   function openSection(next: Section) {

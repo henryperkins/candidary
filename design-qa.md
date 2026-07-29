@@ -43,7 +43,7 @@ things before every screenshot, both of which were found by turning the toleranc
 
 - **Parks the pointer outside the viewport.** A test that clicks its way into a state leaves the
   mouse on the control it clicked, and that control keeps its `:hover` paint. The `/create` submit
-  button differs from its resting state by 13,077 px of aubergine-strong fill, and whether that paint
+  button differs from its resting state by 13,077 px of chestnut-strong fill, and whether that paint
   landed before the capture varied from run to run.
 - **Waits until the font set is quiet across two frames**, not merely for one `document.fonts.ready`.
   A face is only requested when a glyph needs it, so laying out with the faces loaded so far can
@@ -224,7 +224,7 @@ Fixed under this task:
   landmarks. It is now the page's `banner`, which also keeps the brand inside a landmark.
 - `page-has-heading-one` — `/event/:slug/fullscreen` had no level-one heading. It now carries a
   screen-reader-only one; visible copy is unchanged.
-- `color-contrast` on the guest note byline — `.notes-feed small` was written for the dark aubergine
+- `color-contrast` on the guest note byline — `.notes-feed small` was written for the dark
   notes band and rendered a guest's name at 1.72:1 when that component was reused on the light guest
   surface. It now inherits the ink the surrounding feed already uses.
 - `color-contrast` on the guest ground — see "Contrast remediation" below.
