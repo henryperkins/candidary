@@ -1,6 +1,9 @@
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 
-import type { ApiErrorCode } from '../../shared/errors';
+import {
+  failureDecisionForCode,
+  type LoadFailureKind,
+} from '../../shared/load-failure';
 import { ClientApiError } from '../app/api';
 
 export function LoadingState({ label = 'Gathering the details…' }: { label?: string }) {
@@ -38,54 +41,6 @@ export function ErrorState({ message, recoveryHint, onRetry, action }: ErrorStat
   </div>;
 }
 
-export type LoadFailureKind = 'latest-link' | 'ended-event' | 'sign-in' | 'retry';
-
-// Every server code makes an explicit recovery decision here. `satisfies Record<ApiErrorCode, …>`
-// turns a future API-code addition into a compile failure instead of silently falling into retry.
-const LOAD_FAILURE_KIND = {
-  EVENT_NOT_FOUND: 'ended-event',
-  EVENT_DELETED: 'ended-event',
-  EVENT_EXPIRED: 'ended-event',
-  SESSION_REQUIRED: 'latest-link',
-  SESSION_EXPIRED: 'latest-link',
-  ROLE_FORBIDDEN: 'latest-link',
-  UPLOADS_DISABLED: 'retry',
-  GALLERY_HIDDEN: 'retry',
-  TOKEN_REVOKED: 'latest-link',
-  FILE_TYPE_UNSUPPORTED: 'retry',
-  FILE_TOO_LARGE: 'retry',
-  EVENT_MEDIA_LIMIT: 'retry',
-  EVENT_STORAGE_LIMIT: 'retry',
-  UPLOAD_RESERVATION_EXPIRED: 'retry',
-  UPLOAD_OBJECT_MISSING: 'retry',
-  UPLOAD_FINALIZE_CONFLICT: 'retry',
-  MEDIA_STATE_CONFLICT: 'retry',
-  EXPORT_ALREADY_ACTIVE: 'retry',
-  EXPORT_EMPTY: 'retry',
-  EXPORT_LIMIT_EXCEEDED: 'retry',
-  EXPORT_FAILED: 'retry',
-  VALIDATION_FAILED: 'retry',
-  CSRF_INVALID: 'retry',
-  ORIGIN_FORBIDDEN: 'retry',
-  HOST_SESSION_REQUIRED: 'sign-in',
-  LOGIN_CREDENTIALS_INVALID: 'retry',
-  // A wrong, stale, or throttled code is answered by asking for another one, so
-  // every one of these stays a retry rather than a dead end.
-  LOGIN_CODE_INVALID: 'retry',
-  LOGIN_CODE_EXPIRED: 'retry',
-  LOGIN_RATE_LIMITED: 'retry',
-  RATE_LIMITED: 'retry',
-  LOGIN_EMAIL_UNDELIVERABLE: 'retry',
-  // Signing in again cannot lift this one. The management link is the only route
-  // left, which is what the lifecycle hint already says.
-  ACCOUNT_DISABLED: 'ended-event',
-  INTERNAL_ERROR: 'retry',
-} as const satisfies Record<ApiErrorCode, LoadFailureKind>;
-
-export function classifyApiErrorCode(code: ApiErrorCode): LoadFailureKind {
-  return LOAD_FAILURE_KIND[code];
-}
-
 const LINK_RECOVERY_HINT = {
   guest: 'Open the latest guest link from your host to start again.',
   manager: 'Open the latest management link you saved to start again.',
@@ -100,11 +55,12 @@ const LIFECYCLE_HINT = {
 // next time, which is not the same as knowing why it did not answer this time.
 const RETRY_HINT = 'This did not go through. Try again in a moment.';
 
-// Role-independent on purpose: only an account session can raise this, and the way
-// back is the same whichever surface it surfaced on.
+// This hint is role-independent; the shared decision table controls whether the
+// manager surface makes the sign-in route available.
 const SIGN_IN_HINT = 'Sign in with your email and password to continue.';
 
 export interface LoadFailure {
+  kind: LoadFailureKind;
   message: string;
   recoveryHint: string;
   retryable: boolean;
@@ -121,23 +77,28 @@ export function describeLoadFailure(
   fallback: string,
 ): LoadFailure {
   const message = caught instanceof Error && caught.message ? caught.message : fallback;
-  const kind = caught instanceof ClientApiError ? classifyApiErrorCode(caught.code) : 'retry';
+  const decision = caught instanceof ClientApiError
+    ? failureDecisionForCode(caught.code)
+    : { kind: 'retry' as const, offerSignIn: false };
+  const offerSignIn = role === 'manager' && decision.offerSignIn;
+  const { kind } = decision;
   if (kind === 'latest-link') {
-    // A manager URL cannot reveal whether it came from an account page or a copied
-    // link, so sign-in is offered alongside the link hint rather than instead of it.
+    // The recovery table distinguishes failures where a fresh sign-in can help
+    // from ones such as a disabled account, where it cannot.
     return {
       message,
+      kind,
       recoveryHint: LINK_RECOVERY_HINT[role],
       retryable: false,
-      offerSignIn: role === 'manager',
+      offerSignIn,
     };
   }
   if (kind === 'ended-event') {
     // Signing in cannot reopen a closed or deleted event, so it is not offered here.
-    return { message, recoveryHint: LIFECYCLE_HINT[role], retryable: false, offerSignIn: false };
+    return { message, kind, recoveryHint: LIFECYCLE_HINT[role], retryable: false, offerSignIn };
   }
   if (kind === 'sign-in') {
-    return { message, recoveryHint: SIGN_IN_HINT, retryable: false, offerSignIn: true };
+    return { message, kind, recoveryHint: SIGN_IN_HINT, retryable: false, offerSignIn };
   }
-  return { message, recoveryHint: RETRY_HINT, retryable: true, offerSignIn: false };
+  return { message, kind, recoveryHint: RETRY_HINT, retryable: true, offerSignIn };
 }

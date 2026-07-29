@@ -161,8 +161,8 @@ removes.
 
 ## Error handling
 
-- Rotation of an ownerless event returns HTTP 409 with the existing stable
-  `ROLE_FORBIDDEN` code only while a live creator or legacy claim remains. Its
+- Rotation of an ownerless event returns HTTP 409 with
+  `OWNER_CLAIM_REQUIRED` only while a live creator or legacy claim remains. Its
   guidance names the creator session as the required path. If no claim path
   remains, rotation is allowed.
 - Existing membership adoption returns HTTP 200 without requiring a management

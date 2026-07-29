@@ -14,7 +14,7 @@ function manager(context: Context<AppBindings>, write = false) {
 
 async function ownedJob(context: Context<AppBindings>) {
   const job = await new ExportsRepository(context.env.DB).getById(context.req.param('jobId')!);
-  if (!job || job.eventId !== context.req.param('eventId')) throw new ApiError('ROLE_FORBIDDEN', 'This export belongs to a different event.', 403);
+  if (!job || job.eventId !== context.req.param('eventId')) throw new ApiError('RESOURCE_FORBIDDEN', 'This export belongs to a different event.', 403);
   return job;
 }
 

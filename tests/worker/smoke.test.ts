@@ -18,4 +18,15 @@ describe('Worker entrypoint', () => {
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(await response.text()).toContain('<div id="root"></div>');
   });
+
+  it('serves the token-free management recovery shell through Worker security middleware', async () => {
+    const assets = { fetch: () => Promise.resolve(new Response('<div id="root"></div>', { headers: { 'content-type': 'text/html' } })) } as unknown as Fetcher;
+    const response = await createApp().request('/recover/manage', {}, { ...env, ASSETS: assets } as AppEnv);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(await response.text()).toContain('<div id="root"></div>');
+  });
 });

@@ -110,6 +110,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* The failure is the alarm; the way out of it is read calmly underneath, inside the caption band. */
 .state-card--error .state-card__recovery { color: var(--muted); font-size: .875rem; }
 .state-card .button { margin-top: 22px; }.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+.manager-load-failure { width: min(560px, 100%); min-width: 0; display: grid; gap: 18px; text-align: left; }
+.manager-load-failure .state-card { width: 100%; min-width: 0; text-align: center; }
 .guest-header { position: sticky; top: 0; z-index: 5; background: rgb(247 241 231 / 94%); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }.guest-header nav { display: flex; gap: 28px; }.guest-header nav a { color: var(--muted); font-size: .9rem; text-decoration: none; }
 .event-welcome { min-height: 585px; display: grid; grid-template-columns: .9fr 1.1fr; border-bottom: 1px solid var(--border); }.event-welcome > div { padding: 80px 6vw; align-self: center; }.event-welcome time { color: var(--aubergine); font-weight: 600; }.event-welcome h1 { margin: 15px 0 24px; }.event-welcome p { max-width: 590px; color: var(--muted); font-size: 1.12rem; }.event-welcome > img { width: 100%; height: 100%; max-height: 585px; object-fit: cover; }
 .upload-band { padding: 55px 6vw; display: grid; grid-template-columns: 1fr 350px; gap: 46px; border-bottom: 1px solid var(--border); }.upload-drop { min-height: 140px; padding: 25px; display: flex; align-items: center; gap: 20px; border: 1px dashed #bfae9e; border-radius: 10px; background: var(--paper); }.upload-drop > svg { flex: 0 0 auto; color: var(--apricot); font-size: 2rem; }.upload-drop div { flex: 1; }.upload-drop h2 { margin: 0 0 5px; font-size: 1.55rem; }.upload-drop p { margin: 0; color: var(--muted); font-size: .85rem; }.guest-name { align-self: center; margin: 0; }.upload-tray { grid-column: 1 / -1; padding: 20px; border: 1px solid var(--border); background: var(--paper); }.upload-tray ul { padding: 0; list-style: none; }.upload-tray li { display: grid; grid-template-columns: 1fr auto; padding: 10px 0; border-bottom: 1px solid var(--border); }.upload-tray em { color: var(--moss); }.upload-tray small { grid-column: 1 / -1; color: var(--danger); }
@@ -366,8 +368,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .media-more { margin-top: 20px; display: grid; grid-template-columns: minmax(0, 1fr); }
 /* The same ground `.form-error` stands on, so the two error surfaces are one treatment. Danger on the
    old, deeper ground measured 4.48:1; on this one it is 5.09:1. */
-.manager-action-error { margin: 0 0 24px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); font-size: .875rem; }
-.manager-action-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.manager-action-error { margin: 0 0 24px; padding: 12px 14px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); font-size: .875rem; }
+.manager-action-error__summary { display: flex; align-items: flex-start; gap: 10px; }
+.manager-action-error__alert { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 /* Its own line rather than a run-on sentence, and deliberately no colour or size of its own: inheriting
    danger on this ground keeps the pairing the one measured above and the text in the 12–14 px band. */
 .manager-action-error__recovery { display: block; margin-top: 4px; }
@@ -525,3 +528,38 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .account-card h3 { margin-bottom: 10px; font-family: 'Manrope', sans-serif; font-size: 1.05rem; }
 .account-card p { margin-bottom: 14px; font-size: .95rem; }
 .account-card p svg, .account-card button svg { width: 16px; height: 16px; vertical-align: -3px; }
+
+/* This is shared by recovery screens, so it stays a one-column card before a route places it. */
+.management-link-recovery { width: 100%; max-width: 560px; padding: 24px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); color: var(--ink); }
+.management-link-recovery h2 { margin: 0 0 8px; font-size: 1.6rem; }
+.management-link-recovery > p { margin: 0 0 20px; color: var(--muted); }
+.management-link-recovery form, .management-link-recovery__field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.management-link-recovery form { gap: 18px; }
+.management-link-recovery__field > label { font-weight: 600; }
+.management-link-recovery__error { margin: 0; color: var(--danger); font-size: .875rem; }
+.management-link-recovery .button { width: 100%; }
+
+/* Credential recovery is adjacent to its alert so interactive controls never enter a live region. */
+.manager-access-recovery { width: 100%; max-width: 560px; min-width: 0; display: grid; gap: 16px; color: var(--ink); }
+.manager-access-recovery > .button { width: 100%; }
+.manager-access-recovery .management-link-recovery { max-width: none; }
+.manager-action-error .manager-access-recovery { margin-top: 16px; padding-top: 16px; border-top: 1px solid rgb(119 42 42 / 18%); }
+
+/* A failed bearer link cannot name an event safely, so the account and saved-link
+   paths remain distinct, equally contained routes back into the manager. */
+.management-recovery-page { width: 100%; max-width: 760px; min-height: 100svh; margin: 0 auto; padding: 32px 20px 64px; display: grid; align-content: start; gap: 48px; }
+.management-recovery-page > section { width: 100%; min-width: 0; padding: 28px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); box-shadow: 0 18px 50px rgb(66 16 59 / 5%); }
+.management-recovery-page h1 { margin-bottom: 16px; font-size: clamp(2.35rem, 9vw, 4rem); }
+.management-recovery-page > section > p:not(.section-label) { color: var(--muted); }
+.management-recovery-page__methods { display: grid; gap: 20px; margin-top: 32px; }
+.management-recovery-page__method { min-width: 0; padding-top: 24px; border-top: 1px solid var(--border); }
+.management-recovery-page__method h2 { margin-bottom: 10px; font-size: 1.55rem; }
+.management-recovery-page__method > p { color: var(--muted); }
+.management-recovery-page__method .button--secondary { width: 100%; }
+.management-recovery-page__method .management-link-recovery { max-width: none; padding: 0; border: 0; border-radius: 0; }
+
+@media (min-width: 560px) {
+  .management-recovery-page { padding-top: 56px; }
+  .management-recovery-page > section { padding: 40px; }
+  .management-recovery-page__method .button--secondary { width: auto; }
+}

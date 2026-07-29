@@ -3,10 +3,27 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type * as ManagementLinkModule from '../../src/app/management-link';
+
+const { replaceManagementLocation } = vi.hoisted(() => ({
+  replaceManagementLocation: vi.fn(),
+}));
+const { qrToDataURL } = vi.hoisted(() => ({
+  qrToDataURL: vi.fn(),
+}));
+
+vi.mock('../../src/app/management-link', async (importOriginal) => ({
+  ...await importOriginal<typeof ManagementLinkModule>(),
+  replaceManagementLocation,
+}));
+vi.mock('qrcode', () => ({ default: { toDataURL: qrToDataURL } }));
+
 import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { mediaPreview } from '../../src/app/api';
+import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
+import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
@@ -29,6 +46,9 @@ const CREATED = {
   csrfToken: 'csrf-a',
 };
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
+const QR_DATA_URL = 'data:image/png;base64,candidary-test';
+
+qrToDataURL.mockResolvedValue(QR_DATA_URL);
 
 async function createEvent(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
@@ -38,7 +58,80 @@ async function createEvent(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { name: 'Your event is ready.' });
 }
 
-afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  qrToDataURL.mockReset();
+  qrToDataURL.mockResolvedValue(QR_DATA_URL);
+});
+
+describe('management link recovery', () => {
+  it('marks an invalid management link and returns focus to it', async () => {
+    render(<ManagementLinkRecovery />);
+    const user = userEvent.setup();
+
+    expect(screen.getByLabelText('Management link')).toHaveAttribute('autocomplete', 'off');
+    expect(screen.getByLabelText('Management link')).toHaveAttribute('spellcheck', 'false');
+    expect(screen.getByRole('button', { name: 'Open event manager' })).toBeVisible();
+
+    await user.type(screen.getByLabelText('Management link'), '/manage/event');
+    await user.click(screen.getByRole('button', { name: 'Open event manager' }));
+
+    expect(screen.getByLabelText('Management link')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('Enter a Candidary management link from this site.')).toBeVisible();
+    expect(screen.getByLabelText('Management link')).toHaveFocus();
+  });
+
+  it('replaces location with only the parsed pathname from a valid management link', async () => {
+    const token = 'Abc_123.Xyz-789';
+    replaceManagementLocation.mockClear();
+    render(<ManagementLinkRecovery />);
+    const user = userEvent.setup();
+
+    await user.type(
+      screen.getByLabelText('Management link'),
+      `${window.location.origin}/manage/${token}?from=mail#saved`,
+    );
+    await user.click(screen.getByRole('button', { name: 'Open event manager' }));
+
+    expect(replaceManagementLocation).toHaveBeenCalledOnce();
+    expect(replaceManagementLocation).toHaveBeenCalledWith(`/manage/${token}`);
+  });
+});
+
+describe('recover event manager page', () => {
+  it.each(['latest-link', 'sign-in', 'retry'] as const)(
+    'offers account and management-link recovery for %s',
+    (kind) => {
+      render(<RouterProvider router={createAppRouter([`/recover/manage?kind=${kind}`])} />);
+
+      expect(screen.getByRole('heading', { level: 1, name: 'Recover event manager' })).toBeVisible();
+      expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/host/login');
+      expect(screen.getByLabelText('Management link')).toBeVisible();
+      expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['/recover/manage', '/recover/manage?kind=unknown'])(
+    'falls back to recoverable latest-link guidance for %s',
+    (entry) => {
+      render(<RouterProvider router={createAppRouter([entry])} />);
+
+      expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/host/login');
+      expect(screen.getByLabelText('Management link')).toBeVisible();
+    },
+  );
+
+  it('shows terminal guidance without recovery actions for ended events', () => {
+    render(<RouterProvider router={createAppRouter(['/recover/manage?kind=ended-event'])} />);
+
+    expect(screen.getByRole('heading', { level: 1, name: 'This event can no longer be managed' })).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+  });
+});
 
 describe('public Candidary experience', () => {
   it('presents the approved value proposition and workflow', () => {
@@ -275,6 +368,34 @@ function previewSources() {
 }
 
 describe('manager experience', () => {
+  it.each([
+    ['SESSION_EXPIRED', 'This session has expired.', true, true],
+    ['HOST_SESSION_REQUIRED', 'Your sign-in has expired.', true, true],
+    ['ACCOUNT_DISABLED', 'This account is no longer active.', false, true],
+    ['EVENT_EXPIRED', 'This event access has expired.', false, false],
+    ['INTERNAL_ERROR', 'The event manager could not be loaded.', false, false],
+  ] as const)(
+    'renders the correct full-page manager recovery for %s',
+    async (code, message, offerSignIn, offerManagementLink) => {
+      vi.stubGlobal('fetch', vi.fn(() => errorJson({ code, message, requestId: 'request-a' }, 401)));
+      render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
+
+      expect(await screen.findByText(message)).toBeVisible();
+      if (offerSignIn) {
+        expect(screen.getByRole('link', { name: 'Sign in' }))
+          .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+      } else {
+        expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+      }
+      if (offerManagementLink) {
+        expect(screen.getByLabelText('Management link')).toBeVisible();
+      } else {
+        expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+      }
+      expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
+    },
+  );
+
   it('appends the next media page and keeps every row unique', async () => {
     const rows = makeMedia(MANAGER_MEDIA_PAGE_SIZE + 1);
     const mediaRequests: string[] = [];
@@ -753,7 +874,7 @@ describe('manager experience', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
-        return errorJson({ code: 'CONFLICT', message: 'That photo changed before your update.', requestId: 'request-a' }, 409);
+        return errorJson({ code: 'MEDIA_STATE_CONFLICT', message: 'That photo changed before your update.', requestId: 'request-a' }, 409);
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
       if (url.includes('/media')) return json({ media: rows, nextCursor: null });
@@ -909,11 +1030,47 @@ describe('manager experience', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
-  it('names the way out when a load fails after the manager has already rendered', async () => {
+  it('keeps the last usable intake and offers both recovery routes when polling loses credentials', async () => {
     let mediaRequests = 0;
+    const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
+      if (url.includes('/media')) {
+        mediaRequests += 1;
+        return mediaRequests > 1
+          ? errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401)
+          : json({ media: makeMedia(2).slice(1), nextCursor: null });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const interval = vi.spyOn(window, 'setInterval');
+    render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
+    expect(poll).toBeTypeOf('function');
+    await act(async () => { (poll as () => void)(); });
+
+    const notice = await screen.findByRole('alert');
+    expect(notice).toHaveTextContent('This session has expired.');
+    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByAltText('Moment 2')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Sign in' }))
+      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+    expect(screen.getByLabelText('Management link')).toBeVisible();
+  });
+
+  it('names the way out when a load fails after the manager has already rendered', async () => {
+    let mediaRequests = 0;
+    const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
       if (url.includes('/media')) {
         mediaRequests += 1;
         // A manager session lasts twelve hours. The one that expires overnight expires against a page
@@ -927,7 +1084,7 @@ describe('manager experience', () => {
       if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
       throw new Error(`Unexpected request ${url}`);
     }));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
     expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
@@ -943,6 +1100,10 @@ describe('manager experience', () => {
     expect(notice).toHaveTextContent('Open the latest management link you saved to start again.');
     // Still the inline, dismissible notice: the manager the host was working in survives.
     expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Sign in' }))
+      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+    expect(screen.getByLabelText('Management link')).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
@@ -953,7 +1114,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
-        return errorJson({ code: 'CONFLICT', message: 'That photo changed before your update.', requestId: 'request-a' }, 409);
+        return errorJson({ code: 'RESOURCE_FORBIDDEN', message: 'This photo belongs to a different event.', requestId: 'request-a' }, 403);
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
       if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
@@ -972,8 +1133,232 @@ describe('manager experience', () => {
     // A refused write is retryable by definition — the control is still under the host's thumb — so
     // the notice carries the failure and nothing else. The recovery line belongs to load failures.
     const notice = await screen.findByRole('alert');
-    expect(notice).toHaveTextContent('That photo changed before your update.');
+    expect(notice).toHaveTextContent('This photo belongs to a different event.');
     expect(notice.querySelector('.manager-action-error__recovery')).toBeNull();
+    expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+  });
+
+  it('does not mistake an unavailable guest link for lost manager access', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    let guestLinkUnavailable = true;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        (init?.method ?? 'GET').toUpperCase() === 'POST'
+        && url.endsWith('/links/guest/rotate')
+      ) {
+        guestLinkUnavailable = false;
+        return json({ guestLink: 'https://example.test/join/replacement' });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) {
+        return guestLinkUnavailable
+          ? errorJson({
+            code: 'GUEST_LINK_UNAVAILABLE',
+            message: 'The guest link is unavailable. Rotate it to create a replacement.',
+            requestId: 'request-a',
+          }, 410)
+          : json({ guestLink: 'https://example.test/join/replacement' });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The guest link is unavailable. Rotate it to create a replacement.',
+    );
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    expect(screen.queryByRole('button', { name: 'Show full guest link' })).not.toBeInTheDocument();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+      expect(copy).toBeDisabled();
+    }
+    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Rotate guest link' }));
+
+    expect(await screen.findByText('https://example.test/join/replacement')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Show full guest link' })).toBeEnabled();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+      expect(copy).toBeEnabled();
+    }
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('retires rendered and in-flight guest QR codes when the link becomes unavailable', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    let linkUnavailable = false;
+    let resolveSecondQr!: (value: string) => void;
+    qrToDataURL
+      .mockResolvedValueOnce('data:image/png;base64,first-link')
+      .mockImplementationOnce(() => new Promise<string>((resolve) => {
+        resolveSecondQr = resolve;
+      }));
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        (init?.method ?? 'GET').toUpperCase() === 'POST'
+        && url.endsWith('/links/guest/rotate')
+      ) {
+        linkUnavailable = true;
+        return json({ guestLink: 'https://example.test/join/second-link' });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) {
+        return linkUnavailable
+          ? errorJson({
+            code: 'GUEST_LINK_UNAVAILABLE',
+            message: 'The guest link is unavailable. Rotate it to create a replacement.',
+            requestId: 'request-a',
+          }, 410)
+          : json({ guestLink: 'https://example.test/join/first-link' });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findAllByAltText('Guest event QR code')).not.toHaveLength(0);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Rotate guest link' }));
+    await waitFor(() => expect(qrToDataURL).toHaveBeenCalledTimes(2));
+
+    await user.click(screen.getByRole('button', { name: /^Intake/u }));
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The guest link is unavailable. Rotate it to create a replacement.',
+    );
+    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show full guest link' })).not.toBeInTheDocument();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+      expect(copy).toBeDisabled();
+    }
+
+    await act(async () => {
+      resolveSecondQr('data:image/png;base64,stale-second-link');
+      await Promise.resolve();
+    });
+    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+  });
+
+  it('keeps the readable guest link usable when QR generation rejects', async () => {
+    qrToDataURL.mockRejectedValueOnce(new Error('QR generation failed'));
+    vi.stubGlobal('fetch', managerFetch({
+      first: { media: makeMedia(2).slice(1), nextCursor: null },
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await waitFor(() => expect(qrToDataURL).toHaveBeenCalledTimes(1));
+    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    expect(screen.getByText('https://example.test/join/guest')).toBeVisible();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+      expect(copy).toBeEnabled();
+    }
+  });
+
+  it('keeps creator-session recovery out of a refused manager-link rotation', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        (init?.method ?? 'GET').toUpperCase() === 'POST'
+        && url.endsWith('/links/manager/rotate')
+      ) {
+        return errorJson({
+          code: 'OWNER_CLAIM_REQUIRED',
+          message: 'Save this event from its original creator session before rotating its management link.',
+          requestId: 'request-a',
+        }, 409);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Rotate manager link' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Save this event from its original creator session before rotating its management link.',
+    );
+    expect(screen.getByRole('heading', { name: 'Share the photo drop' })).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+  });
+
+  it('preserves loaded media and offers access recovery when pagination loses the manager credential', async () => {
+    const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
+      if (url.includes('/media')) {
+        return url.includes('cursor=page-two')
+          ? errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401)
+          : json({ media: makeMedia(2).slice(1), nextCursor: 'page-two' });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Load more photos' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('This session has expired.');
+    expect(screen.getByAltText('Moment 2')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Sign in' }))
+      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+    expect(screen.getByLabelText('Management link')).toBeVisible();
+  });
+
+  it('turns manager-action credential loss into access recovery without discarding usable state', async () => {
+    const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
+        return errorJson({ code: 'TOKEN_REVOKED', message: 'This link was replaced with a new one.', requestId: 'request-a' }, 403);
+      }
+      if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
+      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Delete moment-2.jpg' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('This link was replaced with a new one.');
+    expect(screen.getByAltText('Moment 2')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Sign in' }))
+      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+    expect(screen.getByLabelText('Management link')).toBeVisible();
   });
 
   it('opens on live intake, filters by guest name, and keeps gallery publishing secondary', async () => {

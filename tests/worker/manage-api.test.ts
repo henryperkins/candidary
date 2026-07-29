@@ -513,6 +513,25 @@ describe('manager settings and private photo intake', () => {
     expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
     expect(await testEnv.MEDIA_BUCKET.head(previewObjectKey)).toBeNull();
   });
+
+  it('uses a domain refusal when a photo belongs to another event', async () => {
+    const first = await eventAccess();
+    const second = await eventAccess();
+    const media = await uploadPending(second, 'foreign-photo');
+
+    const response = await createApp().request(
+      `/api/manage/events/${first.event.id}/media/${media.id}`,
+      {
+        method: 'PATCH',
+        headers: writeHeaders(first.manager),
+        body: JSON.stringify({ action: 'delete', expectedStatus: 'unpublished' }),
+      },
+      testEnv,
+    );
+
+    expect(response.status).toBe(403);
+    expect((await response.json<any>()).code).toBe('RESOURCE_FORBIDDEN');
+  });
 });
 
 describe('access link rotation', () => {
@@ -528,6 +547,21 @@ describe('access link rotation', () => {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
     expect(denied.status).toBe(403);
+  });
+
+  it('distinguishes an unavailable guest link from revoked manager access', async () => {
+    const access = await eventAccess();
+    await env.DB.prepare(`
+      UPDATE event_access_tokens SET revoked_at = ?
+      WHERE event_id = ? AND role = 'guest' AND revoked_at IS NULL
+    `).bind(new Date().toISOString(), access.event.id).run();
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+
+    expect(response.status).toBe(410);
+    expect((await response.json<any>()).code).toBe('GUEST_LINK_UNAVAILABLE');
   });
 
   it('rotates the guest link and invalidates every old guest session immediately', async () => {
@@ -580,7 +614,7 @@ describe('access link rotation', () => {
     }, testEnv);
 
     expect(blocked.status).toBe(409);
-    expect((await blocked.json<any>()).code).toBe('ROLE_FORBIDDEN');
+    expect((await blocked.json<any>()).code).toBe('OWNER_CLAIM_REQUIRED');
 
     const originalSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
       headers: { cookie: access.manager.cookie },
@@ -663,7 +697,7 @@ describe('access link rotation', () => {
     }, testEnv);
 
     expect(blocked.status).toBe(409);
-    expect((await blocked.json<any>()).code).toBe('ROLE_FORBIDDEN');
+    expect((await blocked.json<any>()).code).toBe('OWNER_CLAIM_REQUIRED');
   });
 
   it('does not treat a cohost as durable ownership while creator recovery remains live', async () => {
@@ -682,7 +716,7 @@ describe('access link rotation', () => {
     }, testEnv);
 
     expect(blocked.status).toBe(409);
-    expect((await blocked.json<any>()).code).toBe('ROLE_FORBIDDEN');
+    expect((await blocked.json<any>()).code).toBe('OWNER_CLAIM_REQUIRED');
 
     const originalSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
       headers: { cookie: access.manager.cookie },

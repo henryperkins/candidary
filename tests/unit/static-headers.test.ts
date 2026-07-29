@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 const headersPath = resolve(process.cwd(), 'public/_headers');
 const headers = existsSync(headersPath) ? readFileSync(headersPath, 'utf8') : '';
+const manifestContentTypeRule =
+  /^\/manifest\.webmanifest[ \t]*\r?\n[ \t]+Content-Type: application\/manifest\+json[ \t]*\r?$/mu;
 const wranglerConfig = JSON.parse(readFileSync(resolve(process.cwd(), 'wrangler.jsonc'), 'utf8')) as {
   assets?: { run_worker_first?: string[] };
 };
@@ -23,9 +25,19 @@ describe('static asset security headers', () => {
     expect(headers).toContain('Cross-Origin-Opener-Policy: same-origin');
   });
 
+  it('serves the manifest with an explicit content type under nosniff', () => {
+    expect(headers).toMatch(manifestContentTypeRule);
+  });
+
+  it('does not borrow the manifest content type from beyond its header block', () => {
+    expect('/manifest.webmanifest\n\n  Content-Type: application/manifest+json')
+      .not.toMatch(manifestContentTypeRule);
+  });
+
   it('routes every clean SPA path through the Worker security middleware', () => {
     const patterns = wranglerConfig.assets?.run_worker_first ?? [];
     expect(patterns).toEqual(expect.arrayContaining(['/create', '/event/*', '/manage/*']));
+    expect(patterns).toContain('/recover/manage');
     expect(patterns).not.toContain('!/manage/event/*');
   });
 });

@@ -69,7 +69,7 @@ messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (contex
   const repository = new MessagesRepository(context.env.DB);
   const current = await repository.getById(context.req.param('messageId'));
   if (!current || current.eventId !== auth.event.id) {
-    throw new ApiError('ROLE_FORBIDDEN', 'This note belongs to a different event.', 403);
+    throw new ApiError('RESOURCE_FORBIDDEN', 'This note belongs to a different event.', 403);
   }
   const message = parsed.data.action === 'delete'
     ? await repository.delete(current.id, new Date().toISOString())

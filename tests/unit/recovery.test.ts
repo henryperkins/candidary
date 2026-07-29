@@ -1,8 +1,46 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { parseManagementLink, replaceManagementLocation } from '../../src/app/management-link';
 import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
 
 const EVENT = '11111111-2222-4333-8444-555555555555';
+const ORIGIN = 'https://candidary.test';
+const TOKEN = 'Abc_123.Xyz-789';
+
+describe('management link recovery', () => {
+  it('returns only the management pathname from a same-origin management link', () => {
+    expect(parseManagementLink(`${ORIGIN}/manage/${TOKEN}`, ORIGIN))
+      .toBe(`/manage/${TOKEN}`);
+    expect(parseManagementLink(`/manage/${TOKEN}?from=mail#saved`, ORIGIN))
+      .toBe(`/manage/${TOKEN}`);
+  });
+
+  it.each([
+    ['foreign origin', `https://evil.example/manage/${TOKEN}`],
+    ['credentials', `https://user:pass@candidary.test/manage/${TOKEN}`],
+    ['manager client route', '/manage/event'],
+    ['extra segment', `/manage/${TOKEN}/more`],
+    ['trailing slash', `/manage/${TOKEN}/`],
+    ['missing dot', '/manage/Abc_123'],
+    ['duplicate dot', '/manage/Abc_123.Xyz-789.extra'],
+    ['empty id', '/manage/.Xyz-789'],
+    ['empty secret', '/manage/Abc_123.'],
+    ['invalid id alphabet', '/manage/Abc%2F123.Xyz-789'],
+    ['invalid secret alphabet', '/manage/Abc_123.Xyz%2F789'],
+    ['non-management path', `/join/${TOKEN}`],
+  ])('rejects %s', (_label, value) => {
+    expect(parseManagementLink(value, ORIGIN)).toBeNull();
+  });
+
+  it('passes a management pathname to Location.replace', () => {
+    const replace = vi.fn();
+
+    replaceManagementLocation(`/manage/${TOKEN}`, { replace });
+
+    expect(replace).toHaveBeenCalledOnce();
+    expect(replace).toHaveBeenCalledWith(`/manage/${TOKEN}`);
+  });
+});
 
 describe('host recovery paths', () => {
   it('accepts only the two local destinations a recovery can end at', () => {

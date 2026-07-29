@@ -85,4 +85,26 @@ describe('manager exports', () => {
     expect(retry.status).toBe(202);
     expect((await retry.json<any>()).data.export.attempt).toBe(2);
   });
+
+  it('uses a domain refusal when an export belongs to another event', async () => {
+    const first = await eventAccess();
+    const second = await eventAccess();
+    const job = await new ExportsRepository(testEnv.DB).createActive({
+      id: crypto.randomUUID(),
+      eventId: second.event.id,
+      snapshotAt: new Date().toISOString(),
+      mediaCount: 1,
+      totalBytes: 64,
+      createdAt: new Date().toISOString(),
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${first.event.id}/exports/${job.id}`,
+      { headers: { cookie: first.manager.cookie } },
+      testEnv,
+    );
+
+    expect(response.status).toBe(403);
+    expect((await response.json<any>()).code).toBe('RESOURCE_FORBIDDEN');
+  });
 });

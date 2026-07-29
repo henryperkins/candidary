@@ -74,4 +74,28 @@ describe('guest notes and captions', () => {
       'And the dance floor was perfect.',
     ]);
   });
+
+  it('uses a domain refusal when a note belongs to another event', async () => {
+    const first = await eventAccess();
+    const second = await eventAccess();
+    const created = await createApp().request(`/api/event/${second.event.slug}/messages`, {
+      method: 'POST',
+      headers: writeHeaders(second.guest),
+      body: JSON.stringify({ guestName: 'Avery', body: 'A note for the other event.' }),
+    }, testEnv);
+    const messageId = (await created.json<any>()).data.message.id;
+
+    const response = await createApp().request(
+      `/api/manage/events/${first.event.id}/messages/${messageId}`,
+      {
+        method: 'PATCH',
+        headers: writeHeaders(first.manager),
+        body: JSON.stringify({ action: 'approve', expectedStatus: 'pending' }),
+      },
+      testEnv,
+    );
+
+    expect(response.status).toBe(403);
+    expect((await response.json<any>()).code).toBe('RESOURCE_FORBIDDEN');
+  });
 });

@@ -1,0 +1,29 @@
+{
+  "name": "Candidary",
+  "short_name": "Candidary",
+  "description": "A private place for guests to deliver event photos.",
+  "display": "standalone",
+  "scope": "/",
+  "theme_color": "#42103b",
+  "background_color": "#f7f1e7",
+  "icons": [
+    {
+      "src": "/icons/candidary-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/candidary-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/candidary-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

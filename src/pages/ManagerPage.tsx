@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
-import { api, mediaOriginal, mediaPreview } from '../app/api';
+import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import { hostSignInHref } from '../app/recovery';
 import {
   MANAGER_BULK_SELECTION_MAX,
@@ -14,6 +14,7 @@ import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, Media
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
+import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
@@ -37,14 +38,42 @@ interface MediaPageState {
   cursor: string | null;
 }
 
-// A dismissible notice, and the way out of it when there is one to state. A refused write is retryable
-// by definition — the control that failed is still under the host's thumb — but a load failure can be
-// a dead session or an ended event, where `describeLoadFailure` holds the only instruction that
-// recovers it. Dropping that hint here would leave the host reading "This session has expired." with
-// no mention of the management link, which is the whole point of computing it.
-interface ManagerNotice {
-  message: string;
-  recoveryHint?: string;
+interface GuestLinkLoad {
+  guestLink: string;
+  warning?: string;
+}
+
+// Keeping load failures discriminated prevents a normal refused write from accidentally acquiring
+// credential-recovery UI just because it also has a message.
+type ManagerNotice =
+  | { type: 'action'; message: string; recoveryHint?: string }
+  | { type: 'load'; failure: LoadFailure };
+
+function managerNoticeFor(caught: unknown, fallback: string): ManagerNotice {
+  const failure = describeLoadFailure(caught, 'manager', fallback);
+  return failure.kind === 'retry'
+    ? { type: 'action', message: failure.message }
+    : { type: 'load', failure };
+}
+
+function offersAccessRecovery(failure: LoadFailure) {
+  return failure.kind === 'latest-link' || failure.kind === 'sign-in';
+}
+
+function ManagerAccessRecovery({
+  failure,
+  eventId,
+}: {
+  failure: LoadFailure;
+  eventId: string;
+}) {
+  if (!offersAccessRecovery(failure)) return null;
+  return <section className="manager-access-recovery" aria-label="Recover manager access">
+    {failure.offerSignIn && (
+      <a className="button button--secondary" href={hostSignInHref(eventId)}>Sign in</a>
+    )}
+    <ManagementLinkRecovery />
+  </section>;
 }
 
 function formatBytes(bytes = 0) {
@@ -114,12 +143,21 @@ export function ManagerPage() {
   const refresh = useCallback(async () => {
     setFailure(null);
     try {
+      // A missing guest link is a repairable event resource failure, not lost manager access.
+      // Keep the manager usable so its existing Rotate guest link action remains the way out.
+      const guestLinkLoad: Promise<GuestLinkLoad> = api<GuestLinkLoad>(`/api/manage/events/${eventId}/links`)
+        .catch((caught: unknown): GuestLinkLoad => {
+          if (caught instanceof ClientApiError && caught.code === 'GUEST_LINK_UNAVAILABLE') {
+            return { guestLink: '', warning: caught.message };
+          }
+          throw caught;
+        });
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
         api<{ messages: MessageView[] }>(`/api/manage/events/${eventId}/messages`),
         api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`),
-        api<{ guestLink: string }>(`/api/manage/events/${eventId}/links`),
+        guestLinkLoad,
       ]);
       setEvent(eventData.event);
       // A load opened under the previous query must not reinstate its rows or its cursor. Polling
@@ -131,10 +169,19 @@ export function ManagerPage() {
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setGuestLink(linkData.guestLink);
+      if (linkData.warning) {
+        setActionError({ type: 'action', message: linkData.warning });
+      }
       loadedOnce.current = true;
     } catch (caught) {
       const loadFailure = describeLoadFailure(caught, 'manager', 'The event manager could not be loaded.');
-      if (loadedOnce.current) setActionError(loadFailure); else setFailure(loadFailure);
+      if (loadedOnce.current) {
+        setActionError(loadFailure.kind === 'retry'
+          ? { type: 'action', message: loadFailure.message }
+          : { type: 'load', failure: loadFailure });
+      } else {
+        setFailure(loadFailure);
+      }
     }
   }, [eventId, mediaPath]);
 
@@ -171,8 +218,11 @@ export function ManagerPage() {
           cursor: current.cursor,
         };
       });
-    } catch {
-      // Keep the last usable intake visible; the next poll or a host action retries.
+    } catch (caught) {
+      // Keep transient venue-network failures silent, but do not swallow a credential or lifecycle
+      // change that will repeat forever without a different route back in.
+      const notice = managerNoticeFor(caught, 'The live intake could not be refreshed.');
+      if (notice.type === 'load') setActionError(notice);
     }
   }, [eventId, mediaPath]);
 
@@ -201,7 +251,7 @@ export function ManagerPage() {
     } catch (caught) {
       if (loadMoreOwner.current !== controller) return;
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
-      setActionError({ message: caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.' });
+      setActionError(managerNoticeFor(caught, 'The next page of photos could not be loaded.'));
     } finally {
       if (loadMoreOwner.current === controller) {
         loadMoreOwner.current = null;
@@ -214,12 +264,13 @@ export function ManagerPage() {
   // the API is absent entirely in any non-secure context. Left unhandled that is a silent no-op the
   // host reads as a copied link, so the refusal is reported and the readable link stays on screen.
   async function copyGuestLink() {
+    if (!guestLink) return;
     try {
       if (!navigator.clipboard) throw new Error('Clipboard unavailable');
       await navigator.clipboard.writeText(guestLink);
       setActionError(null);
     } catch {
-      setActionError({ message: 'The guest link could not be copied.', recoveryHint: guestLink });
+      setActionError({ type: 'action', message: 'The guest link could not be copied.', recoveryHint: guestLink });
     }
   }
 
@@ -230,7 +281,7 @@ export function ManagerPage() {
     try {
       await action();
     } catch (caught) {
-      setActionError({ message: caught instanceof Error ? caught.message : 'The manager action could not be completed.' });
+      setActionError(managerNoticeFor(caught, 'The manager action could not be completed.'));
     }
   }
 
@@ -243,7 +294,23 @@ export function ManagerPage() {
     return () => window.clearInterval(interval);
   }, [refreshIntake, section]);
   useEffect(() => {
-    if (guestLink) void QRCode.toDataURL(guestLink, { width: 220, margin: 2, color: { dark: '#42103b', light: '#fffaf3' } }).then(setQr);
+    let current = true;
+    // Never leave the previous link's QR shareable while a replacement renders or
+    // after the server reports that no active guest link exists.
+    setQr('');
+    if (guestLink) {
+      void QRCode.toDataURL(guestLink, {
+        width: 220,
+        margin: 2,
+        color: { dark: '#42103b', light: '#fffaf3' },
+      }).then((nextQr) => {
+        if (current) setQr(nextQr);
+      }).catch(() => {
+        // The readable link remains available; a failed render must not create an
+        // unhandled rejection or revive a previous QR.
+      });
+    }
+    return () => { current = false; };
   }, [guestLink]);
 
   function openSection(next: Section) {
@@ -372,12 +439,15 @@ export function ManagerPage() {
   // Offered for the plain no-credential state as well as a dead account session: a
   // bare manager URL cannot prove whether it arrived from the account page or from a
   // copied management link, and signing in is safe either way.
-  if (failure) return <main className="centered-state"><Brand /><ErrorState
-    message={failure.message}
-    recoveryHint={failure.recoveryHint}
-    onRetry={failure.retryable ? () => void refresh() : undefined}
-    action={failure.offerSignIn ? { label: 'Sign in', href: hostSignInHref(eventId) } : undefined}
-  /></main>;
+  if (failure) return <main className="centered-state"><Brand /><div className="manager-load-failure">
+    <h1 className="sr-only">Event manager unavailable</h1>
+    <ErrorState
+      message={failure.message}
+      recoveryHint={failure.recoveryHint}
+      onRetry={failure.retryable ? () => void refresh() : undefined}
+    />
+    <ManagerAccessRecovery failure={failure} eventId={eventId} />
+  </div></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 
   const photoCount = event.storedMediaCount ?? 0;
@@ -408,12 +478,19 @@ export function ManagerPage() {
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
-      {/* One live region carrying both lines, for the same reason `ErrorState` does: a region that
-          announces only what broke never mentions the one thing that recovers it. */}
-      {actionError && <p className="manager-action-error" role="alert">
-        <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>
-        <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
-      </p>}
+      {actionError && <section className="manager-action-error" aria-label="Manager notice">
+        <div className="manager-action-error__summary">
+          <div className="manager-action-error__alert" role="alert">
+            {actionError.type === 'load'
+              ? <span>{actionError.failure.message}<span className="manager-action-error__recovery">{actionError.failure.recoveryHint}</span></span>
+              : <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>}
+          </div>
+          <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
+        </div>
+        {actionError.type === 'load' && (
+          <ManagerAccessRecovery failure={actionError.failure} eventId={eventId} />
+        )}
+      </section>}
 
       {section === 'intake' && <section aria-labelledby="intake-title">
         <div className="workspace-heading"><div><p className="section-label">Private collection</p><h2 id="intake-title">Live intake</h2></div></div>
@@ -436,7 +513,9 @@ export function ManagerPage() {
         {renderMediaGrid(true)}
       </section>}
 
-      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share the photo drop</h2><div className="share-layout"><div><CopyableLinkCard label="Guest link" value={guestLink} /><div className="button-row"><button className="button button--secondary" onClick={() => void runManagerAction(rotateGuestLink)}>Rotate guest link</button><button className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Guest event QR code" /><a className="button button--secondary" href={qr} download="candidary-guest-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div>{exportPanel('share')}</section>}
+      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share the photo drop</h2><div className="share-layout"><div>{guestLink
+        ? <CopyableLinkCard label="Guest link" value={guestLink} />
+        : <p className="manager-notice">No active guest link. Rotate it to create a replacement.</p>}<div className="button-row"><button className="button button--secondary" onClick={() => void runManagerAction(rotateGuestLink)}>Rotate guest link</button><button className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Guest event QR code" /><a className="button button--secondary" href={qr} download="candidary-guest-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div>{exportPanel('share')}</section>}
 
       {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
 
@@ -444,7 +523,7 @@ export function ManagerPage() {
     </main>
 
     <aside className="manager-utility">
-      <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void copyGuestLink()}><Copy aria-hidden="true" /> Copy guest link</button></section>
+      <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" disabled={!guestLink} onClick={() => void copyGuestLink()}><Copy aria-hidden="true" /> Copy guest link</button></section>
       <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(event.storedBytes)} of {STORAGE_CAP}</small></section>
       {exportPanel('utility')}
     </aside>

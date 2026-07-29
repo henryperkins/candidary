@@ -61,6 +61,9 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `FILE_TYPE_UNSUPPORTED`, `FILE_TOO_LARGE` — a selected or stored object failed type/signature/20 MB validation.
 - `EVENT_MEDIA_LIMIT`, `EVENT_STORAGE_LIMIT` — the 10,000-photo or 100-GiB event quota is full.
 - `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh.
+- `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
+- `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
+- `GUEST_LINK_UNAVAILABLE` — rotate the guest link from the current valid manager session.
 - `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED` — inspect the active job and its persisted parts.
 
 ## Recovery boundaries
