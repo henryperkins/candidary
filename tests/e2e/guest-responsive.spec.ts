@@ -160,6 +160,7 @@ test('a 500-character welcome keeps both photo sources on the first fold at 320 
   await toggle.click();
   const expanded = page.getByRole('button', { name: 'Show less' });
   await expect(expanded).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.photo-drop__hero')).toHaveClass(/photo-drop__hero--welcome-expanded/u);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(LONG_WELCOME);
 
   const expandedSize = await measureDocument(page);

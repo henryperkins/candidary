@@ -11,6 +11,7 @@ import {
   stubManagerRoutes,
 } from './fixtures/routes';
 import { LONG_FILENAME, TEST_NOTE } from './fixtures/ui-data';
+import { settleRendering } from './helpers/rendering';
 
 const IMAGE = {
   name: LONG_FILENAME.replace(/\.HEIC$/u, '.png'),
@@ -19,16 +20,7 @@ const IMAGE = {
 };
 
 async function settle(page: Page) {
-  await page.mouse.move(10_000, 10_000);
-  await page.evaluate(async () => {
-    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await document.fonts.ready;
-      await frame();
-      await frame();
-      if (document.fonts.status === 'loaded') return;
-    }
-  });
+  await settleRendering(page, { parkPointer: true });
 }
 
 async function stubSuccessfulUpload(page: Page) {

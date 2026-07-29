@@ -6,6 +6,7 @@ import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
 import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
 import { LONG_FILENAME, LONG_WELCOME, TEST_NOTE, makeMedia } from './fixtures/ui-data';
 import { measureViewportEscapes } from './helpers/geometry';
+import { settleRendering } from './helpers/rendering';
 
 // This file is the tracked visual evidence. Every case pins its own viewport and asserts a committed
 // baseline under `visual-qa.spec.ts-snapshots/`, so a layout that silently moves fails here rather
@@ -23,26 +24,12 @@ const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
 // Unpublished is the Gallery's default filter and the only state carrying every card control at once.
 const MEDIA_PAGES = { first: { media: makeMedia(3, 'unpublished'), nextCursor: null } };
 
-// Web fonts change metrics as they arrive, and a late arrival moves centred text even when it moves
-// nothing else — the label re-centres on a different sub-pixel origin and rasterises one pixel over.
-// Awaiting `document.fonts.ready` once is not enough: a face is only requested when a glyph needs
-// it, so laying out with the faces loaded so far can request another one and start a fresh loading
-// cycle that `ready` has already resolved past. Wait until the set has been quiet across two frames.
 async function settle(page: Page) {
   // A capture must not depend on where the mouse happened to stop. Any test that clicks its way into
   // a state leaves the pointer on the control it clicked, and that control keeps its `:hover` paint —
   // the submit button on `/create` differs from its resting state by 13,077 px of aubergine-strong
   // fill. Park the pointer outside the viewport so every state below is captured at rest.
-  await page.mouse.move(10_000, 10_000);
-  await page.evaluate(async () => {
-    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await document.fonts.ready;
-      await frame();
-      await frame();
-      if (document.fonts.status === 'loaded') return;
-    }
-  });
+  await settleRendering(page, { parkPointer: true });
 }
 
 async function openManager(page: Page, storedMediaCount: number) {

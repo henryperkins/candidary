@@ -206,7 +206,10 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   }
 
   return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
-    {!reviewMode && <div className={`photo-drop__hero${cover ? ' photo-drop__hero--cover' : ''}`} style={heroStyle}>
+    {!reviewMode && <div
+      className={`photo-drop__hero${cover ? ' photo-drop__hero--cover' : ''}${welcomeExpanded ? ' photo-drop__hero--welcome-expanded' : ''}`}
+      style={heroStyle}
+    >
       <div className="photo-drop__hero-copy">
         <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
         <h1

@@ -8,12 +8,20 @@ import {
   PURE_WHITE_COVER,
 } from './fixtures/cover-images';
 import { EVENT_FIXTURE, eventTheme, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
-import { LONG_FILENAME, LONG_WELCOME, TEST_NOTE, makeMedia } from './fixtures/ui-data';
+import {
+  LONG_FILENAME,
+  LONG_WELCOME,
+  NATURAL_420_WELCOME,
+  TEST_NOTE,
+  makeMedia,
+} from './fixtures/ui-data';
 import { measureDocument, measureTarget } from './helpers/geometry';
+import { settleRendering } from './helpers/rendering';
 import {
   makeTextTransparent,
   minimumWhiteContrast,
   minimumWhiteContrastUnderText,
+  visiblePixelMask,
 } from './helpers/theme-contrast';
 
 type MatrixState =
@@ -397,34 +405,86 @@ test('Notes placeholder uses the approved themed muted text role', async ({ page
   expect(placeholderColor).toBe('rgb(119, 106, 112)');
 });
 
+test('visible-pixel masking keeps straight edges and excludes rounded top corners', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setContent(`
+    <div style="width: 20px; height: 20px; overflow: hidden; border-radius: 6px;">
+      <div data-mask-target style="width: 20px; height: 20px;"></div>
+    </div>
+  `);
+  const width = 20;
+  const height = 20;
+  const mask = await visiblePixelMask(page.locator('[data-mask-target]'), width, height);
+  const included = (x: number, y: number) => mask[y * width + x] === 1;
+  expect({
+    topCenter: included(10, 0),
+    rightCenter: included(19, 10),
+    bottomCenter: included(10, 19),
+    leftCenter: included(0, 10),
+    topLeft: included(0, 0),
+    topRight: included(19, 0),
+  }).toEqual({
+    topCenter: true,
+    rightCenter: true,
+    bottomCenter: true,
+    leftCenter: true,
+    topLeft: false,
+    topRight: false,
+  });
+});
+
 for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'coastal-light'] as const) {
   test(`${presetId} no-cover gradient clears 4.5:1 at all three exact hero geometries`, async ({ page }, testInfo) => {
     onlyOnce(testInfo);
     const cases = [
-      { viewport: { width: 390, height: 844 }, forcedHeight: null, expected: [390, 205] },
-      { viewport: { width: 390, height: 844 }, forcedHeight: 420, expected: [390, 420] },
-      { viewport: { width: 1280, height: 900 }, forcedHeight: null, expected: [620, 265] },
+      { viewport: { width: 390, height: 844 }, welcomeMessage: null, expanded: false, expected: [390, 205] },
+      {
+        viewport: { width: 390, height: 844 },
+        welcomeMessage: NATURAL_420_WELCOME,
+        expanded: true,
+        expected: [390, 420],
+      },
+      { viewport: { width: 1280, height: 900 }, welcomeMessage: null, expanded: false, expected: [620, 265] },
     ] as const;
 
     for (const geometry of cases) {
       await page.setViewportSize(geometry.viewport);
-      await stubGuestRoutes(page, { event: { theme: eventTheme(presetId) } });
+      await stubGuestRoutes(page, {
+        event: {
+          theme: eventTheme(presetId),
+          ...(geometry.welcomeMessage ? { welcomeMessage: geometry.welcomeMessage } : {}),
+        },
+      });
       await page.goto(`/event/${EVENT_FIXTURE.slug}`);
       const hero = page.locator('.photo-drop__hero');
-      if (geometry.forcedHeight) {
-        await hero.evaluate((element, height) => {
-          const heroElement = element as HTMLElement;
-          heroElement.style.height = `${height}px`;
-          heroElement.style.minHeight = `${height}px`;
-        }, geometry.forcedHeight);
+      if (geometry.expanded) {
+        expect(EVENT_FIXTURE.name.length).toBeLessThanOrEqual(80);
+        expect(geometry.welcomeMessage).toHaveLength(182);
+        expect(geometry.welcomeMessage.length).toBeLessThanOrEqual(500);
+        await page.getByRole('button', { name: 'Read full welcome' }).click();
+        await expect(page.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+        await expect(hero).toHaveClass(/photo-drop__hero--welcome-expanded/u);
+        await expectContained(page, `${presetId} expanded 390x420 hero`);
       }
+      await settleRendering(page);
+      const heroBox = await hero.boundingBox();
+      expect(heroBox, `${presetId} hero bounding box`).not.toBeNull();
+      expect([heroBox!.width, heroBox!.height], `${presetId} natural hero box`).toEqual(geometry.expected);
       await makeTextTransparent(hero);
       const contrast = await minimumWhiteContrast(page, hero, { visiblePixelsOnly: true });
       expect([contrast.width, contrast.height], `${presetId} hero box`).toEqual(geometry.expected);
       expect(contrast.sampledPixels, `${presetId} visible hero pixels`).toBeGreaterThan(0);
       if (geometry.expected[0] === 620) {
+        expect(contrast.maskEvidence, `${presetId} desktop clip boundary evidence`).toEqual({
+          topCenter: true,
+          rightCenter: true,
+          bottomCenter: true,
+          leftCenter: true,
+          topLeft: false,
+          topRight: false,
+        });
         expect(contrast.sampledPixels, `${presetId} clipped desktop corners`)
-          .toBeLessThan(geometry.expected[0] * geometry.expected[1]);
+          .toBeLessThan(contrast.totalPixels);
       }
       expect(contrast.minimum, `${presetId} ${geometry.expected.join('x')} minimum contrast`)
         .toBeGreaterThanOrEqual(4.5);

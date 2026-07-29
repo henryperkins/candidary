@@ -420,6 +420,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 @media (max-width: 699px) {
   .guest-shell--drop { background: var(--event-surface, #fffaf3); }
+  /* The expanded mobile hero has a 420px minimum, realizing the documented 390 x 420 raster at
+     390px wide while allowing longer welcome copy to grow. */
+  .photo-drop__hero.photo-drop__hero--welcome-expanded { min-height: 420px; }
   /* The same documented Parchment the wider shell now stands on, so the secondary band reads the
      same on a phone as it does above 699 and its muted captions clear the contrast floor either way. */
   .guest-secondary { background: var(--event-page, #f7f1e7); }

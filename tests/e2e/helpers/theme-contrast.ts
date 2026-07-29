@@ -35,7 +35,7 @@ async function screenshotPixels(page: Page, locator: Locator): Promise<PixelBuff
   }, [...screenshot]);
 }
 
-async function visiblePixelMask(locator: Locator, width: number, height: number) {
+export async function visiblePixelMask(locator: Locator, width: number, height: number) {
   return locator.evaluate((root, size) => {
     const rootBox = root.getBoundingClientRect();
     const clips: Array<{
@@ -73,14 +73,14 @@ async function visiblePixelMask(locator: Locator, width: number, height: number)
       });
     }
     const insideClip = (x: number, y: number, clip: (typeof clips)[number]) => {
-      if (x < clip.left || x >= clip.right || y < clip.top || y >= clip.bottom) return false;
+      if (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom) return false;
       const insideCorner = (
         centerX: number,
         centerY: number,
         radiusX: number,
         radiusY: number,
       ) => radiusX === 0 || radiusY === 0
-        || ((x - centerX) / radiusX) ** 2 + ((y - centerY) / radiusY) ** 2 <= 1;
+        || ((x - centerX) / radiusX) ** 2 + ((y - centerY) / radiusY) ** 2 < 1 - 1e-7;
       const [topLeftX, topLeftY] = clip.topLeft;
       if (x < clip.left + topLeftX && y < clip.top + topLeftY
         && !insideCorner(clip.left + topLeftX, clip.top + topLeftY, topLeftX, topLeftY)) return false;
@@ -142,6 +142,15 @@ export async function minimumWhiteContrast(
   const mask = options.visiblePixelsOnly
     ? await visiblePixelMask(locator, pixels.width, pixels.height)
     : null;
+  const maskAt = (x: number, y: number) => mask?.[y * pixels.width + x] === 1;
+  const maskEvidence = mask ? {
+    topCenter: maskAt(Math.floor(pixels.width / 2), 0),
+    rightCenter: maskAt(pixels.width - 1, Math.floor(pixels.height / 2)),
+    bottomCenter: maskAt(Math.floor(pixels.width / 2), pixels.height - 1),
+    leftCenter: maskAt(0, Math.floor(pixels.height / 2)),
+    topLeft: maskAt(0, 0),
+    topRight: maskAt(pixels.width - 1, 0),
+  } : null;
   let minimum = Number.POSITIVE_INFINITY;
   let sampledPixels = 0;
   for (let offset = 0; offset < pixels.data.length; offset += 4) {
@@ -156,7 +165,14 @@ export async function minimumWhiteContrast(
       ),
     );
   }
-  return { minimum, width: pixels.width, height: pixels.height, sampledPixels };
+  return {
+    minimum,
+    width: pixels.width,
+    height: pixels.height,
+    sampledPixels,
+    totalPixels: pixels.width * pixels.height,
+    maskEvidence,
+  };
 }
 
 export async function minimumWhiteContrastUnderText(
