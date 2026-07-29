@@ -161,6 +161,27 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .moderation-grid strong { display: -webkit-box; overflow: hidden; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .manager-utility { min-width: 0; background: var(--paper); }.manager-utility section { padding: 28px 20px; border-bottom: 1px solid var(--border); }.manager-utility__guest-entry, .manager-utility__capacity { display: none; }.manager-utility h2 { font-size: 1.55rem; }.manager-utility p { color: var(--muted); font-size: .9rem; }.stat { display: flex; align-items: baseline; gap: 9px; }.stat strong { font-family: 'Manrope'; font-size: 2.7rem; }.stat span { color: var(--muted); }.meter { height: 5px; margin: 19px 0 8px; background: #e8dfd5; border-radius: 5px; overflow: hidden; }.meter span { height: 100%; display: block; background: var(--apricot); }.manager-utility small { color: var(--muted); }.export-state { display: grid; gap: 10px; }.export-state strong { text-transform: capitalize; color: var(--aubergine); }.export-state span { color: var(--muted); font-size: .85rem; }
 .manager-panel { max-width: 800px; }.share-layout { margin-top: 30px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }.manager-qr { padding: 15px; border: 1px solid var(--border); background: var(--paper); text-align: center; }.manager-qr img { margin-bottom: 13px; }.manager-messages { margin: 30px 0; padding: 0; list-style: none; }.manager-messages li { padding: 17px 0; border-top: 1px solid var(--border); }.manager-messages p { min-width: 0; margin-bottom: 4px; overflow-wrap: anywhere; }.manager-messages small { color: var(--muted); }.manager-messages .button-row { margin-top: 12px; }.manager-messages .button { min-width: 44px; min-height: 44px; padding: 7px 11px; font-size: .8rem; }.settings-form { margin-top: 30px; max-width: 590px; }.toggle { min-height: 52px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }.toggle input { width: 20px; min-height: 20px; accent-color: var(--moss); }.settings-form .button { margin-top: 24px; }.danger-zone { margin-top: 50px; padding-top: 30px; border-top: 1px solid #e2b9b4; }.danger-zone h3 { color: var(--danger); font-size: 1.35rem; }.danger-zone p { color: var(--muted); }.danger-zone form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.event-appearance-editor { min-width: 0; margin-top: 50px; padding-top: 30px; border-top: 1px solid var(--border); }
+.event-appearance-editor__heading { display: grid; gap: 12px; margin-bottom: 24px; }
+.event-appearance-editor__heading h3 { margin: 4px 0 8px; font-family: 'Manrope', sans-serif; font-size: 1.6rem; }
+.event-appearance-editor__heading p:last-child { max-width: 58ch; margin: 0; color: var(--muted); }
+.event-appearance-editor__status { width: fit-content; padding: 6px 10px; border-radius: 999px; background: var(--moss-soft); color: #4e5b28; font-size: .75rem; font-weight: 700; }
+.event-appearance-editor__status--dirty { background: var(--apricot-soft); color: var(--aubergine); }
+.event-appearance-editor form, .event-appearance-editor__controls, .event-appearance-editor__color-list { min-width: 0; display: grid; gap: 24px; }
+.event-appearance-editor__color { min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
+.event-appearance-editor__color-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; margin-bottom: 12px; }
+.event-appearance-editor__color-heading button { min-height: 44px; padding: 8px 0; border: 0; background: transparent; color: var(--aubergine); font: inherit; font-size: .8rem; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.event-appearance-editor__color-heading button:disabled { cursor: not-allowed; opacity: .55; }
+.event-appearance-editor__color-inputs { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: end; }
+.event-appearance-editor__color-inputs label { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: .78rem; font-weight: 600; }
+.event-appearance-editor__color-inputs input[type='color'] { width: 52px; min-height: 48px; padding: 3px; border: 1px solid var(--input-border); border-radius: 7px; background: var(--paper); cursor: pointer; }
+.event-appearance-editor__color-inputs input[type='text'] { width: 100%; min-height: 48px; }
+.event-appearance-editor__color-inputs input[aria-invalid='true'] { border-color: var(--danger); box-shadow: 0 0 0 2px rgb(181 64 51 / 10%); }
+.event-appearance-editor__preview { min-width: 0; display: grid; gap: 14px; }
+.event-appearance-editor__preview h4 { margin: 0; font-family: 'Manrope', sans-serif; font-size: 1.1rem; }
+.event-appearance-editor__actions { display: grid; gap: 10px; }
+.event-appearance-editor__actions .button { width: 100%; min-height: 44px; }
+.event-appearance-editor button:focus-visible, .event-appearance-editor input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 @media (max-width: 760px) {
   h1 { font-size: 2.8rem; }.page-header, .guest-header { min-height: 70px; padding: 0 20px; }.guest-header nav { display: none; }
   .create-layout, .success-layout { grid-template-columns: 1fr; padding: 40px 20px 65px; }.create-intro { position: static; padding: 0; }.create-form { padding: 24px 20px; }.success-layout { gap: 35px; }.cover-field { align-items: start; flex-wrap: wrap; }
@@ -461,6 +482,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .manager-nav__count { top: 6px; right: 8px; }
 
   .manager-main { padding: 36px 40px 80px; }
+  .event-appearance-editor__heading { grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+  .event-appearance-editor__color-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .event-appearance-editor__actions { display: flex; justify-content: flex-end; }
+  .event-appearance-editor__actions .button { width: auto; }
   .manager-title { display: flex; justify-content: space-between; align-items: start; gap: 20px; }
   .manager-title h1 { font-size: clamp(2.3rem, 4vw, 3.8rem); }
   .manager-title .status { margin-top: 0; }

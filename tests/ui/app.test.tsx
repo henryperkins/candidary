@@ -1,9 +1,10 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
 import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
@@ -250,9 +251,11 @@ describe('guest event experience', () => {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
+  welcomeMessage: 'Welcome.', coverObjectKey: null,
+  uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+  theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
 };
 
 interface MediaPage { media: unknown[]; nextCursor: string | null }
@@ -281,6 +284,25 @@ function previewSources() {
 }
 
 describe('manager experience', () => {
+  it('keeps appearance inside Settings between its form and account controls', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+
+    const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
+    expect(within(navigation).getAllByRole('button')).toHaveLength(5);
+    await userEvent.setup().click(within(navigation).getByRole('button', { name: /settings/i }));
+
+    const settingsForm = screen.getByRole('button', { name: 'Save settings' }).closest('form');
+    const editor = screen.getByRole('region', { name: 'Event appearance editor' });
+    const account = document.querySelector('.account-card');
+    const danger = document.querySelector('.danger-zone');
+    expect(settingsForm?.contains(editor)).toBe(false);
+    expect(settingsForm!.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(editor.compareDocumentPosition(account!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(editor.compareDocumentPosition(danger!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('appends the next media page and keeps every row unique', async () => {
     const rows = makeMedia(MANAGER_MEDIA_PAGE_SIZE + 1);
     const mediaRequests: string[] = [];
