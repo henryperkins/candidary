@@ -4,7 +4,7 @@ import type { Page } from '@playwright/test';
 
 import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
 import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
-import { LONG_FILENAME, UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
+import { LONG_FILENAME, LONG_WELCOME, TEST_NOTE, makeMedia } from './fixtures/ui-data';
 import { measureViewportEscapes } from './helpers/geometry';
 
 // This file is the tracked visual evidence. Every case pins its own viewport and asserts a committed
@@ -14,22 +14,12 @@ import { measureViewportEscapes } from './helpers/geometry';
 // tablet one and a second desktop-emulated copy would be a picture of nobody's screen.
 
 const previewBytes = readFileSync('public/assets/candidary-hero.png');
-// The 500-character ceiling the create form enforces, so this is the longest welcome a host can save.
-const LONG_WELCOME = `Share the night as you saw it, from every table and every corner. ${UNBROKEN_TOKEN} `
-  .padEnd(500, 'We will treasure every frame you send. ');
 // A decodable file that still carries the fixture's 80-character name, so the review card is measured
 // with both a real thumbnail and the worst filename a phone produces.
 const KEEPER = { name: LONG_FILENAME.replace(/\.HEIC$/u, '.png'), mimeType: 'image/png', buffer: previewBytes };
 const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
 const DESTINATIONS = ['Intake', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
-const NOTE = {
-  id: 'message-a',
-  guestName: 'Rowan',
-  body: 'To a lifetime of noticing the little things.',
-  moderationStatus: 'approved' as const,
-  createdAt: '2026-09-19T20:00:00Z',
-};
 // Unpublished is the Gallery's default filter and the only state carrying every card control at once.
 const MEDIA_PAGES = { first: { media: makeMedia(3, 'unpublished'), nextCursor: null } };
 
@@ -58,7 +48,7 @@ async function settle(page: Page) {
 async function openManager(page: Page, storedMediaCount: number) {
   await stubManagerRoutes(page, {
     mediaPages: MEDIA_PAGES,
-    messages: [NOTE],
+    messages: [TEST_NOTE],
     event: { storedMediaCount, ...(storedMediaCount === MAX_EVENT_MEDIA ? { storedBytes: MAX_EVENT_BYTES } : {}) },
   });
   await page.goto(managerUrl);

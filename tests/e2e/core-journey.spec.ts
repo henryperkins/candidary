@@ -2,13 +2,13 @@ import { mkdir } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
+import { EVENT_FIXTURE } from './fixtures/routes';
 import { measureDocument } from './helpers/geometry';
 
 const event = {
-  id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
-  galleryVisible: false, moderationRequired: true, storedMediaCount: 2, storedBytes: 128,
-  guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+  ...EVENT_FIXTURE,
+  galleryVisible: false,
+  storedMediaCount: 2,
 };
 
 test('host creates an event and receives both private access links', async ({ page }, testInfo) => {
