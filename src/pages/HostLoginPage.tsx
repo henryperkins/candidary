@@ -2,9 +2,10 @@ import { type FormEvent, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
-import { adoptTargetFor, hostRegisterHref, HOST_EVENTS_PATH, safeReturnTo } from '../app/recovery';
+import { adoptTargetFor, HOST_EVENTS_PATH, safeReturnTo } from '../app/recovery';
 import { MIN_HOST_PASSWORD_LENGTH } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
+import { AuthModeSwitch, AuthReturnNote } from '../components/HostAuthNav';
 
 type Mode = 'signin' | 'forgot' | 'reset';
 
@@ -86,14 +87,28 @@ export function HostLoginPage() {
     <PageHeader action={<Link className="text-link" to="/">Back home</Link>} />
     <main className="host-layout">
       <section className="host-panel">
+        {/* The event the host came from, named before they are asked for anything —
+            they arrived holding its management link, and this page is otherwise
+            indistinguishable from a sign-in that has nothing to do with it. */}
+        <AuthReturnNote returnTo={returnTo} adopt={adopt} />
         <p className="section-label">Host sign in</p>
         <h1>{TITLES[mode]}</h1>
         {mode === 'signin' && <p>Signing in reaches every event saved to your account.
           Holding a management link works too, and always has.</p>}
+        {/* Reset and confirm are stages inside this door, reached from the links row
+            below — never a third tab. Only the two real destinations are switchable. */}
+        {mode === 'signin' && <AuthModeSwitch mode="signin" returnTo={returnTo} adopt={adopt} />}
         {error && <p className="form-error" role="alert">{error}</p>}
         {notice && <p className="form-note" role="status">{notice}</p>}
 
-        <form className="create-form" onSubmit={submit} noValidate>
+        <form
+          className="create-form"
+          onSubmit={submit}
+          noValidate
+          {...(mode === 'signin'
+            ? { id: 'auth-panel-signin', role: 'tabpanel', 'aria-labelledby': 'auth-tab-signin' }
+            : {})}
+        >
           {mode !== 'reset' && <div className="create-field">
             <label>Email address
               <input name="email" type="email" autoComplete="email" required
@@ -102,10 +117,18 @@ export function HostLoginPage() {
             {fields.email && <small id="email-error">{fields.email}</small>}
           </div>}
 
-          {mode === 'reset' && <div className="create-field">
-            <label>Confirmation code
-              <input name="code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required />
+          {/* One input, never six boxes: `autocomplete="one-time-code"` resolves on a
+              single field only, and splitting it breaks paste, autofill, and the value
+              a screen reader reads back. The hint names the address carried over from
+              the previous step so the host does not retype it beside the code. */}
+          {mode === 'reset' && <div className="create-field code-field">
+            <label htmlFor="reset-code">Confirmation code
+              <input id="reset-code" name="code" inputMode="numeric" autoComplete="one-time-code"
+                maxLength={6} placeholder="000000" required aria-describedby="reset-code-hint" />
             </label>
+            <small id="reset-code-hint" className="field-hint">
+              Six digits{email ? `, sent to ${email}` : ''}.
+            </small>
           </div>}
 
           {mode !== 'forgot' && <div className="create-field">
@@ -128,7 +151,9 @@ export function HostLoginPage() {
           {mode === 'signin'
             ? <button type="button" className="text-link" onClick={() => switchTo('forgot')}>Forgotten your password?</button>
             : <button type="button" className="text-link" onClick={() => switchTo('signin')}>Back to sign in</button>}
-          {mode === 'signin' && <Link className="text-link" to={hostRegisterHref(adopt, returnTo)}>Create account</Link>}
+          {/* `Create account` is not repeated here: the switch above already carries
+              it, and offering the same door twice makes the pair look like two
+              different things. */}
           <Link className="text-link" to="/create">Create a new event</Link>
         </div>
       </section>

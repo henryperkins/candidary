@@ -517,9 +517,48 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    and it belongs under both rather than beside one. */
 .success-layout .host-panel { grid-column: 1 / -1; }
 
+/* Two doors, one panel. The tabs are routed anchors rather than local state: both
+   destinations stay deep-linkable, `returnTo`/`adopt` survive the move, and Back
+   does what it looks like it does. Selection reads exactly as the manager rail's
+   active destination does — an inset 3px aubergine underline — because it is the
+   same idea: which of a fixed set you are looking at. */
+.auth-switch { display: grid; grid-template-columns: 1fr 1fr; margin: 0 0 27px; border: 1px solid var(--border); border-radius: 8px; background: #fffdf8; overflow: hidden; }
+.auth-switch [role='tab'] { min-height: 48px; padding: 12px 10px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-size: .95rem; font-weight: 600; text-decoration: none; transition: color 180ms, background 180ms; }
+.auth-switch [role='tab']:hover:not([aria-selected='true']) { color: var(--ink); }
+.auth-switch [role='tab'][aria-selected='true'] { color: var(--aubergine); background: var(--paper); box-shadow: inset 0 -3px 0 var(--aubergine); }
+/* The ring belongs inside the track; at the shared 3px offset `overflow: hidden` clips it. */
+.auth-switch [role='tab']:focus-visible { outline-offset: -2px; }
+
+/* Where the host came from, and what signing in will actually do about it. Until
+   `returnTo` and `adopt` are rendered, a host holding a management link is asked for
+   credentials by a page that looks unrelated to the event they were just on. Apricot
+   marks it: the same role it plays for selected and new everywhere else. */
+.auth-return { display: grid; gap: 7px; margin: 0 0 24px; padding: 0 0 21px; border-bottom: 1px solid var(--border); }
+/* Deliberately not a flex row: flex would make the name and the date separate items,
+   so at 320 — where the pair has to wrap — they break into two ragged columns instead
+   of one run of text. Inline flow wraps them as the single line they read as. */
+.auth-return__event { margin: 0; font-family: 'Manrope', sans-serif; font-size: 1.05rem; font-weight: 700; letter-spacing: -.02em; }
+.auth-return__marker { display: inline-block; width: 10px; height: 10px; margin-right: 10px; vertical-align: middle; border-radius: 3px; background: var(--apricot); }
+.auth-return__date { color: var(--muted); font-weight: 600; }
+.auth-return p:not(.auth-return__event) { margin: 0; color: var(--muted); font-size: .9rem; }
+
+/* One input, never six boxes. `autocomplete="one-time-code"` only resolves on a single
+   field, and six inputs break paste, autofill, and the value a screen reader reads
+   back. Tracking does the work the boxes were there for — the digits stay countable at
+   a glance. `text-indent` offsets the trailing letter-space so the tracked value sits
+   optically centred rather than pushed left by it. */
+.code-field input { min-height: 52px; font-family: 'Manrope', sans-serif; font-size: 1.5rem; font-weight: 600; letter-spacing: .34em; text-indent: .34em; text-align: center; }
+.code-field input::placeholder { color: var(--border); }
+/* `.create-field > small` is the field error, and is danger-coloured for it. A hint is
+   not a failure and must not borrow the colour that means one. */
+.create-field > small.field-hint { color: var(--muted); font-weight: 400; }
+
 @media (max-width: 768px) {
   .host-layout { padding: 40px 20px 65px; }
   .host-panel { padding: 24px 20px; }
+  /* `Create account` is never abbreviated, so at 320 the label wraps inside its own
+     48px tab rather than being traded for a shorter word. */
+  .auth-switch [role='tab'] { padding: 10px 8px; font-size: .9rem; line-height: 1.25; }
 }
 .account-card { margin-top: 30px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--moss-soft); }
 .account-card h3 { margin-bottom: 10px; font-family: 'Manrope', sans-serif; font-size: 1.05rem; }

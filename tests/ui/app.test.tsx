@@ -30,6 +30,20 @@ const CREATED = {
 };
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
 
+// What `GET /api/manage/events/:id` answers to the management cookie the host is still
+// holding when they arrive at the sign-in panel. The return note reads its name and
+// date from here, by id — never from the query string.
+const EVENT_SUMMARY = {
+  id: RECOVERY_EVENT_ID,
+  slug: 'maya-theo',
+  name: 'Maya & Theo',
+  eventDate: '2026-09-19',
+  welcomeMessage: '',
+  uploadsEnabled: true,
+  galleryVisible: true,
+  moderationRequired: false,
+};
+
 async function createEvent(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
   await user.type(screen.getByLabelText('Event date'), '2026-09-19');
@@ -1220,16 +1234,102 @@ describe('host recovery from a dead credential', () => {
   it('preserves validated recovery context while switching between sign-in and registration', async () => {
     const eventId = '11111111-2222-4333-8444-555555555555';
     const context = `?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`;
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT_SUMMARY })));
     const router = createAppRouter([`/host/login${context}`]);
     const user = userEvent.setup();
     render(<RouterProvider router={router} />);
 
-    await user.click(screen.getByRole('link', { name: 'Create account' }));
+    // The two doors are tabs of one panel now, but they are still routes: the hrefs
+    // are what keep both deep-linkable and carry the recovery context across.
+    const register = screen.getByRole('tab', { name: 'Create account' });
+    expect(register).toHaveAttribute('href', `/host/register${context}`);
+    await user.click(register);
     await screen.findByRole('heading', { name: 'Save this event to your email' });
     expect(router.state.location.search).toBe(context);
-    await user.click(screen.getByRole('link', { name: 'Sign in' }));
+
+    const signIn = screen.getByRole('tab', { name: 'Sign in' });
+    expect(signIn).toHaveAttribute('href', `/host/login${context}`);
+    await user.click(signIn);
     await screen.findByRole('heading', { name: 'Sign in to your events' });
     expect(router.state.location.search).toBe(context);
+  });
+
+  it('puts only the selected door in the tab order and reaches the other by arrow key', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    const context = `?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`;
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT_SUMMARY })));
+    const router = createAppRouter([`/host/login${context}`]);
+    const user = userEvent.setup();
+    render(<RouterProvider router={router} />);
+
+    const signIn = screen.getByRole('tab', { name: 'Sign in' });
+    expect(signIn).toHaveAttribute('aria-selected', 'true');
+    expect(signIn).toHaveAttribute('tabindex', '0');
+    // The unselected tab is out of the tab order, so the arrow keys are the only
+    // keyboard route to the other door — without them it is unreachable.
+    expect(screen.getByRole('tab', { name: 'Create account' })).toHaveAttribute('tabindex', '-1');
+
+    signIn.focus();
+    await user.keyboard('{ArrowRight}');
+    await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
+    expect(router.state.location.search).toBe(context);
+  });
+
+  it('names the event the host came from and what signing in will do about it', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    const fetchMock = vi.fn(() => json({ event: EVENT_SUMMARY }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter([
+      `/host/login?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`,
+    ])} />);
+
+    // Resolved from the API by id — never rendered out of the query string, which is
+    // validated for navigation and is not a source of display data.
+    expect(await screen.findByText('Maya & Theo')).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/manage/events/${eventId}`, expect.anything());
+    expect(screen.getByText('You will come back here, and this event will be added to your account.'))
+      .toBeVisible();
+  });
+
+  it('drops the attachment promise when the URL carries no adopt', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT_SUMMARY })));
+    render(<RouterProvider router={createAppRouter([
+      `/host/login?returnTo=%2Fmanage%2Fevent%2F${eventId}`,
+    ])} />);
+
+    expect(await screen.findByText('You will come back here when you are done.')).toBeVisible();
+    expect(screen.queryByText(/added to your account/u)).not.toBeInTheDocument();
+  });
+
+  it('keeps the return note when the management link it arrived with has already expired', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    // The dead-end path: the cookie that authorizes the lookup is the thing that
+    // expired. The note loses the name and keeps the promise rather than erroring.
+    vi.stubGlobal('fetch', vi.fn(() => errorJson(
+      { code: 'SESSION_EXPIRED', message: 'That link has expired.', requestId: 'r' }, 401,
+    )));
+    render(<RouterProvider router={createAppRouter([
+      `/host/login?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`,
+    ])} />);
+
+    expect(await screen.findByText('You will come back here, and this event will be added to your account.'))
+      .toBeVisible();
+    expect(screen.queryByText('That link has expired.')).not.toBeInTheDocument();
+  });
+
+  it('asks for the six-digit code in one field, never six', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => json({}, 200)));
+    render(<RouterProvider router={createAppRouter(['/host/register?pending=1'])} />);
+
+    const code = screen.getByLabelText('Confirmation code');
+    // `autocomplete="one-time-code"` only resolves on a single field; six inputs also
+    // break paste and the value a screen reader reads back.
+    expect(code).toHaveAttribute('autocomplete', 'one-time-code');
+    expect(code).toHaveAttribute('inputmode', 'numeric');
+    expect(code).toHaveAttribute('maxlength', '6');
+    expect(screen.getAllByLabelText('Confirmation code')).toHaveLength(1);
+    expect(document.querySelectorAll('input[autocomplete="one-time-code"]')).toHaveLength(1);
   });
 
   it('resumes registration from the pending URL and lets the host start over durably', async () => {
