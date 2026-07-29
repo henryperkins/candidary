@@ -3,6 +3,12 @@ import { z } from 'zod';
 
 import type { PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
+import {
+  eventThemeConfigSchema,
+  EventThemeResolutionError,
+  resolveEventTheme,
+  serializeEventThemeConfig,
+} from '../../shared/event-theme';
 import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
@@ -19,6 +25,8 @@ import {
   SUPPORTED_IMAGE_TYPES,
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
+import { eventView } from '../http/event-view';
+import { fieldErrors } from '../http/validation';
 import { sanitizeFilename } from '../security/filenames';
 import { inspectImageHeader } from '../security/image-metadata';
 import { presignUpload } from '../storage/presign';
@@ -103,7 +111,42 @@ manageRoutes.post('/manage/events/:eventId/cover/finalize', async (context) => {
   const previousKey = auth.event.coverObjectKey;
   const event = await new EventsRepository(context.env.DB).setCover(auth.event.id, parsed.data.objectKey);
   if (previousKey && previousKey !== parsed.data.objectKey) await context.env.MEDIA_BUCKET.delete(previousKey);
-  return context.json({ data: { event }, requestId: context.get('requestId') });
+  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
+});
+
+manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
+  const auth = await requireManager(context, { write: true });
+  const parsed = eventThemeConfigSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Check the highlighted theme details.',
+      422,
+      fieldErrors(parsed.error),
+    );
+  }
+
+  let resolved;
+  try {
+    resolved = resolveEventTheme(parsed.data);
+  } catch (error) {
+    if (!(error instanceof EventThemeResolutionError)) throw error;
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Check the highlighted theme details.',
+      422,
+      { [error.field]: error.message },
+    );
+  }
+
+  const updated = await new EventsRepository(context.env.DB).updateTheme(
+    auth.event.id,
+    serializeEventThemeConfig(resolved.config),
+  );
+  return context.json({
+    data: { event: eventView(updated) },
+    requestId: context.get('requestId'),
+  });
 });
 
 manageRoutes.delete('/manage/events/:eventId', async (context) => {
@@ -121,7 +164,7 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
   const parsed = settingsSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422);
   const event = await new EventsRepository(context.env.DB).updateSettings(context.req.param('eventId'), parsed.data);
-  return context.json({ data: { event }, requestId: context.get('requestId') });
+  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
 });
 
 manageRoutes.get('/manage/events/:eventId/media', async (context) => {

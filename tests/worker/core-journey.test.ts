@@ -14,6 +14,12 @@ describe('complete private event journey', () => {
     expect(await testEnv.DB.prepare('SELECT theme_config FROM events WHERE id = ?')
       .bind(access.event.id).first('theme_config'))
       .toBe('{"version":1,"presetId":"candidary-default","overrides":{}}');
+    expect(access.event.theme.config).toEqual({
+      version: 1,
+      presetId: 'candidary-default',
+      overrides: {},
+    });
+    expect(access.event).not.toHaveProperty('themeConfig');
     const media = await uploadPending(access, 'first-look', 'The first look');
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),

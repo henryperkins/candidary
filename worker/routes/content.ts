@@ -10,17 +10,29 @@ import { getOrCreatePreview } from '../storage/previews';
 
 export const contentRoutes = new Hono<AppBindings>();
 
-contentRoutes.get('/event/:slug/cover', async (context) => {
-  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
-  if (auth.event.slug !== context.req.param('slug') || !auth.event.coverObjectKey) {
+async function coverResponse(context: Context<AppBindings>, objectKey: string | null) {
+  if (!objectKey) {
     throw new ApiError('EVENT_NOT_FOUND', 'This event does not have a cover image.', 404);
   }
-  const object = await context.env.MEDIA_BUCKET.get(auth.event.coverObjectKey);
+  const object = await context.env.MEDIA_BUCKET.get(objectKey);
   if (!object?.body) throw new ApiError('UPLOAD_OBJECT_MISSING', 'The cover is temporarily unavailable.', 404);
   return new Response(object.body, { headers: {
     'Content-Type': object.httpMetadata?.contentType ?? 'application/octet-stream',
     'Content-Length': String(object.size), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
   } });
+}
+
+contentRoutes.get('/event/:slug/cover', async (context) => {
+  const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
+  if (auth.event.slug !== context.req.param('slug')) {
+    throw new ApiError('EVENT_NOT_FOUND', 'This event does not have a cover image.', 404);
+  }
+  return coverResponse(context, auth.event.coverObjectKey);
+});
+
+contentRoutes.get('/manage/events/:eventId/cover', async (context) => {
+  const auth = await requireManager(context);
+  return coverResponse(context, auth.event.coverObjectKey);
 });
 
 async function previewResponse(context: Context<AppBindings>) {

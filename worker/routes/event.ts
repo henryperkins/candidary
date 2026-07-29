@@ -5,6 +5,7 @@ import { requireManager } from '../auth/manager';
 import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
+import { eventView, guestEventView } from '../http/event-view';
 
 export const eventRoutes = new Hono<AppBindings>();
 
@@ -15,17 +16,7 @@ eventRoutes.get('/event/:slug', async (context) => {
   }
   return context.json({
     data: {
-      event: {
-        id: auth.event.id,
-        slug: auth.event.slug,
-        name: auth.event.name,
-        eventDate: auth.event.eventDate,
-        welcomeMessage: auth.event.welcomeMessage,
-        coverObjectKey: auth.event.coverObjectKey,
-        uploadsEnabled: auth.event.uploadsEnabled,
-        galleryVisible: auth.event.galleryVisible,
-        moderationRequired: auth.event.moderationRequired,
-      },
+      event: guestEventView(auth.event),
       role: auth.session.role,
     },
     requestId: context.get('requestId'),
@@ -34,6 +25,6 @@ eventRoutes.get('/event/:slug', async (context) => {
 
 eventRoutes.get('/manage/events/:eventId', async (context) => {
   const auth = await requireManager(context);
-  return context.json({ data: { event: auth.event }, requestId: context.get('requestId') });
+  return context.json({ data: { event: eventView(auth.event) }, requestId: context.get('requestId') });
 });
 
