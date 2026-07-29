@@ -53,6 +53,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
 
   const dirty = serializeEventThemeConfig(draftTheme) !== serializeEventThemeConfig(savedTheme);
   const invalid = Boolean(errors['overrides.primaryColor'] || errors['overrides.accentColor']);
+  const unsaved = dirty || invalid;
 
   function adoptDraft(theme: ResolvedEventTheme) {
     setDraftTheme(theme.config);
@@ -174,8 +175,8 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
         <h3>Event appearance</h3>
         <p>Choose the colors and shape guests see. Changes stay in this preview until you save.</p>
       </div>
-      <span className={`event-appearance-editor__status${dirty ? ' event-appearance-editor__status--dirty' : ''}`}>
-        {dirty ? 'Unsaved changes' : 'Saved'}
+      <span className={`event-appearance-editor__status${unsaved ? ' event-appearance-editor__status--dirty' : ''}`}>
+        {unsaved ? 'Unsaved changes' : 'Saved'}
       </span>
     </div>
 

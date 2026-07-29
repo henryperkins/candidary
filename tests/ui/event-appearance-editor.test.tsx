@@ -63,6 +63,22 @@ afterEach(() => {
 });
 
 describe('event appearance editor', () => {
+  it('marks pristine invalid raw input as unsaved while preserving the saved draft', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    const user = userEvent.setup();
+    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+
+    expect(screen.getByText('Saved')).toBeVisible();
+    const primary = screen.getByRole('textbox', { name: 'Primary color' });
+    await user.clear(primary);
+    await user.type(primary, '#abc');
+
+    expect(primary).toHaveAccessibleDescription('Enter a six-digit hex color, such as #245c46.');
+    expect(screen.getByText('Unsaved changes')).toBeVisible();
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#42103b' });
+    expect(screen.getByRole('button', { name: 'Save appearance' })).toBeDisabled();
+  });
+
   it('updates only the local preview when a preset is selected before Save', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       void input;
