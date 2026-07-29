@@ -1,12 +1,25 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { EVENT_THEME_PRESETS, resolveEventTheme } from '../../shared/event-theme';
+import type { GuestEventView, ResolvedEventTheme } from '../../shared/contracts';
+import {
+  DEFAULT_EVENT_THEME_CONFIG,
+  EVENT_THEME_PRESETS,
+  resolveEventTheme,
+} from '../../shared/event-theme';
 import { guestEventCoverPath, managerEventCoverPath } from '../../src/app/api';
+import { EVENT_THEME_CSS_PROPERTIES } from '../../src/app/event-theme-style';
 import { useEventCover } from '../../src/app/use-event-cover';
 import { EventAppearancePreview } from '../../src/components/EventAppearancePreview';
 import { EventThemePresetSelector } from '../../src/components/EventThemePresetSelector';
+import { EventPage } from '../../src/pages/EventPage';
+
+const guestStyles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
 
 const coastalTheme = resolveEventTheme({ version: 1, presetId: 'coastal-light', overrides: {} });
 const previewEvent = {
@@ -16,6 +29,46 @@ const previewEvent = {
   welcomeMessage: 'Come share the moments you caught.',
   coverObjectKey: 'events/event-a/cover/private-photo.jpg',
 };
+const baseGuestEvent: Omit<GuestEventView, 'theme'> = {
+  id: 'event-a',
+  slug: 'maya-theo',
+  name: 'Maya & Theo',
+  eventDate: '2026-09-19',
+  welcomeMessage: 'Come share the moments you caught.',
+  coverObjectKey: null,
+  uploadsEnabled: true,
+  galleryVisible: true,
+  moderationRequired: true,
+};
+
+function json(data: unknown) {
+  return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  }));
+}
+
+function guestRoute(event: GuestEventView | (Omit<GuestEventView, 'theme'> & { theme?: never }), fullscreen = false) {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith('/api/event/maya-theo')) return json({ event, role: 'guest' });
+    if (path.endsWith('/gallery')) return json({ media: [] });
+    throw new Error(`Unexpected request ${path}`);
+  }));
+  return render(<MemoryRouter initialEntries={[fullscreen ? '/event/maya-theo/fullscreen' : '/event/maya-theo']}>
+    <aside data-testid="outside-guest-scope">Host chrome</aside>
+    <Routes>
+      <Route path="/event/:slug" element={<EventPage />} />
+      <Route path="/event/:slug/fullscreen" element={<EventPage fullscreen />} />
+    </Routes>
+  </MemoryRouter>);
+}
+
+function inlineEventProperties(element: HTMLElement): string[] {
+  return Array.from({ length: element.style.length }, (_, index) => element.style.item(index))
+    .filter((property) => property.startsWith('--event-'))
+    .sort();
+}
 
 function CoverRenderProbe({ path, onRender }: { path: string | null; onRender: (state: { path: string | null; cover: string | null; hasCoverModifier: boolean }) => void }) {
   const cover = useEventCover(path);
@@ -174,5 +227,104 @@ describe('event theme primitives', () => {
   it('encodes guest and manager cover identifiers into only their authorized paths', () => {
     expect(guestEventCoverPath('maya/theo?')).toBe('/api/event/maya%2Ftheo%3F/cover');
     expect(managerEventCoverPath('event/a?')).toBe('/api/manage/events/event%2Fa%3F/cover');
+  });
+});
+
+describe('guest event theme rendering', () => {
+  const customTheme = resolveEventTheme({
+    version: 1,
+    presetId: 'candidary-default',
+    overrides: { primaryColor: '#005f73', accentColor: '#c94b3c' },
+  });
+
+  it.each([...EVENT_THEME_PRESETS.map(({ id }) => resolveEventTheme({
+    version: 1,
+    presetId: id,
+    overrides: {},
+  })), customTheme])('installs only the 45 resolved variables on the loaded guest scope for $config.presetId', async (theme) => {
+    guestRoute({ ...baseGuestEvent, theme });
+    const heading = await screen.findByRole('heading', { name: baseGuestEvent.welcomeMessage });
+    const scope = heading.closest('.guest-shell--drop') as HTMLElement;
+    const expectedProperties = Object.values(EVENT_THEME_CSS_PROPERTIES).sort();
+
+    expect(inlineEventProperties(scope)).toEqual(expectedProperties);
+    expect(inlineEventProperties(scope)).toHaveLength(45);
+    for (const [token, property] of Object.entries(EVENT_THEME_CSS_PROPERTIES) as Array<
+      [keyof ResolvedEventTheme['tokens'], string]
+    >) {
+      expect(scope.style.getPropertyValue(property), token).toBe(theme.tokens[token]);
+    }
+    expect(document.documentElement.style.cssText).not.toContain('--event-');
+    expect(screen.getByTestId('outside-guest-scope').style.cssText).not.toContain('--event-');
+  });
+
+  it('uses the canonical default defensively when a legacy runtime response lacks theme', async () => {
+    const defaultTheme = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
+    guestRoute(baseGuestEvent);
+
+    const scope = (await screen.findByRole('heading', { name: baseGuestEvent.welcomeMessage }))
+      .closest('.guest-shell--drop') as HTMLElement;
+    expect(scope.style.getPropertyValue('--event-page')).toBe(defaultTheme.tokens.page);
+    expect(scope.style.getPropertyValue('--event-primary')).toBe(defaultTheme.tokens.primary);
+    expect(inlineEventProperties(scope)).toHaveLength(45);
+  });
+
+  it('leaves loading and authorization errors on global Candidary chrome', async () => {
+    let rejectLoad!: (reason: unknown) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((_resolve, reject) => {
+      rejectLoad = reject;
+    })));
+    render(<MemoryRouter initialEntries={['/event/maya-theo']}>
+      <Routes><Route path="/event/:slug" element={<EventPage />} /></Routes>
+    </MemoryRouter>);
+
+    const loading = screen.getByText('Gathering the details…').closest('.centered-state') as HTMLElement;
+    expect(inlineEventProperties(loading)).toEqual([]);
+
+    await act(async () => rejectLoad(new Error('forbidden')));
+    const error = await screen.findByRole('alert');
+    expect(inlineEventProperties(error.closest('.centered-state') as HTMLElement)).toEqual([]);
+    expect(document.querySelector('.guest-shell--drop')).toBeNull();
+  });
+
+  it('installs one independent resolved scope on the loaded full-screen gallery', async () => {
+    const theme = resolveEventTheme({ version: 1, presetId: 'midnight-film', overrides: {} });
+    guestRoute({ ...baseGuestEvent, theme }, true);
+
+    const scope = (await screen.findByRole('heading', { name: 'Shared gallery · Maya & Theo' }))
+      .closest('.fullscreen') as HTMLElement;
+    expect(inlineEventProperties(scope)).toEqual(Object.values(EVENT_THEME_CSS_PROPERTIES).sort());
+    expect(scope.style.getPropertyValue('--event-fullscreen-backdrop')).toBe('#0b1020');
+    expect(scope.style.getPropertyValue('--event-fullscreen-foreground')).toBe('#ffffff');
+    expect(screen.getByTestId('outside-guest-scope').style.cssText).not.toContain('--event-');
+  });
+
+  it('maps guest selectors to distinct semantic roles while fixed state colors stay fixed', () => {
+    const declaration = (selector: string, property: string) => {
+      const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+      const ruleMatch = guestStyles.match(new RegExp(`(?:^|\\})\\s*${escapedSelector}\\s*\\{`, 'mu'));
+      expect(ruleMatch, selector).not.toBeNull();
+      const bodyStart = (ruleMatch!.index ?? 0) + ruleMatch![0].length;
+      const body = guestStyles.slice(bodyStart, guestStyles.indexOf('}', bodyStart));
+      const declarationMatch = body.match(new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`, 'u'));
+      expect(declarationMatch, `${selector} ${property}`).not.toBeNull();
+      return declarationMatch![1]!.trim();
+    };
+
+    expect(declaration('.photo-drop__name strong', 'color')).toBe('var(--event-required-text, #8b3150)');
+    expect(declaration('.sending-as', 'border')).toContain('var(--event-remembered-name-border, #dfd4d8)');
+    expect(declaration('.review-heading', 'border-bottom')).toContain('var(--event-review-divider, #eadfe3)');
+    expect(declaration('.selection-card__image', 'background')).toContain('var(--event-media-placeholder-start, #e9ddd5)');
+    expect(declaration('.selection-card__image', 'color')).toBe('var(--event-media-placeholder-foreground, #806575)');
+    expect(declaration('.selection-summary', 'color')).toBe('var(--event-selection-summary-text, #6f6168)');
+    expect(declaration('.guest-shell--drop .text-button', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
+    expect(declaration('.new-badge', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
+    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary, #42103b)');
+    expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary, #42103b)');
+    expect(declaration('.selection-card--failed', 'border-color')).toBe('#d99b93');
+    expect(declaration('.selection-card--delivered', 'border-color')).toBe('#b8c9ae');
+    expect(declaration('.selection-card__delivered', 'color')).toBe('#31552d');
+    expect(declaration('.field-error', 'color')).toBe('var(--danger)');
+    expect(declaration('.fullscreen figcaption', 'background')).toContain('rgb(0 0 0 / 65%)');
   });
 });

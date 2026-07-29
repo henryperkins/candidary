@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { guestEventCoverPath } from '../../src/app/api';
 import { GuestUploadFlow } from '../../src/features/uploads/GuestUploadFlow';
 import type { UploadQueueItem, UploadTransport } from '../../src/features/uploads/upload-queue';
 
@@ -41,6 +42,58 @@ afterEach(() => {
 });
 
 describe('mobile guest photo delivery', () => {
+  it('shows a private cover only after its authenticated read succeeds', async () => {
+    let resolveCover!: (response: Response) => void;
+    const createObjectURL = vi.fn().mockReturnValue('blob:guest-cover');
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveCover = resolve;
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(<GuestUploadFlow
+      event={{ ...event, coverObjectKey: 'events/event-a/cover/private.jpg' }}
+      slug="alex/jordan?"
+      transport={transport()}
+    />);
+
+    const hero = container.querySelector('.photo-drop__hero') as HTMLElement;
+    expect(hero).not.toHaveClass('photo-drop__hero--cover');
+    expect(hero.style.getPropertyValue('--event-cover')).toBe('');
+    expect(hero.querySelector('.photo-drop__hero-copy')).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledWith(guestEventCoverPath('alex/jordan?'), expect.objectContaining({
+      credentials: 'same-origin',
+      signal: expect.any(AbortSignal),
+    }));
+
+    await act(async () => resolveCover(new Response(new Blob(['cover']), { status: 200 })));
+
+    await waitFor(() => expect(hero).toHaveClass('photo-drop__hero--cover'));
+    expect(hero.style.getPropertyValue('--event-cover')).toContain('blob:guest-cover');
+    expect(createObjectURL).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['missing', () => Promise.resolve(new Response(null, { status: 404 }))],
+    ['refused', () => Promise.resolve(new Response(null, { status: 403 }))],
+    ['failed', () => Promise.reject(new TypeError('network failed'))],
+  ])('keeps the exact no-cover path when the private cover read is %s', async (_case, coverRead) => {
+    const createObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
+    vi.stubGlobal('fetch', vi.fn(coverRead));
+    const { container } = render(<GuestUploadFlow
+      event={{ ...event, coverObjectKey: 'events/event-a/cover/private.jpg' }}
+      slug="alex-jordan"
+      transport={transport()}
+    />);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    const hero = container.querySelector('.photo-drop__hero') as HTMLElement;
+    expect(hero).not.toHaveClass('photo-drop__hero--cover');
+    expect(hero.style.getPropertyValue('--event-cover')).toBe('');
+    expect(hero.querySelector('.photo-drop__hero-copy')).not.toBeNull();
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
   it('requires and remembers a name before opening either photo source', async () => {
     const user = userEvent.setup();
     render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
