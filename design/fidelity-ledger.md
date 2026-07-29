@@ -1,12 +1,13 @@
 # Candidary fidelity ledger
 
-Reviewed on 2026-07-22 against the approved three-state wedding photo-drop concept at `.superpowers/brainstorm/1543-1784697424/content/camera-selection-flow-v3.html` and the established Candidary visual references in `design/concepts/`, and re-confirmed on 2026-07-27 against tracked evidence.
+Reviewed on 2026-07-22 against the approved three-state wedding photo-drop concept at `.superpowers/brainstorm/1543-1784697424/content/camera-selection-flow-v3.html` and the established Candidary visual references in `design/concepts/`, re-confirmed on 2026-07-27, and extended on 2026-07-29 for the approved per-event theme contract.
 
 Evidence is now committed rather than disposable. Image names below are the baselines in
-`tests/e2e/visual-qa.spec.ts-snapshots/`, stored with Playwright's default `-mobile-win32` suffixes
-and asserted by `npm run test:e2e`; named tests are the specs that measure the claim. Nothing here
-cites `output/`, which remains a disposable working folder. `design-qa.md` holds the full route,
-state, width, and baseline matrix.
+`tests/e2e/visual-qa.spec.ts-snapshots/` and
+`tests/e2e/event-theming-visual.spec.ts-snapshots/`, stored with Playwright's project/platform
+suffixes and asserted by `npm run test:e2e`; named tests are the specs that measure the claim.
+Nothing here cites `output/`, which remains a disposable working folder. `design-qa.md` holds the
+full route, state, width, and baseline matrix.
 
 | Contract point | Accepted direction | Browser result | Disposition |
 | --- | --- | --- | --- |
@@ -19,7 +20,50 @@ state, width, and baseline matrix.
 | Secondary features | Gallery, previous deliveries, and notes remain available but subordinate | `guest-secondary-long-content-320.png`, `fullscreen-long-caption-320.png` | These features are collapsed under `More from the event`, below the primary canvas, and disappear with the rest of the page after the terminal receipt. 80-character filenames wrap inside their column rather than widening the page. |
 | Private-by-default delivery | Every original reaches the host; sharing is a separate decision | `manager-actions-320.png` and manager API tests | Gallery visibility defaults off. New photos arrive as `Unpublished` private originals in Live intake; publish/hide actions affect gallery projection without changing delivery or export inclusion. |
 | Host operating view | Live intake first, with guest lookup, QR/link, capacity, originals, and export | Layout and reachability: `manager-nav-768.png`, `manager-nav-count-390.png`, `manager-export-first-390.png`, `manager-responsive.spec.ts` across 320–1440. Behaviour behind it, which no baseline can carry: `tests/worker/manage-api.test.ts` (guest-name filtered intake), `tests/worker/upload-api.test.ts` (the original served to the manager session and refused to the guest one), `tests/worker/export-api.test.ts` (bounded parts, manifest, manager-only URLs) | The manager opens on the recent private collection, can filter by required guest name, download any original, and prepare a complete partitioned export. The five destinations stay labelled from 320 px to 1440 px, and the 184 px navigation rail with the 330 px utility rail returns at 1101 px. |
-| Visual system | Warm parchment, paper surfaces, aubergine actions, apricot accents, moss completion | Every baseline above | The implementation retains the established typography, palette, restrained borders, Lucide outlines, and explicit focus/status treatment while simplifying the guest composition around the approved photo-first flow. The guest ground now stands on the documented Parchment token rather than an undocumented literal one shade darker, and the landing privacy note reads as ink with a moss check like `.trust-list`; every token in `design/design-system.md` is unchanged. The automated engine reports no contrast violation on the public, create, guest, fullscreen, and manager surfaces rendered by `accessibility.spec.ts`; that claim excludes failed states and physical-device conformance. |
+| Visual system | Warm parchment, paper surfaces, aubergine actions, apricot accents, moss completion | Every baseline above plus both theme suites | The established global tokens remain binding and unchanged for public, account, create, host, Manager, browser, and installed-app chrome. The intentional event-scoped 45-property overlay adds four guest appearances and the documented Default input/placeholder/Notes corrections without changing danger or delivery semantics, fixed typography, spacing, or host chrome. The automated engine reports no contrast violation on the rendered public, create, guest, full-screen, and Manager surfaces; that claim excludes failed states and physical-device conformance. |
+
+## Per-event theme evidence
+
+| Contract point | Accepted direction | Automated/browser result | Disposition |
+| --- | --- | --- | --- |
+| Preset compatibility | Four stable presets: `candidary-default` (Candidary Default), `garden-party` (Garden Party), `midnight-film` (Midnight Film), and `coastal-light` (Coastal Light) | Unit tests pin all 45 values for each preset: 180 version-1 token values, stable IDs/names, deterministic serialization, and the fixed 45-key CSS adapter | Preset IDs never branch components or CSS. Default fallbacks reproduce Candidary Default on the three approved event scopes. |
+| Constrained overrides | Optional primary and accent colors only | Unit, Worker, UI, and browser cases cover strict six-digit lowercase normalization, malicious/unknown input, custom black, white, dark/light colors, and custom `#767676` mid-tone | Primary and accent resolve only their documented families. Focus, danger, delivery, fonts, spacing, and hierarchy remain outside host control. |
+| Guest lifecycle scope | One resolved theme across entry, cover, remembered/invalid name, review, reservation, queue, transfer, finalize, cancel, retry/failure, receipt, gallery, deliveries, Notes, footer, and full screen | `event-theming.spec.ts` rotates the eight primary state rows across 320 × 568, 390 × 844, and 1280 × 900; targeted lifecycle, keyboard, target-size, zoom, reduced-motion, and containment cases supplement the matrix | Loading and authorization errors remain globally branded. Fixed semantic labels, glyphs, retry behavior, failure red, delivered moss, and caption gradient remain recognizable in every preset. |
+| No-cover and cover contrast | Preset-owned gradients; existing private cover plus localized scrim | Every preset checks all visible no-cover pixels at natural 390 × 205, expanded 390 × 420, and production 620 × 265 geometry. The mask includes straight edges and excludes clipped rounded corners. Cover text is checked over pure white, pure black, and the photographic fixture | Normal/control copy clears 4.5:1. Input boundary and focus checks clear 3:1 against applicable surfaces. No raw URL or second image pipeline was added. |
+| Manager appearance isolation | Local controls and inert preview inside existing Settings | UI and browser evidence proves Manager chrome receives no event variables; preset/color changes, Reset, and preview are local until Save. A failed Save retains raw input, draft, preview, unsaved status, scroll position, and a retryable action; success adopts the server-normalized event | The editor adds no sixth destination, upload flow, local storage, live guest action, or duplicate page heading. |
+| Persistence and API isolation | One canonical configuration per event | Migration 0007 backfills existing rows without table reconstruction and preserves sessions, media, messages, and ownership. Worker tests cover create/read view allowlists, canonical storage, manager-link/account authorization, credential-specific CSRF, update/reset, D1 refusal, and cross-event isolation | Only `events.theme_config` stores config. Resolved tokens are derived at event-view boundaries; guest reads omit manager fields, host lists omit theme, and upload authentication does not resolve presentation. |
+| Browser and release boundary | Local automated evidence is supporting evidence, not deployment evidence | Playwright uses Chromium/Desktop Chrome only: a 1440 × 1000 desktop project and a 390 × 844 mobile/touch project, with explicit viewport-pinned cases | Firefox, WebKit/Safari, physical iPhone/Android, native camera-picker, Cloudflare deployment, remote D1 migration, and live production route/CSP/data validation were not performed. |
+
+### New reviewed theme screenshots
+
+| Tracked file | Accepted state | Pixels |
+| --- | --- | ---: |
+| `guest-default-cover-390-mobile-win32.png` | Default cover, localized scrim, and first-fold hierarchy | 390 × 844 |
+| `guest-default-notes-390-mobile-win32.png` | Default Notes form, placeholder, feed, and divider crop | 390 × 1050 |
+| `guest-garden-cover-390-mobile-win32.png` | Garden Party cover first fold | 390 × 844 |
+| `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review and getting-ready state | 320 × 625 |
+| `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 × 844 |
+| `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal delivery receipt | 390 × 844 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview with global chrome outside scope | 390 × 3297 |
+| `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 × 900 |
+
+The Default Notes image is a new approved theme baseline, not one of the three
+existing Default baseline updates. The final Task 8 evidence revision changed
+no PNG.
+
+Three existing Default baselines changed intentionally:
+
+- `create-validation-focus-390-mobile-win32.png` — the approved preset selector;
+- `guest-long-welcome-320-mobile-win32.png` — the corrected name-input boundary and placeholder; and
+- `guest-landscape-844x390-mobile-win32.png` — the same input correction in phone landscape.
+
+Three protected Default baselines remain pixel-identical to the pre-theme base:
+
+| Protected file | SHA-256 |
+| --- | --- |
+| `guest-review-320-mobile-win32.png` | `914F0DE04AE35EE4C1EC139A91502647B3521E351DD3C5E5F81322B033DBD88C` |
+| `guest-secondary-long-content-320-mobile-win32.png` | `04143911B1BBF8EACE58C43A632326C8184459F06E3F14C7DAFB36ECF6275F7F` |
+| `fullscreen-long-caption-320-mobile-win32.png` | `FF034EF996F939E4641AD0A68CE2162B4EEA5A645EDFF8A9943B5D1EF0BD4AB2` |
 
 ## Intentional adaptations
 
@@ -29,6 +73,6 @@ state, width, and baseline matrix.
 
 ## QA outcome
 
-No material mismatch remains between the approved wedding photo-drop journey and the implemented browser experience. The serious `color-contrast` finding the accessibility engine surfaced on the guest and landing surfaces has been resolved without changing a single design-system token; `design-qa.md` records what moved, the resulting ratios, and the fact that muted ink on parchment now clears the threshold by only 0.0046.
+No material mismatch remains between the approved wedding photo-drop journey and the reviewed browser evidence. The serious `color-contrast` finding the accessibility engine surfaced on the guest and landing surfaces has been resolved without changing a global design-system token; the scoped event overlay adds only the documented compatibility corrections and curated event appearances. `design-qa.md` records what moved, the resulting ratios, and the fact that global muted ink on parchment clears the threshold by only 0.0046.
 
 Physical iPhone and Android checks remain release gates because desktop browser emulation cannot prove native camera-picker behavior. The automated accessibility engine, tracked baselines, and geometry assertions are supporting evidence, not a substitute for those gates — `docs/deployment.md` lists them.

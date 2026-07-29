@@ -1,4 +1,4 @@
-# Mobile Host Design QA
+# Candidary Design QA
 
 ## Visual truth
 
@@ -10,6 +10,7 @@
 
 ```powershell
 npm run typecheck        # tsc -b; covers src, worker, tests/unit, tests/ui — NOT tests/e2e
+npx tsc -p tsconfig.e2e.json --pretty false
 npm run lint             # eslint . --max-warnings=0; covers tests/e2e syntactically, not its types
 npm test                 # unit/UI in jsdom, then Worker tests in workerd
 npm run build            # tsc -b then vite build
@@ -17,20 +18,45 @@ npm run test:e2e         # Playwright: geometry, boundary, axe, and tracked-base
 ```
 
 `tests/e2e` belongs to neither TypeScript project, so `npm run typecheck` does not type-check the
-Playwright specs. It is kept type-clean by hand against a throwaway config with the same compiler
-options and `include: ["tests/e2e/**/*.ts", "shared/**/*.ts", "playwright.config.ts"]`. Repeat that
-check when the specs change; lint alone will not catch a type error there.
+Playwright specs. `tsconfig.e2e.json` is the committed, authoritative project for
+`tests/e2e/**/*.ts`, `shared/**/*.ts`, and `playwright.config.ts`; run the exact command above
+whenever browser code changes. Lint alone will not catch a Playwright type error.
 
-Two Playwright projects remain: `desktop` (1440 x 1000) and `mobile` (390 x 844, `isMobile`,
-`hasTouch`). Boundary coverage does not multiply the suite across projects — each responsive spec
-pins its own viewport with `page.setViewportSize()`.
+Two Playwright projects remain, both Chromium/Desktop Chrome: `desktop` (1440 x 1000) and `mobile`
+(390 x 844, `isMobile`, `hasTouch`). Boundary coverage does not multiply the suite across projects
+— each responsive spec pins its own viewport with `page.setViewportSize()`. There is no Firefox,
+WebKit/Safari, physical-device, or native camera-picker evidence.
+
+### Event-theme targeted verification
+
+The narrow feature gate is:
+
+```powershell
+npx vitest run --config vitest.config.ts tests/unit/event-theme.test.ts tests/unit/event-theme-style.test.ts tests/ui/event-theme-creation.test.tsx tests/ui/event-appearance-editor.test.tsx tests/ui/event-theme-rendering.test.tsx tests/ui/guest-upload-flow.test.tsx
+npx vitest run --config vitest.worker.config.ts tests/worker/migration-0007.test.ts tests/worker/event-theme-api.test.ts tests/worker/manage-api.test.ts tests/worker/core-journey.test.ts
+npx tsc -p tsconfig.e2e.json --pretty false
+npx playwright test tests/e2e/event-theming.spec.ts tests/e2e/event-theming-visual.spec.ts tests/e2e/accessibility.spec.ts tests/e2e/guest-responsive.spec.ts tests/e2e/visual-qa.spec.ts
+```
+
+The targeted Playwright command does not include `security.spec.ts`. Production-like CSP evidence
+is part of the later full `npm run test:e2e` gate. A final source head must also run, on that same
+immutable revision:
+
+```powershell
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:e2e
+git diff --check
+```
 
 ## Tracked visual baselines
 
-`tests/e2e/visual-qa.spec.ts` asserts committed images under
-`tests/e2e/visual-qa.spec.ts-snapshots/`, compared exactly — `threshold: 0` **and**
-`maxDiffPixels: 0` — with animations disabled and `scale: 'css'`. `output/` remains disposable and is
-cited nowhere.
+`tests/e2e/visual-qa.spec.ts` and `tests/e2e/event-theming-visual.spec.ts` assert committed images
+under their matching `*-snapshots/` directories, compared exactly — `threshold: 0` **and**
+`maxDiffPixels: 0` — with animations disabled, the caret hidden, and `scale: 'css'`. `output/`
+remains disposable and is cited nowhere.
 
 Both tolerances are required. `maxDiffPixels: 0` alone only counts pixels that already exceeded the
 per-pixel `threshold`, which defaults to 0.2 in a YIQ colour space. That default absorbs a
@@ -38,8 +64,8 @@ whole-surface recolour of a few units per channel: the guest ground moving from 
 `#f7f1e7` changed 393,839 pixels of one baseline and the comparison reported it as a pass. A palette
 regression is exactly what a tracked baseline exists to catch, so the comparison is exact.
 
-Exactness only pays if the capture is deterministic, so `settle()` in `visual-qa.spec.ts` does two
-things before every screenshot, both of which were found by turning the tolerances off:
+Exactness only pays if the capture is deterministic, so both suites call the shared
+`settleRendering()` helper before every screenshot:
 
 - **Parks the pointer outside the viewport.** A test that clicks its way into a state leaves the
   mouse on the control it clicked, and that control keeps its `:hover` paint. The `/create` submit
@@ -55,8 +81,13 @@ Both were latent while the comparison was lossy. Neither affects what the page r
 Regenerate and then prove reproducibility:
 
 ```powershell
-npx playwright test tests/e2e/visual-qa.spec.ts --update-snapshots
-npx playwright test tests/e2e/visual-qa.spec.ts
+npx playwright test tests/e2e/event-theming-visual.spec.ts --project=mobile --update-snapshots
+npx playwright test tests/e2e/event-theming-visual.spec.ts --project=desktop --update-snapshots
+npx playwright test tests/e2e/visual-qa.spec.ts --project=mobile --grep "create form" --update-snapshots
+npx playwright test tests/e2e/visual-qa.spec.ts --project=mobile --grep "guest photo drop" --update-snapshots
+npx playwright test tests/e2e/visual-qa.spec.ts tests/e2e/event-theming-visual.spec.ts --project=mobile
+npx playwright test tests/e2e/event-theming-visual.spec.ts --project=desktop
+git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-mobile-win32.png tests/e2e/visual-qa.spec.ts-snapshots/guest-secondary-long-content-320-mobile-win32.png tests/e2e/visual-qa.spec.ts-snapshots/fullscreen-long-caption-320-mobile-win32.png
 ```
 
 | Baseline | Route and state | Viewport |
@@ -74,8 +105,37 @@ npx playwright test tests/e2e/visual-qa.spec.ts
 | `manager-actions-320.png` | `/manage/event/:id` Gallery card with all four controls | 320 x 844 |
 | `manager-export-first-390.png` | `/manage/event/:id` Share section including the mobile export panel | 390 wide |
 
-Files on disk carry Playwright's default suffixes, so each name above is stored as
-`<name>-mobile-win32.png`. That is deliberate and must not be normalised away:
+The event-theme suite adds exactly eight tracked images:
+
+| Actual baseline | Route and state | Pixels |
+| --- | --- | ---: |
+| `guest-default-cover-390-mobile-win32.png` | Default cover, localized scrim, first fold | 390 x 844 |
+| `guest-default-notes-390-mobile-win32.png` | Default Notes surface/divider crop | 390 x 1050 |
+| `guest-garden-cover-390-mobile-win32.png` | Garden Party cover first fold | 390 x 844 |
+| `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review/getting-ready crop | 320 x 625 |
+| `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 x 844 |
+| `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal receipt | 390 x 844 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3297 |
+| `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 x 900 |
+
+Three existing Default files are deliberately updated:
+`create-validation-focus-390-mobile-win32.png` for the approved selector, plus
+`guest-long-welcome-320-mobile-win32.png` and
+`guest-landscape-844x390-mobile-win32.png` for the corrected empty input boundary/placeholder.
+`guest-default-notes-390-mobile-win32.png` is a new approved image, not a fourth existing update.
+The final evidence revision changed no PNG.
+
+The following pre-theme files are protected and pixel-identical:
+
+| Protected baseline | SHA-256 |
+| --- | --- |
+| `guest-review-320-mobile-win32.png` | `914F0DE04AE35EE4C1EC139A91502647B3521E351DD3C5E5F81322B033DBD88C` |
+| `guest-secondary-long-content-320-mobile-win32.png` | `04143911B1BBF8EACE58C43A632326C8184459F06E3F14C7DAFB36ECF6275F7F` |
+| `fullscreen-long-caption-320-mobile-win32.png` | `FF034EF996F939E4641AD0A68CE2162B4EEA5A645EDFF8A9943B5D1EF0BD4AB2` |
+
+The original mobile/tablet table's logical names carry Playwright's default
+suffixes and are stored as `<name>-mobile-win32.png`; the desktop theme baseline
+carries `-desktop-win32.png`. That is deliberate and must not be normalised away:
 
 - **`-win32`** — these images were rasterised by Windows. A Linux CI run must report a *missing*
   baseline rather than silently diff Linux font rendering against Windows font rendering.
@@ -88,6 +148,73 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
   had to be scrolled into view. Width is what the layout is made of; the height is only the window.
 - Dates rendered through `Intl` (`/create` date placeholder, the guest hero date) follow the
   capturing machine's locale and time zone. That is a further reason the platform suffix stays.
+
+## Event-theme browser matrix
+
+The viewport-pinned behavior runs once in the desktop project and uses this exact preset rotation:
+
+| State | 320 x 568 | 390 x 844 | 1280 x 900 |
+| --- | --- | --- | --- |
+| No-cover name/source entry | Candidary Default | Coastal Light | Garden Party |
+| Cover name/source entry | Midnight Film | Candidary Default | Coastal Light |
+| 500-character welcome, collapsed/expanded | Coastal Light | Candidary Default | Garden Party |
+| Review with long filenames | Candidary Default | Coastal Light | Midnight Film |
+| Active progress then retry/failure | Coastal Light | Candidary Default | Garden Party |
+| Terminal receipt | Candidary Default | Coastal Light | Midnight Film |
+| Gallery, deliveries, and Notes expanded | Coastal Light | Candidary Default | Garden Party |
+| Full-screen long caption | Candidary Default | Coastal Light | Midnight Film |
+
+Supplementary browser evidence covers:
+
+- Garden Party remembered-name, validation focus, keyboard operation, and 44px targets at
+  390 x 844.
+- Coastal Light reserving, queued, uploading, finalizing, cancel, failure, retry, and receipt at
+  390 x 844.
+- Manager canonical PUT and normalized-response adoption at 390 x 1200.
+- Each preset's no-cover all-visible-pixel contrast at natural 390 x 205, semantic expanded
+  390 x 420, and production 620 x 265 geometry. The mask includes right/bottom straight-edge cells
+  and excludes clipped rounded-corner cells.
+- Each preset's cover-copy contrast over pure white, pure black, and photographic fixtures at
+  390 x 844.
+- Axe plus computed 4.5:1 text/action and 3:1 input-boundary/focus checks for all four presets and
+  custom black, white, and `#767676` configurations at 390 x 844.
+- Theme radio accessible names/native checked state and the full Manager Settings Axe scan at
+  390 x 1400.
+- The 640 x 450 200%-zoom proxy, reduced motion, long content, and document containment.
+
+### Manager preview and persistence isolation
+
+The Settings editor keeps `savedTheme` and `draftTheme` separate. Preset and color changes update
+only the inert `.event-appearance-preview`; Manager navigation, workspace, forms, account access,
+and danger area remain on global Candidary tokens. Reset installs canonical Default locally and does
+not write. Save sends the canonical configuration to the event-scoped PUT and adopts only the
+server-normalized response. A failed Save preserves the raw input, last-valid draft and preview,
+unsaved state, Settings scroll position, and retryable action. Guest rendering stays on the saved
+theme until the write succeeds.
+
+Migration and Worker evidence pins the non-null `0007_event_theme.sql` column, canonical Default
+backfill, 512-character/valid-object checks, explicit guest-versus-manager views, credential-specific
+Origin/CSRF behavior, update/reset, one-event isolation, zero-row/D1 refusal, authorized private
+cover reads, and view-boundary fallback. Only configuration is stored; all 45 tokens are derived.
+
+### Production-like CSP
+
+Playwright's `webServer` runs `npm run build` and then Vite preview, never the development server.
+`security.spec.ts` holds a real emitted font request open, waits through the shared font-settlement
+helper, requires a non-empty set of same-origin `/assets/*.woff` or `/assets/*.woff2` requests,
+verifies the shipped CSP and blob-backed private cover, and requires exactly zero browser console
+errors after fonts settle. This evidence is Chromium-only and local; it is not a live production
+CSP check.
+
+### Evidence and release boundary
+
+The automated evidence recorded here is local source, unit, and browser evidence.
+It explicitly does not include Firefox, WebKit/Safari, physical iPhone or Android
+devices, native file-picker behavior, a Cloudflare deployment, a remote D1
+migration, or live production route, CSP, or data verification. A later
+user-authorized source merge and push would establish source integration and
+publication only, not deployment; the actual integration and pushed SHAs belong
+in the final handoff and are not preclaimed here.
 
 ## Verified states
 
