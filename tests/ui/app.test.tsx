@@ -3,12 +3,14 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type * as ManagementLinkModule from '../../src/app/management-link';
+
 const { replaceManagementLocation } = vi.hoisted(() => ({
   replaceManagementLocation: vi.fn(),
 }));
 
 vi.mock('../../src/app/management-link', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../../src/app/management-link')>(),
+  ...await importOriginal<typeof ManagementLinkModule>(),
   replaceManagementLocation,
 }));
 
