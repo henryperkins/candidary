@@ -23,6 +23,12 @@ describe('static asset security headers', () => {
     expect(headers).toContain('Cross-Origin-Opener-Policy: same-origin');
   });
 
+  it('serves the manifest with an explicit content type under nosniff', () => {
+    expect(headers).toMatch(
+      /\/manifest\.webmanifest\s+Content-Type: application\/manifest\+json/u,
+    );
+  });
+
   it('routes every clean SPA path through the Worker security middleware', () => {
     const patterns = wranglerConfig.assets?.run_worker_first ?? [];
     expect(patterns).toEqual(expect.arrayContaining(['/create', '/event/*', '/manage/*']));

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "generate:app-icons": "node scripts/generate-app-icons.mjs",
+    "verify:pwa-build": "node scripts/verify-pwa-build.mjs",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings=0",
