@@ -1,3 +1,4 @@
+import { parseStoredEventThemeConfig } from '../../shared/event-theme';
 import type { EventRecord } from './types';
 
 export interface EventRow {
@@ -6,6 +7,7 @@ export interface EventRow {
   name: string;
   event_date: string;
   welcome_message: string;
+  theme_config: string;
   cover_object_key: string | null;
   uploads_enabled: number;
   gallery_visible: number;
@@ -31,6 +33,7 @@ export interface CreateEventRecord {
   managementAccessExpiresAt: string;
   purgeAfter: string;
   createdAt: string;
+  themeConfig: string;
 }
 
 export function mapEvent(row: EventRow): EventRecord {
@@ -40,6 +43,7 @@ export function mapEvent(row: EventRow): EventRecord {
     name: row.name,
     eventDate: row.event_date,
     welcomeMessage: row.welcome_message,
+    themeConfig: parseStoredEventThemeConfig(row.theme_config),
     coverObjectKey: row.cover_object_key,
     uploadsEnabled: row.uploads_enabled === 1,
     galleryVisible: row.gallery_visible === 1,
@@ -66,8 +70,8 @@ export class EventsRepository {
     return this.db.prepare(`
       INSERT INTO events (
         id, slug, name, event_date, welcome_message, gallery_visible,
-        guest_access_expires_at, management_access_expires_at, purge_after, created_at
-      ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        guest_access_expires_at, management_access_expires_at, purge_after, created_at, theme_config
+      ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
     `).bind(
       input.id,
       input.slug,
@@ -78,6 +82,7 @@ export class EventsRepository {
       input.managementAccessExpiresAt,
       input.purgeAfter,
       input.createdAt,
+      input.themeConfig,
     );
   }
 
@@ -123,6 +128,18 @@ export class EventsRepository {
       id,
     ).run();
     if ((result.meta.changes ?? 0) !== 1) throw new Error('Event settings were not updated.');
+    return (await this.getById(id))!;
+  }
+
+  async updateTheme(id: string, serializedTheme: string): Promise<EventRecord> {
+    const result = await this.db.prepare(`
+      UPDATE events
+      SET theme_config = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).bind(serializedTheme, id).run();
+    if ((result.meta.changes ?? 0) !== 1) {
+      throw new Error('Event theme was not updated.');
+    }
     return (await this.getById(id))!;
   }
 

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AccountsRepository } from '../../worker/db/accounts';
 import { AuthRateLimitsRepository } from '../../worker/db/auth-rate-limits';
-import { EventsRepository } from '../../worker/db/events';
+import { EventsRepository, mapEvent, type EventRow } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
 import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
 import { SessionsRepository } from '../../worker/db/sessions';
@@ -12,6 +12,10 @@ import { TokensRepository } from '../../worker/db/tokens';
 import { finalizeStoredMedia } from '../../worker/storage/media';
 import type { AppEnv } from '../../worker/env';
 import { HostAuthService } from '../../worker/services/host-auth';
+import {
+  DEFAULT_EVENT_THEME_CONFIG,
+  serializeEventThemeConfig,
+} from '../../shared/event-theme';
 import { png } from './helpers';
 
 interface TestMigration {
@@ -38,6 +42,7 @@ async function seedEvent(id = 'event-a', slug = 'maya-theo') {
     managementAccessExpiresAt: '2026-12-18T23:59:59.999Z',
     purgeAfter: '2027-01-17T23:59:59.999Z',
     createdAt: now,
+    themeConfig: serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG),
   });
   return events;
 }
@@ -156,7 +161,16 @@ describe('manager media storage timestamp migration', () => {
     expect(storedAtMigrationIndex).toBeGreaterThan(0);
     await applyD1Migrations(env.DB, migrations.slice(0, storedAtMigrationIndex));
 
-    await seedEvent();
+    await env.DB.prepare(`
+      INSERT INTO events (id, slug, name, event_date, welcome_message,
+        guest_access_expires_at, management_access_expires_at, purge_after, created_at)
+      VALUES ('event-a', 'maya-theo', 'Maya & Theo', '2026-09-19', 'Welcome.', ?, ?, ?, ?)
+    `).bind(
+      '2026-10-19T23:59:59.999Z',
+      '2026-12-18T23:59:59.999Z',
+      '2027-01-17T23:59:59.999Z',
+      now,
+    ).run();
     const sessionId = await seedGuestSession();
     await env.DB.prepare(`
       INSERT INTO media (
@@ -222,6 +236,43 @@ describe('manager media storage timestamp migration', () => {
 });
 
 describe('event, token, and session repositories', () => {
+  it('updates only one event theme and maps malformed stored JSON to the default', async () => {
+    const repository = await seedEvent();
+    await seedEvent('event-b', 'other-event');
+    const coastal = {
+      version: 1,
+      presetId: 'coastal-light',
+      overrides: { primaryColor: '#125f6b' },
+    } as const;
+
+    await repository.updateTheme('event-a', serializeEventThemeConfig(coastal));
+
+    expect((await repository.getById('event-a'))?.themeConfig).toEqual(coastal);
+    expect((await repository.getById('event-b'))?.themeConfig)
+      .toEqual(DEFAULT_EVENT_THEME_CONFIG);
+
+    const row = await env.DB.prepare('SELECT * FROM events WHERE id = ?').bind('event-a')
+      .first<EventRow>();
+    expect(mapEvent({ ...row!, theme_config: '{' }).themeConfig)
+      .toEqual(DEFAULT_EVENT_THEME_CONFIG);
+  });
+
+  it('rejects theme updates for missing or deleted events', async () => {
+    const repository = await seedEvent();
+
+    await expect(repository.updateTheme(
+      'missing-event',
+      serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG),
+    )).rejects.toThrow('Event theme was not updated.');
+
+    await env.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+      .bind(now, 'event-a').run();
+    await expect(repository.updateTheme(
+      'event-a',
+      serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG),
+    )).rejects.toThrow('Event theme was not updated.');
+  });
+
   it('creates and resolves event-scoped records without crossing events', async () => {
     const events = await seedEvent();
     await seedEvent('event-b', 'other-event');

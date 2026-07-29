@@ -1,3 +1,5 @@
+import { serializeEventThemeConfig } from '../../shared/event-theme';
+import type { EventThemeConfigV1 } from '../../shared/contracts';
 import { EventsRepository } from '../db/events';
 import { NotificationOutboxRepository } from '../db/notification-outbox';
 import { SessionsRepository } from '../db/sessions';
@@ -15,6 +17,7 @@ export interface CreateEventInput {
   name: string;
   eventDate: string;
   welcomeMessage: string;
+  theme: EventThemeConfigV1;
 }
 
 export class EventService {
@@ -49,6 +52,7 @@ export class EventService {
         welcomeMessage: input.welcomeMessage,
         ...lifecycle,
         createdAt,
+        themeConfig: serializeEventThemeConfig(input.theme),
       }),
       tokens.createStatement({
         id: guestToken.id,

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
+import { DEFAULT_EVENT_THEME_CONFIG } from '../../shared/event-theme';
 import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
 import { getSessionCookie, setSessionCookies } from '../http/cookies';
@@ -43,7 +44,10 @@ publicRoutes.post('/events', async (context) => {
       .catch(() => null)
     : null;
 
-  const created = await new EventService(context.env).create(parsed.data, accountId);
+  const created = await new EventService(context.env).create({
+    ...parsed.data,
+    theme: DEFAULT_EVENT_THEME_CONFIG,
+  }, accountId);
   const maxAge = Math.max(1, Math.floor((Date.parse(created.sessionExpiresAt) - Date.now()) / 1000));
   setSessionCookies(context, 'event', created.managementSession, created.csrfToken, maxAge);
   return context.json({
