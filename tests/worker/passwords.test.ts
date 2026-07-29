@@ -1,6 +1,7 @@
 import { scrypt } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
+import { MAX_HOST_PASSWORD_LENGTH, MIN_HOST_PASSWORD_LENGTH } from '../../shared/constants';
 import {
   describePasswordProblem,
   hashPassword,
@@ -53,9 +54,23 @@ describe('password hashing', () => {
       .resolves.toEqual({ valid: false, needsRehash: false });
   });
 
+  // Derived from the constants rather than transcribed, so raising the floor cannot
+  // leave a passing test asserting the number it used to be.
   it('enforces a length floor and ceiling', () => {
-    expect(describePasswordProblem('short')).toBe('Use at least 12 characters.');
-    expect(describePasswordProblem('x'.repeat(257))).toBe('Use 256 characters or fewer.');
-    expect(describePasswordProblem('x'.repeat(12))).toBeNull();
+    expect(MIN_HOST_PASSWORD_LENGTH).toBe(15); // NIST SP 800-63B Rev. 4 §3.1.1.2, single factor.
+    expect(describePasswordProblem('short')).toBe(`Use at least ${MIN_HOST_PASSWORD_LENGTH} characters.`);
+    expect(describePasswordProblem('x'.repeat(MIN_HOST_PASSWORD_LENGTH - 1)))
+      .toBe(`Use at least ${MIN_HOST_PASSWORD_LENGTH} characters.`);
+    expect(describePasswordProblem('x'.repeat(MIN_HOST_PASSWORD_LENGTH))).toBeNull();
+    expect(describePasswordProblem('x'.repeat(MAX_HOST_PASSWORD_LENGTH))).toBeNull();
+    expect(describePasswordProblem('x'.repeat(MAX_HOST_PASSWORD_LENGTH + 1)))
+      .toBe(`Use ${MAX_HOST_PASSWORD_LENGTH} characters or fewer.`);
+  });
+
+  // Length is the only rule. Composition requirements push people toward predictable
+  // substitutions without adding entropy, and NIST forbids them outright.
+  it('imposes no composition rule on a password that clears the floor', () => {
+    expect(describePasswordProblem('aaaaaaaaaaaaaaaaaaaa')).toBeNull();
+    expect(describePasswordProblem('correct horse battery staple')).toBeNull();
   });
 });
