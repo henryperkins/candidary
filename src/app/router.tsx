@@ -12,6 +12,7 @@ import { HostLoginPage } from '../pages/HostLoginPage';
 import { HostRegisterPage } from '../pages/HostRegisterPage';
 import { HostVerifyPage } from '../pages/HostVerifyPage';
 import { ManagerPage } from '../pages/ManagerPage';
+import { ManagementRecoveryPage } from '../pages/ManagementRecoveryPage';
 
 const routes: RouteObject[] = [
   { path: '/', element: <LandingPage /> },
@@ -23,6 +24,7 @@ const routes: RouteObject[] = [
   { path: '/host/register', element: <HostRegisterPage /> },
   { path: '/host/events', element: <HostEventsPage /> },
   { path: '/host/verify', element: <HostVerifyPage /> },
+  { path: '/recover/manage', element: <ManagementRecoveryPage /> },
   { path: '*', element: <main className="centered-state"><h1>That page wandered off.</h1><a href="/">Return to Candidary</a></main> },
 ];
 

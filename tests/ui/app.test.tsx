@@ -84,6 +84,38 @@ describe('management link recovery', () => {
   });
 });
 
+describe('recover event manager page', () => {
+  it.each(['latest-link', 'sign-in', 'retry'] as const)(
+    'offers account and management-link recovery for %s',
+    (kind) => {
+      render(<RouterProvider router={createAppRouter([`/recover/manage?kind=${kind}`])} />);
+
+      expect(screen.getByRole('heading', { level: 1, name: 'Recover event manager' })).toBeVisible();
+      expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/host/login');
+      expect(screen.getByLabelText('Management link')).toBeVisible();
+      expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['/recover/manage', '/recover/manage?kind=unknown'])(
+    'falls back to recoverable latest-link guidance for %s',
+    (entry) => {
+      render(<RouterProvider router={createAppRouter([entry])} />);
+
+      expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/host/login');
+      expect(screen.getByLabelText('Management link')).toBeVisible();
+    },
+  );
+
+  it('shows terminal guidance without recovery actions for ended events', () => {
+    render(<RouterProvider router={createAppRouter(['/recover/manage?kind=ended-event'])} />);
+
+    expect(screen.getByRole('heading', { level: 1, name: 'This event can no longer be managed' })).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+  });
+});
+
 describe('public Candidary experience', () => {
   it('presents the approved value proposition and workflow', () => {
     render(<RouterProvider router={createAppRouter(['/'])} />);
