@@ -35,6 +35,93 @@ async function screenshotPixels(page: Page, locator: Locator): Promise<PixelBuff
   }, [...screenshot]);
 }
 
+async function visiblePixelMask(locator: Locator, width: number, height: number) {
+  return locator.evaluate((root, size) => {
+    const rootBox = root.getBoundingClientRect();
+    const clips: Array<{
+      left: number;
+      top: number;
+      right: number;
+      bottom: number;
+      topLeft: [number, number];
+      topRight: [number, number];
+      bottomRight: [number, number];
+      bottomLeft: [number, number];
+    }> = [];
+    const radius = (value: string, insetX: number, insetY: number): [number, number] => {
+      const [horizontal = 0, vertical = horizontal] = (value.match(/[\d.]+/gu) ?? []).map(Number);
+      return [Math.max(0, horizontal - insetX), Math.max(0, vertical - insetY)];
+    };
+    for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor);
+      if (!['hidden', 'clip'].includes(style.overflowX)
+        && !['hidden', 'clip'].includes(style.overflowY)) continue;
+      const box = ancestor.getBoundingClientRect();
+      const borderLeft = Number.parseFloat(style.borderLeftWidth) || 0;
+      const borderTop = Number.parseFloat(style.borderTopWidth) || 0;
+      const borderRight = Number.parseFloat(style.borderRightWidth) || 0;
+      const borderBottom = Number.parseFloat(style.borderBottomWidth) || 0;
+      clips.push({
+        left: box.left + borderLeft - rootBox.left,
+        top: box.top + borderTop - rootBox.top,
+        right: box.right - borderRight - rootBox.left,
+        bottom: box.bottom - borderBottom - rootBox.top,
+        topLeft: radius(style.borderTopLeftRadius, borderLeft, borderTop),
+        topRight: radius(style.borderTopRightRadius, borderRight, borderTop),
+        bottomRight: radius(style.borderBottomRightRadius, borderRight, borderBottom),
+        bottomLeft: radius(style.borderBottomLeftRadius, borderLeft, borderBottom),
+      });
+    }
+    const insideClip = (x: number, y: number, clip: (typeof clips)[number]) => {
+      if (x < clip.left || x >= clip.right || y < clip.top || y >= clip.bottom) return false;
+      const insideCorner = (
+        centerX: number,
+        centerY: number,
+        radiusX: number,
+        radiusY: number,
+      ) => radiusX === 0 || radiusY === 0
+        || ((x - centerX) / radiusX) ** 2 + ((y - centerY) / radiusY) ** 2 <= 1;
+      const [topLeftX, topLeftY] = clip.topLeft;
+      if (x < clip.left + topLeftX && y < clip.top + topLeftY
+        && !insideCorner(clip.left + topLeftX, clip.top + topLeftY, topLeftX, topLeftY)) return false;
+      const [topRightX, topRightY] = clip.topRight;
+      if (x >= clip.right - topRightX && y < clip.top + topRightY
+        && !insideCorner(clip.right - topRightX, clip.top + topRightY, topRightX, topRightY)) return false;
+      const [bottomRightX, bottomRightY] = clip.bottomRight;
+      if (x >= clip.right - bottomRightX && y >= clip.bottom - bottomRightY
+        && !insideCorner(
+          clip.right - bottomRightX,
+          clip.bottom - bottomRightY,
+          bottomRightX,
+          bottomRightY,
+        )) return false;
+      const [bottomLeftX, bottomLeftY] = clip.bottomLeft;
+      return !(x < clip.left + bottomLeftX && y >= clip.bottom - bottomLeftY
+        && !insideCorner(
+          clip.left + bottomLeftX,
+          clip.bottom - bottomLeftY,
+          bottomLeftX,
+          bottomLeftY,
+        ));
+    };
+    const mask: number[] = [];
+    for (let y = 0; y < size.height; y += 1) {
+      for (let x = 0; x < size.width; x += 1) {
+        const left = (x * rootBox.width) / size.width;
+        const top = (y * rootBox.height) / size.height;
+        const right = ((x + 1) * rootBox.width) / size.width;
+        const bottom = ((y + 1) * rootBox.height) / size.height;
+        mask.push(clips.every((clip) =>
+          insideClip(left, top, clip)
+          && insideClip(right, top, clip)
+          && insideClip(right, bottom, clip)
+          && insideClip(left, bottom, clip)) ? 1 : 0);
+      }
+    }
+    return mask;
+  }, { width, height });
+}
+
 export async function makeTextTransparent(locator: Locator) {
   await locator.evaluate((root) => {
     for (const element of [root, ...root.querySelectorAll<HTMLElement>('*')]) {
@@ -46,10 +133,20 @@ export async function makeTextTransparent(locator: Locator) {
   });
 }
 
-export async function minimumWhiteContrast(page: Page, locator: Locator) {
+export async function minimumWhiteContrast(
+  page: Page,
+  locator: Locator,
+  options: { visiblePixelsOnly?: boolean } = {},
+) {
   const pixels = await screenshotPixels(page, locator);
+  const mask = options.visiblePixelsOnly
+    ? await visiblePixelMask(locator, pixels.width, pixels.height)
+    : null;
   let minimum = Number.POSITIVE_INFINITY;
+  let sampledPixels = 0;
   for (let offset = 0; offset < pixels.data.length; offset += 4) {
+    if (mask && mask[offset / 4] !== 1) continue;
+    sampledPixels += 1;
     minimum = Math.min(
       minimum,
       whiteContrast(
@@ -59,7 +156,7 @@ export async function minimumWhiteContrast(page: Page, locator: Locator) {
       ),
     );
   }
-  return { minimum, width: pixels.width, height: pixels.height };
+  return { minimum, width: pixels.width, height: pixels.height, sampledPixels };
 }
 
 export async function minimumWhiteContrastUnderText(

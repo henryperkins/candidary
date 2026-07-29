@@ -149,17 +149,17 @@ test.describe('mobile event-theme visual evidence', () => {
   });
 
   test('manager Event appearance keeps global chrome outside the preview', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 3297 });
+    await page.setViewportSize({ width: 390, height: 844 });
     await stubManagerRoutes(page, {
       mediaPages: { first: { media: [], nextCursor: null } },
     });
     await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('region', { name: 'Event appearance editor' })).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(3297);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
     await settle(page);
-    await expect(page).toHaveScreenshot('manager-event-appearance-390.png');
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(844);
+    await expect(page).toHaveScreenshot('manager-event-appearance-390.png', { fullPage: true });
   });
 });
 

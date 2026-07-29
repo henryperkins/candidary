@@ -219,6 +219,29 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
   await expectTheme(scope, theme);
 }
 
+test('guest event fixture omits every manager-only event field', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await stubGuestRoutes(page);
+  const eventResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/api/event/${EVENT_FIXTURE.slug}`);
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  const payload = await (await eventResponse).json() as {
+    data: { event: Record<string, unknown> };
+  };
+  const managerOnlyFields = [
+    'reservedMediaCount',
+    'storedMediaCount',
+    'reservedBytes',
+    'storedBytes',
+    'guestAccessExpiresAt',
+    'managementAccessExpiresAt',
+    'purgeAfter',
+    'createdAt',
+    'deletedAt',
+  ];
+  expect(managerOnlyFields.filter((field) => field in payload.data.event)).toEqual([]);
+});
+
 test.describe('responsive themed guest state matrix', () => {
   for (const { state, presets } of MATRIX) {
     for (const [index, viewport] of VIEWPORTS.entries()) {
@@ -362,13 +385,25 @@ test('manager appearance PUT carries the canonical config and adopts the normali
   await expectTheme(page.locator('.event-appearance-preview'), eventTheme('coastal-light'));
 });
 
+test('Notes placeholder uses the approved themed muted text role', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubGuestRoutes(page, { event: { theme: eventTheme('candidary-default') } });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await page.locator('.event-extra summary').filter({ hasText: 'Leave a note' }).click();
+  const placeholderColor = await page.getByRole('textbox', { name: 'Note for Maya & Theo' }).evaluate(
+    (element) => getComputedStyle(element, '::placeholder').color,
+  );
+  expect(placeholderColor).toBe('rgb(119, 106, 112)');
+});
+
 for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'coastal-light'] as const) {
   test(`${presetId} no-cover gradient clears 4.5:1 at all three exact hero geometries`, async ({ page }, testInfo) => {
     onlyOnce(testInfo);
     const cases = [
-      { viewport: { width: 390, height: 844 }, forcedWidth: null, forcedHeight: null, expected: [390, 205] },
-      { viewport: { width: 390, height: 844 }, forcedWidth: null, forcedHeight: 420, expected: [390, 420] },
-      { viewport: { width: 1280, height: 900 }, forcedWidth: 620, forcedHeight: null, expected: [620, 265] },
+      { viewport: { width: 390, height: 844 }, forcedHeight: null, expected: [390, 205] },
+      { viewport: { width: 390, height: 844 }, forcedHeight: 420, expected: [390, 420] },
+      { viewport: { width: 1280, height: 900 }, forcedHeight: null, expected: [620, 265] },
     ] as const;
 
     for (const geometry of cases) {
@@ -376,26 +411,21 @@ for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'c
       await stubGuestRoutes(page, { event: { theme: eventTheme(presetId) } });
       await page.goto(`/event/${EVENT_FIXTURE.slug}`);
       const hero = page.locator('.photo-drop__hero');
-      if (geometry.forcedWidth || geometry.forcedHeight) {
-        await hero.evaluate((element, size) => {
+      if (geometry.forcedHeight) {
+        await hero.evaluate((element, height) => {
           const heroElement = element as HTMLElement;
-          if (size.width) {
-            const frame = heroElement.closest<HTMLElement>('.photo-drop');
-            if (!frame) throw new Error('Guest hero frame is missing.');
-            frame.style.width = `${size.width + 2}px`;
-            frame.style.maxWidth = `${size.width + 2}px`;
-            frame.style.borderRadius = '0';
-            frame.style.overflow = 'visible';
-          }
-          if (size.height) {
-            heroElement.style.height = `${size.height}px`;
-            heroElement.style.minHeight = `${size.height}px`;
-          }
-        }, { width: geometry.forcedWidth, height: geometry.forcedHeight });
+          heroElement.style.height = `${height}px`;
+          heroElement.style.minHeight = `${height}px`;
+        }, geometry.forcedHeight);
       }
       await makeTextTransparent(hero);
-      const contrast = await minimumWhiteContrast(page, hero);
+      const contrast = await minimumWhiteContrast(page, hero, { visiblePixelsOnly: true });
       expect([contrast.width, contrast.height], `${presetId} hero box`).toEqual(geometry.expected);
+      expect(contrast.sampledPixels, `${presetId} visible hero pixels`).toBeGreaterThan(0);
+      if (geometry.expected[0] === 620) {
+        expect(contrast.sampledPixels, `${presetId} clipped desktop corners`)
+          .toBeLessThan(geometry.expected[0] * geometry.expected[1]);
+      }
       expect(contrast.minimum, `${presetId} ${geometry.expected.join('x')} minimum contrast`)
         .toBeGreaterThanOrEqual(4.5);
     }

@@ -50,6 +50,7 @@ describe('event creation', () => {
     expect(response.headers.get('set-cookie')).toContain('SameSite=Lax');
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(response.headers.get('content-security-policy')).toContain("script-src 'self'");
 
     const guestToken = new URL(body.data.guestLink).pathname.split('/').at(-1)!;
     const [guestId, guestSecret] = guestToken.split('.');

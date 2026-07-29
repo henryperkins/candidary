@@ -386,7 +386,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .notes-secondary h3 { margin: 12px 0 5px; font-size: 1.45rem; }
 .notes-secondary p { color: var(--event-secondary-muted-text, #766c70); }
 .notes-secondary .note-form textarea { background: var(--event-raised-surface, #ffffff); border-color: var(--event-input-border, #92848c); color: var(--event-page-text, #2b1728); }
-.notes-secondary .note-form textarea::placeholder { color: var(--event-secondary-muted-text, #766c70); }
+.notes-secondary .note-form textarea::placeholder { color: var(--event-muted-text, #776a70); }
 .guest-shell--drop .note-form .button { border-radius: var(--event-action-radius, 12px); background: var(--event-primary, #42103b); color: var(--event-primary-foreground, #ffffff); box-shadow: 0 8px 22px var(--event-primary-shadow, rgb(66 16 59 / 13%)); }
 .guest-shell--drop .note-form .button:hover { background: var(--event-primary-hover, #2c0c2a); }
 /* The notes feed was written for the dark aubergine band, where apricot on aubergine reads. Reused on
@@ -402,7 +402,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 @keyframes photo-drop-spin { to { transform: rotate(360deg); } }
 
 @media (min-width: 700px) and (min-height: 760px) {
-  .photo-drop { min-height: 720px; margin: 38px auto 70px; border: 1px solid var(--event-border, #e3d8dc); border-radius: var(--event-frame-radius, 25px); box-shadow: 0 22px 70px var(--event-frame-shadow, rgb(54 30 46 / 13%)); }
+  .photo-drop { box-sizing: content-box; min-height: 720px; margin: 38px auto 70px; border: 1px solid var(--event-border, #e3d8dc); border-radius: var(--event-frame-radius, 25px); box-shadow: 0 22px 70px var(--event-frame-shadow, rgb(54 30 46 / 13%)); }
   .photo-drop__hero { min-height: 265px; padding: 38px 40px 34px; }
   .photo-drop__card { padding: 30px 40px 38px; }
   .photo-drop--receipt { min-height: 720px; }

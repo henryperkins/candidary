@@ -5,6 +5,7 @@ import type {
   EventThemeOverridesV1,
   EventThemePresetId,
   EventView,
+  GuestEventView,
 } from '../../../shared/contracts';
 import { resolveEventTheme } from '../../../shared/event-theme';
 import { PHOTOGRAPHIC_COVER } from './cover-images';
@@ -17,7 +18,7 @@ export function eventTheme(
   return resolveEventTheme({ version: 1, presetId, overrides });
 }
 
-export const EVENT_FIXTURE: EventView = {
+export const GUEST_EVENT_FIXTURE: GuestEventView = {
   id: 'event-a',
   slug: 'maya-theo',
   name: 'Maya & Theo',
@@ -27,6 +28,11 @@ export const EVENT_FIXTURE: EventView = {
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
+  theme: eventTheme('candidary-default'),
+};
+
+export const EVENT_FIXTURE: EventView = {
+  ...GUEST_EVENT_FIXTURE,
   reservedMediaCount: 0,
   storedMediaCount: 1,
   reservedBytes: 0,
@@ -36,7 +42,6 @@ export const EVENT_FIXTURE: EventView = {
   purgeAfter: '2026-12-19T00:00:00Z',
   createdAt: '2026-07-29T00:00:00Z',
   deletedAt: null,
-  theme: eventTheme('candidary-default'),
 };
 
 interface GuestMessage {
@@ -48,7 +53,7 @@ interface GuestMessage {
 }
 
 interface GuestRouteOptions {
-  event?: Partial<EventView>;
+  event?: Partial<GuestEventView>;
   gallery?: ReturnType<typeof makeMedia>;
   contributions?: ReturnType<typeof makeMedia>;
   messages?: GuestMessage[];
@@ -65,7 +70,7 @@ interface ManagerRouteOptions {
 }
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
-  const event = { ...EVENT_FIXTURE, ...options.event };
+  const event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
   const gallery = options.gallery ?? makeMedia(1);
   const contributions = options.contributions ?? gallery;
   const messages = options.messages ?? [];

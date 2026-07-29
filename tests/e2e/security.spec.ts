@@ -22,19 +22,8 @@ test('production preview enforces the shipped CSP while themed cover images rend
   });
   const response = await page.goto(`/event/${EVENT_FIXTURE.slug}`);
   expect(response?.headers()['content-security-policy']).toContain("default-src 'self'");
+  expect(response?.headers()['content-security-policy']).toContain("script-src 'self'");
   expect(response?.headers()['content-security-policy']).toContain("img-src 'self' blob: data:");
   await expect(page.locator('.photo-drop__hero--cover')).toHaveCSS('background-image', /blob:/u);
-  const knownBundledFontErrors = consoleErrors.filter((message) =>
-    message.startsWith("Loading the font 'data:font/")
-    && message.includes("violates the following Content Security Policy directive: \"font-src 'self'\""));
-  const fallbackNotes = consoleErrors.filter((message) =>
-    message.includes("'script-src' was not explicitly set, so 'default-src' is used as a fallback"));
-  expect(knownBundledFontErrors, 'the existing four Vite-inlined fallback font variants stay explicit')
-    .toHaveLength(4);
-  expect(fallbackNotes).toHaveLength(1);
-  expect(
-    consoleErrors.filter((message) =>
-      !knownBundledFontErrors.includes(message) && !fallbackNotes.includes(message)),
-    'themed rendering adds no CSP or console error',
-  ).toEqual([]);
+  expect(consoleErrors, 'production CSP emits no browser console error').toEqual([]);
 });
