@@ -300,6 +300,11 @@ describe('guest event theme rendering', () => {
   });
 
   it('maps guest selectors to distinct semantic roles while fixed state colors stay fixed', () => {
+    const brightPrimaryTheme = resolveEventTheme({
+      version: 1,
+      presetId: 'candidary-default',
+      overrides: { primaryColor: '#f2c94c' },
+    });
     const declaration = (selector: string, property: string) => {
       const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
       const ruleMatch = guestStyles.match(new RegExp(`(?:^|\\})\\s*${escapedSelector}\\s*\\{`, 'mu'));
@@ -319,7 +324,9 @@ describe('guest event theme rendering', () => {
     expect(declaration('.selection-summary', 'color')).toBe('var(--event-selection-summary-text, #6f6168)');
     expect(declaration('.guest-shell--drop .text-button', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
     expect(declaration('.new-badge', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
-    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary, #42103b)');
+    expect(brightPrimaryTheme.tokens.primary).toBe('#f2c94c');
+    expect(brightPrimaryTheme.tokens.primaryOnSurface).not.toBe(brightPrimaryTheme.tokens.primary);
+    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
     expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary, #42103b)');
     expect(declaration('.selection-card--failed', 'border-color')).toBe('#d99b93');
     expect(declaration('.selection-card--delivered', 'border-color')).toBe('#b8c9ae');

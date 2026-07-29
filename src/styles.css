@@ -325,7 +325,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .selection-card__image > button { width: 44px; height: 44px; padding: 0; position: absolute; top: 0; right: 0; display: grid; place-items: center; border: 0; background: transparent; color: white; cursor: pointer; }
 .selection-card__image > button::before { content: ''; width: 28px; height: 28px; position: absolute; border-radius: 999px; background: rgb(32 17 29 / 72%); }
 .selection-card__image > button svg { width: 15px; height: 15px; z-index: 1; }
-.selection-card__spinner, .selection-card__delivered { width: 36px; height: 36px; position: absolute; display: grid; place-items: center; border-radius: 999px; background: rgb(255 255 255 / 92%); color: var(--event-primary, #42103b); box-shadow: 0 3px 12px rgb(30 13 27 / 20%); }
+.selection-card__spinner, .selection-card__delivered { width: 36px; height: 36px; position: absolute; display: grid; place-items: center; border-radius: 999px; background: rgb(255 255 255 / 92%); color: var(--event-primary-on-surface, #42103b); box-shadow: 0 3px 12px rgb(30 13 27 / 20%); }
 .selection-card__spinner svg { animation: photo-drop-spin 900ms linear infinite; }
 .selection-card__delivered { color: #31552d; }
 .selection-card__status { min-height: 61px; padding: 7px; display: grid; align-content: start; gap: 2px; }
