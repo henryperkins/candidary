@@ -124,7 +124,7 @@ export function parseStoredEventThemeConfig(value: unknown): EventThemeConfigV1 
 }
 
 export function serializeEventThemeConfig(config: EventThemeConfigV1): string {
-  const normalized = normalizeEventThemeConfig(config);
+  const normalized = eventThemeConfigSchema.parse(config);
   const overrides: EventThemeOverridesV1 = {};
   if (normalized.overrides.primaryColor) overrides.primaryColor = normalized.overrides.primaryColor;
   if (normalized.overrides.accentColor) overrides.accentColor = normalized.overrides.accentColor;

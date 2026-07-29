@@ -12,7 +12,7 @@ import {
   serializeEventThemeConfig,
 } from '../../shared/event-theme';
 import type { EventThemeResolutionError } from '../../shared/event-theme';
-import type { HexColor } from '../../shared/contracts';
+import type { EventThemeConfigV1, HexColor } from '../../shared/contracts';
 
 const EXPECTED_TOKENS = {
   'candidary-default': {
@@ -90,6 +90,20 @@ describe('event theme contract', () => {
     expect(serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG)).toBe(
       '{"version":1,"presetId":"candidary-default","overrides":{}}',
     );
+  });
+
+  it('canonicalizes and validates direct serialization input', () => {
+    expect(serializeEventThemeConfig({
+      version: 1,
+      presetId: 'coastal-light',
+      overrides: { primaryColor: '#0C6370', accentColor: '#C85F50' },
+    })).toBe('{"version":1,"presetId":"coastal-light","overrides":{}}');
+    expect(() => serializeEventThemeConfig({
+      version: 1,
+      presetId: 'coastal-light',
+      overrides: { primaryColor: '#0c6370' },
+      evil: 'x',
+    } as unknown as EventThemeConfigV1)).toThrow();
   });
 
   it('normalizes case and removes redundant overrides', () => {
@@ -222,9 +236,11 @@ describe('event theme contract', () => {
   it.each(EVENT_THEME_PRESET_IDS)('keeps no-cover hero pixels readable at required viewport sizes for %s', (presetId) => {
     const tokens = EXPECTED_TOKENS[presetId];
     for (const [width, height] of [[390, 205], [390, 420], [620, 265]] as const) {
-      for (let y = 0; y < height; y += 4) for (let x = 0; x < width; x += 4) {
-        expect(contrastRatio('#ffffff', noCoverPixel(tokens, x, y, width, height))).toBeGreaterThanOrEqual(4.5);
+      let minimumRatio = Number.POSITIVE_INFINITY;
+      for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+        minimumRatio = Math.min(minimumRatio, contrastRatio('#ffffff', noCoverPixel(tokens, x, y, width, height)));
       }
+      expect(minimumRatio).toBeGreaterThanOrEqual(4.5);
     }
   });
 
