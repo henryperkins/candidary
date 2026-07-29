@@ -26,6 +26,7 @@ describe('static asset security headers', () => {
   it('routes every clean SPA path through the Worker security middleware', () => {
     const patterns = wranglerConfig.assets?.run_worker_first ?? [];
     expect(patterns).toEqual(expect.arrayContaining(['/create', '/event/*', '/manage/*']));
+    expect(patterns).toContain('/recover/manage');
     expect(patterns).not.toContain('!/manage/event/*');
   });
 });

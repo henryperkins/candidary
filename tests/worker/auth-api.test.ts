@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { decryptGuestSecret } from '../../worker/security/crypto';
 import { createApp } from '../../worker/app';
 import type { AppEnv } from '../../worker/env';
+import { classifyExchangeFailure } from '../../worker/routes/exchange';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -129,6 +130,98 @@ describe('token exchange and session authorization', () => {
     }, testEnv);
     expect(response.status).toBe(403);
     expect((await response.json<any>()).code).toBe('ROLE_FORBIDDEN');
+  });
+
+  it('redirects failed manager document navigations to a token-free recovery route while JSON clients retain the API error', async () => {
+    const invalidPath = '/manage/invalid.token';
+
+    const navigate = await createApp().request(invalidPath, {
+      redirect: 'manual',
+      headers: { 'sec-fetch-mode': 'navigate' },
+    }, testEnv);
+    expect(navigate.status).toBe(302);
+    expect(navigate.headers.get('location')).toBe('/recover/manage?kind=latest-link');
+    expect(navigate.headers.get('location')).not.toContain('invalid.token');
+    expect(navigate.headers.get('referrer-policy')).toBe('no-referrer');
+
+    const html = await createApp().request(invalidPath, {
+      redirect: 'manual',
+      headers: { accept: 'text/html,application/xhtml+xml' },
+    }, testEnv);
+    expect(html.status).toBe(302);
+    expect(html.headers.get('location')).toBe('/recover/manage?kind=latest-link');
+
+    const json = await createApp().request(invalidPath, {
+      headers: { accept: 'application/json' },
+    }, testEnv);
+    expect(json.status).toBe(401);
+    expect((await json.json<{ code: string }>()).code).toBe('SESSION_REQUIRED');
+  });
+
+  it.each([
+    ['revoked manager link', 'revoked_at', 'latest-link'],
+    ['expired manager link', 'expires_at', 'ended-event'],
+  ] as const)('redirects a %s document navigation with %s recovery', async (_label, column, kind) => {
+    const created = await createEvent();
+    const managerPath = new URL(created.body.data.managementLink).pathname;
+    const tokenId = managerPath.split('/').at(-1)!.split('.')[0]!;
+    const value = column === 'revoked_at'
+      ? new Date().toISOString()
+      : new Date(Date.now() - 60_000).toISOString();
+    await env.DB.prepare(`UPDATE event_access_tokens SET ${column} = ? WHERE id = ?`).bind(value, tokenId).run();
+
+    const response = await createApp().request(managerPath, {
+      redirect: 'manual',
+      headers: { 'sec-fetch-mode': 'navigate' },
+    }, testEnv);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe(`/recover/manage?kind=${kind}`);
+    expect(response.headers.get('location')).not.toContain(managerPath.split('/').at(-1)!);
+  });
+
+  it('redirects a deleted event manager navigation with ended-event recovery', async () => {
+    const created = await createEvent();
+    const managerPath = new URL(created.body.data.managementLink).pathname;
+    await env.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+      .bind(new Date().toISOString(), created.body.data.event.id).run();
+
+    const response = await createApp().request(managerPath, {
+      redirect: 'manual',
+      headers: { 'sec-fetch-mode': 'navigate' },
+    }, testEnv);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe('/recover/manage?kind=ended-event');
+    expect(response.headers.get('location')).not.toContain(managerPath.split('/').at(-1)!);
+  });
+
+  it('preserves host cookies when a manager link establishes its event session', async () => {
+    const created = await createEvent();
+    const managerPath = new URL(created.body.data.managementLink).pathname;
+
+    const response = await createApp().request(managerPath, {
+      redirect: 'manual',
+      headers: {
+        cookie: 'candidary_host=dummy.host; candidary_host_csrf=dummy-csrf',
+      },
+    }, testEnv);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe(`/manage/event/${created.body.data.event.id}`);
+    const cookies = response.headers.getSetCookie();
+    expect(cookies).toEqual(expect.arrayContaining([
+      expect.stringContaining('candidary_session='),
+      expect.stringContaining('candidary_csrf='),
+    ]));
+    expect(cookies).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('candidary_host='),
+      expect.stringContaining('candidary_host_csrf='),
+    ]));
+  });
+
+  it('classifies an unexpected manager exchange failure as retryable', () => {
+    expect(classifyExchangeFailure(new Error('unexpected'))).toBe('retry');
   });
 });
 
