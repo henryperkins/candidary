@@ -379,6 +379,18 @@ test('theme radios have textual names, native checked state, and a full-document
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Event appearance editor' })).toBeVisible();
   await expect(page.locator('.event-appearance-preview')).toBeVisible();
+  const colorInputBorder = await page.getByLabel('Primary color picker').evaluate((element) => {
+    const tokenProbe = document.createElement('span');
+    tokenProbe.style.color = 'var(--border)';
+    document.body.append(tokenProbe);
+    const expected = getComputedStyle(tokenProbe).color;
+    tokenProbe.remove();
+    return {
+      actual: getComputedStyle(element).borderTopColor,
+      expected,
+    };
+  });
+  expect(colorInputBorder.actual, 'Manager color input uses the global border token').toBe(colorInputBorder.expected);
   for (const toggle of await page.locator('.settings-form .toggle').all()) {
     const target = await measureTarget(toggle);
     expect(target.width, 'Settings toggle label width').toBeGreaterThanOrEqual(44);

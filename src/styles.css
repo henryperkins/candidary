@@ -225,7 +225,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .event-appearance-editor__color-heading button:disabled { cursor: not-allowed; opacity: .55; }
 .event-appearance-editor__color-inputs { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: end; }
 .event-appearance-editor__color-inputs label { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: .78rem; font-weight: 600; }
-.event-appearance-editor__color-inputs input[type='color'] { width: 52px; min-height: 48px; padding: 3px; border: 1px solid var(--input-border); border-radius: 7px; background: var(--paper); cursor: pointer; }
+.event-appearance-editor__color-inputs input[type='color'] { width: 52px; min-height: 48px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); cursor: pointer; }
 .event-appearance-editor__color-inputs input[type='text'] { width: 100%; min-height: 48px; }
 .event-appearance-editor__color-inputs input[aria-invalid='true'] { border-color: var(--danger); box-shadow: 0 0 0 2px rgb(181 64 51 / 10%); }
 .event-appearance-editor__preview { min-width: 0; display: grid; gap: 14px; }
