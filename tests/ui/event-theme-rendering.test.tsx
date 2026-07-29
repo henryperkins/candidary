@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EVENT_THEME_PRESETS, resolveEventTheme } from '../../shared/event-theme';
 import { guestEventCoverPath, managerEventCoverPath } from '../../src/app/api';
+import { useEventCover } from '../../src/app/use-event-cover';
 import { EventAppearancePreview } from '../../src/components/EventAppearancePreview';
 import { EventThemePresetSelector } from '../../src/components/EventThemePresetSelector';
 
@@ -15,6 +16,12 @@ const previewEvent = {
   welcomeMessage: 'Come share the moments you caught.',
   coverObjectKey: 'events/event-a/cover/private-photo.jpg',
 };
+
+function CoverRenderProbe({ path, onRender }: { path: string | null; onRender: (state: { path: string | null; cover: string | null; hasCoverModifier: boolean }) => void }) {
+  const cover = useEventCover(path);
+  onRender({ path, cover, hasCoverModifier: Boolean(cover) });
+  return <output className={cover ? 'cover-modifier' : ''} data-testid="cover-render-probe">{cover}</output>;
+}
 
 afterEach(() => {
   cleanup();
@@ -140,6 +147,28 @@ describe('event theme primitives', () => {
 
     expect(preview.style.getPropertyValue('--event-cover')).toContain('blob:cover-b');
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:stale-a');
+  });
+
+  it('does not render a previous private cover while a replacement path is still loading', async () => {
+    const renders: Array<{ path: string | null; cover: string | null; hasCoverModifier: boolean }> = [];
+    let resolveSecond: ((response: Response) => void) | undefined;
+    vi.stubGlobal('URL', { createObjectURL: vi.fn().mockReturnValue('blob:cover-a'), revokeObjectURL: vi.fn() });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(new Blob(['a']), { status: 200 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveSecond = resolve; })));
+
+    const view = render(<CoverRenderProbe path="/api/manage/events/event-a/cover" onRender={(state) => renders.push(state)} />);
+    await waitFor(() => expect(screen.getByTestId('cover-render-probe')).toHaveTextContent('blob:cover-a'));
+    renders.length = 0;
+
+    view.rerender(<CoverRenderProbe path="/api/manage/events/event-b/cover" onRender={(state) => renders.push(state)} />);
+
+    expect(renders[0]).toEqual({
+      path: '/api/manage/events/event-b/cover', cover: null, hasCoverModifier: false,
+    });
+    expect(screen.getByTestId('cover-render-probe')).not.toHaveClass('cover-modifier');
+    expect(screen.getByTestId('cover-render-probe')).toHaveTextContent('');
+    await act(async () => { resolveSecond!(new Response(null, { status: 404 })); });
   });
 
   it('encodes guest and manager cover identifiers into only their authorized paths', () => {

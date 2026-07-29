@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 export function useEventCover(path: string | null): string | null {
-  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+  const [cover, setCover] = useState<{ path: string; url: string } | null>(null);
   const coverUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -14,7 +14,7 @@ export function useEventCover(path: string | null): string | null {
     };
 
     clearCover();
-    setCoverUrl(null);
+    setCover(null);
     if (!path) return () => {
       current = false;
       controller.abort();
@@ -31,7 +31,7 @@ export function useEventCover(path: string | null): string | null {
           return;
         }
         coverUrlRef.current = nextUrl;
-        setCoverUrl(nextUrl);
+        setCover({ path, url: nextUrl });
       } catch {
         // A private cover is optional, and aborted or failed reads keep the gradient fallback.
       }
@@ -44,5 +44,5 @@ export function useEventCover(path: string | null): string | null {
     };
   }, [path]);
 
-  return coverUrl;
+  return cover?.path === path ? cover.url : null;
 }
