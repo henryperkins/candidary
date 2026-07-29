@@ -20,6 +20,16 @@ npx wrangler r2 bucket cors set candidary-media --file config/r2-cors.json
 
 The bucket remains private. CORS permits signed browser PUT requests from the application origin with the signed `content-type` header. Originals are manager-only; previews are authorization-checked; export links are short-lived and manager-only.
 
+## Transport security
+
+Enable **SSL/TLS → Edge Certificates → Always Use HTTPS** for the zone. A plain-HTTP request is then redirected at the edge and never reaches the Worker.
+
+Both response surfaces send `Strict-Transport-Security: max-age=31536000; includeSubDomains`: `worker/http/security-headers.ts` for the paths in `assets.run_worker_first`, and `public/_headers` for everything the asset server answers directly — including `/`, which is where most first visits land. `tests/unit/static-headers.test.ts` fails if the two surfaces drift.
+
+Before changing the apex, confirm no subdomain is expected to answer over plain HTTP. `includeSubDomains` commits every subdomain to HTTPS for a year and cannot be withdrawn from browsers that already saw it. The only subdomain in use today is the mail return-path `cf-bounce`, which carries DNS records rather than an HTTP service. `preload` is omitted on purpose.
+
+Leave the dashboard's own HSTS setting off. The policy lives in the repo so it stays under version control and under test; two sources would let a second, different max-age ship without review.
+
 ## Secrets
 
 Generate independent 32-byte values and store them with Wrangler. The guest encryption value is base64url-encoded for AES-256-GCM.
