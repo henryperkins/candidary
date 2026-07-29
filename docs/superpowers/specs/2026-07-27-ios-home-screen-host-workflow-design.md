@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Revalidated:** 2026-07-28 against `origin/main` at `051478a`
-- **Status:** Previously approved; current-origin refresh awaiting review
+- **Status:** Approved for implementation
 
 ## Objective
 
