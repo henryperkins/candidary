@@ -10,3 +10,12 @@ export function parseManagementLink(value: string, currentOrigin: string): strin
     return null;
   }
 }
+
+// Kept beside parsing so every recovery surface takes the same final, validated
+// pathname through the one browser-navigation boundary.
+export function replaceManagementLocation(
+  pathname: string,
+  location: Pick<Location, 'replace'> = window.location,
+): void {
+  location.replace(pathname);
+}

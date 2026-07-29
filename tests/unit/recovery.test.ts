@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { parseManagementLink } from '../../src/app/management-link';
+import { parseManagementLink, replaceManagementLocation } from '../../src/app/management-link';
 import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
 
 const EVENT = '11111111-2222-4333-8444-555555555555';
@@ -30,6 +30,15 @@ describe('management link recovery', () => {
     ['non-management path', `/join/${TOKEN}`],
   ])('rejects %s', (_label, value) => {
     expect(parseManagementLink(value, ORIGIN)).toBeNull();
+  });
+
+  it('passes a management pathname to Location.replace', () => {
+    const replace = vi.fn();
+
+    replaceManagementLocation(`/manage/${TOKEN}`, { replace });
+
+    expect(replace).toHaveBeenCalledOnce();
+    expect(replace).toHaveBeenCalledWith(`/manage/${TOKEN}`);
   });
 });
 

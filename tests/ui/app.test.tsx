@@ -3,6 +3,15 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+const { replaceManagementLocation } = vi.hoisted(() => ({
+  replaceManagementLocation: vi.fn(),
+}));
+
+vi.mock('../../src/app/management-link', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/app/management-link')>(),
+  replaceManagementLocation,
+}));
+
 import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
 import { mediaPreview } from '../../src/app/api';
 import { createAppRouter } from '../../src/app/router';
@@ -59,9 +68,9 @@ describe('management link recovery', () => {
   });
 
   it('replaces location with only the parsed pathname from a valid management link', async () => {
-    const replace = vi.fn();
     const token = 'Abc_123.Xyz-789';
-    render(<ManagementLinkRecovery replace={replace} />);
+    replaceManagementLocation.mockClear();
+    render(<ManagementLinkRecovery />);
     const user = userEvent.setup();
 
     await user.type(
@@ -70,8 +79,8 @@ describe('management link recovery', () => {
     );
     await user.click(screen.getByRole('button', { name: 'Open event manager' }));
 
-    expect(replace).toHaveBeenCalledOnce();
-    expect(replace).toHaveBeenCalledWith(`/manage/${token}`);
+    expect(replaceManagementLocation).toHaveBeenCalledOnce();
+    expect(replaceManagementLocation).toHaveBeenCalledWith(`/manage/${token}`);
   });
 });
 
