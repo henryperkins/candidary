@@ -57,6 +57,22 @@ describe('management link recovery', () => {
     expect(screen.getByText('Enter a Candidary management link from this site.')).toBeVisible();
     expect(screen.getByLabelText('Management link')).toHaveFocus();
   });
+
+  it('replaces location with only the parsed pathname from a valid management link', async () => {
+    const replace = vi.fn();
+    const token = 'Abc_123.Xyz-789';
+    render(<ManagementLinkRecovery replace={replace} />);
+    const user = userEvent.setup();
+
+    await user.type(
+      screen.getByLabelText('Management link'),
+      `${window.location.origin}/manage/${token}?from=mail#saved`,
+    );
+    await user.click(screen.getByRole('button', { name: 'Open event manager' }));
+
+    expect(replace).toHaveBeenCalledOnce();
+    expect(replace).toHaveBeenCalledWith(`/manage/${token}`);
+  });
 });
 
 describe('public Candidary experience', () => {

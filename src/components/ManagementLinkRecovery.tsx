@@ -2,7 +2,15 @@ import { type FormEvent, useId, useRef, useState } from 'react';
 
 import { parseManagementLink } from '../app/management-link';
 
-export function ManagementLinkRecovery() {
+interface ManagementLinkRecoveryProps {
+  // JSDOM does not expose a spyable Location#replace. Production callers omit this
+  // seam, preserving a real browser replacement while tests can observe its input.
+  replace?: (pathname: string) => void;
+}
+
+export function ManagementLinkRecovery({
+  replace = (pathname) => window.location.replace(pathname),
+}: ManagementLinkRecoveryProps) {
   const input = useRef<HTMLInputElement>(null);
   const [error, setError] = useState('');
   const headingId = useId();
@@ -18,7 +26,7 @@ export function ManagementLinkRecovery() {
       return;
     }
     setError('');
-    window.location.replace(pathname);
+    replace(pathname);
   }
 
   return <section className="management-link-recovery" aria-labelledby={headingId}>
