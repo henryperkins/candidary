@@ -158,8 +158,9 @@ Files on disk carry Playwright's default suffixes, so each name above is stored 
 `@axe-core/playwright` 4.12.1 runs over the whole document — no `include`, no `exclude`, no
 `runOnly`, no `withTags`, no `disableRules` — on `/`, the `/create` form, the `/create` success state
 with the guest link revealed, the guest hero, the guest secondary content with all three disclosures
-open, `/event/:slug/fullscreen`, and each of the five manager sections. It supplements rather than
-replaces the keyboard, target-size, geometry, contrast, zoom and reduced-motion assertions above.
+open, `/event/:slug/fullscreen`, each of the five manager sections, and the full-page and inline
+manager credential-recovery states. It supplements rather than replaces the keyboard, target-size,
+geometry, contrast, zoom and reduced-motion assertions above.
 
 ### Exactly which rules run
 
@@ -185,8 +186,8 @@ difference matters enough to write down. Measured against the installed axe-core
   `manager-scale.spec.ts` and `error-recovery.spec.ts`. Those six are the complete list: no other spec
   imports `measureTarget` or asserts against 44. Do not read a green axe run as touch-target
   conformance, and do not thin those assertions out on the strength of it — axe would not notice a
-  44 px control shrinking to 24. `error-recovery.spec.ts` is the most exposed of the six, because it is
-  the only one whose surfaces no axe pass renders at all — see the known gap below.
+  44 px control shrinking to 24. `error-recovery.spec.ts` remains the most exposed of the six because
+  axe renders only its two manager credential-recovery surfaces — see the known gap below.
 - **A further 7 of the 96 default-enabled rules are tagged `experimental`** and axe excludes them
   from a default run: `css-orientation-lock`, `focus-order-semantics`, `hidden-content`,
   `label-content-name-mismatch`, `p-as-heading`, `table-fake-caption`, `td-has-header`. They are left
@@ -209,14 +210,15 @@ never ran reports nothing, which on the wire is indistinguishable from a rule th
 nothing — so without that check, deleting the option would leave a green suite and a false document.
 Verified by removing the option: the guard fails first, on every surface.
 
-Known gap: no axe pass renders a failed state, so the engine never reads the guest or manager error
-cards or the manager's inline action notice. Those states are measured geometrically by
-`error-recovery.spec.ts`, which also checks the notice's resolved contrast directly; the original
-pairing was found and fixed by hand — see "Contrast remediation".
+Known gap: the engine renders the full-page and inline manager credential-recovery states, but it
+does not render the guest error cards or an ordinary refused manager mutation. Those remaining
+states are measured geometrically by `error-recovery.spec.ts`, which also checks the action notice's
+resolved contrast directly; the original pairing was found and fixed by hand — see "Contrast
+remediation".
 
 Every surface enumerated for `accessibility.spec.ts` reports zero violations in both Playwright
-projects. This is automated-browser evidence for those rendered states, not failed-state or
-physical-device conformance.
+projects. This is automated-browser evidence for those rendered states, not comprehensive
+failed-state or physical-device conformance.
 
 Fixed under this task:
 

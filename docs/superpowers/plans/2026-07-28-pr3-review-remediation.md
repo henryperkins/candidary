@@ -79,7 +79,7 @@ expect(screen.getByText(managerBearerUrl)).toBeInTheDocument();
 Add route tests for these database-backed cases:
 
 1. An ownerless event with a live, unrevoked `can_claim_owner = 1` manager
-   session returns HTTP 409 / `ROLE_FORBIDDEN` before rotation. The old access
+   session returns HTTP 409 / `OWNER_CLAIM_REQUIRED` before rotation. The old access
    token and creator session still resolve afterward.
 2. The same event may rotate after the creator session expires when
    `legacy_owner_claim_open = 0`: expire the creator cookie, exchange the
@@ -126,8 +126,8 @@ database state:
 Before calling `LinkService.rotate`, have only the `role === 'manager'`
 rotation branch read this state. Guest-link rotation does not affect ownership
 eligibility and must remain unchanged. If `!hasOwner && claimStillPossible`,
-throw the existing
-`ROLE_FORBIDDEN` code with status 409 and guidance that the event must be saved
+throw
+`OWNER_CLAIM_REQUIRED` with status 409 and guidance that the event must be saved
 from its original creator session first. Perform no token/session mutation in
 that branch. Otherwise rotate normally.
 

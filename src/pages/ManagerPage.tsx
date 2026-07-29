@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
-import { api, mediaOriginal, mediaPreview } from '../app/api';
+import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import { hostSignInHref } from '../app/recovery';
 import {
   MANAGER_BULK_SELECTION_MAX,
@@ -36,6 +36,11 @@ type MediaStatus = 'all' | MediaView['publicationStatus'];
 interface MediaPageState {
   rows: MediaView[];
   cursor: string | null;
+}
+
+interface GuestLinkLoad {
+  guestLink: string;
+  warning?: string;
 }
 
 // Keeping load failures discriminated prevents a normal refused write from accidentally acquiring
@@ -138,12 +143,21 @@ export function ManagerPage() {
   const refresh = useCallback(async () => {
     setFailure(null);
     try {
+      // A missing guest link is a repairable event resource failure, not lost manager access.
+      // Keep the manager usable so its existing Rotate guest link action remains the way out.
+      const guestLinkLoad: Promise<GuestLinkLoad> = api<GuestLinkLoad>(`/api/manage/events/${eventId}/links`)
+        .catch((caught: unknown): GuestLinkLoad => {
+          if (caught instanceof ClientApiError && caught.code === 'GUEST_LINK_UNAVAILABLE') {
+            return { guestLink: '', warning: caught.message };
+          }
+          throw caught;
+        });
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
         api<{ messages: MessageView[] }>(`/api/manage/events/${eventId}/messages`),
         api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`),
-        api<{ guestLink: string }>(`/api/manage/events/${eventId}/links`),
+        guestLinkLoad,
       ]);
       setEvent(eventData.event);
       // A load opened under the previous query must not reinstate its rows or its cursor. Polling
@@ -155,6 +169,9 @@ export function ManagerPage() {
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setGuestLink(linkData.guestLink);
+      if (linkData.warning) {
+        setActionError({ type: 'action', message: linkData.warning });
+      }
       loadedOnce.current = true;
     } catch (caught) {
       const loadFailure = describeLoadFailure(caught, 'manager', 'The event manager could not be loaded.');
@@ -247,6 +264,7 @@ export function ManagerPage() {
   // the API is absent entirely in any non-secure context. Left unhandled that is a silent no-op the
   // host reads as a copied link, so the refusal is reported and the readable link stays on screen.
   async function copyGuestLink() {
+    if (!guestLink) return;
     try {
       if (!navigator.clipboard) throw new Error('Clipboard unavailable');
       await navigator.clipboard.writeText(guestLink);
@@ -276,7 +294,20 @@ export function ManagerPage() {
     return () => window.clearInterval(interval);
   }, [refreshIntake, section]);
   useEffect(() => {
-    if (guestLink) void QRCode.toDataURL(guestLink, { width: 220, margin: 2, color: { dark: '#42103b', light: '#fffaf3' } }).then(setQr);
+    let current = true;
+    // Never leave the previous link's QR shareable while a replacement renders or
+    // after the server reports that no active guest link exists.
+    setQr('');
+    if (guestLink) {
+      void QRCode.toDataURL(guestLink, {
+        width: 220,
+        margin: 2,
+        color: { dark: '#42103b', light: '#fffaf3' },
+      }).then((nextQr) => {
+        if (current) setQr(nextQr);
+      });
+    }
+    return () => { current = false; };
   }, [guestLink]);
 
   function openSection(next: Section) {
@@ -479,7 +510,9 @@ export function ManagerPage() {
         {renderMediaGrid(true)}
       </section>}
 
-      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share the photo drop</h2><div className="share-layout"><div><CopyableLinkCard label="Guest link" value={guestLink} /><div className="button-row"><button className="button button--secondary" onClick={() => void runManagerAction(rotateGuestLink)}>Rotate guest link</button><button className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Guest event QR code" /><a className="button button--secondary" href={qr} download="candidary-guest-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div>{exportPanel('share')}</section>}
+      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share the photo drop</h2><div className="share-layout"><div>{guestLink
+        ? <CopyableLinkCard label="Guest link" value={guestLink} />
+        : <p className="manager-notice">No active guest link. Rotate it to create a replacement.</p>}<div className="button-row"><button className="button button--secondary" onClick={() => void runManagerAction(rotateGuestLink)}>Rotate guest link</button><button className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Guest event QR code" /><a className="button button--secondary" href={qr} download="candidary-guest-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div>{exportPanel('share')}</section>}
 
       {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
 
@@ -487,7 +520,7 @@ export function ManagerPage() {
     </main>
 
     <aside className="manager-utility">
-      <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" onClick={() => void copyGuestLink()}><Copy aria-hidden="true" /> Copy guest link</button></section>
+      <section className="manager-utility__guest-entry"><p className="section-label">Guest entry</p><h2>Scan to contribute</h2>{qr && <img className="intake-qr" src={qr} alt="Guest event QR code" />}<button type="button" className="button button--secondary button--wide" disabled={!guestLink} onClick={() => void copyGuestLink()}><Copy aria-hidden="true" /> Copy guest link</button></section>
       <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(event.storedBytes)} of {STORAGE_CAP}</small></section>
       {exportPanel('utility')}
     </aside>

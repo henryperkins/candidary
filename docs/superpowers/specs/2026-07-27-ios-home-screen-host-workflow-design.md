@@ -333,6 +333,9 @@ code-driven:
 - manager failures caused by `SESSION_REQUIRED`, `SESSION_EXPIRED`,
   `ROLE_FORBIDDEN`, `TOKEN_REVOKED`, or `HOST_SESSION_REQUIRED` may offer
   sign-in;
+- `RESOURCE_FORBIDDEN`, `OWNER_CLAIM_REQUIRED`, and
+  `GUEST_LINK_UNAVAILABLE` remain retry-classified domain refusals and never
+  offer credential recovery;
 - `ACCOUNT_DISABLED` classifies as `latest-link` but does not offer sign-in;
 - event lifecycle failures remain `ended-event`; and
 - all other current API codes remain `retry`.

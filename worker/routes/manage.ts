@@ -64,7 +64,7 @@ export const manageRoutes = new Hono<AppBindings>();
 manageRoutes.get('/manage/events/:eventId/links', async (context) => {
   const auth = await managerForEvent(context);
   const token = await new TokensRepository(context.env.DB).getActiveForRole(auth.event.id, 'guest');
-  if (!token?.secretCiphertext) throw new ApiError('TOKEN_REVOKED', 'The guest link is unavailable. Rotate it to create a replacement.', 410);
+  if (!token?.secretCiphertext) throw new ApiError('GUEST_LINK_UNAVAILABLE', 'The guest link is unavailable. Rotate it to create a replacement.', 410);
   const secret = await decryptGuestSecret(token.secretCiphertext, context.env.GUEST_TOKEN_ENCRYPTION_KEY);
   const origin = context.env.APP_ORIGIN.replace(/\/$/u, '');
   return context.json({ data: { guestLink: `${origin}/join/${token.id}.${secret}` }, requestId: context.get('requestId') });
@@ -83,7 +83,7 @@ manageRoutes.post('/manage/events/:eventId/cover/finalize', async (context) => {
   const auth = await managerForEvent(context, true);
   const parsed = z.object({ objectKey: z.string(), mimeType: z.enum(SUPPORTED_IMAGE_TYPES) }).safeParse(await context.req.json().catch(() => null));
   if (!parsed.success || !parsed.data.objectKey.startsWith(`events/${auth.event.id}/cover/`)) {
-    throw new ApiError('ROLE_FORBIDDEN', 'This cover belongs to a different event.', 403);
+    throw new ApiError('RESOURCE_FORBIDDEN', 'This cover belongs to a different event.', 403);
   }
   const object = await context.env.MEDIA_BUCKET.get(parsed.data.objectKey);
   if (!object || object.size > MAX_IMAGE_BYTES || object.httpMetadata?.contentType !== parsed.data.mimeType) {
@@ -156,7 +156,7 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
   const repository = new MediaRepository(context.env.DB);
   const media = await repository.getById(context.req.param('mediaId'));
   if (!media || media.eventId !== context.req.param('eventId')) {
-    throw new ApiError('ROLE_FORBIDDEN', 'This photo belongs to a different event.', 403);
+    throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
   }
   const changedAt = new Date().toISOString();
   const result = parsed.data.action === 'delete'
@@ -194,7 +194,7 @@ for (const role of ['guest', 'manager'] as const) {
         .getEventOwnershipState(auth.event.id, new Date().toISOString());
       if (ownership && !ownership.hasOwner && ownership.claimStillPossible) {
         throw new ApiError(
-          'ROLE_FORBIDDEN',
+          'OWNER_CLAIM_REQUIRED',
           'Save this event from its original creator session before rotating its management link.',
           409,
         );
