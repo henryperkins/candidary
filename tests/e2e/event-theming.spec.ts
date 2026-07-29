@@ -435,6 +435,8 @@ test('visible-pixel masking keeps straight edges and excludes rounded top corner
 
 for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'coastal-light'] as const) {
   test(`${presetId} no-cover gradient clears 4.5:1 at all three exact hero geometries`, async ({ page }, testInfo) => {
+    // Three exact screenshot/mask passes can exceed the default timeout under the full parallel matrix.
+    test.slow();
     onlyOnce(testInfo);
     const cases = [
       { viewport: { width: 390, height: 844 }, welcomeMessage: null, expanded: false, expected: [390, 205] },

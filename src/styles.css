@@ -302,7 +302,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .field-error { margin: 9px 0 0; display: flex; align-items: center; gap: 7px; color: var(--danger); font-size: .78rem; line-height: 1.4; }
 .field-error svg { flex: 0 0 auto; }
 .sending-as { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 0 13px; border: 1px solid var(--event-remembered-name-border, #dfd4d8); border-radius: var(--event-input-radius, 11px); background: var(--event-raised-surface, #ffffff); font-size: .9rem; font-weight: 600; }
-.guest-shell--drop .text-button { min-height: 44px; padding: 8px 3px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--event-primary-on-surface, #42103b); font-weight: 700; font-size: .78rem; cursor: pointer; }
+.text-button { min-height: 44px; padding: 8px 3px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--aubergine); font-weight: 700; font-size: .78rem; cursor: pointer; }
+.guest-shell--drop .text-button { color: var(--event-primary-on-surface, #42103b); }
 .text-button:disabled { opacity: .5; cursor: default; }
 .photo-source-actions { margin-top: 16px; display: grid; gap: 9px; }
 .source-button, .send-button { width: 100%; min-height: 52px; padding: 13px 18px; display: inline-flex; align-items: center; justify-content: center; gap: 10px; border-radius: var(--event-action-radius, 12px); font-weight: 700; cursor: pointer; }
