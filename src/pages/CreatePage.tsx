@@ -5,8 +5,11 @@ import { Link, useNavigate } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
 import { MAX_EVENT_MEDIA } from '../../shared/constants';
+import type { EventThemePresetId } from '../../shared/contracts';
+import { EVENT_THEME_VERSION } from '../../shared/event-theme';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
+import { EventThemePresetSelector } from '../components/EventThemePresetSelector';
 import { HostAccountPanel } from '../components/HostAccountPanel';
 import { hostRegisterHref } from '../app/recovery';
 
@@ -29,6 +32,7 @@ export function CreatePage() {
   const [saved, setSaved] = useState(false);
   const [cover, setCover] = useState<File | null>(null);
   const [coverError, setCoverError] = useState('');
+  const [themePresetId, setThemePresetId] = useState<EventThemePresetId>('candidary-default');
   const [qr, setQr] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -53,6 +57,7 @@ export function CreatePage() {
     try {
       const result = await api<Created>('/api/events', { method: 'POST', body: JSON.stringify({
         name: data.get('name'), eventDate: data.get('eventDate'), welcomeMessage: data.get('welcomeMessage'),
+        theme: { version: EVENT_THEME_VERSION, presetId: themePresetId, overrides: {} },
       }) });
       setCreated(result);
       setSaved(result.savedToAccount === true);
@@ -104,6 +109,7 @@ export function CreatePage() {
       <div className="create-field"><label>Event name<input name="name" maxLength={80} required aria-invalid={Boolean(fields.name)} aria-describedby={fields.name ? 'name-error' : undefined} /></label>{fields.name && <small id="name-error">{fields.name}</small>}</div>
       <div className="create-field"><label>Event date<input name="eventDate" type="date" required aria-invalid={Boolean(fields.eventDate)} aria-describedby={fields.eventDate ? 'eventDate-error' : undefined} /></label>{fields.eventDate && <small id="eventDate-error">{fields.eventDate}</small>}</div>
       <div className="create-field"><label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." aria-invalid={Boolean(fields.welcomeMessage)} aria-describedby={fields.welcomeMessage ? 'welcomeMessage-error' : undefined} /></label>{fields.welcomeMessage && <small id="welcomeMessage-error">{fields.welcomeMessage}</small>}</div>
+      <EventThemePresetSelector name="themePreset" value={themePresetId} onChange={setThemePresetId} disabled={busy} />
       <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : 'Optional · JPEG, PNG, or WebP · 10 MB max'}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only cover-field__input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0] ?? null; setCover(file && file.size <= 10 * 1024 * 1024 ? file : null); if (file && file.size > 10 * 1024 * 1024) setError('Cover photos must be 10 MB or smaller.'); }} /></label>
       <button className="button button--primary button--wide" disabled={busy}>{busy ? 'Creating your event…' : 'Create private event'}</button>
       <p className="form-note"><LockKeyhole aria-hidden="true" /> Your links act as the keys to this private event.</p>

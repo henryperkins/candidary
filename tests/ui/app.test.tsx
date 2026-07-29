@@ -49,7 +49,8 @@ describe('public Candidary experience', () => {
   });
 
   it('creates an event and clearly returns both access links', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
+    const fetchMock = vi.fn<typeof fetch>(() => json(CREATED, 201));
+    vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     await createEvent(userEvent.setup());
     expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
@@ -59,6 +60,11 @@ describe('public Candidary experience', () => {
       .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
     expect(screen.getByText(CREATED.managementLink)).toBeInTheDocument();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, request] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      theme: { version: 1, presetId: 'candidary-default', overrides: {} },
+    });
   });
 
   it('associates create errors with their fields and focuses the first invalid one', async () => {
