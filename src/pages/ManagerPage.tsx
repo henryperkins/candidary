@@ -14,6 +14,7 @@ import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, Media
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
+import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
@@ -37,14 +38,37 @@ interface MediaPageState {
   cursor: string | null;
 }
 
-// A dismissible notice, and the way out of it when there is one to state. A refused write is retryable
-// by definition — the control that failed is still under the host's thumb — but a load failure can be
-// a dead session or an ended event, where `describeLoadFailure` holds the only instruction that
-// recovers it. Dropping that hint here would leave the host reading "This session has expired." with
-// no mention of the management link, which is the whole point of computing it.
-interface ManagerNotice {
-  message: string;
-  recoveryHint?: string;
+// Keeping load failures discriminated prevents a normal refused write from accidentally acquiring
+// credential-recovery UI just because it also has a message.
+type ManagerNotice =
+  | { type: 'action'; message: string; recoveryHint?: string }
+  | { type: 'load'; failure: LoadFailure };
+
+function managerNoticeFor(caught: unknown, fallback: string): ManagerNotice {
+  const failure = describeLoadFailure(caught, 'manager', fallback);
+  return failure.kind === 'retry'
+    ? { type: 'action', message: failure.message }
+    : { type: 'load', failure };
+}
+
+function offersAccessRecovery(failure: LoadFailure) {
+  return failure.kind === 'latest-link' || failure.kind === 'sign-in';
+}
+
+function ManagerAccessRecovery({
+  failure,
+  eventId,
+}: {
+  failure: LoadFailure;
+  eventId: string;
+}) {
+  if (!offersAccessRecovery(failure)) return null;
+  return <section className="manager-access-recovery" aria-label="Recover manager access">
+    {failure.offerSignIn && (
+      <a className="button button--secondary" href={hostSignInHref(eventId)}>Sign in</a>
+    )}
+    <ManagementLinkRecovery />
+  </section>;
 }
 
 function formatBytes(bytes = 0) {
@@ -134,7 +158,13 @@ export function ManagerPage() {
       loadedOnce.current = true;
     } catch (caught) {
       const loadFailure = describeLoadFailure(caught, 'manager', 'The event manager could not be loaded.');
-      if (loadedOnce.current) setActionError(loadFailure); else setFailure(loadFailure);
+      if (loadedOnce.current) {
+        setActionError(loadFailure.kind === 'retry'
+          ? { type: 'action', message: loadFailure.message }
+          : { type: 'load', failure: loadFailure });
+      } else {
+        setFailure(loadFailure);
+      }
     }
   }, [eventId, mediaPath]);
 
@@ -171,8 +201,11 @@ export function ManagerPage() {
           cursor: current.cursor,
         };
       });
-    } catch {
-      // Keep the last usable intake visible; the next poll or a host action retries.
+    } catch (caught) {
+      // Keep transient venue-network failures silent, but do not swallow a credential or lifecycle
+      // change that will repeat forever without a different route back in.
+      const notice = managerNoticeFor(caught, 'The live intake could not be refreshed.');
+      if (notice.type === 'load') setActionError(notice);
     }
   }, [eventId, mediaPath]);
 
@@ -201,7 +234,7 @@ export function ManagerPage() {
     } catch (caught) {
       if (loadMoreOwner.current !== controller) return;
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
-      setActionError({ message: caught instanceof Error ? caught.message : 'The next page of photos could not be loaded.' });
+      setActionError(managerNoticeFor(caught, 'The next page of photos could not be loaded.'));
     } finally {
       if (loadMoreOwner.current === controller) {
         loadMoreOwner.current = null;
@@ -219,7 +252,7 @@ export function ManagerPage() {
       await navigator.clipboard.writeText(guestLink);
       setActionError(null);
     } catch {
-      setActionError({ message: 'The guest link could not be copied.', recoveryHint: guestLink });
+      setActionError({ type: 'action', message: 'The guest link could not be copied.', recoveryHint: guestLink });
     }
   }
 
@@ -230,7 +263,7 @@ export function ManagerPage() {
     try {
       await action();
     } catch (caught) {
-      setActionError({ message: caught instanceof Error ? caught.message : 'The manager action could not be completed.' });
+      setActionError(managerNoticeFor(caught, 'The manager action could not be completed.'));
     }
   }
 
@@ -372,12 +405,15 @@ export function ManagerPage() {
   // Offered for the plain no-credential state as well as a dead account session: a
   // bare manager URL cannot prove whether it arrived from the account page or from a
   // copied management link, and signing in is safe either way.
-  if (failure) return <main className="centered-state"><Brand /><ErrorState
-    message={failure.message}
-    recoveryHint={failure.recoveryHint}
-    onRetry={failure.retryable ? () => void refresh() : undefined}
-    action={failure.offerSignIn ? { label: 'Sign in', href: hostSignInHref(eventId) } : undefined}
-  /></main>;
+  if (failure) return <main className="centered-state"><Brand /><div className="manager-load-failure">
+    <h1 className="sr-only">Event manager unavailable</h1>
+    <ErrorState
+      message={failure.message}
+      recoveryHint={failure.recoveryHint}
+      onRetry={failure.retryable ? () => void refresh() : undefined}
+    />
+    <ManagerAccessRecovery failure={failure} eventId={eventId} />
+  </div></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 
   const photoCount = event.storedMediaCount ?? 0;
@@ -408,12 +444,19 @@ export function ManagerPage() {
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
-      {/* One live region carrying both lines, for the same reason `ErrorState` does: a region that
-          announces only what broke never mentions the one thing that recovers it. */}
-      {actionError && <p className="manager-action-error" role="alert">
-        <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>
-        <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
-      </p>}
+      {actionError && <section className="manager-action-error" aria-label="Manager notice">
+        <div className="manager-action-error__summary">
+          <div className="manager-action-error__alert" role="alert">
+            {actionError.type === 'load'
+              ? <span>{actionError.failure.message}<span className="manager-action-error__recovery">{actionError.failure.recoveryHint}</span></span>
+              : <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>}
+          </div>
+          <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
+        </div>
+        {actionError.type === 'load' && (
+          <ManagerAccessRecovery failure={actionError.failure} eventId={eventId} />
+        )}
+      </section>}
 
       {section === 'intake' && <section aria-labelledby="intake-title">
         <div className="workspace-heading"><div><p className="section-label">Private collection</p><h2 id="intake-title">Live intake</h2></div></div>

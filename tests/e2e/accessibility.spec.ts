@@ -8,6 +8,7 @@ import { measureContrast, measureDocument, measureSeparation, measureTarget } fr
 
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
 const HEADER_WIDTHS = [320, 768];
+const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
 // The five manager destinations are unchanged and the public header keeps exactly these exits: the
 // count is asserted so neither a hidden one nor an added one can pass unnoticed.
 const HEADER_EXITS = [
@@ -246,6 +247,86 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Share', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(intake).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('full-page manager recovery is labelled, associated, touch-sized, contained, and axe-clean', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    event: { id: RECOVERY_EVENT_ID },
+    mediaPages: { first: { media: [], nextCursor: null } },
+  });
+  await page.route(new RegExp(`/api/manage/events/${RECOVERY_EVENT_ID}$`, 'u'), (route) => route.fulfill({
+    status: 401,
+    json: { code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' },
+  }));
+  await page.goto(`/manage/event/${RECOVERY_EVENT_ID}`);
+
+  const input = page.getByRole('textbox', { name: 'Management link' });
+  await expect(input).toBeVisible();
+  await expect(input).toHaveAttribute('autocomplete', 'off');
+  await expect(input).toHaveAttribute('spellcheck', 'false');
+  await input.fill('/manage/event');
+  await page.getByRole('button', { name: 'Open event manager' }).click();
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute('aria-invalid', 'true');
+  const errorId = await input.getAttribute('aria-describedby');
+  expect(errorId, 'the visible validation message is field-associated').toBeTruthy();
+  await expect(page.locator(`#${errorId}`)).toHaveText('Enter a Candidary management link from this site.');
+
+  for (const target of [
+    page.getByRole('link', { name: 'Sign in' }),
+    page.getByRole('button', { name: 'Open event manager' }),
+  ]) {
+    const size = await measureTarget(target);
+    expect(size.width).toBeGreaterThanOrEqual(44);
+    expect(size.height).toBeGreaterThanOrEqual(44);
+  }
+  for (const width of [320, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth, `full-page recovery contained at ${width}`)
+      .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+  await expectNoAxeViolations(page, 'full-page manager recovery');
+});
+
+test('inline manager recovery keeps forms outside alerts and remains touch-sized, contained, and axe-clean', async ({ page }) => {
+  let mediaRequests = 0;
+  await stubManagerRoutes(page, {
+    event: { id: RECOVERY_EVENT_ID },
+    mediaPages: { first: { media: makeMedia(1), nextCursor: null } },
+  });
+  await page.route(`**/api/manage/events/${RECOVERY_EVENT_ID}/media*`, (route) => {
+    mediaRequests += 1;
+    return mediaRequests > 1
+      ? route.fulfill({
+        status: 401,
+        json: { code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' },
+      })
+      : route.fallback();
+  });
+  await page.goto(`/manage/event/${RECOVERY_EVENT_ID}`);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await page.getByLabel('Filter by guest name').fill('Avery');
+  await page.getByRole('button', { name: 'Filter' }).click();
+
+  await expect(page.getByRole('alert')).toContainText('This session has expired.');
+  await expect(page.getByRole('alert').locator('form')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Management link' })).toBeVisible();
+  for (const target of [
+    page.getByRole('link', { name: 'Sign in' }),
+    page.getByRole('button', { name: 'Open event manager' }),
+  ]) {
+    const size = await measureTarget(target);
+    expect(size.width).toBeGreaterThanOrEqual(44);
+    expect(size.height).toBeGreaterThanOrEqual(44);
+  }
+  for (const width of [320, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth, `inline recovery contained at ${width}`)
+      .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+  await expectNoAxeViolations(page, 'inline manager recovery');
 });
 
 test('the public surfaces carry no automated accessibility violation', async ({ page }) => {
