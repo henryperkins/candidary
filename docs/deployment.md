@@ -76,10 +76,10 @@ compatibility trigger that stamps `stored_at` for any finalization performed by 
 than the column, so a migrated database serving the previous deployment is a state the schema was
 written to sit in.
 
-Production was migrated through `0005_media_stored_at.sql` on 2026-07-27; `0006_host_accounts.sql`
-and `0007_event_theme.sql` have been added since and may still be pending there. The apply command
-is the only thing that answers what is true of the database you are actually pointed at, so run it
-before every deploy regardless of what this paragraph remembers.
+Production is migrated through `0007_event_theme.sql` as of 2026-07-29, confirmed by the apply
+command reporting nothing to do. The apply command is the only thing that answers what is true of
+the database you are actually pointed at, so run it before every deploy regardless of what this
+paragraph remembers.
 
 ## Wedding rehearsal gate
 
