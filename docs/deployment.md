@@ -68,6 +68,19 @@ then publishes the export Workflow, Images binding, private asset routing, the d
 trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the
 HTTPS origin before printing a QR code.
 
+The two commands are in that order for a reason, and from `0005_media_stored_at.sql` onward the
+order is load-bearing rather than tidy: the manager's intake queries select and order by
+`media.stored_at` (`worker/db/media.ts`), so Worker code deployed against a database without that
+column fails the manager's first request. The opposite order strands nobody — `0005` carries a
+compatibility trigger that stamps `stored_at` for any finalization performed by Worker code older
+than the column, so a migrated database serving the previous deployment is a state the schema was
+written to sit in.
+
+Production was migrated through `0005_media_stored_at.sql` on 2026-07-27; `0006_host_accounts.sql`
+and `0007_event_theme.sql` have been added since and may still be pending there. The apply command
+is the only thing that answers what is true of the database you are actually pointed at, so run it
+before every deploy regardless of what this paragraph remembers.
+
 ## Wedding rehearsal gate
 
 Do not describe a deployment as wedding-ready until a dedicated rehearsal event passes all of the following:
