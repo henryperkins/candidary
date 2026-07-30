@@ -2,6 +2,9 @@ import type {
   RsvpHouseholdView,
   RsvpImportCommitResponse,
   RsvpImportPreview,
+  RsvpSubmissionInvitee,
+  RsvpSubmissionRequest,
+  RsvpSubmissionResponse,
 } from '../../shared/contracts';
 import { parseRsvpCsv } from '../../shared/csv';
 import { ApiError } from '../../shared/errors';
@@ -10,10 +13,18 @@ import {
   checkRosterCapacity,
   findLookupCollisions,
   normalizeInvitedName,
+  parsePersonText,
   resolveGuestEventPhase,
 } from '../../shared/rsvp';
 import { EventsRepository } from '../db/events';
-import { buildRosterStatements, RsvpRepository, type RosterInviteeInput } from '../db/rsvp';
+import type { AuthenticatedHousehold } from '../auth/rsvp';
+import {
+  buildRosterStatements,
+  COMMIT_HOUSEHOLD_SQL,
+  RsvpRepository,
+  SUBMIT_INVITEES_SQL,
+  type RosterInviteeInput,
+} from '../db/rsvp';
 import {
   RSVP_LOOKUP_IP_LIMIT,
   RSVP_LOOKUP_NAME_LIMIT,
@@ -278,6 +289,209 @@ export class RsvpService {
     if (rsvpState !== 'open' && !household.firstRespondedAt) return notAvailable;
 
     return { status: 'matched', household };
+  }
+
+  /**
+   * Turns a submitted set of answers into the exact rows that will be written,
+   * refusing anything that is not a complete answer for this household.
+   *
+   * The submitted set has to be the household's whole active set: no invented
+   * ids, none omitted, none repeated. A partial submission is not a smaller
+   * update, it is a request whose meaning cannot be determined.
+   */
+  private canonicalize(
+    invitees: readonly RsvpInviteeRecord[],
+    submitted: readonly RsvpSubmissionInvitee[],
+  ): RsvpSubmissionInvitee[] {
+    const byId = new Map(invitees.map((invitee) => [invitee.id, invitee]));
+    const seen = new Set<string>();
+    for (const row of submitted) {
+      if (!byId.has(row.id) || seen.has(row.id)) {
+        throw new ApiError(
+          'VALIDATION_FAILED',
+          'This response does not match the current guest list. Reload and try again.',
+          422,
+        );
+      }
+      seen.add(row.id);
+    }
+    if (seen.size !== invitees.length) {
+      throw new ApiError(
+        'VALIDATION_FAILED',
+        'Choose attending or not attending for everyone in the household.',
+        422,
+      );
+    }
+
+    const answers = new Map(submitted.map((row) => [row.id, row]));
+    // Sorted by the stored order rather than the order the browser sent, so the
+    // digest is a property of the answer and not of the request.
+    return [...invitees]
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+      .map((invitee) => {
+        const answer = answers.get(invitee.id)!;
+        if (invitee.kind === 'named') {
+          // A named guest's name belongs to the roster, not to the response.
+          return { id: invitee.id, attendance: answer.attendance, displayName: invitee.displayName };
+        }
+        if (answer.attendance !== 'attending') {
+          // A declined slot carries no name at all: nobody is coming in it.
+          return { id: invitee.id, attendance: answer.attendance, displayName: null };
+        }
+        const name = parsePersonText(answer.displayName ?? '');
+        if (!name.ok) {
+          throw new ApiError(
+            'VALIDATION_FAILED',
+            'Enter a name for each attending guest.',
+            422,
+            { [`${invitee.id}.displayName`]: 'Enter this guest’s name.' },
+          );
+        }
+        return { id: invitee.id, attendance: answer.attendance, displayName: name.value };
+      });
+  }
+
+  private async requestDigest(
+    version: number,
+    invitees: readonly RsvpSubmissionInvitee[],
+  ): Promise<string> {
+    return sha256Hex(JSON.stringify({
+      version,
+      invitees: invitees.map(({ id, attendance, displayName }) => ({ id, attendance, displayName })),
+    }));
+  }
+
+  /**
+   * Commits one household's response.
+   *
+   * Two different things can look like a repeat, and they are answered
+   * differently. The same idempotency key with the same answer is a lost
+   * confirmation, and replays as success even if the household has moved on
+   * since — a guest on a bad connection must never be asked to answer twice.
+   * The same key with a *different* answer is a bug or a tampered retry, and is
+   * refused rather than silently applied.
+   */
+  async submitHousehold(
+    auth: AuthenticatedHousehold,
+    request: RsvpSubmissionRequest,
+    now = new Date(),
+  ): Promise<RsvpSubmissionResponse> {
+    const invitees = await this.rsvp.listInvitees(auth.event.id, auth.household.id);
+    const canonical = this.canonicalize(invitees, request.invitees);
+    const digest = await this.requestDigest(request.version, canonical);
+
+    const replayed = await this.settleReceipt(auth, request, digest, now);
+    if (replayed) return replayed;
+
+    if (request.version !== auth.household.version) {
+      throw this.householdConflict();
+    }
+
+    const nowIso = now.toISOString();
+    try {
+      const results = await this.env.DB.batch([
+        this.env.DB.prepare(SUBMIT_INVITEES_SQL).bind(
+          JSON.stringify(canonical),
+          nowIso,
+          auth.event.id,
+          auth.household.id,
+          auth.household.id,
+          request.version,
+          nowIso,
+          auth.session.id,
+          nowIso,
+          nowIso,
+        ),
+        this.env.DB.prepare(COMMIT_HOUSEHOLD_SQL).bind(
+          canonical.length,
+          request.idempotencyKey,
+          digest,
+          nowIso,
+          nowIso,
+          'household',
+          nowIso,
+          auth.household.id,
+          auth.event.id,
+          request.version,
+        ),
+        this.rsvp.receiptStatement({
+          eventId: auth.event.id,
+          householdId: auth.household.id,
+          idempotencyKey: request.idempotencyKey,
+          requestDigest: digest,
+          resultVersion: request.version + 1,
+          createdAt: nowIso,
+        }),
+      ]);
+      // A guarded write that matched nothing means the deadline passed, RSVP
+      // paused, or the session lapsed between the check and the write.
+      if ((results[1]?.meta.changes ?? 0) !== 1) {
+        throw this.householdConflict();
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      // A concurrent identical request won the receipt key. Whether that is a
+      // success or a conflict is decided by the digest, exactly as above.
+      const settled = await this.settleReceipt(auth, request, digest, now);
+      if (settled) return settled;
+      throw this.householdConflict();
+    }
+
+    return {
+      household: await this.currentHouseholdView(auth, now),
+      committedVersion: request.version + 1,
+      replayed: false,
+    };
+  }
+
+  private async settleReceipt(
+    auth: AuthenticatedHousehold,
+    request: RsvpSubmissionRequest,
+    digest: string,
+    now: Date,
+  ): Promise<RsvpSubmissionResponse | null> {
+    const receipt = await this.rsvp.getReceipt(auth.household.id, request.idempotencyKey);
+    if (!receipt) return null;
+    if (receipt.requestDigest !== digest) {
+      throw new ApiError(
+        'RSVP_SUBMISSION_CONFLICT',
+        'This response was already sent with different answers. Reload and review it.',
+        409,
+      );
+    }
+    return {
+      household: await this.currentHouseholdView(auth, now),
+      committedVersion: receipt.resultVersion,
+      replayed: true,
+    };
+  }
+
+  private async currentHouseholdView(
+    auth: AuthenticatedHousehold,
+    now: Date,
+  ): Promise<RsvpHouseholdView> {
+    const household = await this.rsvp.getHousehold(auth.event.id, auth.household.id);
+    if (!household) throw new ApiError('EVENT_NOT_FOUND', 'This invitation is no longer available.', 404);
+    const invitees = await this.rsvp.listInvitees(auth.event.id, household.id);
+    const event = await this.events.getById(auth.event.id) ?? auth.event;
+    return this.householdView(event, household, invitees, auth.session, now);
+  }
+
+  /**
+   * A conflict carries a message and nothing else; the caller re-reads the
+   * household. The error envelope has one shape across this whole API, and
+   * smuggling a view through `fieldErrors` to save a request would break it.
+   *
+   * What matters is that nothing is written: the respondent reads what is there
+   * now before replacing it, which is the whole difference between resolving a
+   * conflict and overwriting somebody.
+   */
+  private householdConflict(): ApiError {
+    return new ApiError(
+      'RSVP_HOUSEHOLD_CONFLICT',
+      'This invitation changed since you opened it. Review it and send again.',
+      409,
+    );
   }
 
   private lookupDigest(eventId: string, normalizedName: string): Promise<string> {

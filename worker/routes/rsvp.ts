@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
-import { MAX_RSVP_TEXT_LENGTH } from '../../shared/constants';
+import { MAX_HOUSEHOLD_CAPACITY, MAX_RSVP_TEXT_LENGTH } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { RsvpAuthService } from '../auth/rsvp';
 import { AuthService } from '../auth/service';
@@ -109,14 +109,45 @@ rsvpRoutes.post('/event/:slug/rsvp/lookup', async (context) => {
   });
 });
 
-// A returning device reads its own household back. Resolves only the RSVP
-// cookie: the event guest session cannot stand in for it.
-rsvpRoutes.get('/event/:slug/rsvp/household', async (context) => {
+const submissionSchema = z.object({
+  version: z.number().int().min(1),
+  idempotencyKey: z.string().min(1).max(128),
+  invitees: z.array(z.object({
+    id: z.uuid(),
+    attendance: z.enum(['attending', 'declined']),
+    displayName: z.string().max(MAX_RSVP_TEXT_LENGTH).nullable(),
+  })).min(1).max(MAX_HOUSEHOLD_CAPACITY),
+});
+
+async function householdForSlug(context: Context<AppBindings>, write: boolean) {
   const auth = await new RsvpAuthService(context.env)
     .resolve(getSessionCookie(context, 'rsvp'));
   if (auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This invitation belongs to a different event.', 403);
   }
+  if (write) await assertCsrf(context, 'rsvp', auth.session.csrfDigest);
+  return auth;
+}
+
+rsvpRoutes.put('/event/:slug/rsvp/household', async (context) => {
+  const auth = await householdForSlug(context, true);
+  const parsed = submissionSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Choose attending or not attending for everyone in the household.',
+      422,
+    );
+  }
+
+  const committed = await new RsvpService(context.env).submitHousehold(auth, parsed.data);
+  return context.json({ data: committed, requestId: context.get('requestId') });
+});
+
+// A returning device reads its own household back. Resolves only the RSVP
+// cookie: the event guest session cannot stand in for it.
+rsvpRoutes.get('/event/:slug/rsvp/household', async (context) => {
+  const auth = await householdForSlug(context, false);
 
   const invitees = await new RsvpRepository(context.env.DB)
     .listInvitees(auth.event.id, auth.household.id);

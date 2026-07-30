@@ -158,6 +158,128 @@ export function buildRosterStatements(input: {
   ];
 }
 
+/**
+ * Applies one household's answers.
+ *
+ * The rows arrive as a single JSON binding read through `json_each`, so a
+ * thirty-person household costs three bindings rather than ninety and can never
+ * approach D1's parameter limit.
+ *
+ * Every condition that could make this write wrong is in the WHERE clause
+ * rather than in a read before it: the household version, the event still being
+ * open, the deadline, and the session's own captured window. A pause or a
+ * deadline that lands mid-request therefore changes zero rows and the following
+ * statement rolls the batch back, instead of being a race a read could lose.
+ */
+export const SUBMIT_INVITEES_SQL = `
+  WITH submitted AS (
+    SELECT
+      json_extract(value, '$.id') AS id,
+      json_extract(value, '$.attendance') AS attendance,
+      json_extract(value, '$.displayName') AS display_name
+    FROM json_each(?)
+  )
+  UPDATE rsvp_invitees
+  SET attendance = (
+        SELECT attendance FROM submitted WHERE submitted.id = rsvp_invitees.id
+      ),
+      display_name = CASE
+        WHEN kind = 'named' THEN display_name
+        WHEN (
+          SELECT attendance FROM submitted WHERE submitted.id = rsvp_invitees.id
+        ) = 'attending'
+        THEN (
+          SELECT display_name FROM submitted WHERE submitted.id = rsvp_invitees.id
+        )
+        ELSE NULL
+      END,
+      updated_at = ?
+  WHERE event_id = ?
+    AND household_id = ?
+    AND id IN (SELECT id FROM submitted)
+    AND (
+      SELECT version FROM rsvp_households
+      WHERE id = ? AND archived_at IS NULL
+    ) = ?
+    AND EXISTS (
+      SELECT 1 FROM events
+      WHERE id = rsvp_invitees.event_id
+        AND deleted_at IS NULL
+        AND rsvp_enabled = 1
+        AND rsvp_deadline_at >= ?
+    )
+    AND EXISTS (
+      SELECT 1 FROM rsvp_sessions
+      WHERE id = ?
+        AND event_id = rsvp_invitees.event_id
+        AND household_id = rsvp_invitees.household_id
+        AND revoked_at IS NULL
+        AND expires_at >= ?
+        AND write_authority_deadline >= ?
+    )
+`;
+
+/**
+ * A host correction. Same canonical write, but it answers to the manager's
+ * authority rather than a household session, and deliberately ignores the guest
+ * deadline: correcting a list after RSVP closes is the point.
+ */
+export const HOST_SUBMIT_INVITEES_SQL = `
+  WITH submitted AS (
+    SELECT
+      json_extract(value, '$.id') AS id,
+      json_extract(value, '$.attendance') AS attendance,
+      json_extract(value, '$.displayName') AS display_name
+    FROM json_each(?)
+  )
+  UPDATE rsvp_invitees
+  SET attendance = (
+        SELECT attendance FROM submitted WHERE submitted.id = rsvp_invitees.id
+      ),
+      display_name = CASE
+        WHEN kind = 'named' THEN display_name
+        WHEN (
+          SELECT attendance FROM submitted WHERE submitted.id = rsvp_invitees.id
+        ) = 'attending'
+        THEN (
+          SELECT display_name FROM submitted WHERE submitted.id = rsvp_invitees.id
+        )
+        ELSE NULL
+      END,
+      updated_at = ?
+  WHERE event_id = ?
+    AND household_id = ?
+    AND id IN (SELECT id FROM submitted)
+    AND (
+      SELECT version FROM rsvp_households
+      WHERE id = ? AND archived_at IS NULL
+    ) = ?
+    AND EXISTS (
+      SELECT 1 FROM events WHERE id = rsvp_invitees.event_id AND deleted_at IS NULL
+    )
+`;
+
+/**
+ * Advances the household, or aborts the whole batch.
+ *
+ * `changes()` here is the invitee statement's row count. If it is not exactly
+ * the number of rows that were meant to move, `version` is set to NULL and the
+ * NOT NULL constraint tears the transaction down. A partially applied response
+ * is not a state this product is willing to have.
+ */
+export const COMMIT_HOUSEHOLD_SQL = `
+  UPDATE rsvp_households
+  SET version = CASE WHEN changes() = ? THEN version + 1 ELSE NULL END,
+      last_submission_key = ?,
+      last_submission_digest = ?,
+      last_submission_result_version = version + 1,
+      first_responded_at = COALESCE(first_responded_at, ?),
+      latest_responded_at = ?,
+      latest_actor_kind = ?,
+      updated_at = ?
+  WHERE id = ? AND event_id = ? AND archived_at IS NULL AND version = ?
+`;
+
 export class RsvpRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -187,6 +309,40 @@ export class RsvpRepository {
       ORDER BY sort_order
     `).bind(eventId, householdId).all<RsvpInviteeRow>();
     return rows.results.map(mapRsvpInvitee);
+  }
+
+  async getReceipt(
+    householdId: string,
+    idempotencyKey: string,
+  ): Promise<{ requestDigest: string; resultVersion: number } | null> {
+    const row = await this.db.prepare(`
+      SELECT request_digest, result_version FROM rsvp_submission_receipts
+      WHERE household_id = ? AND idempotency_key = ?
+    `).bind(householdId, idempotencyKey)
+      .first<{ request_digest: string; result_version: number }>();
+    return row ? { requestDigest: row.request_digest, resultVersion: row.result_version } : null;
+  }
+
+  receiptStatement(input: {
+    eventId: string;
+    householdId: string;
+    idempotencyKey: string;
+    requestDigest: string;
+    resultVersion: number;
+    createdAt: string;
+  }): D1PreparedStatement {
+    return this.db.prepare(`
+      INSERT INTO rsvp_submission_receipts (
+        event_id, household_id, idempotency_key, request_digest, result_version, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      input.eventId,
+      input.householdId,
+      input.idempotencyKey,
+      input.requestDigest,
+      input.resultVersion,
+      input.createdAt,
+    );
   }
 
   /**
