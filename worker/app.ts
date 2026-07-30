@@ -12,6 +12,7 @@ import { galleryRoutes } from './routes/gallery';
 import { hostAuthRoutes } from './routes/host-auth';
 import { hostPublicRoutes } from './routes/host-public';
 import { manageRoutes } from './routes/manage';
+import { manageRsvpRoutes } from './routes/manage-rsvp';
 import { messageRoutes } from './routes/messages';
 import { publicRoutes } from './routes/public';
 import { uploadRoutes } from './routes/uploads';
@@ -35,6 +36,7 @@ export function createApp() {
   app.route('/api', contentRoutes);
   app.route('/api', galleryRoutes);
   app.route('/api', manageRoutes);
+  app.route('/api', manageRsvpRoutes);
   app.route('/api', messageRoutes);
 
   app.notFound((context) => {
