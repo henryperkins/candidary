@@ -15,6 +15,7 @@ import { manageRoutes } from './routes/manage';
 import { manageRsvpRoutes } from './routes/manage-rsvp';
 import { messageRoutes } from './routes/messages';
 import { publicRoutes } from './routes/public';
+import { rsvpRoutes } from './routes/rsvp';
 import { uploadRoutes } from './routes/uploads';
 
 export function createApp() {
@@ -37,6 +38,7 @@ export function createApp() {
   app.route('/api', galleryRoutes);
   app.route('/api', manageRoutes);
   app.route('/api', manageRsvpRoutes);
+  app.route('/api', rsvpRoutes);
   app.route('/api', messageRoutes);
 
   app.notFound((context) => {

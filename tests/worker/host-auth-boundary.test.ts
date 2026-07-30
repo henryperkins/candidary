@@ -155,3 +155,31 @@ describe('native host-auth request boundary', () => {
     expect(boundary.keys[0]).toBe(boundary.keys[1]);
   });
 });
+
+it('derives the boundary key from CF-Connecting-IP alone', async () => {
+  // Host auth and RSVP lookup now share one hardened extractor, so a forwarding
+  // header a client can set must not change which budget is charged.
+  async function keyFor(headers: Record<string, string>) {
+    const boundary = deniedAtBoundary();
+    await createApp().request('/api/host/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, ...headers },
+      body: JSON.stringify({ email: 'host@example.com', password: 'a'.repeat(15) }),
+    }, boundary.env);
+    return boundary.keys[0];
+  }
+
+  const honest = await keyFor({ 'CF-Connecting-IP': SOURCE_IP });
+  const spoofed = await keyFor({
+    'CF-Connecting-IP': SOURCE_IP,
+    'X-Forwarded-For': '198.51.100.7',
+    Forwarded: 'for=198.51.100.8',
+  });
+  const headerless = await keyFor({ 'X-Forwarded-For': '198.51.100.7' });
+
+  expect(spoofed).toBe(honest);
+  // No Cloudflare header at all falls back to one shared bucket rather than an
+  // unlimited supply of fresh ones.
+  expect(headerless).not.toBe(honest);
+  expect(await keyFor({})).toBe(headerless);
+});

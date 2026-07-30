@@ -4,16 +4,21 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { SecretToken } from '../security/crypto';
 import type { AppBindings } from '../env';
 
-// The two credentials are held side by side rather than in one slot. A host who is
+// The credentials are held side by side rather than in one slot. A host who is
 // signed in and then opens a management link — their own, or one a couple handed
 // them — must not be silently signed out of their account, and the reverse flow
 // has to keep working for a planner who has no account at all.
-export type CookieScope = 'event' | 'host';
+//
+// `rsvp` is a third, narrower authority: it speaks for one household and grants
+// neither the event guest role nor anything a manager can do. A phone can hold
+// all three at once, and each route accepts exactly one of them.
+export type CookieScope = 'event' | 'host' | 'rsvp';
 const REGISTRATION_COOKIE = 'candidary_registration';
 
 const COOKIE_NAMES = {
   event: { session: 'candidary_session', csrf: 'candidary_csrf' },
   host: { session: 'candidary_host', csrf: 'candidary_host_csrf' },
+  rsvp: { session: 'candidary_rsvp', csrf: 'candidary_rsvp_csrf' },
 } as const satisfies Record<CookieScope, { session: string; csrf: string }>;
 
 export function setSessionCookies(

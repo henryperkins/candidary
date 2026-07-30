@@ -11,9 +11,18 @@ export function assertRequestOrigin(context: Context<AppBindings>): void {
   }
 }
 
-// Scoped, because a browser can now hold two sessions at once and each carries its
-// own token. Checking the wrong pair would either reject a legitimate write or,
-// worse, accept one authorized by the other credential.
+// Each scope has its own header, so a token minted for one authority can never
+// authorize a write in another. The client offers all three on every non-GET
+// request; the route decides which pair it will accept.
+const CSRF_HEADERS = {
+  event: 'X-Candidary-CSRF',
+  host: 'X-Candidary-Host-CSRF',
+  rsvp: 'X-Candidary-RSVP-CSRF',
+} as const satisfies Record<CookieScope, string>;
+
+// Scoped, because a browser can hold several sessions at once and each carries
+// its own token. Checking the wrong pair would either reject a legitimate write
+// or, worse, accept one authorized by a different credential.
 export async function assertCsrf(
   context: Context<AppBindings>,
   scope: CookieScope,
@@ -21,9 +30,7 @@ export async function assertCsrf(
 ): Promise<void> {
   assertRequestOrigin(context);
   const cookieToken = getCsrfCookie(context, scope);
-  const headerToken = scope === 'host'
-    ? context.req.header('X-Candidary-Host-CSRF')
-    : context.req.header('X-Candidary-CSRF');
+  const headerToken = context.req.header(CSRF_HEADERS[scope]);
   if (!cookieToken || !headerToken || !constantTimeEqual(cookieToken, headerToken)) {
     throw new ApiError('CSRF_INVALID', 'Refresh the page and try again.', 403);
   }

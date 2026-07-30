@@ -45,6 +45,14 @@
         "limit": 20,
         "period": 60
       }
+    },
+    {
+      "name": "RSVP_LOOKUP_RATE_LIMIT",
+      "namespace_id": "1002",
+      "simple": {
+        "limit": 30,
+        "period": 60
+      }
     }
   ],
   "workflows": [

@@ -15,6 +15,7 @@ import {
   setRegistrationCookie,
   setSessionCookies,
 } from '../http/cookies';
+import { clientIp } from '../http/client-ip';
 import { assertCsrf, assertRequestOrigin } from '../http/csrf';
 import { digestSecret } from '../security/crypto';
 import {
@@ -88,10 +89,6 @@ async function startSession(context: Context<AppBindings>, account: Authenticate
 
 export const hostAuthRoutes = new Hono<AppBindings>();
 
-function requestIp(context: Context<AppBindings>): string {
-  return context.req.header('CF-Connecting-IP')?.trim() || 'unknown';
-}
-
 type HostAuthBoundaryAction =
   | 'registration_start'
   | 'registration_resend'
@@ -107,7 +104,7 @@ async function assertHostAuthBoundary(
   action: HostAuthBoundaryAction,
 ): Promise<void> {
   const key = await digestSecret(
-    `host-auth-boundary:${action}:ip:${requestIp(context)}`,
+    `host-auth-boundary:${action}:ip:${clientIp(context)}`,
     context.env.LOGIN_HMAC_KEY,
   );
   if (!(await context.env.HOST_AUTH_RATE_LIMIT.limit({ key })).success) {
@@ -145,7 +142,7 @@ hostAuthRoutes.post('/host/register', async (context) => {
     displayName: body.displayName ?? null,
     bindEventId,
   }, {
-    ipAddress: requestIp(context),
+    ipAddress: clientIp(context),
     creatorSessionId,
   });
 
@@ -162,7 +159,7 @@ hostAuthRoutes.post('/host/register/resend', async (context) => {
   const rawRegistrationToken = getRegistrationCookie(context);
   const registrationToken = await new HostAuthService(context.env).resendRegistration(
     rawRegistrationToken,
-    { ipAddress: requestIp(context) },
+    { ipAddress: clientIp(context) },
   );
   setRegistrationCookie(context, registrationToken, 15 * 60);
   return context.json({
@@ -199,7 +196,7 @@ hostAuthRoutes.post('/host/login', async (context) => {
   const body = await parse(context, loginSchema);
   await assertHostAuthBoundary(context, 'login');
   const service = new HostAuthService(context.env);
-  await service.reserveLogin(body.email, requestIp(context));
+  await service.reserveLogin(body.email, clientIp(context));
   const account = await service.authenticate(body.email, body.password);
   await new AccountsRepository(context.env.DB).touch(account.id, new Date().toISOString());
   await startSession(context, account);
@@ -271,7 +268,7 @@ hostAuthRoutes.post('/host/verify/resend', async (context) => {
     return context.json({ data: { sent: false, emailVerified: true }, requestId: context.get('requestId') });
   }
   await new HostAuthService(context.env)
-    .reserveVerificationResend(principal.account.id, requestIp(context));
+    .reserveVerificationResend(principal.account.id, clientIp(context));
   const events = await new AccountsRepository(context.env.DB).listEventsForAccount(principal.account.id);
   const issued = await new HostAuthService(context.env)
     .issueChallenge(principal.account, 'verify', events[0]?.id ?? null);
@@ -289,7 +286,7 @@ hostAuthRoutes.post('/host/password/forgot', async (context) => {
   await assertHostAuthBoundary(context, 'password_forgot');
   const service = new HostAuthService(context.env);
   const account = await new AccountsRepository(context.env.DB).getByEmail(body.email);
-  await service.reservePasswordReset(body.email, requestIp(context));
+  await service.reservePasswordReset(body.email, clientIp(context));
   if (account && !account.disabledAt) {
     context.executionCtx.waitUntil(
       service.issueChallenge(account, 'reset', null).then(() => undefined).catch(() => undefined),

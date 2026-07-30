@@ -28,6 +28,8 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (csrf) headers.set('x-candidary-csrf', decodeURIComponent(csrf));
     const hostCsrf = cookieValue('candidary_host_csrf');
     if (hostCsrf) headers.set('x-candidary-host-csrf', decodeURIComponent(hostCsrf));
+    const rsvpCsrf = cookieValue('candidary_rsvp_csrf');
+    if (rsvpCsrf) headers.set('x-candidary-rsvp-csrf', decodeURIComponent(rsvpCsrf));
   }
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   const payload = await response.json() as Envelope<T> & Partial<ApiErrorBody>;

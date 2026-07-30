@@ -190,6 +190,28 @@ export class RsvpRepository {
   }
 
   /**
+   * The active households holding a given named-guest digest.
+   *
+   * Queries the digest alone — never a name, never a prefix — so this cannot be
+   * walked to enumerate a roster.
+   */
+  async householdsByLookupDigest(eventId: string, lookupDigest: string): Promise<string[]> {
+    const rows = await this.db.prepare(`
+      SELECT DISTINCT household.id AS household_id
+      FROM rsvp_invitees AS invitee
+      JOIN rsvp_households AS household
+        ON household.event_id = invitee.event_id
+       AND household.id = invitee.household_id
+      WHERE invitee.event_id = ?
+        AND invitee.lookup_digest = ?
+        AND invitee.kind = 'named'
+        AND household.archived_at IS NULL
+      ORDER BY household.id
+    `).bind(eventId, lookupDigest).all<{ household_id: string }>();
+    return rows.results.map((row) => row.household_id);
+  }
+
+  /**
    * How many named guests and plus-one slots each active household holds.
    *
    * A LEFT JOIN, so a household with no invitees at all still appears: that is

@@ -1,4 +1,5 @@
 import type {
+  RsvpHouseholdView,
   RsvpImportCommitResponse,
   RsvpImportPreview,
 } from '../../shared/contracts';
@@ -8,10 +9,17 @@ import {
   checkHouseholdCapacity,
   checkRosterCapacity,
   findLookupCollisions,
+  normalizeInvitedName,
+  resolveGuestEventPhase,
 } from '../../shared/rsvp';
 import { EventsRepository } from '../db/events';
 import { buildRosterStatements, RsvpRepository, type RosterInviteeInput } from '../db/rsvp';
-import type { EventRecord } from '../db/types';
+import {
+  RSVP_LOOKUP_IP_LIMIT,
+  RSVP_LOOKUP_NAME_LIMIT,
+  RsvpRateLimitsRepository,
+} from '../db/rsvp-rate-limits';
+import type { EventRecord, RsvpHouseholdRecord, RsvpInviteeRecord } from '../db/types';
 import type { AppEnv } from '../env';
 import { digestSecret } from '../security/crypto';
 
@@ -55,12 +63,21 @@ function isExpectedImportAbort(error: unknown): boolean {
     || message.includes('UNIQUE constraint failed: rsvp_households');
 }
 
+// The service answers with the household record; the route turns it into the
+// view a guest may see, because only the route knows which session is asking.
+export type RsvpLookupResult =
+  | { status: 'matched'; household: RsvpHouseholdRecord }
+  | { status: 'second_name_required' }
+  | { status: 'not_available'; message: string };
+
 export class RsvpService {
   private readonly events: EventsRepository;
+  private readonly rates: RsvpRateLimitsRepository;
   private readonly rsvp: RsvpRepository;
 
   constructor(private readonly env: AppEnv) {
     this.events = new EventsRepository(env.DB);
+    this.rates = new RsvpRateLimitsRepository(env.DB, env.RSVP_LOOKUP_HMAC_KEY);
     this.rsvp = new RsvpRepository(env.DB);
   }
 
@@ -125,6 +142,142 @@ export class RsvpService {
     }
 
     return { rosterVersion: event.rsvpRosterVersion };
+  }
+
+  /**
+   * What one household is allowed to see about itself.
+   *
+   * `deadlineAt` is the event's deadline, because that is the date on the
+   * invitation. The session's own captured window shows up as `editable` and
+   * `renewalRequired` instead, which is what the guest can act on.
+   */
+  householdView(
+    event: EventRecord,
+    household: RsvpHouseholdRecord,
+    invitees: readonly RsvpInviteeRecord[],
+    session: { writeAuthorityDeadline: string } | null,
+    now = new Date(),
+  ): RsvpHouseholdView {
+    const { rsvpState } = resolveGuestEventPhase(event, now);
+    const sessionOpen = session
+      ? now.getTime() <= Date.parse(session.writeAuthorityDeadline)
+      : false;
+    return {
+      id: household.id,
+      label: household.label,
+      version: household.version,
+      editable: rsvpState === 'open' && sessionOpen,
+      // The event is still open, but this device's proof is older than the
+      // deadline it was given. A fresh exact lookup restores the window.
+      renewalRequired: rsvpState === 'open' && session !== null && !sessionOpen,
+      deadlineAt: event.rsvpDeadlineAt ?? '',
+      invitees: invitees.map((invitee) => ({
+        id: invitee.id,
+        kind: invitee.kind,
+        displayName: invitee.displayName,
+        attendance: invitee.attendance,
+        order: invitee.sortOrder,
+      })),
+      firstRespondedAt: household.firstRespondedAt,
+      latestRespondedAt: household.latestRespondedAt,
+      latestActor: household.latestActorKind,
+    };
+  }
+
+  /**
+   * Charges the durable half of the abuse budget: one attempt against the
+   * caller's address, and one against each name they submitted.
+   *
+   * Naming a second person costs a second name-attempt, so a two-name probe
+   * cannot search twice as fast as a one-name probe.
+   */
+  async reserveLookupAttempts(
+    event: EventRecord,
+    ip: string,
+    names: readonly string[],
+    now = new Date(),
+  ): Promise<void> {
+    const refusals: boolean[] = [
+      await this.rates.reserve({
+        eventId: event.id,
+        action: 'lookup_ip',
+        normalizedValue: ip,
+        limit: RSVP_LOOKUP_IP_LIMIT,
+        now,
+      }),
+    ];
+    for (const name of names) {
+      refusals.push(await this.rates.reserve({
+        eventId: event.id,
+        action: 'lookup_name',
+        normalizedValue: normalizeInvitedName(name),
+        limit: RSVP_LOOKUP_NAME_LIMIT,
+        now,
+      }));
+    }
+    // Every budget is charged before any is checked, so a refusal cannot be
+    // used to learn which of the two limits was reached.
+    if (refusals.includes(false)) {
+      throw new ApiError(
+        'RATE_LIMITED',
+        'Too many attempts. Try again in a few minutes.',
+        429,
+      );
+    }
+  }
+
+  /**
+   * Resolves an exact name, or one of two exact names, to a single household.
+   *
+   * Every way this can fail answers with the same generic shape. A stranger
+   * guessing names must not be able to tell a miss from a paused event, an
+   * archived household, or a name that exists in two households — each of those
+   * is a fact about somebody's guest list.
+   */
+  async lookup(
+    event: EventRecord,
+    input: { firstName: string; secondName?: string },
+    now = new Date(),
+  ): Promise<RsvpLookupResult> {
+    const notAvailable = {
+      status: 'not_available',
+      message: 'We could not open an invitation with those details.',
+    } as const;
+
+    const { rsvpState } = resolveGuestEventPhase(event, now);
+    if (rsvpState === 'disabled') return notAvailable;
+
+    const names = [input.firstName, input.secondName]
+      .filter((name): name is string => typeof name === 'string' && name.trim().length > 0);
+    if (names.length === 0) return notAvailable;
+
+    const matches: string[][] = [];
+    for (const name of names) {
+      matches.push(await this.rsvp.householdsByLookupDigest(
+        event.id,
+        await this.lookupDigest(event.id, normalizeInvitedName(name)),
+      ));
+    }
+
+    const candidates = matches.reduce<string[]>(
+      (narrowed, current) => narrowed.filter((id) => current.includes(id)),
+      matches[0] ?? [],
+    );
+    if (candidates.length === 0) return notAvailable;
+    if (candidates.length > 1) {
+      // Only ever with one name in hand: two names that still do not resolve is
+      // a dead end, not an invitation to keep guessing.
+      return names.length === 1 ? { status: 'second_name_required' } : notAvailable;
+    }
+
+    const household = await this.rsvp.getHousehold(event.id, candidates[0]!);
+    if (!household || household.archivedAt) return notAvailable;
+    // Paused or closed, a household may still read what it already sent. One
+    // that never answered stays invisible, so the closed state cannot be used
+    // to confirm that a name is on the list.
+    if (rsvpState !== 'open' && !household.firstRespondedAt) return notAvailable;
+
+    return { status: 'matched', household };
   }
 
   private lookupDigest(eventId: string, normalizedName: string): Promise<string> {

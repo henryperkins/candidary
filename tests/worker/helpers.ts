@@ -109,6 +109,56 @@ export async function secondGuest(eventLink: string) {
   return cookiesFrom(await exchangeEventEntry(eventLink));
 }
 
+/** Previews and commits a guest list the way a host would. */
+export async function importRoster(
+  access: { event: any; manager: { cookie: string; csrf: string } },
+  csv: string,
+) {
+  const previewed = await createApp().request(
+    `/api/manage/events/${access.event.id}/rsvp/import/preview`,
+    { method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ csv }) },
+    testEnv,
+  );
+  const preview = (await previewed.json<any>()).data;
+  if (preview.issues.length > 0) {
+    throw new Error(`Roster fixture is invalid: ${JSON.stringify(preview.issues)}`);
+  }
+  const committed = await createApp().request(
+    `/api/manage/events/${access.event.id}/rsvp/import/commit`,
+    {
+      method: 'POST',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        csv,
+        sourceDigest: preview.sourceDigest,
+        expectedRosterVersion: preview.rosterVersion,
+      }),
+    },
+    testEnv,
+  );
+  if (committed.status !== 201) {
+    throw new Error(`Roster fixture did not commit: ${await committed.text()}`);
+  }
+  return (await committed.json<any>()).data;
+}
+
+/** Opens RSVP and refreshes the fixture's event view to match. */
+export async function openRsvp(access: Awaited<ReturnType<typeof eventAccess>>) {
+  // Importing a roster advances the version, so the fixture's copy is stale by
+  // the time this runs and the settings write would be refused as a stale view.
+  const current = await createApp().request(`/api/manage/events/${access.event.id}`, {
+    headers: { cookie: access.manager.cookie },
+  }, testEnv);
+  access.event = (await current.json<any>()).data.event;
+
+  const response = await applySettings(access, { rsvpEnabled: true });
+  if (response.status !== 200) {
+    throw new Error(`RSVP fixture did not open: ${await response.text()}`);
+  }
+  access.event = (await response.json<any>()).data.event;
+  return access.event;
+}
+
 export async function uploadPending(
   access: Awaited<ReturnType<typeof eventAccess>>,
   key: string,
