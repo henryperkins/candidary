@@ -14,8 +14,10 @@ import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
+import { canonicalTimeZone, endOfLocalDate, isIanaTimeZone } from '../../shared/event-time';
 import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
+import { RsvpService } from '../services/rsvp';
 import {
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
@@ -39,6 +41,12 @@ const settingsSchema = z.object({
   uploadsEnabled: z.boolean(),
   galleryVisible: z.boolean(),
   moderationRequired: z.boolean(),
+  eventTimezone: z.string().min(1).max(64).refine(isIanaTimeZone, 'Choose a valid time zone.'),
+  rsvpDeadlineDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.'),
+  rsvpEnabled: z.boolean(),
+  // Only an early stale-view signal. The write is guarded on the version the
+  // server itself read while validating, never on this number.
+  rsvpRosterVersion: z.number().int().min(0),
 });
 const actionSchema = z.object({
   action: z.enum(['publish', 'hide', 'delete']),
@@ -199,14 +207,65 @@ manageRoutes.delete('/manage/events/:eventId', async (context) => {
 manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
   const auth = await managerForEvent(context, true);
   const parsed = settingsSchema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422);
-  // Reopening intake after the printed entry was disabled would leave guests
-  // with an event that accepts uploads and no working way in. Manager authority
-  // does not outrank the irreversible stop.
-  if (parsed.data.uploadsEnabled) {
+  if (!parsed.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Check the event settings.',
+      422,
+      fieldErrors(parsed.error),
+    );
+  }
+  // Reopening either intake after the printed entry was disabled would leave
+  // guests with an event that accepts submissions and no working way in.
+  // Manager authority does not outrank the irreversible stop.
+  if (parsed.data.uploadsEnabled || parsed.data.rsvpEnabled) {
     await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
   }
-  const event = await new EventsRepository(context.env.DB).updateSettings(context.req.param('eventId'), parsed.data);
+
+  const eventTimezone = canonicalTimeZone(parsed.data.eventTimezone) ?? parsed.data.eventTimezone;
+  if (parsed.data.rsvpDeadlineDate > auth.event.eventDate) {
+    throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422, {
+      rsvpDeadlineDate: 'The RSVP deadline must be on or before the event date.',
+    });
+  }
+  let rsvpDeadlineAt: string;
+  try {
+    rsvpDeadlineAt = endOfLocalDate(parsed.data.rsvpDeadlineDate, eventTimezone);
+  } catch {
+    throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422, {
+      rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
+    });
+  }
+
+  // Cheap refusal before doing the validation work, so an obviously stale host
+  // page is told to reload rather than racing.
+  if (parsed.data.rsvpRosterVersion !== auth.event.rsvpRosterVersion) {
+    throw new ApiError(
+      'RSVP_ROSTER_INVALID',
+      'The guest list changed since this page loaded. Reload and try again.',
+      409,
+      { rsvpEnabled: 'The guest list changed since this page loaded.' },
+    );
+  }
+
+  // A roster is only validated when RSVP is being turned on. Turning it off, or
+  // leaving it off, must never be blocked by a list that has a problem.
+  const rosterVersion = parsed.data.rsvpEnabled
+    ? (await new RsvpService(context.env).assertRosterCanOpen(auth.event.id)).rosterVersion
+    : auth.event.rsvpRosterVersion;
+
+  const event = await new EventsRepository(context.env.DB).updateSettings(
+    context.req.param('eventId'),
+    { ...parsed.data, eventTimezone, rsvpDeadlineAt, expectedRosterVersion: rosterVersion },
+  );
+  if (!event) {
+    throw new ApiError(
+      'RSVP_ROSTER_INVALID',
+      'The guest list changed while these settings were saving. Review it and try again.',
+      409,
+      { rsvpEnabled: 'The guest list changed while these settings were saving.' },
+    );
+  }
   return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
 });
 

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
+import { canonicalTimeZone, endOfLocalDate, isIanaTimeZone } from '../../shared/event-time';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
   eventThemeConfigSchema,
@@ -21,8 +22,38 @@ const eventSchema = z.object({
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid event date.')
     .refine((value) => !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`)), 'Choose a valid event date.'),
   welcomeMessage: z.string().trim().min(1, 'Add a welcome message.').max(500, 'Use 500 characters or fewer.'),
+  eventTimezone: z.string().min(1).max(64)
+    .refine(isIanaTimeZone, 'Choose a valid time zone.'),
+  rsvpDeadlineDate: z.string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.'),
   theme: eventThemeConfigSchema.default(DEFAULT_EVENT_THEME_CONFIG),
 });
+
+/**
+ * Turns the host's calendar date into the absolute instant the event closes.
+ *
+ * The date and the zone are the only things taken from the request; the instant
+ * is derived here. A browser that sent its own timestamp would be answering a
+ * question only the event's own zone can answer.
+ */
+function resolveRsvpDeadline(input: {
+  eventDate: string;
+  rsvpDeadlineDate: string;
+  eventTimezone: string;
+}): string {
+  if (input.rsvpDeadlineDate > input.eventDate) {
+    throw new ApiError('VALIDATION_FAILED', 'Check the highlighted event details.', 422, {
+      rsvpDeadlineDate: 'The RSVP deadline must be on or before the event date.',
+    });
+  }
+  try {
+    return endOfLocalDate(input.rsvpDeadlineDate, input.eventTimezone);
+  } catch {
+    throw new ApiError('VALIDATION_FAILED', 'Check the highlighted event details.', 422, {
+      rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
+    });
+  }
+}
 
 export const publicRoutes = new Hono<AppBindings>();
 
@@ -55,7 +86,14 @@ publicRoutes.post('/events', async (context) => {
       { [`theme.${error.field}`]: error.message },
     );
   }
-  const created = await new EventService(context.env).create({ ...parsed.data, theme }, accountId);
+  // Stored canonically, so "america/chicago" and "America/Chicago" are one zone
+  // in every later export and view.
+  const eventTimezone = canonicalTimeZone(parsed.data.eventTimezone) ?? parsed.data.eventTimezone;
+  const rsvpDeadlineAt = resolveRsvpDeadline({ ...parsed.data, eventTimezone });
+  const created = await new EventService(context.env).create(
+    { ...parsed.data, theme, eventTimezone, rsvpDeadlineAt },
+    accountId,
+  );
   const maxAge = Math.max(1, Math.floor((Date.parse(created.sessionExpiresAt) - Date.now()) / 1000));
   setSessionCookies(context, 'event', created.managementSession, created.csrfToken, maxAge);
   return context.json({

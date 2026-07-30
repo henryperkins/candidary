@@ -329,7 +329,11 @@ describe('manager settings and private photo intake', () => {
 
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ galleryVisible: true, uploadsEnabled: true, moderationRequired: true }),
+      body: JSON.stringify({
+        galleryVisible: true, uploadsEnabled: true, moderationRequired: true,
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+        rsvpEnabled: false, rsvpRosterVersion: 0,
+      }),
     }, testEnv);
     const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${avery.id}`, {
       method: 'PATCH', headers: writeHeaders(access.manager),

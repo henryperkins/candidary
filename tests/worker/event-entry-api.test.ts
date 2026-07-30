@@ -117,6 +117,8 @@ describe('durable event entry', () => {
       headers: writeHeaders(access.manager),
       body: JSON.stringify({
         uploadsEnabled: true, galleryVisible: true, moderationRequired: false,
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+        rsvpEnabled: false, rsvpRosterVersion: 0,
       }),
     }, testEnv);
 
@@ -208,6 +210,8 @@ describe('durable event entry', () => {
       headers: writeHeaders(access.manager),
       body: JSON.stringify({
         uploadsEnabled: true, galleryVisible: true, moderationRequired: false,
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+        rsvpEnabled: false, rsvpRosterVersion: 0,
       }),
     }, testEnv);
     expect(reopened.status).toBe(410);

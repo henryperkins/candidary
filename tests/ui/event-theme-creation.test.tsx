@@ -49,6 +49,7 @@ it('selects a theme during creation and submits its canonical configuration', as
 
   await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
   await user.type(screen.getByLabelText('Event date'), '2026-09-19');
+  await user.type(screen.getByLabelText('RSVP deadline'), '2026-09-05');
   await user.type(welcomeMessage, 'Come share the moments you caught.');
   await user.click(screen.getByRole('button', { name: 'Create private event' }));
   await screen.findByRole('heading', { name: 'Your event is ready.' });
@@ -59,6 +60,9 @@ it('selects a theme during creation and submits its canonical configuration', as
     name: 'Maya & Theo',
     eventDate: '2026-09-19',
     welcomeMessage: 'Come share the moments you caught.',
+    // Defaulted from the host's own browser and sent for the server to validate.
+    eventTimezone: expect.any(String),
+    rsvpDeadlineDate: '2026-09-05',
     theme: { version: 1, presetId: 'coastal-light', overrides: {} },
   });
 });

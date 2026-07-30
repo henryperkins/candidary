@@ -39,6 +39,11 @@ const baseGuestEvent: Omit<GuestEventView, 'theme'> = {
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
+  eventTimezone: 'America/Chicago',
+  rsvpDeadlineAt: null,
+  rsvpDeadlineDate: null,
+  phase: 'photos-primary' as const,
+  rsvpState: 'disabled' as const,
 };
 
 function json(data: unknown) {

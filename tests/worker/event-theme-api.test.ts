@@ -36,6 +36,11 @@ const EVENT_VIEW_KEYS = [
   'purgeAfter',
   'createdAt',
   'deletedAt',
+  'eventTimezone',
+  'rsvpEnabled',
+  'rsvpDeadlineAt',
+  'rsvpDeadlineDate',
+  'rsvpRosterVersion',
   'theme',
 ] as const;
 
@@ -49,6 +54,11 @@ const GUEST_EVENT_VIEW_KEYS = [
   'uploadsEnabled',
   'galleryVisible',
   'moderationRequired',
+  'eventTimezone',
+  'rsvpDeadlineAt',
+  'rsvpDeadlineDate',
+  'phase',
+  'rsvpState',
   'theme',
 ] as const;
 
@@ -114,6 +124,7 @@ function createEvent(extra: Record<string, unknown> = {}) {
       name: 'Maya & Theo',
       eventDate: '2026-09-19',
       welcomeMessage: 'Welcome.',
+      eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
       ...extra,
     }),
   }, testEnv);
@@ -557,6 +568,8 @@ describe('authorized event theme updates', () => {
       body: JSON.stringify({
         galleryVisible: true,
         uploadsEnabled: true,
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+        rsvpEnabled: false, rsvpRosterVersion: 0,
         moderationRequired: true,
       }),
     }, testEnv);

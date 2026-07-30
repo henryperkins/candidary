@@ -28,6 +28,13 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
+  eventTimezone: 'America/Chicago',
+  // The existing photo fixtures are explicitly photos-primary with RSVP off, so
+  // no upload or receipt baseline picks up an RSVP disclosure it never had.
+  rsvpDeadlineAt: null,
+  rsvpDeadlineDate: null,
+  phase: 'photos-primary',
+  rsvpState: 'disabled',
   theme: eventTheme('candidary-default'),
 };
 
@@ -42,6 +49,8 @@ export const EVENT_FIXTURE: EventView = {
   purgeAfter: '2026-12-19T00:00:00Z',
   createdAt: '2026-07-29T00:00:00Z',
   deletedAt: null,
+  rsvpEnabled: false,
+  rsvpRosterVersion: 0,
 };
 
 interface GuestMessage {

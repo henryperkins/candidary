@@ -22,15 +22,38 @@ function cookiesFrom(response: Response) {
 async function guestAccess() {
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
-    body: JSON.stringify({ name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Welcome.' }),
+    body: JSON.stringify({
+      name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+      eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+    }),
   }, testEnv);
   const body = await created.json<any>();
   const exchange = await exchangeEventEntry(body.data.eventLink);
+  const manager = cookiesFrom(created);
+  // New events start with intake paused, so the fixture opens it as a host would.
+  const opened = await createApp().request(`/api/manage/events/${body.data.event.id}/settings`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      cookie: manager.cookie,
+      origin,
+      'x-candidary-csrf': manager.csrf,
+    },
+    body: JSON.stringify({
+      uploadsEnabled: true,
+      galleryVisible: body.data.event.galleryVisible,
+      moderationRequired: body.data.event.moderationRequired,
+      eventTimezone: body.data.event.eventTimezone,
+      rsvpDeadlineDate: body.data.event.rsvpDeadlineDate,
+      rsvpEnabled: false,
+      rsvpRosterVersion: body.data.event.rsvpRosterVersion,
+    }),
+  }, testEnv);
   return {
     ...cookiesFrom(exchange),
-    event: body.data.event,
+    event: (await opened.json<any>()).data.event,
     eventLink: body.data.eventLink as string,
-    manager: cookiesFrom(created),
+    manager,
   };
 }
 

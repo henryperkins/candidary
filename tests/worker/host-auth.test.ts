@@ -986,6 +986,8 @@ describe('managing an event through an account', () => {
       headers: hostHeaders(host),
       body: JSON.stringify({
         uploadsEnabled: false, galleryVisible: true, moderationRequired: true,
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+        rsvpEnabled: false, rsvpRosterVersion: 0,
       }),
     }, testEnv);
     expect(settings.status).toBe(200);
@@ -1145,6 +1147,7 @@ describe('managing an event through an account', () => {
       headers: { 'content-type': 'application/json', origin, cookie: host.cookie },
       body: JSON.stringify({
         name: 'Saved On Create', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
       }),
     }, testEnv);
 
@@ -1176,6 +1179,7 @@ describe('managing an event through an account', () => {
       headers: { 'content-type': 'application/json', origin, cookie: host.cookie },
       body: JSON.stringify({
         name: 'Link Only', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
       }),
     }, testEnv);
 

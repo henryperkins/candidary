@@ -124,9 +124,19 @@ export interface EventView {
   purgeAfter: string;
   createdAt: string;
   deletedAt: string | null;
+  eventTimezone: string;
+  rsvpEnabled: boolean;
+  rsvpDeadlineAt: string | null;
+  // The same instant as a calendar date in `eventTimezone`. Sent alongside the
+  // absolute value so no browser has to reinterpret it in its own zone.
+  rsvpDeadlineDate: string | null;
+  rsvpRosterVersion: number;
   theme: ResolvedEventTheme;
 }
 
+// Deliberately an allowlist rather than an omission of what is secret: a field
+// added to `EventView` should not reach a guest until somebody names it here.
+// The phase is server-computed, because a guest device's clock is not evidence.
 export type GuestEventView = Pick<
   EventView,
   | 'id'
@@ -138,8 +148,11 @@ export type GuestEventView = Pick<
   | 'uploadsEnabled'
   | 'galleryVisible'
   | 'moderationRequired'
+  | 'eventTimezone'
+  | 'rsvpDeadlineAt'
+  | 'rsvpDeadlineDate'
   | 'theme'
->;
+> & GuestPhaseView;
 
 // RSVP. Every shape below is written out rather than derived from a database
 // record, because the difference between what a household may see and what a

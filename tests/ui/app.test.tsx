@@ -235,6 +235,44 @@ describe('public Candidary experience', () => {
     expect(screen.getByLabelText('Event name')).not.toHaveAttribute('aria-invalid', 'true');
   });
 
+  it('walks focus through the RSVP fields in the order the form presents them', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => errorJson({
+      code: 'VALIDATION_FAILED',
+      message: 'Check the event details.',
+      fieldErrors: {
+        // Answered out of order on purpose: the host is taken to the first
+        // problem they would have reached, not the first the server listed.
+        welcomeMessage: 'Write a welcome message.',
+        rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
+        eventTimezone: 'Choose a valid time zone.',
+      },
+      requestId: 'request-a',
+    }, 422)));
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Create private event' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the event details.');
+
+    await waitFor(() => expect(screen.getByLabelText('Event time zone')).toHaveFocus());
+    expect(screen.getByLabelText('Event time zone'))
+      .toHaveAccessibleDescription('Choose a valid time zone.');
+    expect(screen.getByLabelText('RSVP deadline'))
+      .toHaveAccessibleDescription('Choose a valid RSVP deadline.');
+  });
+
+  it('defaults the time zone to the host browser and offers it for editing', async () => {
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+
+    const zone = screen.getByLabelText('Event time zone');
+    expect(zone).toHaveValue(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    // Typed, not chosen from a fixed list: a browser without
+    // `Intl.supportedValuesOf` still lets a host name any zone the server knows.
+    const user = userEvent.setup();
+    await user.clear(zone);
+    await user.type(zone, 'Pacific/Auckland');
+    expect(zone).toHaveValue('Pacific/Auckland');
+  });
+
   it('announces a copied link only after the clipboard write succeeds', async () => {
     let resolveCopy!: () => void;
     vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));

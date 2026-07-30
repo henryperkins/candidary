@@ -38,6 +38,10 @@ export interface CreateEventRecord {
   purgeAfter: string;
   createdAt: string;
   themeConfig: string;
+  eventTimezone: string;
+  // The last millisecond of the host's chosen local day, already resolved. The
+  // repository never converts a date, so no zone logic can drift in here.
+  rsvpDeadlineAt: string;
 }
 
 export function mapEvent(row: EventRow): EventRecord {
@@ -75,17 +79,23 @@ export class EventsRepository {
   // creator session, and any account ownership in one batch rather than a sequence
   // of writes a failure could tear in half.
   createStatement(input: CreateEventRecord): D1PreparedStatement {
+    // Both intakes are written off explicitly rather than left to a column
+    // default. A new event opens nothing until the host has seen what it will
+    // collect: RSVP waits for a validated roster, photos wait for the day.
     return this.db.prepare(`
       INSERT INTO events (
         id, slug, name, event_date, welcome_message, gallery_visible,
+        uploads_enabled, rsvp_enabled, event_timezone, rsvp_deadline_at,
         guest_access_expires_at, management_access_expires_at, purge_after, created_at, theme_config
-      ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       input.id,
       input.slug,
       input.name,
       input.eventDate,
       input.welcomeMessage,
+      input.eventTimezone,
+      input.rsvpDeadlineAt,
       input.guestAccessExpiresAt,
       input.managementAccessExpiresAt,
       input.purgeAfter,
@@ -109,6 +119,14 @@ export class EventsRepository {
     return row ? mapEvent(row) : null;
   }
 
+  /**
+   * Applies every event setting in one guarded write.
+   *
+   * `expectedRosterVersion` is the version the caller validated the roster at,
+   * not a number from the browser. If the roster moved in between, the write
+   * changes nothing and the caller re-validates rather than opening RSVP
+   * against a list that no longer exists.
+   */
   async updateSettings(
     id: string,
     input: {
@@ -117,25 +135,38 @@ export class EventsRepository {
       uploadsEnabled: boolean;
       galleryVisible: boolean;
       moderationRequired: boolean;
+      eventTimezone: string;
+      rsvpDeadlineAt: string;
+      rsvpEnabled: boolean;
+      expectedRosterVersion: number;
     },
-  ): Promise<EventRecord> {
+  ): Promise<EventRecord | null> {
     const result = await this.db.prepare(`
       UPDATE events SET
         name = COALESCE(?, name),
         welcome_message = COALESCE(?, welcome_message),
         uploads_enabled = ?,
         gallery_visible = ?,
-        moderation_required = ?
-      WHERE id = ? AND deleted_at IS NULL
+        moderation_required = ?,
+        event_timezone = ?,
+        rsvp_deadline_at = ?,
+        rsvp_enabled = ?
+      WHERE id = ? AND deleted_at IS NULL AND rsvp_roster_version = ?
     `).bind(
       input.name ?? null,
       input.welcomeMessage ?? null,
       input.uploadsEnabled ? 1 : 0,
       input.galleryVisible ? 1 : 0,
       input.moderationRequired ? 1 : 0,
+      input.eventTimezone,
+      input.rsvpDeadlineAt,
+      input.rsvpEnabled ? 1 : 0,
       id,
+      input.expectedRosterVersion,
     ).run();
-    if ((result.meta.changes ?? 0) !== 1) throw new Error('Event settings were not updated.');
+    // Null rather than an exception: a lost race is an ordinary outcome here,
+    // and the route turns it into guest-facing prose.
+    if ((result.meta.changes ?? 0) !== 1) return null;
     return (await this.getById(id))!;
   }
 

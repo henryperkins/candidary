@@ -26,6 +26,7 @@ async function createEvent(name = 'Maya & Theo') {
       name,
       eventDate: '2026-09-19',
       welcomeMessage: 'Add the moments only you noticed.',
+      eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
     }),
   }, testEnv);
   return { response, body: await response.json<any>() };

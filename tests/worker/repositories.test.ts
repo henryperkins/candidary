@@ -51,7 +51,12 @@ async function seedEvent(id = 'event-a', slug = 'maya-theo') {
     purgeAfter: '2027-01-17T23:59:59.999Z',
     createdAt: now,
     themeConfig: serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG),
+    eventTimezone: 'America/Chicago',
+    rsvpDeadlineAt: '2026-09-13T04:59:59.999Z',
   });
+  // New events open nothing; these cases are about quota and idempotency, so
+  // intake is switched on directly rather than through the manager route.
+  await env.DB.prepare('UPDATE events SET uploads_enabled = 1 WHERE id = ?').bind(id).run();
   return events;
 }
 

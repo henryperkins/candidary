@@ -190,6 +190,40 @@ export class RsvpRepository {
   }
 
   /**
+   * How many named guests and plus-one slots each active household holds.
+   *
+   * A LEFT JOIN, so a household with no invitees at all still appears: that is
+   * exactly the shape RSVP activation has to refuse.
+   */
+  async listHouseholdCompositions(eventId: string): Promise<Array<{
+    householdId: string;
+    namedCount: number;
+    plusOneCount: number;
+  }>> {
+    const rows = await this.db.prepare(`
+      SELECT household.id AS household_id,
+             SUM(CASE WHEN invitee.kind = 'named' THEN 1 ELSE 0 END) AS named_count,
+             SUM(CASE WHEN invitee.kind = 'plus_one' THEN 1 ELSE 0 END) AS plus_one_count
+      FROM rsvp_households AS household
+      LEFT JOIN rsvp_invitees AS invitee
+        ON invitee.event_id = household.event_id
+       AND invitee.household_id = household.id
+      WHERE household.event_id = ? AND household.archived_at IS NULL
+      GROUP BY household.id
+      ORDER BY household.created_at, household.id
+    `).bind(eventId).all<{
+      household_id: string;
+      named_count: number | null;
+      plus_one_count: number | null;
+    }>();
+    return rows.results.map((row) => ({
+      householdId: row.household_id,
+      namedCount: row.named_count ?? 0,
+      plusOneCount: row.plus_one_count ?? 0,
+    }));
+  }
+
+  /**
    * The named lookup digests of every active household, shaped for
    * `findLookupCollisions`. Plus-one slots are excluded because they carry no
    * digest and can never open an invitation.

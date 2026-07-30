@@ -52,21 +52,57 @@ export async function exchangeEventEntry(eventLink: string) {
   }, testEnv);
 }
 
-export async function eventAccess(name = 'Maya & Theo') {
+/**
+ * Sends a complete settings payload. Settings is one atomic write, so a caller
+ * has to state every field; this fills in the current values and lets a test
+ * name only what it is changing.
+ */
+export async function applySettings(
+  access: { event: any; manager: { cookie: string; csrf: string } },
+  patch: Record<string, unknown> = {},
+) {
+  return createApp().request(`/api/manage/events/${access.event.id}/settings`, {
+    method: 'PATCH',
+    headers: writeHeaders(access.manager),
+    body: JSON.stringify({
+      uploadsEnabled: access.event.uploadsEnabled,
+      galleryVisible: access.event.galleryVisible,
+      moderationRequired: access.event.moderationRequired,
+      eventTimezone: access.event.eventTimezone,
+      rsvpDeadlineDate: access.event.rsvpDeadlineDate,
+      rsvpEnabled: access.event.rsvpEnabled,
+      rsvpRosterVersion: access.event.rsvpRosterVersion,
+      ...patch,
+    }),
+  }, testEnv);
+}
+
+// New events open nothing. The photo-journey fixtures all assume intake is
+// running, so this turns it on the way a host would rather than by writing to
+// the database behind the route that owns the decision.
+export async function eventAccess(name = 'Maya & Theo', uploadsEnabled = true) {
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
-    body: JSON.stringify({ name, eventDate: '2026-09-19', welcomeMessage: 'Welcome.' }),
+    body: JSON.stringify({
+      name, eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
+      eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+    }),
   }, testEnv);
   const body = await created.json<any>();
   const managerCookies = cookiesFrom(created);
   const guestExchange = await exchangeEventEntry(body.data.eventLink);
-  return {
+  const access = {
     event: body.data.event,
     eventLink: body.data.eventLink as string,
     managementLink: body.data.managementLink as string,
     manager: { ...managerCookies, csrf: body.data.csrfToken as string },
     guest: cookiesFrom(guestExchange),
   };
+
+  if (!uploadsEnabled) return access;
+  const opened = await applySettings(access, { uploadsEnabled: true });
+  access.event = (await opened.json<any>()).data.event;
+  return access;
 }
 
 export async function secondGuest(eventLink: string) {

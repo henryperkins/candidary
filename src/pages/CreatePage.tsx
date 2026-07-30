@@ -26,7 +26,32 @@ interface Created {
 }
 
 // Form order, not response order: the host should be taken to the first problem they would reach anyway.
-const CREATE_FIELDS = ['name', 'eventDate', 'welcomeMessage'] as const;
+const CREATE_FIELDS = [
+  'name',
+  'eventDate',
+  'eventTimezone',
+  'rsvpDeadlineDate',
+  'welcomeMessage',
+] as const;
+
+// The host's own zone is the right first guess, and the server validates
+// whatever comes back. `supportedValuesOf` is recent enough that a browser
+// without it still has to work: the datalist is a convenience, not the input.
+function detectedTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+function knownTimeZones(): string[] {
+  try {
+    return Intl.supportedValuesOf?.('timeZone') ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export function CreatePage() {
   const navigate = useNavigate();
@@ -35,6 +60,8 @@ export function CreatePage() {
   const [cover, setCover] = useState<File | null>(null);
   const [coverError, setCoverError] = useState('');
   const [themePresetId, setThemePresetId] = useState<EventThemePresetId>('candidary-default');
+  const [timeZone, setTimeZone] = useState(detectedTimeZone);
+  const [zoneOptions] = useState(knownTimeZones);
   const [qr, setQr] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -59,6 +86,7 @@ export function CreatePage() {
     try {
       const result = await api<Created>('/api/events', { method: 'POST', body: JSON.stringify({
         name: data.get('name'), eventDate: data.get('eventDate'), welcomeMessage: data.get('welcomeMessage'),
+        eventTimezone: data.get('eventTimezone'), rsvpDeadlineDate: data.get('rsvpDeadlineDate'),
         theme: { version: EVENT_THEME_VERSION, presetId: themePresetId, overrides: {} },
       }) });
       setCreated(result);
@@ -86,6 +114,7 @@ export function CreatePage() {
           is saved to an account it stops being true, and leaving it up would talk a
           host out of the recovery they just set up. */}
       <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
+      <p className="form-note">RSVP is paused until you add and validate the guest list, and photo delivery is paused until you open it.</p>
       <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
       <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
     </section>
@@ -110,6 +139,8 @@ export function CreatePage() {
       {/* The error sits outside the label: a name identifies the field, an error describes it. */}
       <div className="create-field"><label>Event name<input name="name" maxLength={80} required aria-invalid={Boolean(fields.name)} aria-describedby={fields.name ? 'name-error' : undefined} /></label>{fields.name && <small id="name-error">{fields.name}</small>}</div>
       <div className="create-field"><label>Event date<input name="eventDate" type="date" required aria-invalid={Boolean(fields.eventDate)} aria-describedby={fields.eventDate ? 'eventDate-error' : undefined} /></label>{fields.eventDate && <small id="eventDate-error">{fields.eventDate}</small>}</div>
+      <div className="create-field"><label>Event time zone<input name="eventTimezone" list="event-time-zones" value={timeZone} onChange={(changed) => setTimeZone(changed.target.value)} required autoComplete="off" spellCheck={false} aria-invalid={Boolean(fields.eventTimezone)} aria-describedby={fields.eventTimezone ? 'eventTimezone-error' : 'eventTimezone-hint'} /></label><small id="eventTimezone-hint">RSVP deadlines close at the end of this day, in this zone.</small>{fields.eventTimezone && <small id="eventTimezone-error">{fields.eventTimezone}</small>}{zoneOptions.length > 0 && <datalist id="event-time-zones">{zoneOptions.map((zone) => <option key={zone} value={zone} />)}</datalist>}</div>
+      <div className="create-field"><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" required aria-invalid={Boolean(fields.rsvpDeadlineDate)} aria-describedby={fields.rsvpDeadlineDate ? 'rsvpDeadlineDate-error' : undefined} /></label>{fields.rsvpDeadlineDate && <small id="rsvpDeadlineDate-error">{fields.rsvpDeadlineDate}</small>}</div>
       <div className="create-field"><label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." aria-invalid={Boolean(fields.welcomeMessage)} aria-describedby={fields.welcomeMessage ? 'welcomeMessage-error' : undefined} /></label>{fields.welcomeMessage && <small id="welcomeMessage-error">{fields.welcomeMessage}</small>}</div>
       <EventThemePresetSelector name="themePreset" value={themePresetId} onChange={setThemePresetId} disabled={busy} />
       <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : 'Optional · JPEG, PNG, or WebP · 10 MB max'}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only cover-field__input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0] ?? null; setCover(file && file.size <= 10 * 1024 * 1024 ? file : null); if (file && file.size > 10 * 1024 * 1024) setError('Cover photos must be 10 MB or smaller.'); }} /></label>
