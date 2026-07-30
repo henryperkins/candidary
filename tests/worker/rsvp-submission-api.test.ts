@@ -26,6 +26,7 @@ interface Household {
   id: string;
   version: number;
   editable: boolean;
+  deadlineAt: string;
   invitees: Array<{ id: string; kind: string; displayName: string | null; attendance: string }>;
 }
 
@@ -195,6 +196,48 @@ describe('household responses', () => {
     expect(response.status).toBe(422);
     expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
   });
+
+  it.each([
+    ['a name over 80 characters', 'x'.repeat(81)],
+    ['a Unicode format character', 'Sam\u200cRivera'],
+  ])('refuses an attending plus-one with %s', async (_label, displayName) => {
+    const { access, session } = await opened();
+    const response = await submit(access, session, {
+      version: session.household.version,
+      idempotencyKey: 'invalid-plus-one-name',
+      invitees: answers(session.household, 'attending', displayName),
+    });
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+  });
+
+  it('refuses pending choices and a household larger than the capacity limit', async () => {
+    const { access, session } = await opened();
+    const pending = await submit(access, session, {
+      version: session.household.version,
+      idempotencyKey: 'pending-choice',
+      invitees: session.household.invitees.map((invitee) => ({
+        id: invitee.id,
+        attendance: 'pending',
+        displayName: null,
+      })),
+    });
+    expect(pending.status).toBe(422);
+
+    const overflow = await submit(access, session, {
+      version: session.household.version,
+      idempotencyKey: 'capacity-overflow',
+      invitees: Array.from({ length: 31 }, (_, index) => ({
+        id: index === 0
+          ? session.household.invitees[0]!.id
+          : crypto.randomUUID(),
+        attendance: 'declined',
+        displayName: null,
+      })),
+    });
+    expect(overflow.status).toBe(422);
+  });
 });
 
 describe('deadlines and pauses', () => {
@@ -219,6 +262,13 @@ describe('deadlines and pauses', () => {
     });
     expect(refused.status).toBe(409);
     expect((await refused.json<any>()).code).toBe('RSVP_HOUSEHOLD_CONFLICT');
+    const readOnly = await createApp().request(
+      `/api/event/${access.event.slug}/rsvp/household`,
+      { headers: { cookie: session.cookie } },
+      testEnv,
+    );
+    expect(readOnly.status).toBe(200);
+    expect((await readOnly.json<any>()).data.household.editable).toBe(false);
   });
 
   it('refuses a write while RSVP is paused', async () => {
@@ -343,12 +393,15 @@ describe('replay and conflict', () => {
     const refused = await submit(access, session, {
       version: 1, idempotencyKey: 'device-b', invitees: answers(session.household, 'declined'),
     });
+    const body = await refused.json<any>();
 
     expect(refused.status).toBe(409);
-    expect((await refused.json<any>()).code).toBe('RSVP_HOUSEHOLD_CONFLICT');
+    expect(body.code).toBe('RSVP_HOUSEHOLD_CONFLICT');
     expect((await storedAttendance(session.household.id)).every((row) => row[2] === 'attending')).toBe(true);
-    // The refusal carries no roster detail; the client re-reads it.
-    expect(JSON.stringify(await refused.json<any>().catch(() => ({})))).not.toContain('Perkins');
+    // The one error envelope carries a message only; the client re-reads the
+    // current household instead of receiving a second shape in fieldErrors.
+    expect(Object.keys(body).sort()).toEqual(['code', 'message', 'requestId']);
+    expect(JSON.stringify(body)).not.toContain('Perkins');
   });
 
   it('lets exactly one of two simultaneous sends win', async () => {
@@ -366,6 +419,33 @@ describe('replay and conflict', () => {
     expect(statuses).toEqual([200, 409]);
     expect(await env.DB.prepare('SELECT version FROM rsvp_households WHERE id = ?')
       .bind(session.household.id).first('version')).toBe(2);
+  });
+
+  it('does not retain a receipt for the concurrent submission that lost', async () => {
+    const { access, session } = await opened();
+    const requests = [
+      {
+        version: 1,
+        idempotencyKey: 'loser-receipt-a',
+        invitees: answers(session.household, 'attending', 'Sam Rivera'),
+      },
+      {
+        version: 1,
+        idempotencyKey: 'loser-receipt-b',
+        invitees: answers(session.household, 'declined'),
+      },
+    ];
+    const responses = await Promise.all(requests.map((request) => submit(access, session, request)));
+    const losingIndex = responses.findIndex((response) => response.status === 409);
+
+    expect(losingIndex).toBeGreaterThanOrEqual(0);
+    const replay = await submit(access, session, requests[losingIndex]!);
+
+    expect(replay.status).toBe(409);
+    expect((await replay.json<any>()).code).toBe('RSVP_HOUSEHOLD_CONFLICT');
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM rsvp_submission_receipts WHERE household_id = ?
+    `).bind(session.household.id).first('count')).toBe(1);
   });
 
   it('will not accept a submission without the RSVP CSRF pair', async () => {

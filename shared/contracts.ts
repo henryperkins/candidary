@@ -338,6 +338,9 @@ export interface RsvpHouseholdDetail {
 export interface RsvpNamedInviteeDraft {
   id: string | null;
   displayName: string;
+  // Required only when this is a new row in a household that already
+  // responded. Existing rows preserve attendance through roster edits.
+  attendance?: Exclude<RsvpAttendance, 'pending'>;
 }
 
 export interface RsvpHouseholdCreateRequest {
@@ -352,6 +355,12 @@ export interface RsvpHouseholdUpdateRequest {
   label: string;
   plusOneSlots: number;
   namedInvitees: RsvpNamedInviteeDraft[];
+  // Covers exactly the newly added plus-one capacity of a household that
+  // already responded. Unresponded additions always start pending.
+  newPlusOneResponses?: Array<{
+    attendance: Exclude<RsvpAttendance, 'pending'>;
+    displayName: string | null;
+  }>;
   expectedVersion: number;
   expectedRosterVersion: number;
 }
@@ -359,6 +368,10 @@ export interface RsvpHouseholdUpdateRequest {
 export interface RsvpHouseholdVersionRequest {
   expectedVersion: number;
   expectedRosterVersion: number;
+}
+
+export interface RsvpHouseholdResponseRequest extends RsvpHouseholdVersionRequest {
+  invitees: RsvpSubmissionInvitee[];
 }
 
 // One exported line per named invitee or plus-one slot, including pending and

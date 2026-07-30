@@ -1,16 +1,27 @@
 import type {
+  RsvpAttendance,
+  RsvpHouseholdCreateRequest,
+  RsvpHouseholdDetail,
+  RsvpHouseholdFilter,
+  RsvpHouseholdListPage,
+  RsvpHouseholdResponseRequest,
+  RsvpHouseholdUpdateRequest,
   RsvpHouseholdView,
   RsvpImportCommitResponse,
   RsvpImportPreview,
+  RsvpSummary,
   RsvpSubmissionInvitee,
   RsvpSubmissionRequest,
   RsvpSubmissionResponse,
 } from '../../shared/contracts';
-import { parseRsvpCsv } from '../../shared/csv';
+import { csvCell, parseRsvpCsv } from '../../shared/csv';
 import { ApiError } from '../../shared/errors';
+import { localDateForInstant } from '../../shared/event-time';
 import {
+  RSVP_HOUSEHOLD_KEY_PATTERN,
   checkHouseholdCapacity,
   checkRosterCapacity,
+  deriveRsvpSummary,
   findLookupCollisions,
   normalizeInvitedName,
   parsePersonText,
@@ -19,10 +30,16 @@ import {
 import { EventsRepository } from '../db/events';
 import type { AuthenticatedHousehold } from '../auth/rsvp';
 import {
+  ADVANCE_ROSTER_SQL,
+  ARCHIVE_HOUSEHOLD_SQL,
+  buildManagedInviteeInsertStatements,
   buildRosterStatements,
   COMMIT_HOUSEHOLD_SQL,
+  HOST_SUBMIT_INVITEES_SQL,
   RsvpRepository,
   SUBMIT_INVITEES_SQL,
+  UPDATE_HOUSEHOLD_ROSTER_SQL,
+  type ManagedInviteeInput,
   type RosterInviteeInput,
 } from '../db/rsvp';
 import {
@@ -30,8 +47,10 @@ import {
   RSVP_LOOKUP_NAME_LIMIT,
   RsvpRateLimitsRepository,
 } from '../db/rsvp-rate-limits';
+import { RsvpSessionsRepository } from '../db/rsvp-sessions';
 import type { EventRecord, RsvpHouseholdRecord, RsvpInviteeRecord } from '../db/types';
 import type { AppEnv } from '../env';
+import { encodeRsvpCursor, type RsvpHouseholdCursor } from '../http/rsvp-cursor';
 import { digestSecret } from '../security/crypto';
 
 function rosterInvalid(message: string): ApiError {
@@ -41,6 +60,33 @@ function rosterInvalid(message: string): ApiError {
 function importConflict(message: string): ApiError {
   return new ApiError('RSVP_IMPORT_CONFLICT', message, 409);
 }
+
+function managerConflict(): ApiError {
+  return new ApiError(
+    'RSVP_HOUSEHOLD_CONFLICT',
+    'This household changed since you opened it. Reload and review it before saving.',
+    409,
+  );
+}
+
+function rosterValidation(message: string): ApiError {
+  return new ApiError('VALIDATION_FAILED', message, 422);
+}
+
+const RSVP_EXPORT_HEADER = [
+  'household_key',
+  'household_label',
+  'household_archived_at',
+  'member_kind',
+  'member_name',
+  'attendance',
+  'member_order',
+  'household_version',
+  'first_responded_at',
+  'last_responded_at',
+  'last_actor',
+  'event_timezone',
+] as const;
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -192,6 +238,127 @@ export class RsvpService {
       firstRespondedAt: household.firstRespondedAt,
       latestRespondedAt: household.latestRespondedAt,
       latestActor: household.latestActorKind,
+    };
+  }
+
+  private householdDetail(
+    household: RsvpHouseholdRecord,
+    invitees: readonly RsvpInviteeRecord[],
+  ): RsvpHouseholdDetail {
+    return {
+      id: household.id,
+      householdKey: household.householdKey,
+      label: household.label,
+      plusOneSlots: invitees.filter((invitee) => invitee.kind === 'plus_one').length,
+      version: household.version,
+      archivedAt: household.archivedAt,
+      invitees: [...invitees]
+        .sort((left, right) => left.sortOrder - right.sortOrder)
+        .map((invitee) => ({
+          id: invitee.id,
+          kind: invitee.kind,
+          displayName: invitee.displayName,
+          attendance: invitee.attendance,
+          order: invitee.sortOrder,
+        })),
+      firstRespondedAt: household.firstRespondedAt,
+      latestRespondedAt: household.latestRespondedAt,
+      latestActor: household.latestActorKind,
+      updatedAt: household.updatedAt,
+    };
+  }
+
+  async managerHousehold(eventId: string, householdId: string): Promise<RsvpHouseholdDetail> {
+    const household = await this.rsvp.getHousehold(eventId, householdId);
+    if (!household) {
+      throw new ApiError('EVENT_NOT_FOUND', 'This household could not be found.', 404);
+    }
+    return this.householdDetail(
+      household,
+      await this.rsvp.listInvitees(eventId, householdId),
+    );
+  }
+
+  async summary(eventId: string): Promise<RsvpSummary> {
+    const households = await this.rsvp.listHouseholds(eventId);
+    const invitees = await this.rsvp.listEventInvitees(eventId);
+    const byHousehold = new Map<string, RsvpInviteeRecord[]>();
+    for (const invitee of invitees) {
+      const rows = byHousehold.get(invitee.householdId);
+      if (rows) rows.push(invitee);
+      else byHousehold.set(invitee.householdId, [invitee]);
+    }
+    return deriveRsvpSummary(households.map((household) => ({
+      archived: household.archivedAt !== null,
+      invitees: (byHousehold.get(household.id) ?? []).map((invitee) => ({
+        kind: invitee.kind,
+        attendance: invitee.attendance,
+      })),
+    })));
+  }
+
+  async listManagerHouseholds(input: {
+    eventId: string;
+    query?: string;
+    state: RsvpHouseholdFilter;
+    cursor?: RsvpHouseholdCursor;
+  }): Promise<RsvpHouseholdListPage> {
+    const pageSize = 50;
+    const rows = await this.rsvp.listManagerHouseholds({
+      ...input,
+      limit: pageSize + 1,
+    });
+    const hasMore = rows.length > pageSize;
+    const page = rows.slice(0, pageSize);
+    const last = page.at(-1);
+    return {
+      households: page.map((row) => ({
+        id: row.id,
+        householdKey: row.household_key,
+        label: row.label,
+        version: row.version,
+        archivedAt: row.archived_at,
+        attending: row.attending,
+        declined: row.declined,
+        awaitingResponse: row.awaiting_response,
+        invitedCapacity: row.invited_capacity,
+        firstRespondedAt: row.first_responded_at,
+        latestRespondedAt: row.latest_responded_at,
+        latestActor: row.latest_actor_kind,
+        updatedAt: row.updated_at,
+      })),
+      nextCursor: hasMore && last
+        ? encodeRsvpCursor({ updatedAt: last.updated_at, id: last.id })
+        : null,
+    };
+  }
+
+  async exportCsv(event: EventRecord): Promise<{
+    csv: string;
+    filename: string;
+  }> {
+    const nowIso = new Date().toISOString();
+    const rows = await this.rsvp.listExportRows(event.id);
+    const lines = [
+      RSVP_EXPORT_HEADER.join(','),
+      ...rows.map((row) => [
+        row.household_key,
+        row.household_label,
+        row.household_archived_at,
+        row.member_kind,
+        row.member_name,
+        row.attendance,
+        row.member_order,
+        row.household_version,
+        row.first_responded_at,
+        row.last_responded_at,
+        row.last_actor,
+        event.eventTimezone,
+      ].map(csvCell).join(',')),
+    ];
+    return {
+      csv: `${lines.join('\r\n')}\r\n`,
+      filename: `${event.slug}-rsvp-${localDateForInstant(nowIso, event.eventTimezone)}.csv`,
     };
   }
 
@@ -404,6 +571,7 @@ export class RsvpService {
         ),
         this.env.DB.prepare(COMMIT_HOUSEHOLD_SQL).bind(
           canonical.length,
+          request.version,
           request.idempotencyKey,
           digest,
           nowIso,
@@ -412,7 +580,6 @@ export class RsvpService {
           nowIso,
           auth.household.id,
           auth.event.id,
-          request.version,
         ),
         this.rsvp.receiptStatement({
           eventId: auth.event.id,
@@ -425,7 +592,10 @@ export class RsvpService {
       ]);
       // A guarded write that matched nothing means the deadline passed, RSVP
       // paused, or the session lapsed between the check and the write.
-      if ((results[1]?.meta.changes ?? 0) !== 1) {
+      if (
+        (results[0]?.meta.changes ?? 0) !== canonical.length
+        || (results[1]?.meta.changes ?? 0) !== 1
+      ) {
         throw this.householdConflict();
       }
     } catch (error) {
@@ -492,6 +662,503 @@ export class RsvpService {
       'This invitation changed since you opened it. Review it and send again.',
       409,
     );
+  }
+
+  private cleanPersonText(value: string, message: string): string {
+    const parsed = parsePersonText(value);
+    if (!parsed.ok) throw rosterValidation(message);
+    return parsed.value;
+  }
+
+  private async assertManagerVersions(
+    eventId: string,
+    expectedRosterVersion: number,
+    household?: RsvpHouseholdRecord,
+    expectedVersion?: number,
+  ): Promise<void> {
+    const currentEvent = await this.events.getById(eventId);
+    if (!currentEvent || currentEvent.rsvpRosterVersion !== expectedRosterVersion) {
+      throw managerConflict();
+    }
+    if (
+      household
+      && (household.archivedAt !== null || household.version !== expectedVersion)
+    ) {
+      throw managerConflict();
+    }
+  }
+
+  private async managerWriteFailure(
+    error: unknown,
+    input: {
+      eventId: string;
+      expectedRosterVersion: number;
+      householdId?: string;
+      expectedVersion?: number;
+    },
+  ): Promise<never> {
+    const event = await this.events.getById(input.eventId);
+    if (!event || event.rsvpRosterVersion !== input.expectedRosterVersion) {
+      throw managerConflict();
+    }
+    if (input.householdId) {
+      const household = await this.rsvp.getHousehold(input.eventId, input.householdId);
+      if (
+        !household
+        || household.archivedAt !== null
+        || household.version !== input.expectedVersion
+      ) {
+        throw managerConflict();
+      }
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('UNIQUE constraint failed: rsvp_households')) {
+      throw rosterInvalid('That household key is already in use.');
+    }
+    throw error;
+  }
+
+  private async assertProspectiveRoster(input: {
+    eventId: string;
+    householdId: string;
+    namedCount: number;
+    plusOneCount: number;
+    nameKeys: string[];
+    mode: 'add' | 'replace' | 'remove';
+  }): Promise<void> {
+    if (input.mode !== 'remove') {
+      const householdIssue = checkHouseholdCapacity({
+        namedCount: input.namedCount,
+        plusOneSlots: input.plusOneCount,
+      });
+      if (householdIssue) {
+        throw rosterValidation(
+          householdIssue === 'household_named_required'
+            ? 'Add at least one named guest to this household.'
+            : 'This household is over its size limit.',
+        );
+      }
+    }
+
+    const currentCompositions = await this.rsvp.listHouseholdCompositions(input.eventId);
+    const compositions = currentCompositions
+      .filter((household) => household.householdId !== input.householdId);
+    if (input.mode !== 'remove') {
+      compositions.push({
+        householdId: input.householdId,
+        namedCount: input.namedCount,
+        plusOneCount: input.plusOneCount,
+      });
+    }
+    for (const household of compositions) {
+      if (checkHouseholdCapacity({
+        namedCount: household.namedCount,
+        plusOneSlots: household.plusOneCount,
+      })) {
+        throw rosterInvalid('A household is over its size limit. Review the guest list.');
+      }
+    }
+    const invitedCapacity = compositions.reduce(
+      (total, household) => total + household.namedCount + household.plusOneCount,
+      0,
+    );
+    const rosterIssue = checkRosterCapacity({
+      households: compositions.length,
+      invitedCapacity,
+    });
+    if (rosterIssue === 'event_household_limit') {
+      throw rosterInvalid('This event can hold at most 500 households.');
+    }
+    if (rosterIssue === 'event_capacity_limit') {
+      throw rosterInvalid('This event can invite at most 500 people including plus-one slots.');
+    }
+
+    const keys = (await this.rsvp.listActiveLookupKeys(input.eventId))
+      .filter((household) => household.householdId !== input.householdId);
+    if (input.mode !== 'remove') {
+      keys.push({ householdId: input.householdId, nameKeys: input.nameKeys });
+    }
+    if (findLookupCollisions(keys).length > 0) {
+      throw rosterInvalid(
+        'These names would make one or more households impossible to tell apart. Add a distinguishing name.',
+      );
+    }
+  }
+
+  async createManagerHousehold(
+    event: EventRecord,
+    input: RsvpHouseholdCreateRequest,
+    now = new Date(),
+  ): Promise<{ household: RsvpHouseholdDetail; rosterVersion: number }> {
+    if (!RSVP_HOUSEHOLD_KEY_PATTERN.test(input.householdKey)) {
+      throw rosterValidation(
+        'Household keys use lowercase letters, numbers, hyphens, and underscores, up to 64 characters.',
+      );
+    }
+    const label = this.cleanPersonText(input.label, 'Enter a household label from 1 to 80 characters.');
+    const names = input.namedInvitees.map((name) => (
+      this.cleanPersonText(name, 'Enter each named guest from 1 to 80 characters.')
+    ));
+    const householdId = crypto.randomUUID();
+    const nameKeys = await Promise.all(names.map(async (name) => (
+      this.lookupDigest(event.id, normalizeInvitedName(name))
+    )));
+    await this.assertManagerVersions(event.id, input.expectedRosterVersion);
+    await this.assertProspectiveRoster({
+      eventId: event.id,
+      householdId,
+      namedCount: names.length,
+      plusOneCount: input.plusOneSlots,
+      nameKeys,
+      mode: 'add',
+    });
+    if (await this.rsvp.getHouseholdByKey(event.id, input.householdKey)) {
+      throw rosterInvalid('That household key is already in use.');
+    }
+
+    const createdAt = now.toISOString();
+    const invitees: RosterInviteeInput[] = names.map((displayName, sortOrder) => ({
+      id: crypto.randomUUID(),
+      householdId,
+      kind: 'named',
+      displayName,
+      lookupDigest: nameKeys[sortOrder]!,
+      sortOrder,
+    }));
+    for (let slot = 0; slot < input.plusOneSlots; slot += 1) {
+      invitees.push({
+        id: crypto.randomUUID(),
+        householdId,
+        kind: 'plus_one',
+        displayName: null,
+        lookupDigest: null,
+        sortOrder: names.length + slot,
+      });
+    }
+    const statements = buildRosterStatements({
+      eventId: event.id,
+      households: [{ id: householdId, householdKey: input.householdKey, label }],
+      invitees,
+      createdAt,
+    });
+
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(ADVANCE_ROSTER_SQL)
+          .bind(input.expectedRosterVersion, event.id),
+        ...this.rsvp.toStatements(statements),
+      ]);
+    } catch (error) {
+      await this.managerWriteFailure(error, {
+        eventId: event.id,
+        expectedRosterVersion: input.expectedRosterVersion,
+      });
+    }
+    return {
+      household: await this.managerHousehold(event.id, householdId),
+      rosterVersion: input.expectedRosterVersion + 1,
+    };
+  }
+
+  async updateManagerHousehold(
+    event: EventRecord,
+    householdId: string,
+    input: RsvpHouseholdUpdateRequest,
+    now = new Date(),
+  ): Promise<{ household: RsvpHouseholdDetail; rosterVersion: number }> {
+    const household = await this.rsvp.getHousehold(event.id, householdId);
+    if (!household) throw new ApiError('EVENT_NOT_FOUND', 'This household could not be found.', 404);
+    await this.assertManagerVersions(
+      event.id,
+      input.expectedRosterVersion,
+      household,
+      input.expectedVersion,
+    );
+
+    const current = await this.rsvp.listInvitees(event.id, householdId);
+    const existingNamed = current.filter((invitee) => invitee.kind === 'named');
+    const existingPlusOnes = current
+      .filter((invitee) => invitee.kind === 'plus_one')
+      .sort((left, right) => left.sortOrder - right.sortOrder);
+    const byNamedId = new Map(existingNamed.map((invitee) => [invitee.id, invitee]));
+    const seen = new Set<string>();
+    const retained: Array<{
+      record: RsvpInviteeRecord;
+      displayName: string;
+      lookupDigest: string;
+    }> = [];
+    const additions: Array<{
+      displayName: string;
+      lookupDigest: string;
+      attendance?: Exclude<RsvpAttendance, 'pending'>;
+    }> = [];
+
+    for (const draft of input.namedInvitees) {
+      const displayName = this.cleanPersonText(
+        draft.displayName,
+        'Enter each named guest from 1 to 80 characters.',
+      );
+      const lookupDigest = await this.lookupDigest(
+        event.id,
+        normalizeInvitedName(displayName),
+      );
+      if (draft.id === null) {
+        additions.push({ displayName, lookupDigest, attendance: draft.attendance });
+        continue;
+      }
+      const record = byNamedId.get(draft.id);
+      if (!record || seen.has(draft.id)) {
+        throw rosterValidation('This edit does not match the current named guest list.');
+      }
+      seen.add(draft.id);
+      retained.push({ record, displayName, lookupDigest });
+    }
+
+    const removedNamed = existingNamed.filter((invitee) => !seen.has(invitee.id));
+    const responded = household.firstRespondedAt !== null;
+    if (responded && removedNamed.length > 0) {
+      throw rosterInvalid('A named guest cannot be removed after this household responded.');
+    }
+
+    const growth = Math.max(0, input.plusOneSlots - existingPlusOnes.length);
+    if (responded) {
+      if (additions.some((addition) => addition.attendance === undefined)) {
+        throw rosterValidation(
+          'Choose attending or declined for every named guest added after a response.',
+        );
+      }
+      if ((input.newPlusOneResponses?.length ?? 0) !== growth) {
+        throw rosterValidation(
+          'Choose attending or declined for every plus-one slot added after a response.',
+        );
+      }
+    }
+
+    const reduction = Math.max(0, existingPlusOnes.length - input.plusOneSlots);
+    const removedPlusOnes = reduction === 0 ? [] : existingPlusOnes.slice(-reduction);
+    if (removedPlusOnes.some((invitee) => invitee.attendance === 'attending')) {
+      throw rosterInvalid(
+        'Reduce plus-one capacity only after the highest guest slots are declined.',
+      );
+    }
+
+    const names = [...retained.map((invitee) => invitee.lookupDigest), ...additions.map(
+      (invitee) => invitee.lookupDigest,
+    )];
+    await this.assertProspectiveRoster({
+      eventId: event.id,
+      householdId,
+      namedCount: retained.length + additions.length,
+      plusOneCount: input.plusOneSlots,
+      nameKeys: names,
+      mode: 'replace',
+    });
+
+    const changedAt = now.toISOString();
+    let nextOrder = current.reduce(
+      (highest, invitee) => Math.max(highest, invitee.sortOrder),
+      -1,
+    ) + 1;
+    const inserted: ManagedInviteeInput[] = additions.map((addition) => ({
+      id: crypto.randomUUID(),
+      householdId,
+      kind: 'named',
+      displayName: addition.displayName,
+      lookupDigest: addition.lookupDigest,
+      attendance: responded ? addition.attendance! : 'pending',
+      sortOrder: nextOrder++,
+    }));
+    for (let slot = 0; slot < growth; slot += 1) {
+      const answer = responded ? input.newPlusOneResponses![slot]! : undefined;
+      let displayName: string | null = null;
+      if (answer?.attendance === 'attending') {
+        displayName = this.cleanPersonText(
+          answer.displayName ?? '',
+          'Enter a name for each attending guest.',
+        );
+      }
+      inserted.push({
+        id: crypto.randomUUID(),
+        householdId,
+        kind: 'plus_one',
+        displayName,
+        lookupDigest: null,
+        attendance: responded ? answer!.attendance : 'pending',
+        sortOrder: nextOrder++,
+      });
+    }
+
+    const deletedIds = [...removedNamed, ...removedPlusOnes].map((invitee) => invitee.id);
+    const statements: D1PreparedStatement[] = [
+      this.env.DB.prepare(ADVANCE_ROSTER_SQL)
+        .bind(input.expectedRosterVersion, event.id),
+      this.env.DB.prepare(UPDATE_HOUSEHOLD_ROSTER_SQL).bind(
+        input.expectedVersion,
+        this.cleanPersonText(input.label, 'Enter a household label from 1 to 80 characters.'),
+        changedAt,
+        householdId,
+        event.id,
+      ),
+      ...retained.map((invitee) => this.env.DB.prepare(`
+        UPDATE rsvp_invitees
+        SET display_name = ?, lookup_digest = ?, updated_at = ?
+        WHERE id = ? AND event_id = ? AND household_id = ? AND kind = 'named'
+      `).bind(
+        invitee.displayName,
+        invitee.lookupDigest,
+        changedAt,
+        invitee.record.id,
+        event.id,
+        householdId,
+      )),
+    ];
+    if (deletedIds.length > 0) {
+      statements.push(this.env.DB.prepare(`
+        DELETE FROM rsvp_invitees
+        WHERE event_id = ? AND household_id = ?
+          AND id IN (SELECT value FROM json_each(?))
+      `).bind(event.id, householdId, JSON.stringify(deletedIds)));
+    }
+    statements.push(...this.rsvp.toStatements(buildManagedInviteeInsertStatements({
+      eventId: event.id,
+      invitees: inserted,
+      createdAt: changedAt,
+    })));
+
+    try {
+      await this.env.DB.batch(statements);
+    } catch (error) {
+      await this.managerWriteFailure(error, {
+        eventId: event.id,
+        expectedRosterVersion: input.expectedRosterVersion,
+        householdId,
+        expectedVersion: input.expectedVersion,
+      });
+    }
+    return {
+      household: await this.managerHousehold(event.id, householdId),
+      rosterVersion: input.expectedRosterVersion + 1,
+    };
+  }
+
+  async correctManagerHousehold(
+    event: EventRecord,
+    householdId: string,
+    input: RsvpHouseholdResponseRequest,
+    now = new Date(),
+  ): Promise<{ household: RsvpHouseholdDetail; rosterVersion: number }> {
+    const household = await this.rsvp.getHousehold(event.id, householdId);
+    if (!household) throw new ApiError('EVENT_NOT_FOUND', 'This household could not be found.', 404);
+    await this.assertManagerVersions(
+      event.id,
+      input.expectedRosterVersion,
+      household,
+      input.expectedVersion,
+    );
+    const invitees = await this.rsvp.listInvitees(event.id, householdId);
+    const canonical = this.canonicalize(invitees, input.invitees);
+    await this.assertProspectiveRoster({
+      eventId: event.id,
+      householdId,
+      namedCount: invitees.filter((invitee) => invitee.kind === 'named').length,
+      plusOneCount: invitees.filter((invitee) => invitee.kind === 'plus_one').length,
+      nameKeys: invitees
+        .filter((invitee) => invitee.kind === 'named')
+        .map((invitee) => invitee.lookupDigest!),
+      mode: 'replace',
+    });
+
+    const changedAt = now.toISOString();
+    const digest = await this.requestDigest(input.expectedVersion, canonical);
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(ADVANCE_ROSTER_SQL)
+          .bind(input.expectedRosterVersion, event.id),
+        this.env.DB.prepare(HOST_SUBMIT_INVITEES_SQL).bind(
+          JSON.stringify(canonical),
+          changedAt,
+          event.id,
+          householdId,
+          householdId,
+          input.expectedVersion,
+        ),
+        this.env.DB.prepare(COMMIT_HOUSEHOLD_SQL).bind(
+          canonical.length,
+          input.expectedVersion,
+          `host:${crypto.randomUUID()}`,
+          digest,
+          changedAt,
+          changedAt,
+          'host',
+          changedAt,
+          householdId,
+          event.id,
+        ),
+      ]);
+    } catch (error) {
+      await this.managerWriteFailure(error, {
+        eventId: event.id,
+        expectedRosterVersion: input.expectedRosterVersion,
+        householdId,
+        expectedVersion: input.expectedVersion,
+      });
+    }
+    return {
+      household: await this.managerHousehold(event.id, householdId),
+      rosterVersion: input.expectedRosterVersion + 1,
+    };
+  }
+
+  async archiveManagerHousehold(
+    event: EventRecord,
+    householdId: string,
+    input: { expectedVersion: number; expectedRosterVersion: number },
+    now = new Date(),
+  ): Promise<{ household: RsvpHouseholdDetail; rosterVersion: number }> {
+    const household = await this.rsvp.getHousehold(event.id, householdId);
+    if (!household) throw new ApiError('EVENT_NOT_FOUND', 'This household could not be found.', 404);
+    await this.assertManagerVersions(
+      event.id,
+      input.expectedRosterVersion,
+      household,
+      input.expectedVersion,
+    );
+    await this.assertProspectiveRoster({
+      eventId: event.id,
+      householdId,
+      namedCount: 0,
+      plusOneCount: 0,
+      nameKeys: [],
+      mode: 'remove',
+    });
+
+    const archivedAt = now.toISOString();
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(ADVANCE_ROSTER_SQL)
+          .bind(input.expectedRosterVersion, event.id),
+        this.env.DB.prepare(ARCHIVE_HOUSEHOLD_SQL).bind(
+          input.expectedVersion,
+          archivedAt,
+          archivedAt,
+          householdId,
+          event.id,
+        ),
+        new RsvpSessionsRepository(this.env.DB)
+          .revokeForHouseholdStatement(event.id, householdId, archivedAt),
+      ]);
+    } catch (error) {
+      await this.managerWriteFailure(error, {
+        eventId: event.id,
+        expectedRosterVersion: input.expectedRosterVersion,
+        householdId,
+        expectedVersion: input.expectedVersion,
+      });
+    }
+    return {
+      household: await this.managerHousehold(event.id, householdId),
+      rosterVersion: input.expectedRosterVersion + 1,
+    };
   }
 
   private lookupDigest(eventId: string, normalizedName: string): Promise<string> {

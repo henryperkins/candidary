@@ -1,4 +1,10 @@
-import type { RsvpActor, RsvpAttendance, RsvpInviteeKind } from '../../shared/contracts';
+import type {
+  RsvpActor,
+  RsvpAttendance,
+  RsvpHouseholdFilter,
+  RsvpInviteeKind,
+} from '../../shared/contracts';
+import type { RsvpHouseholdCursor } from '../http/rsvp-cursor';
 import type { HouseholdNameKeys } from '../../shared/rsvp';
 import type { RsvpHouseholdRecord, RsvpInviteeRecord } from './types';
 
@@ -44,6 +50,36 @@ export interface RsvpInviteeRow {
   updated_at: string;
 }
 
+export interface RsvpHouseholdListRow {
+  id: string;
+  household_key: string;
+  label: string;
+  version: number;
+  archived_at: string | null;
+  attending: number;
+  declined: number;
+  awaiting_response: number;
+  invited_capacity: number;
+  first_responded_at: string | null;
+  latest_responded_at: string | null;
+  latest_actor_kind: RsvpActor | null;
+  updated_at: string;
+}
+
+export interface RsvpExportRowRecord {
+  household_key: string;
+  household_label: string;
+  household_archived_at: string | null;
+  member_kind: RsvpInviteeKind;
+  member_name: string | null;
+  attendance: RsvpAttendance;
+  member_order: number;
+  household_version: number;
+  first_responded_at: string | null;
+  last_responded_at: string | null;
+  last_actor: RsvpActor | null;
+}
+
 export function mapRsvpHousehold(row: RsvpHouseholdRow): RsvpHouseholdRecord {
   return {
     id: row.id,
@@ -78,6 +114,10 @@ export function mapRsvpInvitee(row: RsvpInviteeRow): RsvpInviteeRecord {
   };
 }
 
+function escapeLike(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
+}
+
 const HOUSEHOLD_COLUMNS = [
   'id', 'event_id', 'household_key', 'label', 'created_at', 'updated_at',
 ] as const;
@@ -87,7 +127,12 @@ const INVITEE_COLUMNS = [
   'sort_order', 'created_at', 'updated_at',
 ] as const;
 
-function chunkedInsert(
+const MANAGED_INVITEE_COLUMNS = [
+  'id', 'event_id', 'household_id', 'kind', 'display_name', 'lookup_digest',
+  'attendance', 'sort_order', 'created_at', 'updated_at',
+] as const;
+
+export function chunkedInsert(
   table: string,
   columns: readonly string[],
   rows: readonly StatementBinding[][],
@@ -118,6 +163,10 @@ export interface RosterInviteeInput {
   displayName: string | null;
   lookupDigest: string | null;
   sortOrder: number;
+}
+
+export interface ManagedInviteeInput extends RosterInviteeInput {
+  attendance: RsvpAttendance;
 }
 
 /**
@@ -156,6 +205,29 @@ export function buildRosterStatements(input: {
     ...chunkedInsert('rsvp_households', HOUSEHOLD_COLUMNS, households),
     ...chunkedInsert('rsvp_invitees', INVITEE_COLUMNS, invitees),
   ];
+}
+
+export function buildManagedInviteeInsertStatements(input: {
+  eventId: string;
+  invitees: readonly ManagedInviteeInput[];
+  createdAt: string;
+}): StatementPlan[] {
+  return chunkedInsert(
+    'rsvp_invitees',
+    MANAGED_INVITEE_COLUMNS,
+    input.invitees.map((invitee): StatementBinding[] => [
+      invitee.id,
+      input.eventId,
+      invitee.householdId,
+      invitee.kind,
+      invitee.displayName,
+      invitee.lookupDigest,
+      invitee.attendance,
+      invitee.sortOrder,
+      input.createdAt,
+      input.createdAt,
+    ]),
+  );
 }
 
 /**
@@ -269,7 +341,11 @@ export const HOST_SUBMIT_INVITEES_SQL = `
  */
 export const COMMIT_HOUSEHOLD_SQL = `
   UPDATE rsvp_households
-  SET version = CASE WHEN changes() = ? THEN version + 1 ELSE NULL END,
+  SET version = CASE
+        WHEN changes() = ? AND version = ? AND archived_at IS NULL
+        THEN version + 1
+        ELSE NULL
+      END,
       last_submission_key = ?,
       last_submission_digest = ?,
       last_submission_result_version = version + 1,
@@ -277,7 +353,49 @@ export const COMMIT_HOUSEHOLD_SQL = `
       latest_responded_at = ?,
       latest_actor_kind = ?,
       updated_at = ?
-  WHERE id = ? AND event_id = ? AND archived_at IS NULL AND version = ?
+  WHERE id = ? AND event_id = ?
+`;
+
+/**
+ * Every host mutation advances the event-level roster version first. A stale
+ * page sets the NOT NULL column to NULL, aborting the complete D1 batch before
+ * any household row can move.
+ */
+export const ADVANCE_ROSTER_SQL = `
+  UPDATE events
+  SET rsvp_roster_version = CASE
+        WHEN rsvp_roster_version = ? AND deleted_at IS NULL
+        THEN rsvp_roster_version + 1
+        ELSE NULL
+      END
+  WHERE id = ?
+`;
+
+/**
+ * The household half of a host roster edit. It deliberately targets the row
+ * even when stale or archived so the NOT NULL guard executes and rolls the
+ * event-version advance back.
+ */
+export const UPDATE_HOUSEHOLD_ROSTER_SQL = `
+  UPDATE rsvp_households
+  SET version = CASE
+        WHEN version = ? AND archived_at IS NULL THEN version + 1
+        ELSE NULL
+      END,
+      label = ?,
+      updated_at = ?
+  WHERE id = ? AND event_id = ?
+`;
+
+export const ARCHIVE_HOUSEHOLD_SQL = `
+  UPDATE rsvp_households
+  SET version = CASE
+        WHEN version = ? AND archived_at IS NULL THEN version + 1
+        ELSE NULL
+      END,
+      archived_at = ?,
+      updated_at = ?
+  WHERE id = ? AND event_id = ?
 `;
 
 export class RsvpRepository {
@@ -302,6 +420,25 @@ export class RsvpRepository {
     return row ? mapRsvpHousehold(row) : null;
   }
 
+  async getHouseholdByKey(
+    eventId: string,
+    householdKey: string,
+  ): Promise<RsvpHouseholdRecord | null> {
+    const row = await this.db.prepare(`
+      SELECT * FROM rsvp_households WHERE event_id = ? AND household_key = ?
+    `).bind(eventId, householdKey).first<RsvpHouseholdRow>();
+    return row ? mapRsvpHousehold(row) : null;
+  }
+
+  async listHouseholds(eventId: string): Promise<RsvpHouseholdRecord[]> {
+    const rows = await this.db.prepare(`
+      SELECT * FROM rsvp_households
+      WHERE event_id = ?
+      ORDER BY created_at, id
+    `).bind(eventId).all<RsvpHouseholdRow>();
+    return rows.results.map(mapRsvpHousehold);
+  }
+
   async listInvitees(eventId: string, householdId: string): Promise<RsvpInviteeRecord[]> {
     const rows = await this.db.prepare(`
       SELECT * FROM rsvp_invitees
@@ -309,6 +446,140 @@ export class RsvpRepository {
       ORDER BY sort_order
     `).bind(eventId, householdId).all<RsvpInviteeRow>();
     return rows.results.map(mapRsvpInvitee);
+  }
+
+  async listEventInvitees(eventId: string): Promise<RsvpInviteeRecord[]> {
+    const rows = await this.db.prepare(`
+      SELECT invitee.*
+      FROM rsvp_invitees AS invitee
+      JOIN rsvp_households AS household
+        ON household.event_id = invitee.event_id
+       AND household.id = invitee.household_id
+      WHERE invitee.event_id = ?
+      ORDER BY household.created_at, household.id, invitee.sort_order
+    `).bind(eventId).all<RsvpInviteeRow>();
+    return rows.results.map(mapRsvpInvitee);
+  }
+
+  async listManagerHouseholds(input: {
+    eventId: string;
+    query?: string;
+    state: RsvpHouseholdFilter;
+    cursor?: RsvpHouseholdCursor;
+    limit: number;
+  }): Promise<RsvpHouseholdListRow[]> {
+    const where = ['household.event_id = ?'];
+    const bindings: StatementBinding[] = [input.eventId];
+
+    if (input.state === 'archived') {
+      where.push('household.archived_at IS NOT NULL');
+    } else {
+      where.push('household.archived_at IS NULL');
+      if (input.state === 'responded') {
+        where.push(`NOT EXISTS (
+          SELECT 1 FROM rsvp_invitees AS pending
+          WHERE pending.event_id = household.event_id
+            AND pending.household_id = household.id
+            AND pending.attendance = 'pending'
+        )`);
+      } else if (input.state === 'awaiting') {
+        where.push(`EXISTS (
+          SELECT 1 FROM rsvp_invitees AS pending
+          WHERE pending.event_id = household.event_id
+            AND pending.household_id = household.id
+            AND pending.attendance = 'pending'
+        )`);
+      }
+    }
+
+    if (input.query !== undefined && input.query.length > 0) {
+      const pattern = `%${escapeLike(input.query)}%`;
+      where.push(`(
+        household.label LIKE ? ESCAPE '\\'
+        OR EXISTS (
+          SELECT 1 FROM rsvp_invitees AS matched
+          WHERE matched.event_id = household.event_id
+            AND matched.household_id = household.id
+            AND matched.display_name IS NOT NULL
+            AND matched.display_name LIKE ? ESCAPE '\\'
+        )
+      )`);
+      bindings.push(pattern, pattern);
+    }
+
+    if (input.cursor) {
+      where.push(`(
+        household.updated_at < ?
+        OR (household.updated_at = ? AND household.id < ?)
+      )`);
+      bindings.push(input.cursor.updatedAt, input.cursor.updatedAt, input.cursor.id);
+    }
+
+    bindings.push(input.limit);
+    const rows = await this.db.prepare(`
+      SELECT
+        household.id,
+        household.household_key,
+        household.label,
+        household.version,
+        household.archived_at,
+        household.first_responded_at,
+        household.latest_responded_at,
+        household.latest_actor_kind,
+        household.updated_at,
+        (
+          SELECT COUNT(*) FROM rsvp_invitees AS member
+          WHERE member.event_id = household.event_id
+            AND member.household_id = household.id
+            AND member.attendance = 'attending'
+        ) AS attending,
+        (
+          SELECT COUNT(*) FROM rsvp_invitees AS member
+          WHERE member.event_id = household.event_id
+            AND member.household_id = household.id
+            AND member.attendance = 'declined'
+        ) AS declined,
+        (
+          SELECT COUNT(*) FROM rsvp_invitees AS member
+          WHERE member.event_id = household.event_id
+            AND member.household_id = household.id
+            AND member.attendance = 'pending'
+        ) AS awaiting_response,
+        (
+          SELECT COUNT(*) FROM rsvp_invitees AS member
+          WHERE member.event_id = household.event_id
+            AND member.household_id = household.id
+        ) AS invited_capacity
+      FROM rsvp_households AS household
+      WHERE ${where.join('\n AND ')}
+      ORDER BY household.updated_at DESC, household.id DESC
+      LIMIT ?
+    `).bind(...bindings).all<RsvpHouseholdListRow>();
+    return rows.results;
+  }
+
+  async listExportRows(eventId: string): Promise<RsvpExportRowRecord[]> {
+    const rows = await this.db.prepare(`
+      SELECT
+        household.household_key,
+        household.label AS household_label,
+        household.archived_at AS household_archived_at,
+        invitee.kind AS member_kind,
+        invitee.display_name AS member_name,
+        invitee.attendance,
+        invitee.sort_order AS member_order,
+        household.version AS household_version,
+        household.first_responded_at,
+        household.latest_responded_at AS last_responded_at,
+        household.latest_actor_kind AS last_actor
+      FROM rsvp_households AS household
+      JOIN rsvp_invitees AS invitee
+        ON invitee.event_id = household.event_id
+       AND invitee.household_id = household.id
+      WHERE household.event_id = ?
+      ORDER BY household.created_at, household.id, invitee.sort_order
+    `).bind(eventId).all<RsvpExportRowRecord>();
+    return rows.results;
   }
 
   async getReceipt(
