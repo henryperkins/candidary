@@ -7,6 +7,9 @@ import type {
   ModerationStatus,
   PublicationStatus,
   Role,
+  RsvpActor,
+  RsvpAttendance,
+  RsvpInviteeKind,
   UploadState,
 } from '../../shared/contracts';
 import type { SupportedImageType } from '../../shared/constants';
@@ -31,6 +34,69 @@ export interface EventRecord {
   purgeAfter: string;
   createdAt: string;
   deletedAt: string | null;
+  // The IANA zone the host chose. Every deadline is computed in it, never in
+  // the Worker's zone or a browser's.
+  eventTimezone: string;
+  rsvpEnabled: boolean;
+  rsvpDeadlineAt: string | null;
+  rsvpRosterVersion: number;
+}
+
+// The credential printed on the invitation. It outlives guest-grant rotation,
+// session expiry, and the switch from RSVP to photos; only `disabledAt` ends it,
+// and that cannot be undone.
+export interface EventEntryRecord {
+  id: string;
+  eventId: string;
+  secretDigest: string;
+  secretCiphertext: string;
+  createdAt: string;
+  disabledAt: string | null;
+}
+
+export interface RsvpHouseholdRecord {
+  id: string;
+  eventId: string;
+  householdKey: string;
+  label: string;
+  version: number;
+  lastSubmissionKey: string | null;
+  lastSubmissionDigest: string | null;
+  lastSubmissionResultVersion: number | null;
+  firstRespondedAt: string | null;
+  latestRespondedAt: string | null;
+  latestActorKind: RsvpActor | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RsvpInviteeRecord {
+  id: string;
+  eventId: string;
+  householdId: string;
+  kind: RsvpInviteeKind;
+  displayName: string | null;
+  // Present only for named guests. A plus-one is never searchable.
+  lookupDigest: string | null;
+  attendance: RsvpAttendance;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// A household's own credential. It grants neither the event guest role nor any
+// manager authority, and it is scoped to exactly one household.
+export interface RsvpSessionRecord {
+  id: string;
+  secretDigest: string;
+  csrfDigest: string;
+  eventId: string;
+  householdId: string;
+  writeAuthorityDeadline: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
 }
 
 export interface TokenRecord {

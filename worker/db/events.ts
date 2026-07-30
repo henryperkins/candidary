@@ -21,6 +21,10 @@ export interface EventRow {
   purge_after: string;
   created_at: string;
   deleted_at: string | null;
+  event_timezone: string;
+  rsvp_enabled: number;
+  rsvp_deadline_at: string | null;
+  rsvp_roster_version: number;
 }
 
 export interface CreateEventRecord {
@@ -57,6 +61,10 @@ export function mapEvent(row: EventRow): EventRecord {
     purgeAfter: row.purge_after,
     createdAt: row.created_at,
     deletedAt: row.deleted_at,
+    eventTimezone: row.event_timezone,
+    rsvpEnabled: row.rsvp_enabled === 1,
+    rsvpDeadlineAt: row.rsvp_deadline_at,
+    rsvpRosterVersion: row.rsvp_roster_version,
   };
 }
 

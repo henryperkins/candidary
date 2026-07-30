@@ -4,9 +4,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AccountsRepository } from '../../worker/db/accounts';
 import { AuthRateLimitsRepository } from '../../worker/db/auth-rate-limits';
+import { EventEntriesRepository } from '../../worker/db/event-entries';
 import { EventsRepository, mapEvent, type EventRow } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
 import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
+import {
+  buildRosterStatements,
+  MAX_D1_BINDINGS,
+  RsvpRepository,
+} from '../../worker/db/rsvp';
+import { RsvpRateLimitsRepository } from '../../worker/db/rsvp-rate-limits';
+import { RsvpSessionsRepository } from '../../worker/db/rsvp-sessions';
 import { SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
 import { finalizeStoredMedia } from '../../worker/storage/media';
@@ -859,6 +867,255 @@ describe('manager media pagination', () => {
     expect(second.media).toHaveLength(24);
     expect(second.nextCursor).toBeNull();
     expect(new Set([...first.media, ...second.media].map(({ id }) => id)).size).toBe(48);
+  });
+});
+
+describe('durable event entry credentials', () => {
+  it('creates one entry in the event batch and disables it exactly once', async () => {
+    await seedEvent();
+    const entries = new EventEntriesRepository(env.DB);
+    await env.DB.batch([entries.createStatement({
+      id: 'entry-a',
+      eventId: 'event-a',
+      secretDigest: 'entry-digest',
+      secretCiphertext: 'entry-ciphertext',
+      createdAt: now,
+    })]);
+
+    expect(await entries.getForEvent('event-a')).toMatchObject({
+      id: 'entry-a', disabledAt: null, secretCiphertext: 'entry-ciphertext',
+    });
+    expect(await entries.getById('entry-a')).toMatchObject({ eventId: 'event-a' });
+
+    expect(await entries.disableForEvent('event-a', '2026-07-21T13:00:00.000Z')).toBe(true);
+    // A second click is not an error, and must not move the timestamp.
+    expect(await entries.disableForEvent('event-a', '2026-07-21T14:00:00.000Z')).toBe(false);
+    expect((await entries.getForEvent('event-a'))?.disabledAt)
+      .toBe('2026-07-21T13:00:00.000Z');
+  });
+});
+
+describe('RSVP roster statements', () => {
+  function worstCaseRoster() {
+    const households = Array.from({ length: 500 }, (_unused, index) => ({
+      id: `household-${index}`,
+      householdKey: `h${index}`,
+      label: `Household ${index}`,
+    }));
+    const invitees = households.map((household, index) => ({
+      id: `invitee-${index}`,
+      householdId: household.id,
+      kind: 'named' as const,
+      displayName: `Guest Number ${index}`,
+      lookupDigest: `digest-${index}`,
+      sortOrder: 0,
+    }));
+    return { eventId: 'event-a', households, invitees, createdAt: now };
+  }
+
+  it('keeps every generated statement inside D1 parameter limits', () => {
+    const plans = buildRosterStatements(worstCaseRoster());
+
+    for (const plan of plans) {
+      expect(plan.bindings.length).toBeLessThanOrEqual(MAX_D1_BINDINGS);
+      // A placeholder count that drifts from the binding count is the failure
+      // mode this bound is protecting against.
+      expect(plan.sql.split('?').length - 1).toBe(plan.bindings.length);
+    }
+    expect(plans.length).toBeGreaterThan(1);
+  });
+
+  it('commits a full five-hundred-capacity roster as one batch', async () => {
+    await seedEvent();
+    const repository = new RsvpRepository(env.DB);
+    const plans = buildRosterStatements(worstCaseRoster());
+
+    await env.DB.batch(repository.toStatements(plans));
+
+    expect(await repository.countHouseholds('event-a')).toBe(500);
+    expect(await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM rsvp_invitees WHERE event_id = ?',
+    ).bind('event-a').first('count')).toBe(500);
+  });
+
+  it('rolls the whole roster back when one statement fails', async () => {
+    await seedEvent();
+    const repository = new RsvpRepository(env.DB);
+    const roster = worstCaseRoster();
+    // A duplicate household key in the final chunk: nothing may survive it.
+    const plans = buildRosterStatements({
+      ...roster,
+      households: [...roster.households, {
+        id: 'household-duplicate', householdKey: 'h0', label: 'Duplicate',
+      }],
+    });
+
+    await expect(env.DB.batch(repository.toStatements(plans))).rejects.toThrow();
+    expect(await repository.countHouseholds('event-a')).toBe(0);
+  });
+
+  it('offers only active named guests as lookup candidates', async () => {
+    await seedEvent();
+    const repository = new RsvpRepository(env.DB);
+    await env.DB.batch(repository.toStatements(buildRosterStatements({
+      eventId: 'event-a',
+      createdAt: now,
+      households: [
+        { id: 'household-a', householdKey: 'perkins', label: 'Perkins household' },
+        { id: 'household-b', householdKey: 'rivera', label: 'Rivera household' },
+      ],
+      invitees: [
+        {
+          id: 'invitee-a', householdId: 'household-a', kind: 'named',
+          displayName: 'Henry Perkins', lookupDigest: 'digest-henry', sortOrder: 0,
+        },
+        {
+          id: 'invitee-slot', householdId: 'household-a', kind: 'plus_one',
+          displayName: null, lookupDigest: null, sortOrder: 1,
+        },
+        {
+          id: 'invitee-b', householdId: 'household-b', kind: 'named',
+          displayName: 'Avery Rivera', lookupDigest: 'digest-avery', sortOrder: 0,
+        },
+      ],
+    })));
+    await env.DB.prepare('UPDATE rsvp_households SET archived_at = ? WHERE id = ?')
+      .bind(now, 'household-b').run();
+
+    // The plus-one carries no digest, and the archived household is gone from
+    // lookup entirely.
+    expect(await repository.listActiveLookupKeys('event-a')).toEqual([
+      { householdId: 'household-a', nameKeys: ['digest-henry'] },
+    ]);
+    expect((await repository.listInvitees('event-a', 'household-a')).map((i) => i.kind))
+      .toEqual(['named', 'plus_one']);
+    expect(await repository.getHousehold('event-a', 'household-a'))
+      .toMatchObject({ householdKey: 'perkins', version: 1, archivedAt: null });
+    expect(await repository.getHousehold('event-b', 'household-a')).toBeNull();
+  });
+});
+
+describe('RSVP household sessions and lookup budgets', () => {
+  async function seedHousehold() {
+    await seedEvent();
+    await env.DB.batch(new RsvpRepository(env.DB).toStatements(buildRosterStatements({
+      eventId: 'event-a',
+      createdAt: now,
+      households: [{ id: 'household-a', householdKey: 'perkins', label: 'Perkins household' }],
+      invitees: [{
+        id: 'invitee-a', householdId: 'household-a', kind: 'named',
+        displayName: 'Henry Perkins', lookupDigest: 'digest-henry', sortOrder: 0,
+      }],
+    })));
+  }
+
+  it('mints, resolves, and revokes one household session', async () => {
+    await seedHousehold();
+    const sessions = new RsvpSessionsRepository(env.DB);
+    const created = await sessions.create({
+      id: 'rsvp-session-a',
+      secretDigest: 'session-digest',
+      csrfDigest: 'csrf-digest',
+      eventId: 'event-a',
+      householdId: 'household-a',
+      writeAuthorityDeadline: '2026-08-31T04:59:59.999Z',
+      expiresAt: '2026-10-19T23:59:59.999Z',
+      createdAt: now,
+    });
+
+    expect(created).toMatchObject({
+      householdId: 'household-a',
+      writeAuthorityDeadline: '2026-08-31T04:59:59.999Z',
+      revokedAt: null,
+    });
+    expect(await sessions.revoke('rsvp-session-a', '2026-07-21T13:00:00.000Z')).toBe(true);
+    expect(await sessions.revoke('rsvp-session-a', '2026-07-21T14:00:00.000Z')).toBe(false);
+    expect((await sessions.getById('rsvp-session-a'))?.revokedAt)
+      .toBe('2026-07-21T13:00:00.000Z');
+  });
+
+  it('signs every household device out of one event at once', async () => {
+    await seedHousehold();
+    const sessions = new RsvpSessionsRepository(env.DB);
+    for (const suffix of ['a', 'b']) {
+      await sessions.create({
+        id: `rsvp-session-${suffix}`,
+        secretDigest: `session-digest-${suffix}`,
+        csrfDigest: `csrf-digest-${suffix}`,
+        eventId: 'event-a',
+        householdId: 'household-a',
+        writeAuthorityDeadline: '2026-08-31T04:59:59.999Z',
+        expiresAt: '2026-10-19T23:59:59.999Z',
+        createdAt: now,
+      });
+    }
+
+    await env.DB.batch([
+      sessions.revokeForEventStatement('event-a', '2026-07-21T13:00:00.000Z'),
+    ]);
+
+    expect(await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM rsvp_sessions WHERE revoked_at IS NULL',
+    ).first('count')).toBe(0);
+  });
+
+  it('charges lookup attempts per event, scope, and fixed fifteen-minute window', async () => {
+    await seedEvent();
+    await seedEvent('event-b', 'other-event');
+    const rates = new RsvpRateLimitsRepository(env.DB, rateKey);
+    const attempt = (eventId: string, at: string) => rates.reserve({
+      eventId,
+      action: 'lookup_name',
+      normalizedValue: 'henry perkins',
+      limit: 2,
+      now: new Date(at),
+    });
+
+    expect(await attempt('event-a', '2026-07-21T12:14:59.999Z')).toBe(true);
+    expect(await attempt('event-a', '2026-07-21T12:14:59.999Z')).toBe(true);
+    expect(await attempt('event-a', '2026-07-21T12:14:59.999Z')).toBe(false);
+    // A different event is a different budget for the same name.
+    expect(await attempt('event-b', '2026-07-21T12:14:59.999Z')).toBe(true);
+    // The window is fixed to the quarter hour, not a sliding window.
+    expect(await attempt('event-a', '2026-07-21T12:15:00.000Z')).toBe(true);
+
+    const rows = await env.DB.prepare(`
+      SELECT event_id, window_started_at, attempts, scope_digest
+      FROM rsvp_lookup_rate_limits ORDER BY event_id, window_started_at
+    `).all<{
+      event_id: string;
+      window_started_at: string;
+      attempts: number;
+      scope_digest: string;
+    }>();
+    expect(rows.results.map((row) => [row.event_id, row.window_started_at, row.attempts]))
+      .toEqual([
+        ['event-a', '2026-07-21T12:00:00.000Z', 3],
+        ['event-a', '2026-07-21T12:15:00.000Z', 1],
+        ['event-b', '2026-07-21T12:00:00.000Z', 1],
+      ]);
+    // The submitted name must be unrecoverable from what was stored.
+    for (const row of rows.results) {
+      expect(row.scope_digest).not.toContain('henry');
+      expect(row.scope_digest).not.toContain('perkins');
+    }
+  });
+
+  it('keeps the IP and name budgets separate', async () => {
+    await seedEvent();
+    const rates = new RsvpRateLimitsRepository(env.DB, rateKey);
+    const at = new Date('2026-07-21T12:00:00.000Z');
+
+    expect(await rates.reserve({
+      eventId: 'event-a', action: 'lookup_ip', normalizedValue: 'henry perkins', limit: 1, now: at,
+    })).toBe(true);
+    expect(await rates.reserve({
+      eventId: 'event-a', action: 'lookup_name', normalizedValue: 'henry perkins', limit: 1, now: at,
+    })).toBe(true);
+
+    expect(await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM rsvp_lookup_rate_limits',
+    ).first('count')).toBe(2);
   });
 });
 
