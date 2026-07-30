@@ -1,5 +1,6 @@
 import { serializeEventThemeConfig } from '../../shared/event-theme';
 import type { EventThemeConfigV1 } from '../../shared/contracts';
+import { EventEntriesRepository } from '../db/event-entries';
 import { EventsRepository } from '../db/events';
 import { NotificationOutboxRepository } from '../db/notification-outbox';
 import { SessionsRepository } from '../db/sessions';
@@ -8,7 +9,7 @@ import type { AppEnv } from '../env';
 import {
   createSecretToken,
   digestSecret,
-  encryptGuestSecret,
+  encryptSecret,
 } from '../security/crypto';
 import { calculateLifecycle } from '../security/lifecycle';
 import { eventSlug } from '../security/slugs';
@@ -29,9 +30,15 @@ export class EventService {
   // event instead of claiming a recovery the host does not have.
   async create(input: CreateEventInput, accountId: string | null = null, now = new Date()) {
     const events = new EventsRepository(this.env.DB);
+    const entries = new EventEntriesRepository(this.env.DB);
     const tokens = new TokensRepository(this.env.DB);
     const sessions = new SessionsRepository(this.env.DB);
     const eventId = crypto.randomUUID();
+    // Two guest-side credentials, doing two different jobs. `entryToken` is what
+    // gets printed and must never change; `guestToken` is the internal grant
+    // that upload authorization and `event_sessions.access_token_id` hang off,
+    // and it stays rotatable.
+    const entryToken = createSecretToken();
     const guestToken = createSecretToken();
     const managerToken = createSecretToken();
     const managementSession = createSecretToken();
@@ -54,12 +61,19 @@ export class EventService {
         createdAt,
         themeConfig: serializeEventThemeConfig(input.theme),
       }),
+      entries.createStatement({
+        id: entryToken.id,
+        eventId,
+        secretDigest: await digestSecret(entryToken.secret, this.env.ENTRY_HMAC_KEY),
+        secretCiphertext: await encryptSecret(entryToken.secret, this.env.ENTRY_ENCRYPTION_KEY),
+        createdAt,
+      }),
       tokens.createStatement({
         id: guestToken.id,
         eventId,
         role: 'guest',
         secretDigest: await digestSecret(guestToken.secret, this.env.TOKEN_HMAC_KEY),
-        secretCiphertext: await encryptGuestSecret(guestToken.secret, this.env.GUEST_TOKEN_ENCRYPTION_KEY),
+        secretCiphertext: await encryptSecret(guestToken.secret, this.env.GUEST_TOKEN_ENCRYPTION_KEY),
         expiresAt: lifecycle.guestAccessExpiresAt,
         createdAt,
       }),
@@ -116,7 +130,10 @@ export class EventService {
     const origin = this.env.APP_ORIGIN.replace(/\/$/u, '');
     return {
       event,
-      guestLink: `${origin}/join/${guestToken.token}`,
+      // In the fragment, not the path: browsers never send a fragment in a
+      // request line or a Referer header, so the printed secret stays out of
+      // every access log between the guest's phone and this Worker.
+      eventLink: `${origin}/join#${entryToken.token}`,
       managementLink: `${origin}/manage/${managerToken.token}`,
       managementSession,
       csrfToken,

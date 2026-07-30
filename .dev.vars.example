@@ -4,6 +4,15 @@ SESSION_HMAC_KEY=replace-with-a-different-32-byte-or-longer-random-secret
 GUEST_TOKEN_ENCRYPTION_KEY=replace-with-32-random-bytes-encoded-as-base64url
 LOGIN_HMAC_KEY=replace-with-another-32-byte-or-longer-random-secret
 
+# Persisted-data keys, not session rotation controls. ENTRY_* protect the
+# credential printed on invitations and RSVP_LOOKUP_HMAC_KEY keys the stored
+# name digests; rotating either without a re-encryption or re-digest migration
+# breaks printed entries or roster lookup. Ordinary guest-grant and session
+# rotation leaves all three alone.
+ENTRY_HMAC_KEY=replace-with-a-different-32-byte-or-longer-random-secret
+ENTRY_ENCRYPTION_KEY=replace-with-32-random-bytes-encoded-as-base64url
+RSVP_LOOKUP_HMAC_KEY=replace-with-another-32-byte-or-longer-random-secret
+
 # Required for browser-direct signed R2 PUT/GET URLs.
 R2_ACCESS_KEY_ID=replace-with-an-r2-api-token-access-key
 R2_SECRET_ACCESS_KEY=replace-with-an-r2-api-token-secret-key

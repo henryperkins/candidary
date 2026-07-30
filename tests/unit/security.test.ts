@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   constantTimeEqual,
   createSecretToken,
-  decryptGuestSecret,
+  decryptSecret,
   digestSecret,
-  encryptGuestSecret,
+  encryptSecret,
 } from '../../worker/security/crypto';
 import { calculateLifecycle } from '../../worker/security/lifecycle';
 import { sanitizeFilename } from '../../worker/security/filenames';
@@ -35,13 +35,13 @@ describe('secret token security', () => {
   });
 
   it('encrypts guest secrets with a unique IV and decrypts them', async () => {
-    const first = await encryptGuestSecret('guest-secret', encryptionKey);
-    const second = await encryptGuestSecret('guest-secret', encryptionKey);
+    const first = await encryptSecret('guest-secret', encryptionKey);
+    const second = await encryptSecret('guest-secret', encryptionKey);
 
     expect(first).toMatch(/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
     expect(first).not.toBe(second);
-    await expect(decryptGuestSecret(first, encryptionKey)).resolves.toBe('guest-secret');
-    await expect(decryptGuestSecret(`${first}tampered`, encryptionKey)).rejects.toThrow();
+    await expect(decryptSecret(first, encryptionKey)).resolves.toBe('guest-secret');
+    await expect(decryptSecret(`${first}tampered`, encryptionKey)).rejects.toThrow();
   });
 });
 

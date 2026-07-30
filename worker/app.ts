@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { toErrorResponse } from '../shared/errors';
 import type { AppBindings } from './env';
 import { securityHeaders } from './http/security-headers';
+import { entryRoutes } from './routes/entry';
 import { eventRoutes } from './routes/event';
 import { exportRoutes } from './routes/exports';
 import { exchangeRoutes } from './routes/exchange';
@@ -24,6 +25,7 @@ export function createApp() {
   });
   app.use('*', securityHeaders);
   app.route('/api', publicRoutes);
+  app.route('/api', entryRoutes);
   app.route('/', exchangeRoutes);
   app.route('/', hostPublicRoutes);
   app.route('/api', hostAuthRoutes);

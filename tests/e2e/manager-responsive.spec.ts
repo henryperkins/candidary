@@ -293,7 +293,7 @@ test('changing manager section returns the host to the top of the new section', 
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(1_000);
 
   await destination(page, 'Share').click();
-  const heading = page.getByRole('heading', { name: 'Share the photo drop' });
+  const heading = page.getByRole('heading', { name: 'Share your event' });
   await expect(heading).toBeVisible();
   await expect.poll(
     () => page.evaluate(() => window.scrollY),

@@ -41,6 +41,17 @@ export async function resetDatabase() {
   }]);
 }
 
+// The printed credential lives in the URL fragment, which `new URL().pathname`
+// deliberately excludes. Every caller has to send it in the POST body, exactly
+// as the join shell does, or it is not testing the real exchange.
+export async function exchangeEventEntry(eventLink: string) {
+  return createApp().request('/api/entry/exchange', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin },
+    body: JSON.stringify({ token: new URL(eventLink).hash.slice(1) }),
+  }, testEnv);
+}
+
 export async function eventAccess(name = 'Maya & Theo') {
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
@@ -48,19 +59,18 @@ export async function eventAccess(name = 'Maya & Theo') {
   }, testEnv);
   const body = await created.json<any>();
   const managerCookies = cookiesFrom(created);
-  const guestExchange = await createApp().request(new URL(body.data.guestLink).pathname, { redirect: 'manual' }, testEnv);
+  const guestExchange = await exchangeEventEntry(body.data.eventLink);
   return {
     event: body.data.event,
-    guestLink: body.data.guestLink as string,
+    eventLink: body.data.eventLink as string,
     managementLink: body.data.managementLink as string,
     manager: { ...managerCookies, csrf: body.data.csrfToken as string },
     guest: cookiesFrom(guestExchange),
   };
 }
 
-export async function secondGuest(guestLink: string) {
-  const exchange = await createApp().request(new URL(guestLink).pathname, { redirect: 'manual' }, testEnv);
-  return cookiesFrom(exchange);
+export async function secondGuest(eventLink: string) {
+  return cookiesFrom(await exchangeEventEntry(eventLink));
 }
 
 export async function uploadPending(

@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 
 const baseUrl = process.env.CANDIDARY_LOAD_BASE_URL?.replace(/\/$/u, '');
-const guestLink = process.env.CANDIDARY_LOAD_GUEST_LINK;
+const eventLink = process.env.CANDIDARY_LOAD_EVENT_LINK;
 const guests = Number(process.env.CANDIDARY_LOAD_GUESTS ?? 500);
 const photos = Number(process.env.CANDIDARY_LOAD_PHOTOS ?? 10_000);
 const live = process.env.CANDIDARY_LOAD_CONFIRM === 'I_UNDERSTAND';
@@ -21,10 +21,10 @@ const plan = {
 
 if (!live) {
   console.log(JSON.stringify({ mode: 'dry-run', ...plan }, null, 2));
-  console.log('Set CANDIDARY_LOAD_BASE_URL, CANDIDARY_LOAD_GUEST_LINK, and CANDIDARY_LOAD_CONFIRM=I_UNDERSTAND to run against a dedicated rehearsal event.');
+  console.log('Set CANDIDARY_LOAD_BASE_URL, CANDIDARY_LOAD_EVENT_LINK, and CANDIDARY_LOAD_CONFIRM=I_UNDERSTAND to run against a dedicated rehearsal event.');
   process.exit(0);
 }
-if (!baseUrl || !guestLink) throw new Error('A base URL and dedicated rehearsal guest link are required for a live run.');
+if (!baseUrl || !eventLink) throw new Error('A base URL and dedicated rehearsal event link are required for a live run.');
 
 function cookies(response) {
   const values = typeof response.headers.getSetCookie === 'function'
@@ -73,11 +73,18 @@ async function mapConcurrent(items, limit, operation) {
   await Promise.all(workers);
 }
 
-const joinPath = new URL(guestLink).pathname;
+// The credential is in the fragment, so every simulated guest exchanges it the
+// same way a scanned phone does: a same-origin POST with the token in the body.
+const entryToken = new URL(eventLink).hash.slice(1);
 const sessions = [];
 await mapConcurrent(Array.from({ length: guests }), 25, async (_, index) => {
-  const response = await fetch(`${baseUrl}${joinPath}`, { redirect: 'manual' });
-  sessions[index] = { ...cookies(response), slug: response.headers.get('location')?.split('/').pop() };
+  const response = await fetch(`${baseUrl}/api/entry/exchange`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: baseUrl },
+    body: JSON.stringify({ token: entryToken }),
+  });
+  const body = await response.json();
+  sessions[index] = { ...cookies(response), slug: body?.data?.location?.split('/').pop() };
 });
 
 let assigned = 0;

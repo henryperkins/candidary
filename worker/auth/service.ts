@@ -1,9 +1,11 @@
 import type { Role } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { AccountsRepository } from '../db/accounts';
+import { EventEntriesRepository } from '../db/event-entries';
 import { EventsRepository } from '../db/events';
 import { HostSessionsRepository, SessionsRepository } from '../db/sessions';
 import { TokensRepository } from '../db/tokens';
+import type { EventRecord, TokenRecord } from '../db/types';
 import type { AppEnv, AuthenticatedAccount, AuthenticatedSession, Principal } from '../env';
 import { constantTimeEqual, createSecretToken, digestSecret } from '../security/crypto';
 
@@ -27,6 +29,7 @@ function sessionExpiry(role: Role, tokenExpiry: string, now: Date): string {
 
 export class AuthService {
   private readonly accounts: AccountsRepository;
+  private readonly entries: EventEntriesRepository;
   private readonly events: EventsRepository;
   private readonly hostSessions: HostSessionsRepository;
   private readonly sessions: SessionsRepository;
@@ -34,26 +37,19 @@ export class AuthService {
 
   constructor(private readonly env: AppEnv) {
     this.accounts = new AccountsRepository(env.DB);
+    this.entries = new EventEntriesRepository(env.DB);
     this.events = new EventsRepository(env.DB);
     this.hostSessions = new HostSessionsRepository(env.DB);
     this.sessions = new SessionsRepository(env.DB);
     this.tokens = new TokensRepository(env.DB);
   }
 
-  async exchange(rawToken: string, role: Role, now = new Date()) {
-    const parsed = parseSecretToken(rawToken);
-    const token = await this.tokens.getById(parsed.id);
-    if (!token || token.role !== role) throw new ApiError('SESSION_REQUIRED', 'This access link is not valid.', 401);
-    if (token.revokedAt) throw new ApiError('TOKEN_REVOKED', 'This access link has been replaced or revoked.', 401);
-    if (Date.parse(token.expiresAt) <= now.getTime()) throw new ApiError('EVENT_EXPIRED', 'This event access has expired.', 410);
-    const suppliedDigest = await digestSecret(parsed.secret, this.env.TOKEN_HMAC_KEY);
-    if (!constantTimeEqual(suppliedDigest, token.secretDigest)) {
-      throw new ApiError('SESSION_REQUIRED', 'This access link is not valid.', 401);
-    }
-    const event = await this.events.getById(token.eventId);
-    if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
-    if (event.deletedAt) throw new ApiError('EVENT_DELETED', 'This event has been deleted.', 410);
-
+  private async createEventSession(
+    event: EventRecord,
+    token: TokenRecord,
+    role: Role,
+    now: Date,
+  ) {
     const sessionToken = createSecretToken();
     const csrfToken = createSecretToken().secret;
     const expiresAt = sessionExpiry(role, token.expiresAt, now);
@@ -70,6 +66,67 @@ export class AuthService {
     });
 
     return { event, session, sessionToken, csrfToken };
+  }
+
+  async exchange(rawToken: string, role: Role, now = new Date()) {
+    const parsed = parseSecretToken(rawToken);
+    const token = await this.tokens.getById(parsed.id);
+    if (!token || token.role !== role) throw new ApiError('SESSION_REQUIRED', 'This access link is not valid.', 401);
+    if (token.revokedAt) throw new ApiError('TOKEN_REVOKED', 'This access link has been replaced or revoked.', 401);
+    if (Date.parse(token.expiresAt) <= now.getTime()) throw new ApiError('EVENT_EXPIRED', 'This event access has expired.', 410);
+    const suppliedDigest = await digestSecret(parsed.secret, this.env.TOKEN_HMAC_KEY);
+    if (!constantTimeEqual(suppliedDigest, token.secretDigest)) {
+      throw new ApiError('SESSION_REQUIRED', 'This access link is not valid.', 401);
+    }
+    const event = await this.events.getById(token.eventId);
+    if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
+    if (event.deletedAt) throw new ApiError('EVENT_DELETED', 'This event has been deleted.', 410);
+
+    return this.createEventSession(event, token, role, now);
+  }
+
+  /**
+   * Turns the credential printed on an invitation into an ordinary guest event
+   * session.
+   *
+   * The printed credential authorizes nothing on its own: it identifies the
+   * event, and the session is then minted against the event's current internal
+   * guest grant. That indirection is what lets a host sign every guest device
+   * out without reprinting a single sign.
+   *
+   * Every way this can fail because of the credential itself answers with one
+   * `EVENT_ENTRY_UNAVAILABLE`, so a stranger holding a guess cannot learn
+   * whether an id exists, whether a secret was close, or whether an event was
+   * disabled rather than never created.
+   */
+  async exchangeEntry(rawEntry: string, now = new Date()) {
+    const unavailable = () => new ApiError(
+      'EVENT_ENTRY_UNAVAILABLE',
+      'This event entry is no longer available. Ask the host for the current invitation.',
+      410,
+    );
+
+    const [id, secret, extra] = rawEntry.split('.');
+    if (!id || !secret || extra) throw unavailable();
+
+    const entry = await this.entries.getById(id);
+    if (!entry || entry.disabledAt) throw unavailable();
+    const suppliedDigest = await digestSecret(secret, this.env.ENTRY_HMAC_KEY);
+    if (!constantTimeEqual(suppliedDigest, entry.secretDigest)) throw unavailable();
+
+    const event = await this.events.getById(entry.eventId);
+    if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
+    if (event.deletedAt) throw new ApiError('EVENT_DELETED', 'This event has been deleted.', 410);
+
+    const token = await this.tokens.getActiveForRole(event.id, 'guest');
+    // `getActiveForRole` filters on revocation alone. Without this the printed
+    // credential would outlive the event's own guest access window and keep
+    // minting sessions after it closed.
+    if (!token || Date.parse(token.expiresAt) <= now.getTime()) {
+      throw new ApiError('EVENT_EXPIRED', 'This event access has expired.', 410);
+    }
+
+    return this.createEventSession(event, token, 'guest', now);
   }
 
   // Event cookies are link sessions only. Account cookies resolve separately from

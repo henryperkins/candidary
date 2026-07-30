@@ -8,6 +8,7 @@ import { EventsRepository } from '../../worker/db/events';
 import {
   cookiesFrom,
   eventAccess,
+  exchangeEventEntry,
   origin,
   png,
   resetDatabase,
@@ -220,9 +221,7 @@ describe('event theme create and read serialization', () => {
     expect(Object.keys(managerBody.data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
     expect(managerBody.data.event.theme).toEqual(body.data.event.theme);
 
-    const guestExchange = await createApp().request(new URL(body.data.guestLink).pathname, {
-      redirect: 'manual',
-    }, testEnv);
+    const guestExchange = await exchangeEventEntry(body.data.eventLink);
     const guest = cookiesFrom(guestExchange);
     const guestRead = await createApp().request(`/api/event/${body.data.event.slug}`, {
       headers: { cookie: guest.cookie },

@@ -3,10 +3,11 @@ import { applyD1Migrations, reset } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthService } from '../../worker/auth/service';
-import { decryptGuestSecret } from '../../worker/security/crypto';
+import { decryptSecret } from '../../worker/security/crypto';
 import { createApp } from '../../worker/app';
 import type { AppEnv } from '../../worker/env';
 import { classifyExchangeFailure } from '../../worker/routes/exchange';
+import { exchangeEventEntry } from './helpers';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -48,7 +49,10 @@ describe('event creation', () => {
 
     expect(response.status).toBe(201);
     expect(body.data.event.name).toBe('Maya & Theo');
-    expect(body.data.guestLink).toMatch(new RegExp(`^${origin}/join/[^.]+\\.[^.]+$`));
+    // The printed credential rides in the fragment; the management link keeps
+    // its path form because it is typed or pasted, never scanned.
+    expect(body.data.eventLink).toMatch(new RegExp(`^${origin}/join#[^.]+\\.[^.]+$`));
+    expect(body.data.guestLink).toBeUndefined();
     expect(body.data.managementLink).toMatch(new RegExp(`^${origin}/manage/[^.]+\\.[^.]+$`));
     expect(body.data.csrfToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(response.headers.get('set-cookie')).toContain('HttpOnly');
@@ -58,16 +62,22 @@ describe('event creation', () => {
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
     expect(response.headers.get('content-security-policy')).toContain("script-src 'self'");
 
-    const guestToken = new URL(body.data.guestLink).pathname.split('/').at(-1)!;
-    const [guestId, guestSecret] = guestToken.split('.');
+    const [entryId, entrySecret] = new URL(body.data.eventLink).hash.slice(1).split('.');
     const managerToken = new URL(body.data.managementLink).pathname.split('/').at(-1)!;
     const [managerId, managerSecret] = managerToken.split('.');
-    const guestRow = await env.DB.prepare('SELECT * FROM event_access_tokens WHERE id = ?').bind(guestId).first<any>();
+    const entryRow = await env.DB.prepare('SELECT * FROM event_entry_credentials WHERE id = ?').bind(entryId).first<any>();
+    const guestRow = await env.DB.prepare("SELECT * FROM event_access_tokens WHERE event_id = ? AND role = 'guest'").bind(body.data.event.id).first<any>();
     const managerRow = await env.DB.prepare('SELECT * FROM event_access_tokens WHERE id = ?').bind(managerId).first<any>();
     const sessionCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM event_sessions WHERE role = 'manager'").first<{ count: number }>();
 
-    expect(guestRow.secret_digest).not.toBe(guestSecret);
-    expect(await decryptGuestSecret(guestRow.secret_ciphertext, testEnv.GUEST_TOKEN_ENCRYPTION_KEY)).toBe(guestSecret);
+    // The printed secret is stored under its own key, separately from the
+    // internal grant, so rotating one never touches the other.
+    expect(entryRow.secret_digest).not.toBe(entrySecret);
+    expect(await decryptSecret(entryRow.secret_ciphertext, testEnv.ENTRY_ENCRYPTION_KEY)).toBe(entrySecret);
+    // The internal guest grant still exists and is still recoverable, but it is
+    // never handed to a browser.
+    expect(guestRow.secret_ciphertext).not.toBeNull();
+    expect(JSON.stringify(body)).not.toContain(guestRow.id);
     expect(managerRow.secret_digest).not.toBe(managerSecret);
     expect(managerRow.secret_ciphertext).toBeNull();
     expect(sessionCount?.count).toBe(1);
@@ -95,32 +105,33 @@ describe('event creation', () => {
 });
 
 describe('token exchange and session authorization', () => {
-  it('exchanges a guest token, redirects without the secret, and resolves the event shell', async () => {
+  it('exchanges the printed entry, answers without the secret, and resolves the event shell', async () => {
     const created = await createEvent();
-    const guestPath = new URL(created.body.data.guestLink).pathname;
-    const exchange = await createApp().request(guestPath, { redirect: 'manual' }, testEnv);
+    const fragment = new URL(created.body.data.eventLink).hash.slice(1);
+    const exchange = await exchangeEventEntry(created.body.data.eventLink);
+    const exchangeBody = await exchange.json<any>();
 
-    expect(exchange.status).toBe(302);
-    expect(exchange.headers.get('location')).toMatch(/^\/event\/[a-z0-9-]+$/);
-    expect(exchange.headers.get('location')).not.toContain(guestPath.split('/').at(-1)!);
+    expect(exchange.status).toBe(200);
+    expect(exchangeBody.data.location).toMatch(/^\/event\/[a-z0-9-]+$/);
+    expect(JSON.stringify(exchangeBody)).not.toContain(fragment);
     const cookie = cookieFrom(exchange);
-    const eventPath = exchange.headers.get('location')!;
-    const shell = await createApp().request(`/api${eventPath}`, { headers: { cookie } }, testEnv);
+    const shell = await createApp().request(`/api${exchangeBody.data.location}`, { headers: { cookie } }, testEnv);
 
     expect(shell.status).toBe(200);
     expect((await shell.json<any>()).data.event.name).toBe('Maya & Theo');
   });
 
-  it('invalidates existing sessions as soon as the backing token is revoked', async () => {
+  it('invalidates existing sessions as soon as the internal grant is revoked', async () => {
     const created = await createEvent();
-    const guestPath = new URL(created.body.data.guestLink).pathname;
-    const exchange = await createApp().request(guestPath, { redirect: 'manual' }, testEnv);
+    const exchange = await exchangeEventEntry(created.body.data.eventLink);
+    const location = (await exchange.json<any>()).data.location as string;
     const cookie = cookieFrom(exchange);
-    const tokenId = guestPath.split('/').at(-1)!.split('.')[0]!;
-    await env.DB.prepare('UPDATE event_access_tokens SET revoked_at = ? WHERE id = ?')
-      .bind(new Date().toISOString(), tokenId).run();
+    await env.DB.prepare(`
+      UPDATE event_access_tokens SET revoked_at = ?
+      WHERE event_id = ? AND role = 'guest'
+    `).bind(new Date().toISOString(), created.body.data.event.id).run();
 
-    const shell = await createApp().request(`/api${exchange.headers.get('location')!}`, { headers: { cookie } }, testEnv);
+    const shell = await createApp().request(`/api${location}`, { headers: { cookie } }, testEnv);
     expect(shell.status).toBe(401);
     expect((await shell.json<any>()).code).toBe('TOKEN_REVOKED');
   });

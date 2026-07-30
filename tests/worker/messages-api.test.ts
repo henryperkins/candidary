@@ -15,7 +15,7 @@ beforeEach(resetDatabase);
 describe('guest notes and captions', () => {
   it('keeps a pending note private to its author until the manager approves it', async () => {
     const access = await eventAccess();
-    const other = await secondGuest(access.guestLink);
+    const other = await secondGuest(access.eventLink);
     const created = await createApp().request(`/api/event/${access.event.slug}/messages`, {
       method: 'POST', headers: writeHeaders(access.guest),
       body: JSON.stringify({ guestName: 'Avery', body: 'What a perfect evening.' }),

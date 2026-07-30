@@ -11,10 +11,10 @@ const event = {
   storedMediaCount: 2,
 };
 
-test('host creates an event and receives both private access links', async ({ page }, testInfo) => {
+test('host creates an event and receives its permanent entry and management link', async ({ page }, testInfo) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ data: {
     event,
-    guestLink: `https://candidary.test/join/${'guest-secret-'.repeat(8)}`,
+    eventLink: `https://candidary.test/join#${'entry-secret-'.repeat(8)}`,
     managementLink: `https://candidary.test/manage/${'manager-secret-'.repeat(8)}`,
     csrfToken: 'csrf-a',
   }, requestId: 'request-a' }) }));

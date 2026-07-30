@@ -380,7 +380,7 @@ test('a refused export request keeps the share section and the control that aske
 
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
-  await expect(page.getByRole('heading', { name: 'Share the photo drop' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Share your event' })).toBeVisible();
   // The panel that asked is still there, still able to ask again, rather than a dead section.
   await expect(panel.getByRole('button', { name: 'Prepare download' })).toBeEnabled();
   await expectContained(page);

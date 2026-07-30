@@ -6,6 +6,7 @@ import { createApp } from '../../worker/app';
 import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
 import { getOrCreatePreview } from '../../worker/storage/previews';
+import { exchangeEventEntry } from './helpers';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -24,8 +25,13 @@ async function guestAccess() {
     body: JSON.stringify({ name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Welcome.' }),
   }, testEnv);
   const body = await created.json<any>();
-  const exchange = await createApp().request(new URL(body.data.guestLink).pathname, { redirect: 'manual' }, testEnv);
-  return { ...cookiesFrom(exchange), event: body.data.event, manager: cookiesFrom(created) };
+  const exchange = await exchangeEventEntry(body.data.eventLink);
+  return {
+    ...cookiesFrom(exchange),
+    event: body.data.event,
+    eventLink: body.data.eventLink as string,
+    manager: cookiesFrom(created),
+  };
 }
 
 function writeHeaders(access: { cookie: string; csrf: string }) {
@@ -253,10 +259,9 @@ describe('upload finalization and private delivery', () => {
       method: 'POST', headers: writeHeaders(access), body: '{}',
     }, testEnv);
 
-    const guestToken = await env.DB.prepare("SELECT id, secret_ciphertext FROM event_access_tokens WHERE role = 'guest'").first<any>();
-    const guestSecret = await (await import('../../worker/security/crypto')).decryptGuestSecret(guestToken.secret_ciphertext, testEnv.GUEST_TOKEN_ENCRYPTION_KEY);
-    const otherExchange = await createApp().request(`/join/${guestToken.id}.${guestSecret}`, { redirect: 'manual' }, testEnv);
-    const other = cookiesFrom(otherExchange);
+    // A second guest device scans the same printed entry: it gets its own
+    // session, and must still not see somebody else's pending photo.
+    const other = cookiesFrom(await exchangeEventEntry(access.eventLink));
     const previewEnv = withImages();
     const ownPreview = await createApp().request(`/api/media/${reserved.id}/preview`, { headers: { cookie: access.cookie } }, previewEnv);
     const pending = await createApp().request(`/api/media/${reserved.id}/preview`, { headers: { cookie: other.cookie } }, previewEnv);

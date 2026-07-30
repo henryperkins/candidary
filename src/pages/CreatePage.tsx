@@ -15,7 +15,9 @@ import { hostRegisterHref } from '../app/recovery';
 
 interface Created {
   event: { id: string; name: string; slug: string };
-  guestLink: string;
+  // The permanent printed credential. It never changes for the life of the
+  // event, which is what lets a host print it on invitations and signs.
+  eventLink: string;
   managementLink: string;
   csrfToken: string;
   // Committed server-side when a signed-in host created the event, so the success
@@ -49,7 +51,7 @@ export function CreatePage() {
     });
   }
 
-  useEffect(() => { if (created) void QRCode.toDataURL(created.guestLink, { width: 260, margin: 2, color: { dark: '#4a2415', light: '#fffaf3' } }).then(setQr); }, [created]);
+  useEffect(() => { if (created) void QRCode.toDataURL(created.eventLink, { width: 260, margin: 2, color: { dark: '#4a2415', light: '#fffaf3' } }).then(setQr); }, [created]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setFields({});
@@ -79,15 +81,15 @@ export function CreatePage() {
   }
 
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
-    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the guest link when you’re ready.</p><p className="form-note">The creator session’s ownership eligibility ends at the earlier of the management deadline and 12 hours after creation.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
+    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the event link when you’re ready.</p><p className="form-note">The creator session’s ownership eligibility ends at the earlier of the management deadline and 12 hours after creation.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
       {/* The warning is only true while the link is the sole way in. Once the event
           is saved to an account it stops being true, and leaving it up would talk a
           host out of the recovery they just set up. */}
       <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
-      <CopyableLinkCard label="Guest link" value={created.guestLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
+      <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
       <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
     </section>
-    <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Guest QR code</h2>{qr && <img src={qr} alt="QR code for the guest event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
+    <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Event QR code</h2><p>The same code handles RSVPs now and event photos later. Print it once.</p>{qr && <img src={qr} alt="QR code for the event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
     {/* Mounted on whether creation already attached the event, not on `saved`.
         Keying it to `saved` would unmount the panel the moment completion
         succeeded, so the host would click Confirm and watch it disappear instead

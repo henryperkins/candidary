@@ -133,9 +133,9 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   await page.route(`${base}/exports`, (route) => route.fulfill({
     json: { data: { exports: options.exports ?? [] }, requestId: 'request-a' },
   }));
-  await page.route(`${base}/links`, (route) => route.fulfill({
+  await page.route(`${base}/entry`, (route) => route.fulfill({
     json: {
-      data: { guestLink: `https://candidary.test/join/${'guest-secret-'.repeat(8)}` },
+      data: { eventLink: `https://candidary.test/join#${'entry-secret-'.repeat(8)}`, disabledAt: null },
       requestId: 'request-a',
     },
   }));

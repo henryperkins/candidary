@@ -996,11 +996,11 @@ describe('managing an event through an account', () => {
     }, testEnv);
     expect(media.status).toBe(200);
 
-    const links = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+    const entry = await createApp().request(`/api/manage/events/${access.event.id}/entry`, {
       headers: { cookie: host.cookie },
     }, testEnv);
-    expect(links.status).toBe(200);
-    expect((await links.json<any>()).data.guestLink).toContain('/join/');
+    expect(entry.status).toBe(200);
+    expect((await entry.json<any>()).data.eventLink).toContain('/join#');
   });
 
   it('refuses an account that does not host the event', async () => {

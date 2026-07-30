@@ -162,9 +162,9 @@ test('the manager card controls and the mobile export panel hold their layout', 
   await page.setViewportSize({ width: 390, height: 1500 });
   await destination(page, 'Share').click();
   const share = page.locator('.manager-panel');
-  await expect(page.getByRole('heading', { name: 'Share the photo drop' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Share your event' })).toBeVisible();
   await expect(page.locator('.manager-export-panel--share')).toBeVisible();
-  await expect(page.locator('.manager-panel img[alt="Guest event QR code"]')).toBeVisible();
+  await expect(page.locator('.manager-panel img[alt="Event QR code"]')).toBeVisible();
   expect(await page.evaluate(() => window.scrollY), 'the section is laid out without scrolling').toBe(0);
   await settle(page);
   await expect(share).toHaveScreenshot('manager-export-first-390.png');
@@ -185,7 +185,7 @@ test('every manager section stays inside the phone viewport and shows one guest 
   }
 
   await destination(page, 'Share').click();
-  await expect(page.locator('.manager-panel img[alt="Guest event QR code"]')).toBeVisible();
+  await expect(page.locator('.manager-panel img[alt="Event QR code"]')).toBeVisible();
   // The utility rail's copies belong to the wide layout; on a phone the host sees exactly one.
   await expect(page.locator('.manager-utility__guest-entry')).toBeHidden();
   await expect(page.locator('.manager-utility__capacity')).toBeHidden();

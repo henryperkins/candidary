@@ -61,7 +61,7 @@ publicRoutes.post('/events', async (context) => {
   return context.json({
     data: {
       event: eventView(created.event),
-      guestLink: created.guestLink,
+      eventLink: created.eventLink,
       managementLink: created.managementLink,
       csrfToken: created.csrfToken,
       savedToAccount: created.savedToAccount,

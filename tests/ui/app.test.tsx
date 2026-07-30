@@ -42,7 +42,7 @@ function errorJson(body: Record<string, unknown>, status: number) {
 
 const CREATED = {
   event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
-  guestLink: 'https://example.test/join/guest-secret',
+  eventLink: 'https://example.test/join#entry-id.entry-secret',
   managementLink: 'https://example.test/manage/manager-secret',
   csrfToken: 'csrf-a',
 };
@@ -162,7 +162,7 @@ describe('public Candidary experience', () => {
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     await createEvent(userEvent.setup());
     expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
-    expect(screen.getByText('Guest link')).toBeVisible();
+    expect(screen.getByText('Event link')).toBeVisible();
     expect(screen.getByText('Management link')).toBeVisible();
     expect(screen.getByRole('link', { name: /open event manager/i }))
       .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
@@ -245,8 +245,8 @@ describe('public Candidary experience', () => {
     );
     await createEvent(user);
 
-    await user.click(screen.getByRole('button', { name: 'Copy guest link' }));
-    expect(writeText).toHaveBeenCalledWith('https://example.test/join/guest-secret');
+    await user.click(screen.getByRole('button', { name: 'Copy event link' }));
+    expect(writeText).toHaveBeenCalledWith('https://example.test/join#entry-id.entry-secret');
     expect(screen.queryByText('Copied')).not.toBeInTheDocument();
 
     await act(async () => { resolveCopy(); });
@@ -259,23 +259,23 @@ describe('public Candidary experience', () => {
     const user = userEvent.setup();
     await createEvent(user);
 
-    const reveal = screen.getByRole('button', { name: 'Show full guest link' });
+    const reveal = screen.getByRole('button', { name: 'Show full event link' });
     expect(reveal).toHaveAttribute('aria-expanded', 'false');
     await user.click(reveal);
 
-    const hide = screen.getByRole('button', { name: 'Hide full guest link' });
+    const hide = screen.getByRole('button', { name: 'Hide full event link' });
     expect(hide).toHaveAttribute('aria-expanded', 'true');
     // The control must point at the link it reveals, and that link must be selectable.
     const revealed = document.getElementById(hide.getAttribute('aria-controls') ?? '');
     expect(revealed, 'aria-controls resolves').not.toBeNull();
     expect(revealed).toBeVisible();
-    expect(revealed).toHaveTextContent('https://example.test/join/guest-secret');
+    expect(revealed).toHaveTextContent('https://example.test/join#entry-id.entry-secret');
     expect(revealed).toHaveAttribute('tabindex', '0');
     // The management link keeps its own independent control.
     expect(screen.getByRole('button', { name: 'Show full management link' })).toHaveAttribute('aria-expanded', 'false');
 
     await user.click(hide);
-    expect(screen.getByRole('button', { name: 'Show full guest link' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: 'Show full event link' })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('reports unavailable clipboard writes without claiming success, and reveals the link instead', async () => {
@@ -284,18 +284,18 @@ describe('public Candidary experience', () => {
     const user = userEvent.setup();
     vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('Permission denied'));
     await createEvent(user);
-    expect(screen.getByRole('button', { name: 'Show full guest link' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: 'Show full event link' })).toHaveAttribute('aria-expanded', 'false');
 
-    await user.click(screen.getByRole('button', { name: 'Copy guest link' }));
+    await user.click(screen.getByRole('button', { name: 'Copy event link' }));
     expect(await screen.findByText('Copy unavailable. Select the link instead.')).toBeVisible();
     expect(screen.queryByText('Copied')).not.toBeInTheDocument();
 
-    const hide = screen.getByRole('button', { name: 'Hide full guest link' });
+    const hide = screen.getByRole('button', { name: 'Hide full event link' });
     expect(hide).toHaveAttribute('aria-expanded', 'true');
     const revealed = document.getElementById(hide.getAttribute('aria-controls') ?? '');
     expect(revealed, 'aria-controls resolves').not.toBeNull();
     expect(revealed).toBeVisible();
-    expect(revealed).toHaveTextContent('https://example.test/join/guest-secret');
+    expect(revealed).toHaveTextContent('https://example.test/join#entry-id.entry-secret');
   });
 });
 
@@ -381,7 +381,7 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
     }
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
-    if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+    if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
     throw new Error(`Unexpected request ${url}`);
   });
 }
@@ -565,7 +565,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -614,7 +614,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -660,7 +660,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -745,7 +745,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -800,7 +800,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -846,7 +846,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     const view = render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -883,7 +883,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -922,7 +922,7 @@ describe('manager experience', () => {
       if (url.includes('/media')) return json({ media: rows, nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -970,7 +970,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${method} ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -1023,7 +1023,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: '' });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     });
     const interval = vi.spyOn(window, 'setInterval');
@@ -1052,7 +1052,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     const interval = vi.spyOn(window, 'setInterval');
@@ -1086,7 +1086,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     const interval = vi.spyOn(window, 'setInterval');
@@ -1123,7 +1123,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
@@ -1162,7 +1162,7 @@ describe('manager experience', () => {
       if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -1180,122 +1180,81 @@ describe('manager experience', () => {
     expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
   });
 
-  it('does not mistake an unavailable guest link for lost manager access', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    let guestLinkUnavailable = true;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  it('does not mistake a disabled event entry for lost manager access', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (
-        (init?.method ?? 'GET').toUpperCase() === 'POST'
-        && url.endsWith('/links/guest/rotate')
-      ) {
-        guestLinkUnavailable = false;
-        return json({ guestLink: 'https://example.test/join/replacement' });
-      }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
       if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) {
-        return guestLinkUnavailable
-          ? errorJson({
-            code: 'GUEST_LINK_UNAVAILABLE',
-            message: 'The guest link is unavailable. Rotate it to create a replacement.',
-            requestId: 'request-a',
-          }, 410)
-          : json({ guestLink: 'https://example.test/join/replacement' });
+      if (url.endsWith('/entry')) {
+        return json({ eventLink: null, disabledAt: '2026-07-21T12:00:00.000Z' });
       }
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
 
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'The guest link is unavailable. Rotate it to create a replacement.',
-    );
+    // A disabled entry is a permanent event state, not a credential problem, so
+    // it must not offer sign-in or link recovery.
     expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(screen.queryByRole('button', { name: 'Show full guest link' })).not.toBeInTheDocument();
-    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+    expect(screen.getByText(/cannot be replaced/iu)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Show full event link' })).not.toBeInTheDocument();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy event link' })) {
       expect(copy).toBeDisabled();
     }
-    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Rotate guest link' }));
-
-    expect(await screen.findByText('https://example.test/join/replacement')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Show full guest link' })).toBeEnabled();
-    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
-      expect(copy).toBeEnabled();
-    }
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
+    // There is deliberately no way to mint a replacement.
+    expect(screen.queryByRole('button', { name: /rotate (guest|event) link/iu }))
+      .not.toBeInTheDocument();
   });
 
-  it('retires rendered and in-flight guest QR codes when the link becomes unavailable', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    let linkUnavailable = false;
-    let resolveSecondQr!: (value: string) => void;
-    qrToDataURL
-      .mockResolvedValueOnce('data:image/png;base64,first-link')
-      .mockImplementationOnce(() => new Promise<string>((resolve) => {
-        resolveSecondQr = resolve;
-      }));
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  it('retires rendered and in-flight event QR codes once the entry is disabled', async () => {
+    let disabled = false;
+    let resolveFirstQr!: (value: string) => void;
+    qrToDataURL.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolveFirstQr = resolve;
+    }));
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (
-        (init?.method ?? 'GET').toUpperCase() === 'POST'
-        && url.endsWith('/links/guest/rotate')
-      ) {
-        linkUnavailable = true;
-        return json({ guestLink: 'https://example.test/join/second-link' });
-      }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
       if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) {
-        return linkUnavailable
-          ? errorJson({
-            code: 'GUEST_LINK_UNAVAILABLE',
-            message: 'The guest link is unavailable. Rotate it to create a replacement.',
-            requestId: 'request-a',
-          }, 410)
-          : json({ guestLink: 'https://example.test/join/first-link' });
+      if (url.endsWith('/entry')) {
+        const answer = disabled
+          ? { eventLink: null, disabledAt: '2026-07-21T12:00:00.000Z' }
+          : { eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null };
+        disabled = true;
+        return json(answer);
       }
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
 
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(await screen.findAllByAltText('Guest event QR code')).not.toHaveLength(0);
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Share' }));
-    await user.click(screen.getByRole('button', { name: 'Rotate guest link' }));
-    await waitFor(() => expect(qrToDataURL).toHaveBeenCalledTimes(2));
-
-    await user.click(screen.getByRole('button', { name: /^Intake/u }));
+    // Any refresh re-reads the entry; this one comes back disabled.
     await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'The guest link is unavailable. Rotate it to create a replacement.',
-    );
-    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Show full guest link' })).not.toBeInTheDocument();
-    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
-      expect(copy).toBeDisabled();
-    }
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    expect(await screen.findByText(/cannot be replaced/iu)).toBeVisible();
 
+    // The QR render that was already in flight when the entry died must not
+    // paint a scannable code afterwards.
     await act(async () => {
-      resolveSecondQr('data:image/png;base64,stale-second-link');
+      resolveFirstQr('data:image/png;base64,stale-entry');
       await Promise.resolve();
     });
-    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+    expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
   });
 
-  it('keeps the readable guest link usable when QR generation rejects', async () => {
+  it('keeps the readable event link usable when QR generation rejects', async () => {
     qrToDataURL.mockRejectedValueOnce(new Error('QR generation failed'));
     vi.stubGlobal('fetch', managerFetch({
       first: { media: makeMedia(2).slice(1), nextCursor: null },
@@ -1304,12 +1263,12 @@ describe('manager experience', () => {
 
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
     await waitFor(() => expect(qrToDataURL).toHaveBeenCalledTimes(1));
-    expect(screen.queryByAltText('Guest event QR code')).not.toBeInTheDocument();
+    expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(screen.getByText('https://example.test/join/guest')).toBeVisible();
-    for (const copy of screen.getAllByRole('button', { name: 'Copy guest link' })) {
+    expect(screen.getByText('https://example.test/join#entry-id.entry-secret')).toBeVisible();
+    for (const copy of screen.getAllByRole('button', { name: 'Copy event link' })) {
       expect(copy).toBeEnabled();
     }
   });
@@ -1332,7 +1291,7 @@ describe('manager experience', () => {
       if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
@@ -1345,7 +1304,7 @@ describe('manager experience', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Save this event from its original creator session before rotating its management link.',
     );
-    expect(screen.getByRole('heading', { name: 'Share the photo drop' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Share your event' })).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
   });
@@ -1362,7 +1321,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
@@ -1388,7 +1347,7 @@ describe('manager experience', () => {
       if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
@@ -1421,7 +1380,7 @@ describe('manager experience', () => {
       }
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/links')) return json({ guestLink: 'https://example.test/join/guest' });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
       throw new Error(`Unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);

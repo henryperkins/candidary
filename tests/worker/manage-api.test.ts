@@ -542,49 +542,60 @@ describe('manager settings and private photo intake', () => {
 });
 
 describe('access link rotation', () => {
-  it('redisplays the active guest link without exposing it to guests', async () => {
+  it('redisplays the printed event entry without exposing it to guests', async () => {
     const access = await eventAccess();
-    const response = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/entry`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
     expect(response.status).toBe(200);
-    expect((await response.json<any>()).data.guestLink).toBe(access.guestLink);
+    expect((await response.json<any>()).data).toEqual({
+      eventLink: access.eventLink,
+      disabledAt: null,
+    });
 
-    const denied = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+    const denied = await createApp().request(`/api/manage/events/${access.event.id}/entry`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
     expect(denied.status).toBe(403);
   });
 
-  it('distinguishes an unavailable guest link from revoked manager access', async () => {
+  it('keeps the printed entry recoverable even with no active internal grant', async () => {
     const access = await eventAccess();
     await env.DB.prepare(`
       UPDATE event_access_tokens SET revoked_at = ?
       WHERE event_id = ? AND role = 'guest' AND revoked_at IS NULL
     `).bind(new Date().toISOString(), access.event.id).run();
 
-    const response = await createApp().request(`/api/manage/events/${access.event.id}/links`, {
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/entry`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
 
-    expect(response.status).toBe(410);
-    expect((await response.json<any>()).code).toBe('GUEST_LINK_UNAVAILABLE');
+    // The two credentials are independent: whatever happens to the rotatable
+    // grant, the host can still read back what is printed on the invitations.
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.eventLink).toBe(access.eventLink);
   });
 
-  it('rotates the guest link and invalidates every old guest session immediately', async () => {
+  it('rotates the internal grant and invalidates every old guest session immediately', async () => {
     const access = await eventAccess();
-    const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/guest/rotate`, {
-      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
+    const rotated = await createApp().request(
+      `/api/manage/events/${access.event.id}/guest-sessions/rotate`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ confirmName: access.event.name }),
+      },
+      testEnv,
+    );
     const body = await rotated.json<any>();
-    expect(body.data.guestLink).not.toBe(access.guestLink);
+    expect(body.data.eventLink).toBe(access.eventLink);
 
     const oldShell = await createApp().request(`/api/event/${access.event.slug}`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
     expect((await oldShell.json<any>()).code).toBe('TOKEN_REVOKED');
 
-    const replacement = await secondGuest(body.data.guestLink);
+    const replacement = await secondGuest(body.data.eventLink);
     const newShell = await createApp().request(`/api/event/${access.event.slug}`, {
       headers: { cookie: replacement.cookie },
     }, testEnv);

@@ -7,7 +7,7 @@ import { RouterProvider } from 'react-router-dom';
 
 const CREATED = {
   event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
-  guestLink: 'https://example.test/join/guest-secret',
+  eventLink: 'https://example.test/join#entry-id.entry-secret',
   managementLink: 'https://example.test/manage/manager-secret',
   csrfToken: 'csrf-a',
 };

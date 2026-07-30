@@ -33,7 +33,14 @@ async function exchange(context: Context<AppBindings>, role: Role) {
   return context.redirect(location, 302);
 }
 
-exchangeRoutes.get('/join/:token', (context) => exchange(context, 'guest'));
+// Not a compatibility exchange. Guest entry moved to `/join#<credential>` and a
+// POST body, and this path only ever carried a credential in the URL. It exists
+// to get that credential out of the address bar and off the next Referer header,
+// and it never accepts the token it is handed.
+exchangeRoutes.get('/join/:token', (context) => context.redirect(
+  '/recover/event-entry?kind=unavailable',
+  302,
+));
 exchangeRoutes.get('/manage/:token', async (context) => {
   try {
     return await exchange(context, 'manager');

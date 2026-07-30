@@ -21,7 +21,7 @@ function randomBase64Url(byteLength: number): string {
 
 async function importAesKey(keyMaterial: string): Promise<CryptoKey> {
   const bytes = base64UrlToBytes(keyMaterial);
-  if (bytes.byteLength !== 32) throw new Error('Guest token encryption key must contain 32 bytes.');
+  if (bytes.byteLength !== 32) throw new Error('Secret encryption key must contain 32 bytes.');
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
@@ -62,17 +62,20 @@ export function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-export async function encryptGuestSecret(secret: string, keyMaterial: string): Promise<string> {
+// Two different secrets are stored recoverably now — the internal guest grant
+// and the printed entry credential — under two different keys. The `v1.` wire
+// format is unchanged, so rows written before this became generic still decrypt.
+export async function encryptSecret(secret: string, keyMaterial: string): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await importAesKey(keyMaterial);
   const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(secret));
   return `v1.${bytesToBase64Url(iv)}.${bytesToBase64Url(new Uint8Array(ciphertext))}`;
 }
 
-export async function decryptGuestSecret(ciphertext: string, keyMaterial: string): Promise<string> {
+export async function decryptSecret(ciphertext: string, keyMaterial: string): Promise<string> {
   const [version, encodedIv, encodedCiphertext, extra] = ciphertext.split('.');
   if (version !== 'v1' || !encodedIv || !encodedCiphertext || extra) {
-    throw new Error('Guest token ciphertext is malformed.');
+    throw new Error('Stored ciphertext is malformed.');
   }
 
   const key = await importAesKey(keyMaterial);

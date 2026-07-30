@@ -31,7 +31,7 @@ const MANAGER_SECTIONS = [
   { name: 'Intake', heading: 'Live intake' },
   { name: 'Gallery', heading: 'Gallery publishing' },
   { name: 'Notes', heading: 'Notes from the day' },
-  { name: 'Share', heading: 'Share the photo drop' },
+  { name: 'Share', heading: 'Share your event' },
   { name: 'Settings', heading: 'Settings' },
 ] as const;
 
@@ -256,7 +256,7 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
   await page.route('**/api/manage/events/event-a/media*', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
   await page.route('**/api/manage/events/event-a/messages', (route) => route.fulfill({ json: { data: { messages: [] }, requestId: 'r' } }));
   await page.route('**/api/manage/events/event-a/exports', (route) => route.fulfill({ json: { data: { exports: [] }, requestId: 'r' } }));
-  await page.route('**/api/manage/events/event-a/links', (route) => route.fulfill({ json: { data: { guestLink: 'https://candidary.test/join/guest' }, requestId: 'r' } }));
+  await page.route('**/api/manage/events/event-a/entry', (route) => route.fulfill({ json: { data: { eventLink: 'https://candidary.test/join#entry-id.entry-secret', disabledAt: null }, requestId: 'r' } }));
   await page.goto('/manage/event/event-a');
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
 
@@ -374,7 +374,7 @@ test('the public surfaces carry no automated accessibility violation', async ({ 
   // and the reveal control. It is where the host's only copy of the management link lives.
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
     event: EVENT_FIXTURE,
-    guestLink: UNBROKEN_TOKEN,
+    eventLink: UNBROKEN_TOKEN,
     managementLink: `${UNBROKEN_TOKEN}-manage`,
     csrfToken: 'csrf-a',
   }, requestId: 'request-a' } }));
@@ -383,7 +383,7 @@ test('the public surfaces carry no automated accessibility violation', async ({ 
   await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
   await page.getByRole('button', { name: 'Create private event' }).click();
   await expect(page.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
-  await page.getByRole('button', { name: 'Show full guest link' }).click();
+  await page.getByRole('button', { name: 'Show full event link' }).click();
   await expect(page.locator('.link-card--expanded code')).toHaveCount(1);
   await expectNoAxeViolations(page, 'create success');
 });

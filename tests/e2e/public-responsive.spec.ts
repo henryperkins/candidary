@@ -169,7 +169,7 @@ test('the event date stays inside its field under iOS native date sizing', async
 test('a private link can be revealed and read across the width matrix', async ({ page }) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
     event: EVENT_FIXTURE,
-    guestLink: UNBROKEN_TOKEN,
+    eventLink: UNBROKEN_TOKEN,
     managementLink: `${UNBROKEN_TOKEN}-manage`,
     csrfToken: 'csrf-a',
   }, requestId: 'request-a' } }));
@@ -182,7 +182,7 @@ test('a private link can be revealed and read across the width matrix', async ({
     await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
     await page.getByRole('button', { name: 'Create private event' }).click();
 
-    const reveal = page.getByRole('button', { name: 'Show full guest link' });
+    const reveal = page.getByRole('button', { name: 'Show full event link' });
     await expect(reveal).toBeVisible();
     const revealSize = await measureTarget(reveal);
     expect(revealSize.width, `reveal target width at ${width}`).toBeGreaterThanOrEqual(44);

@@ -14,9 +14,8 @@ import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
+import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
-import { TokensRepository } from '../db/tokens';
-import { decryptGuestSecret } from '../security/crypto';
 import {
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
@@ -31,6 +30,8 @@ import { sanitizeFilename } from '../security/filenames';
 import { inspectImageHeader } from '../security/image-metadata';
 import { presignUpload } from '../storage/presign';
 import { deleteEventData } from '../workflows/cleanup';
+
+const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
@@ -63,19 +64,55 @@ function managerForEvent(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
 }
 
+// Both durable-entry actions are irreversible for guests, so neither may happen
+// on a single tap. The host retypes the event name exactly as it is stored.
+async function assertEventNameConfirmed(
+  context: Context<AppBindings>,
+  eventName: string,
+): Promise<void> {
+  const parsed = confirmNameSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success || parsed.data.confirmName.trim() !== eventName) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Type the event name exactly as it appears to confirm.',
+      422,
+      { confirmName: 'This does not match the event name.' },
+    );
+  }
+}
+
 function publicationTarget(action: 'publish' | 'hide'): PublicationStatus {
   return action === 'publish' ? 'published' : 'hidden';
 }
 
 export const manageRoutes = new Hono<AppBindings>();
 
-manageRoutes.get('/manage/events/:eventId/links', async (context) => {
+// Re-displays the printed credential for a host who lost the card. There is no
+// replacement action beside it on purpose: a new link would not be on the signs
+// already standing at the venue.
+manageRoutes.get('/manage/events/:eventId/entry', async (context) => {
   const auth = await managerForEvent(context);
-  const token = await new TokensRepository(context.env.DB).getActiveForRole(auth.event.id, 'guest');
-  if (!token?.secretCiphertext) throw new ApiError('GUEST_LINK_UNAVAILABLE', 'The guest link is unavailable. Rotate it to create a replacement.', 410);
-  const secret = await decryptGuestSecret(token.secretCiphertext, context.env.GUEST_TOKEN_ENCRYPTION_KEY);
-  const origin = context.env.APP_ORIGIN.replace(/\/$/u, '');
-  return context.json({ data: { guestLink: `${origin}/join/${token.id}.${secret}` }, requestId: context.get('requestId') });
+  const entry = await new EventEntryService(context.env).recover(auth.event.id);
+  // This body contains the printed credential in full.
+  context.header('Cache-Control', 'no-store');
+  return context.json({ data: entry, requestId: context.get('requestId') });
+});
+
+// Signs guest devices out without touching the printed QR. Named for what it
+// does to guests rather than what it does to a token, because that is the part
+// a host is deciding about.
+manageRoutes.post('/manage/events/:eventId/guest-sessions/rotate', async (context) => {
+  const auth = await managerForEvent(context, true);
+  await assertEventNameConfirmed(context, auth.event.name);
+  const result = await new EventEntryService(context.env).rotateInternalGuestGrant(auth.event);
+  return context.json({ data: result, requestId: context.get('requestId') });
+});
+
+manageRoutes.post('/manage/events/:eventId/entry/disable', async (context) => {
+  const auth = await managerForEvent(context, true);
+  await assertEventNameConfirmed(context, auth.event.name);
+  const result = await new EventEntryService(context.env).disable(auth.event);
+  return context.json({ data: result, requestId: context.get('requestId') });
 });
 
 manageRoutes.post('/manage/events/:eventId/cover', async (context) => {
@@ -160,9 +197,15 @@ manageRoutes.delete('/manage/events/:eventId', async (context) => {
 });
 
 manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
-  await managerForEvent(context, true);
+  const auth = await managerForEvent(context, true);
   const parsed = settingsSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422);
+  // Reopening intake after the printed entry was disabled would leave guests
+  // with an event that accepts uploads and no working way in. Manager authority
+  // does not outrank the irreversible stop.
+  if (parsed.data.uploadsEnabled) {
+    await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+  }
   const event = await new EventsRepository(context.env.DB).updateSettings(context.req.param('eventId'), parsed.data);
   return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
 });
@@ -229,21 +272,20 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
   return context.json({ data: { changed }, requestId: context.get('requestId') });
 });
 
-for (const role of ['guest', 'manager'] as const) {
-  manageRoutes.post(`/manage/events/:eventId/links/${role}/rotate`, async (context) => {
-    const auth = await managerForEvent(context, true);
-    if (role === 'manager') {
-      const ownership = await new AccountsRepository(context.env.DB)
-        .getEventOwnershipState(auth.event.id, new Date().toISOString());
-      if (ownership && !ownership.hasOwner && ownership.claimStillPossible) {
-        throw new ApiError(
-          'OWNER_CLAIM_REQUIRED',
-          'Save this event from its original creator session before rotating its management link.',
-          409,
-        );
-      }
-    }
-    const result = await new LinkService(context.env).rotate(auth.event, role);
-    return context.json({ data: result, requestId: context.get('requestId') });
-  });
-}
+// Only the management link rotates as a link now. The guest side is reached
+// through the permanent printed entry, so its replacement lives at
+// `/guest-sessions/rotate` and deliberately produces no new URL.
+manageRoutes.post('/manage/events/:eventId/links/manager/rotate', async (context) => {
+  const auth = await managerForEvent(context, true);
+  const ownership = await new AccountsRepository(context.env.DB)
+    .getEventOwnershipState(auth.event.id, new Date().toISOString());
+  if (ownership && !ownership.hasOwner && ownership.claimStillPossible) {
+    throw new ApiError(
+      'OWNER_CLAIM_REQUIRED',
+      'Save this event from its original creator session before rotating its management link.',
+      409,
+    );
+  }
+  const result = await new LinkService(context.env).rotateManagementLink(auth.event);
+  return context.json({ data: result, requestId: context.get('requestId') });
+});

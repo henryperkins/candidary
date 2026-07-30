@@ -5,6 +5,8 @@ import {
   type RouteObject,
 } from 'react-router-dom';
 import { CreatePage } from '../pages/CreatePage';
+import { EventEntryPage } from '../pages/EventEntryPage';
+import { EventEntryUnavailablePage } from '../pages/EventEntryUnavailablePage';
 import { EventPage } from '../pages/EventPage';
 import { LandingPage } from '../pages/LandingPage';
 import { HostEventsPage } from '../pages/HostEventsPage';
@@ -17,6 +19,7 @@ import { ManagementRecoveryPage } from '../pages/ManagementRecoveryPage';
 const routes: RouteObject[] = [
   { path: '/', element: <LandingPage /> },
   { path: '/create', element: <CreatePage /> },
+  { path: '/join', element: <EventEntryPage /> },
   { path: '/event/:slug', element: <EventPage /> },
   { path: '/event/:slug/fullscreen', element: <EventPage fullscreen /> },
   { path: '/manage/event/:eventId', element: <ManagerPage /> },
@@ -25,6 +28,7 @@ const routes: RouteObject[] = [
   { path: '/host/events', element: <HostEventsPage /> },
   { path: '/host/verify', element: <HostVerifyPage /> },
   { path: '/recover/manage', element: <ManagementRecoveryPage /> },
+  { path: '/recover/event-entry', element: <EventEntryUnavailablePage /> },
   { path: '*', element: <main className="centered-state"><h1>That page wandered off.</h1><a href="/">Return to Candidary</a></main> },
 ];
 
