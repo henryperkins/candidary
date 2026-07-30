@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-30
 
-**Status:** Approved design; written specification awaiting review
+**Status:** Approved for implementation
 
 ## 1. Decision
 
@@ -60,6 +60,11 @@ Event creation produces one random, high-entropy entry credential and its QR.
 The credential is not a guessable event slug. Scanning it exchanges the
 credential for a short-lived event guest session, removes the credential from
 the address bar, and redirects to the clean event route.
+
+The credential is carried in the event link's URL fragment. The join page reads
+it into memory, removes the fragment before exchange, and sends it in a
+same-origin POST body. URL fragments are not sent in HTTP requests or referrers,
+so normal edge/application request logs never receive the raw printed secret.
 
 The printed credential remains stable for the event's lifetime. Normal session
 expiry, session-secret rotation, and internal credential maintenance do not
@@ -285,7 +290,7 @@ The deadline is nullable only while RSVP is disabled.
 - ID and event ID;
 - host-facing label;
 - optimistic concurrency version;
-- last idempotency key and result version;
+- last idempotency key, canonical request digest, and result version;
 - first response timestamp;
 - latest response timestamp;
 - latest actor kind (`household` or `host`); and
@@ -330,6 +335,21 @@ They grant access to one household roster only.
 Security-sensitive lookup limits use action-separated, HMAC-protected client
 scope keys. Raw IP addresses and submitted names are not stored in rate-limit
 records.
+
+### 7.7 Submission receipts
+
+`rsvp_submission_receipts` owns:
+
+- event and household IDs;
+- each successfully committed idempotency key;
+- its canonical request digest;
+- its committed household result version; and
+- its created timestamp.
+
+Receipts remain until event purge so a lost response can be replayed even after
+a later household or host edit. Reusing a successful key with different content
+is rejected. Receipts are transport-recovery metadata, not a host-visible RSVP
+revision history.
 
 ## 8. Components and interfaces
 
