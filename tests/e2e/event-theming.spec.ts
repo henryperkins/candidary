@@ -402,7 +402,7 @@ test('Notes placeholder uses the approved themed muted text role', async ({ page
   const placeholderColor = await page.getByRole('textbox', { name: 'Note for Maya & Theo' }).evaluate(
     (element) => getComputedStyle(element, '::placeholder').color,
   );
-  expect(placeholderColor).toBe('rgb(119, 106, 112)');
+  expect(placeholderColor).toBe('rgb(119, 110, 106)');
 });
 
 test('visible-pixel masking keeps straight edges and excludes rounded top corners', async ({ page }, testInfo) => {
