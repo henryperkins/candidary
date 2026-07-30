@@ -303,7 +303,7 @@ export function ManagerPage() {
       void QRCode.toDataURL(guestLink, {
         width: 220,
         margin: 2,
-        color: { dark: '#42103b', light: '#fffaf3' },
+        color: { dark: '#4a2415', light: '#fffaf3' },
       }).then((nextQr) => {
         if (current) setQr(nextQr);
       }).catch(() => {

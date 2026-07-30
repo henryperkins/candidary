@@ -597,6 +597,22 @@ describe('registration', () => {
 });
 
 describe('sign in', () => {
+  it('accepts a valid password created at the former 12-character floor', async () => {
+    const legacyPassword = 'legacy-pass!';
+    expect(legacyPassword).toHaveLength(12);
+    await registerAndComplete('host@example.com');
+    await env.DB.prepare('UPDATE host_accounts SET password_hash = ? WHERE email = ?')
+      .bind(await lowerCostHash(legacyPassword), 'host@example.com').run();
+
+    const response = await post('/api/host/login', {
+      email: 'host@example.com',
+      password: legacyPassword,
+    });
+
+    expect(response.status).toBe(200);
+    expect(hostCookiesFrom(response).cookie).toContain('candidary_host=');
+  });
+
   it('accepts the right password and rejects a wrong one identically to an unknown address', async () => {
     await registerAndComplete('host@example.com');
 

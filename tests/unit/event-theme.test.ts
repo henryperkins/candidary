@@ -16,7 +16,7 @@ import type { EventThemeConfigV1, HexColor } from '../../shared/contracts';
 
 const EXPECTED_TOKENS = {
   'candidary-default': {
-    page: '#f7f1e7', surface: '#fffaf3', raisedSurface: '#ffffff', text: '#35242f', pageText: '#2b1728', cardText: '#4a3e45', mutedText: '#776a70', secondaryMutedText: '#766c70', quietText: '#665860', requiredText: '#8b3150', selectionSummaryText: '#6f6168', primary: '#42103b', primaryForeground: '#ffffff', primaryHover: '#2c0c2a', primaryOnSurface: '#42103b', primaryShadow: 'rgb(66 16 59 / 13%)', accent: '#f3a578', accentForeground: '#42103b', accentSoft: '#f9ddc4', accentSoftForeground: '#42103b', border: '#e3d8dc', sectionBorder: '#d9cec2', rememberedNameBorder: '#dfd4d8', reviewDivider: '#eadfe3', inputBorder: '#92848c', focus: '#8b3f79', mediaPlaceholderStart: '#e9ddd5', mediaPlaceholderEnd: '#cbb5bf', mediaPlaceholderForeground: '#806575', heroStart: '#63345c', heroMid: '#9f5a6b', heroEnd: '#d98b6a', heroOverlayTop: 'rgb(31 9 28 / 8%)', heroOverlayBottom: 'rgb(31 9 28 / 52%)', coverOverlayTop: 'rgb(31 9 28 / 5%)', coverOverlayBottom: 'rgb(31 9 28 / 62%)', coverTextScrim: 'rgb(31 9 28 / 64%)', fullscreenBackdrop: '#170a15', fullscreenForeground: '#ffffff', inputShadow: 'rgb(43 23 40 / 4%)', frameShadow: 'rgb(54 30 46 / 13%)', inputRadius: '11px', actionRadius: '12px', cardRadius: '10px', frameRadius: '25px',
+    page: '#f7f1e7', surface: '#fffaf3', raisedSurface: '#ffffff', text: '#352924', pageText: '#2b1d17', cardText: '#4a413e', mutedText: '#776e6a', secondaryMutedText: '#766c70', quietText: '#665c58', requiredText: '#8b4b31', selectionSummaryText: '#6f6561', primary: '#4a2415', primaryForeground: '#ffffff', primaryHover: '#31170c', primaryOnSurface: '#4a2415', primaryShadow: 'rgb(74 36 21 / 13%)', accent: '#3f6d95', accentForeground: '#ffffff', accentSoft: '#dde7f0', accentSoftForeground: '#4a2415', border: '#e3dcd8', sectionBorder: '#d9cec2', rememberedNameBorder: '#dfd7d4', reviewDivider: '#eae2df', inputBorder: '#928a84', focus: '#2c5c85', mediaPlaceholderStart: '#e9ddd5', mediaPlaceholderEnd: '#cbbbb5', mediaPlaceholderForeground: '#806d65', heroStart: '#634134', heroMid: '#a06e5a', heroEnd: '#d98b6a', heroOverlayTop: 'rgb(31 15 9 / 10%)', heroOverlayBottom: 'rgb(31 15 9 / 52%)', coverOverlayTop: 'rgb(31 15 9 / 5%)', coverOverlayBottom: 'rgb(31 15 9 / 62%)', coverTextScrim: 'rgb(31 15 9 / 64%)', fullscreenBackdrop: '#170e0a', fullscreenForeground: '#ffffff', inputShadow: 'rgb(43 29 23 / 4%)', frameShadow: 'rgb(54 37 30 / 13%)', inputRadius: '11px', actionRadius: '12px', cardRadius: '10px', frameRadius: '25px',
   },
   'garden-party': {
     page: '#f2f1e8', surface: '#fffcf5', raisedSurface: '#ffffff', text: '#1f3028', pageText: '#17271f', cardText: '#2b3e34', mutedText: '#5b6b62', secondaryMutedText: '#53675d', quietText: '#4d6258', requiredText: '#8a4036', selectionSummaryText: '#53675d', primary: '#245c46', primaryForeground: '#ffffff', primaryHover: '#194b38', primaryOnSurface: '#245c46', primaryShadow: 'rgb(36 92 70 / 13%)', accent: '#c36f42', accentForeground: '#111111', accentSoft: '#f8ebe0', accentSoftForeground: '#1f3028', border: '#d7d9ca', sectionBorder: '#cbd1c2', rememberedNameBorder: '#d3d8ce', reviewDivider: '#e1e2d7', inputBorder: '#788b80', focus: '#6f3e7c', mediaPlaceholderStart: '#dde1d2', mediaPlaceholderEnd: '#b9c6b5', mediaPlaceholderForeground: '#526d5c', heroStart: '#244d3e', heroMid: '#5f7a53', heroEnd: '#c18a58', heroOverlayTop: 'rgb(14 34 27 / 10%)', heroOverlayBottom: 'rgb(14 34 27 / 54%)', coverOverlayTop: 'rgb(14 34 27 / 8%)', coverOverlayBottom: 'rgb(14 34 27 / 64%)', coverTextScrim: 'rgb(14 34 27 / 64%)', fullscreenBackdrop: '#10231b', fullscreenForeground: '#ffffff', inputShadow: 'rgb(23 39 31 / 4%)', frameShadow: 'rgb(31 48 40 / 13%)', inputRadius: '14px', actionRadius: '16px', cardRadius: '16px', frameRadius: '28px',
@@ -163,9 +163,9 @@ describe('event theme contract', () => {
   it('keeps Candidary Default compatibility orphan values exact', () => {
     const tokens = EVENT_THEME_PRESETS[0]!.tokens;
     expect(tokens).toMatchObject({
-      pageText: '#2b1728', cardText: '#4a3e45', secondaryMutedText: '#766c70',
-      quietText: '#665860', requiredText: '#8b3150', selectionSummaryText: '#6f6168',
-      inputBorder: '#92848c', primaryHover: '#2c0c2a',
+      pageText: '#2b1d17', cardText: '#4a413e', secondaryMutedText: '#766c70',
+      quietText: '#665c58', requiredText: '#8b4b31', selectionSummaryText: '#6f6561',
+      inputBorder: '#928a84', primaryHover: '#31170c',
     });
   });
 
@@ -200,8 +200,8 @@ describe('event theme contract', () => {
 
   it('derives Candidary Default accent soft exactly at the authored accent', () => {
     expect(resolveEventTheme({
-      version: 1, presetId: 'candidary-default', overrides: { accentColor: '#f3a578' },
-    }).tokens.accentSoft).toBe('#f9ddc4');
+      version: 1, presetId: 'candidary-default', overrides: { accentColor: '#3f6d95' },
+    }).tokens.accentSoft).toBe('#dde7f0');
   });
 
   it.each(EVENT_THEME_PRESET_IDS)('satisfies text, focus, and action contrast for %s', (presetId) => {
@@ -228,9 +228,9 @@ describe('event theme contract', () => {
 
   it('measures the corrected default input border against all applicable surfaces', () => {
     const tokens = EVENT_THEME_PRESETS[0]!.tokens;
-    expect(contrastRatio(tokens.inputBorder, tokens.raisedSurface)).toBeCloseTo(3.56, 2);
-    expect(contrastRatio(tokens.inputBorder, tokens.surface)).toBeCloseTo(3.43, 2);
-    expect(contrastRatio(tokens.inputBorder, tokens.page)).toBeCloseTo(3.17, 2);
+    expect(contrastRatio(tokens.inputBorder, tokens.raisedSurface)).toBeCloseTo(3.39, 2);
+    expect(contrastRatio(tokens.inputBorder, tokens.surface)).toBeCloseTo(3.27, 2);
+    expect(contrastRatio(tokens.inputBorder, tokens.page)).toBeCloseTo(3.02, 2);
   });
 
   it.each(EVENT_THEME_PRESET_IDS)('keeps no-cover hero pixels readable at required viewport sizes for %s', (presetId) => {

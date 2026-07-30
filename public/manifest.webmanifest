@@ -4,7 +4,7 @@
   "description": "A private place for guests to deliver event photos.",
   "display": "standalone",
   "scope": "/",
-  "theme_color": "#42103b",
+  "theme_color": "#31170c",
   "background_color": "#f7f1e7",
   "icons": [
     {

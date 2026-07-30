@@ -27,7 +27,7 @@ const MEDIA_PAGES = { first: { media: makeMedia(3, 'unpublished'), nextCursor: n
 async function settle(page: Page) {
   // A capture must not depend on where the mouse happened to stop. Any test that clicks its way into
   // a state leaves the pointer on the control it clicked, and that control keeps its `:hover` paint —
-  // the submit button on `/create` differs from its resting state by 13,077 px of aubergine-strong
+  // the submit button on `/create` differs from its resting state by 13,077 px of chestnut-strong
   // fill. Park the pointer outside the viewport so every state below is captured at rest.
   await settleRendering(page, { parkPointer: true });
 }

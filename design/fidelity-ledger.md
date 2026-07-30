@@ -20,14 +20,14 @@ full route, state, width, and baseline matrix.
 | Secondary features | Gallery, previous deliveries, and notes remain available but subordinate | `guest-secondary-long-content-320.png`, `fullscreen-long-caption-320.png` | These features are collapsed under `More from the event`, below the primary canvas, and disappear with the rest of the page after the terminal receipt. 80-character filenames wrap inside their column rather than widening the page. |
 | Private-by-default delivery | Every original reaches the host; sharing is a separate decision | `manager-actions-320.png` and manager API tests | Gallery visibility defaults off. New photos arrive as `Unpublished` private originals in Live intake; publish/hide actions affect gallery projection without changing delivery or export inclusion. |
 | Host operating view | Live intake first, with guest lookup, QR/link, capacity, originals, and export | Layout and reachability: `manager-nav-768.png`, `manager-nav-count-390.png`, `manager-export-first-390.png`, `manager-responsive.spec.ts` across 320–1440. Behaviour behind it, which no baseline can carry: `tests/worker/manage-api.test.ts` (guest-name filtered intake), `tests/worker/upload-api.test.ts` (the original served to the manager session and refused to the guest one), `tests/worker/export-api.test.ts` (bounded parts, manifest, manager-only URLs) | The manager opens on the recent private collection, can filter by required guest name, download any original, and prepare a complete partitioned export. The five destinations stay labelled from 320 px to 1440 px, and the 184 px navigation rail with the 330 px utility rail returns at 1101 px. |
-| Visual system | Warm parchment, paper surfaces, aubergine actions, apricot accents, moss completion | Every baseline above plus both theme suites | The current established global tokens remain binding and are unchanged by event theming for public, account, create, host, Manager, browser, and installed-app chrome. The intentional event-scoped 45-property overlay adds four guest appearances and the documented Default input/placeholder/Notes corrections without changing danger or delivery semantics, fixed typography, spacing, or host chrome. The automated engine reports no contrast violation on the rendered public, create, guest, full-screen, Manager, and manager credential-recovery surfaces; that claim excludes unrendered failed/action-refusal states and physical-device conformance. |
-| Browser and installed-app chrome | Aubergine theme chrome with a Parchment launch background | `pwa-assets.test.ts`, `pwa.spec.ts`, and `verify:pwa-build` | The already-approved installed-app work changed the global browser theme from the undocumented `#32122f` to the documented Aubergine token `#42103b`. Event theming does not alter that global chrome. Browser chrome sits outside tracked page captures, so the correction does not churn visual snapshots. |
+| Visual system | Warm parchment, paper surfaces, chestnut actions, denim accents, moss completion | Every baseline above plus both theme suites | The established Chestnut/Denim global tokens remain binding for public, account, create, host, Manager, browser, and installed-app chrome. Event theming does not mutate those global tokens: its scoped 45-property overlay adds four guest appearances, with `candidary-default` remapped to the Chestnut/Denim compatibility appearance and the documented Default input/placeholder/Notes corrections, while danger and delivery semantics, typography, spacing, and host chrome remain fixed. The automated engine reports no contrast violation on the rendered public, create, guest, full-screen, Manager, and manager credential-recovery surfaces; that claim excludes unrendered failed/action-refusal states and physical-device conformance. |
+| Browser and installed-app chrome | Chestnut strong theme chrome with a Parchment launch background | `pwa-assets.test.ts`, `pwa.spec.ts`, and `verify:pwa-build` | Browser and installed-app chrome use the documented Chestnut strong token `#31170c`; the undocumented `#32122f` and intermediate Aubergine value `#42103b` are retired from global Candidary and Default chrome. Event theming does not alter that global chrome. Browser chrome sits outside tracked page captures; the Manager appearance baseline includes global page chrome and must match the integrated palette. |
 
 ## Per-event theme evidence
 
 | Contract point | Accepted direction | Automated/browser result | Disposition |
 | --- | --- | --- | --- |
-| Preset compatibility | Four stable presets: `candidary-default` (Candidary Default), `garden-party` (Garden Party), `midnight-film` (Midnight Film), and `coastal-light` (Coastal Light) | Unit tests pin all 45 values for each preset: 180 version-1 token values, stable IDs/names, deterministic serialization, and the fixed 45-key CSS adapter | Preset IDs never branch components or CSS. Default fallbacks reproduce Candidary Default on the three approved event scopes. |
+| Preset compatibility | Four stable presets: `candidary-default` (Candidary Default), `garden-party` (Garden Party), `midnight-film` (Midnight Film), and `coastal-light` (Coastal Light) | Unit tests pin all 45 values for each preset: 180 version-1 token values, stable IDs/names, deterministic serialization, and the fixed 45-key CSS adapter | Preset IDs never branch components or CSS. Default values and fallbacks reproduce the Chestnut/Denim Candidary Default on the three approved event scopes. |
 | Constrained overrides | Optional primary and accent colors only | Unit, Worker, UI, and browser cases cover strict six-digit lowercase normalization, malicious/unknown input, custom black, white, dark/light colors, and custom `#767676` mid-tone | Primary and accent resolve only their documented families. Focus, danger, delivery, fonts, spacing, and hierarchy remain outside host control. |
 | Guest lifecycle scope | One resolved theme across entry, cover, remembered/invalid name, review, reservation, queue, transfer, finalize, cancel, retry/failure, receipt, gallery, deliveries, Notes, footer, and full screen | `event-theming.spec.ts` rotates the eight primary state rows across 320 × 568, 390 × 844, and 1280 × 900; targeted lifecycle, keyboard, target-size, zoom, reduced-motion, and containment cases supplement the matrix | Loading and authorization errors remain globally branded. Fixed semantic labels, glyphs, retry behavior, failure red, delivered moss, and caption gradient remain recognizable in every preset. |
 | No-cover and cover contrast | Preset-owned gradients; existing private cover plus localized scrim | Every preset checks all visible no-cover pixels at natural 390 × 205, expanded 390 × 420, and production 620 × 265 geometry. The mask includes straight edges and excludes clipped rounded corners. Cover text is checked over pure white, pure black, and the photographic fixture | Normal/control copy clears 4.5:1. Input boundary and focus checks clear 3:1 against applicable surfaces. No raw URL or second image pipeline was added. |
@@ -49,10 +49,11 @@ full route, state, width, and baseline matrix.
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 × 900 |
 
 The Default Notes image is a new approved theme baseline, not one of the three
-existing Default baseline updates. The final Task 8 evidence revision changed
+existing Default baseline updates. The final event-theming Task 8 evidence revision changed
 no PNG. A later independent-review correction replaced the Manager color
-input's undefined border variable with the global `--border` token and
-regenerated only `manager-event-appearance-390-mobile-win32.png`.
+input's undefined border variable with the global `--border` token and, at that feature head,
+regenerated only `manager-event-appearance-390-mobile-win32.png`. The Chestnut/Denim integration
+then regenerated the combined Default and global-chrome baselines against the final token registry.
 
 Three existing Default baselines changed intentionally:
 
@@ -60,12 +61,13 @@ Three existing Default baselines changed intentionally:
 - `guest-long-welcome-320-mobile-win32.png` — the corrected name-input boundary and placeholder; and
 - `guest-landscape-844x390-mobile-win32.png` — the same input correction in phone landscape.
 
-Three protected Default baselines remain pixel-identical to the pre-theme base:
+Three Default baselines remain protected from event-theme layout or behavior churn. Their approved
+Chestnut/Denim palette updates are pinned here:
 
 | Protected file | SHA-256 |
 | --- | --- |
-| `guest-review-320-mobile-win32.png` | `914F0DE04AE35EE4C1EC139A91502647B3521E351DD3C5E5F81322B033DBD88C` |
-| `guest-secondary-long-content-320-mobile-win32.png` | `04143911B1BBF8EACE58C43A632326C8184459F06E3F14C7DAFB36ECF6275F7F` |
+| `guest-review-320-mobile-win32.png` | `EF8C537EC2177F47F2BE55463EF9B752F4A081F2879BF015CCD4690135C55F2C` |
+| `guest-secondary-long-content-320-mobile-win32.png` | `445AAB2DB8C8FF3F05BFB013DC5EB4230816A8CCD11EA87E8E3A88824C1C3E17` |
 | `fullscreen-long-caption-320-mobile-win32.png` | `FF034EF996F939E4641AD0A68CE2162B4EEA5A645EDFF8A9943B5D1EF0BD4AB2` |
 
 ## Intentional adaptations
@@ -76,6 +78,6 @@ Three protected Default baselines remain pixel-identical to the pre-theme base:
 
 ## QA outcome
 
-No material mismatch remains between the approved wedding photo-drop journey and the reviewed browser evidence. The serious `color-contrast` finding the accessibility engine surfaced on the guest and landing surfaces has been resolved without changing a global design-system token; the scoped event overlay adds only the documented compatibility corrections and curated event appearances. `design-qa.md` records what moved, the resulting ratios, and the fact that global muted ink on parchment clears the threshold by only 0.0046.
+No material mismatch remains between the approved wedding photo-drop journey and the reviewed browser evidence. The original serious `color-contrast` finding on the guest and landing surfaces was resolved without changing a global design-system token. The later Chestnut/Denim migration changed the documented global palette while preserving those contrast relationships; the scoped event overlay adds only the documented compatibility corrections and curated event appearances. `design-qa.md` records what moved, the resulting ratios, and the fact that global muted ink on parchment clears the threshold by only 0.0046.
 
 Physical iPhone and Android checks remain release gates because desktop browser emulation cannot prove native camera-picker behavior. The automated accessibility engine, tracked baselines, and geometry assertions are supporting evidence, not a substitute for those gates — `docs/deployment.md` lists them.

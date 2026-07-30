@@ -20,7 +20,7 @@ const expectedManifest = {
   description: 'A private place for guests to deliver event photos.',
   display: 'standalone',
   scope: '/',
-  theme_color: '#42103b',
+  theme_color: '#31170c',
   background_color: '#f7f1e7',
   icons: [
     {
@@ -56,7 +56,7 @@ describe('iOS web app metadata', () => {
   it('publishes the exact standalone and Apple document metadata without credential mode', () => {
     const document = new DOMParser().parseFromString(readText('index.html'), 'text/html');
 
-    expect(document.querySelector('meta[name="theme-color"]')?.getAttribute('content')).toBe('#42103b');
+    expect(document.querySelector('meta[name="theme-color"]')?.getAttribute('content')).toBe('#31170c');
     expect(document.querySelector('meta[name="mobile-web-app-capable"]')?.getAttribute('content')).toBe('yes');
     expect(document.querySelector('meta[name="apple-mobile-web-app-capable"]')?.getAttribute('content')).toBe('yes');
     expect(document.querySelector('meta[name="apple-mobile-web-app-title"]')?.getAttribute('content')).toBe('Candidary');
@@ -102,6 +102,10 @@ describe('iOS web app metadata', () => {
     expect(existsSync(fromRoot('design/assets/candidary-app-icon.svg'))).toBe(true);
     expect(existsSync(fromRoot('scripts/generate-app-icons.mjs'))).toBe(true);
     expect(existsSync(fromRoot('scripts/verify-pwa-build.mjs'))).toBe(true);
+    const iconSource = readText('design/assets/candidary-app-icon.svg');
+    expect(iconSource).toContain('#4a2415');
+    expect(iconSource).toContain('#3f6d95');
+    expect(iconSource).not.toMatch(/#42103b|#f3a578/iu);
   });
 
   it('enforces resolved PWA artifact verification in the deployment command', () => {

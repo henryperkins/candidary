@@ -69,7 +69,7 @@ Exactness only pays if the capture is deterministic, so both suites call the sha
 
 - **Parks the pointer outside the viewport.** A test that clicks its way into a state leaves the
   mouse on the control it clicked, and that control keeps its `:hover` paint. The `/create` submit
-  button differs from its resting state by 13,077 px of aubergine-strong fill, and whether that paint
+  button differs from its resting state by 13,077 px of chestnut-strong fill, and whether that paint
   landed before the capture varied from run to run.
 - **Waits until the font set is quiet across two frames**, not merely for one `document.fonts.ready`.
   A face is only requested when a glyph needs it, so laying out with the faces loaded so far can
@@ -118,22 +118,24 @@ The event-theme suite adds exactly eight tracked images:
 | `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3297 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 x 900 |
 
-Three existing Default files are deliberately updated:
+At the event-theming feature head, three existing Default files were deliberately updated:
 `create-validation-focus-390-mobile-win32.png` for the approved selector, plus
 `guest-long-welcome-320-mobile-win32.png` and
 `guest-landscape-844x390-mobile-win32.png` for the corrected empty input boundary/placeholder.
 `guest-default-notes-390-mobile-win32.png` is a new approved image, not a fourth existing update.
-The final Task 8 evidence revision changed no PNG. A later independent-review
+The final event-theming Task 8 evidence revision changed no PNG. A later independent-review
 correction replaced the Manager color input's undefined border variable with
-the global `--border` token and regenerated only
-`manager-event-appearance-390-mobile-win32.png`.
+the global `--border` token and, at that feature head, regenerated only
+`manager-event-appearance-390-mobile-win32.png`. The later Chestnut/Denim integration regenerated
+the combined Default and global-chrome baselines listed here against the integrated token registry.
 
-The following pre-theme files are protected and pixel-identical:
+The following files are protected from event-theme layout or behavior churn. Their Chestnut/Denim
+palette updates are intentional and pinned by hash:
 
 | Protected baseline | SHA-256 |
 | --- | --- |
-| `guest-review-320-mobile-win32.png` | `914F0DE04AE35EE4C1EC139A91502647B3521E351DD3C5E5F81322B033DBD88C` |
-| `guest-secondary-long-content-320-mobile-win32.png` | `04143911B1BBF8EACE58C43A632326C8184459F06E3F14C7DAFB36ECF6275F7F` |
+| `guest-review-320-mobile-win32.png` | `EF8C537EC2177F47F2BE55463EF9B752F4A081F2879BF015CCD4690135C55F2C` |
+| `guest-secondary-long-content-320-mobile-win32.png` | `445AAB2DB8C8FF3F05BFB013DC5EB4230816A8CCD11EA87E8E3A88824C1C3E17` |
 | `fullscreen-long-caption-320-mobile-win32.png` | `FF034EF996F939E4641AD0A68CE2162B4EEA5A645EDFF8A9943B5D1EF0BD4AB2` |
 
 The original mobile/tablet table's logical names carry Playwright's default
@@ -289,8 +291,10 @@ in the final handoff and are not preclaimed here.
 `runOnly`, no `withTags`, no `disableRules` — on `/`, the `/create` form, the `/create` success state
 with the guest link revealed, the guest hero, the guest secondary content with all three disclosures
 open, `/event/:slug/fullscreen`, each of the five manager sections, and the full-page and inline
-manager credential-recovery states. It supplements rather than replaces the keyboard, target-size,
-geometry, contrast, zoom and reduced-motion assertions above.
+manager credential-recovery states. Dedicated theme cases separately scan the complete guest
+document for all four curated presets plus custom black, white, and `#767676` configurations, and
+scan the full Manager Settings appearance editor. It supplements rather than replaces the keyboard,
+target-size, geometry, contrast, zoom and reduced-motion assertions above.
 
 ### Exactly which rules run
 
@@ -356,7 +360,7 @@ Fixed under this task:
   landmarks. It is now the page's `banner`, which also keeps the brand inside a landmark.
 - `page-has-heading-one` — `/event/:slug/fullscreen` had no level-one heading. It now carries a
   screen-reader-only one; visible copy is unchanged.
-- `color-contrast` on the guest note byline — `.notes-feed small` was written for the dark aubergine
+- `color-contrast` on the guest note byline — `.notes-feed small` was written for the dark
   notes band and rendered a guest's name at 1.72:1 when that component was reused on the light guest
   surface. It now inherits the ink the surrounding feed already uses.
 - `color-contrast` on the guest ground — see "Contrast remediation" below.
@@ -390,8 +394,9 @@ Fixed under this task:
 ## Contrast remediation
 
 The engine originally reported eleven serious `color-contrast` elements on the landing and guest
-surfaces, plus one more the engine never reaches. All are now resolved. **No value in
-`design/design-system.md`'s token table changed.** Two of the three fixes move an *undocumented*
+surfaces, plus one more the engine never reaches. All are now resolved. **During that contrast-
+remediation task, no value in `design/design-system.md`'s token table changed.** Two of the three
+fixes move an *undocumented*
 literal onto a *documented* token or an existing one, and the third stops using a status token as
 body copy — which is why this satisfies "preserve the Candidary palette" rather than departing from
 it.

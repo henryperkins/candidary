@@ -20,6 +20,24 @@ npx wrangler r2 bucket cors set candidary-media --file config/r2-cors.json
 
 The bucket remains private. CORS permits signed browser PUT requests from the application origin with the signed `content-type` header. Originals are manager-only; previews are authorization-checked; export links are short-lived and manager-only.
 
+## Transport security
+
+Enable **SSL/TLS → Edge Certificates → Always Use HTTPS** for the zone. A plain-HTTP request is then redirected at the edge and never reaches the Worker. Leave the **HSTS** card in that same panel switched off — the policy ships from the repo instead, and the check at the end of this section catches it if both are on.
+
+Both response surfaces send `Strict-Transport-Security: max-age=31536000; includeSubDomains`: `worker/http/security-headers.ts` for the paths in `assets.run_worker_first`, and `public/_headers` for everything the asset server answers directly — including `/`, which is where most first visits land. The Worker emits it only when the request URL scheme is `https:`, as RFC 6797 requires, so its absence under `npm run dev` over localhost is correct rather than a regression.
+
+The value is pinned once per surface — `tests/unit/static-headers.test.ts` reads `public/_headers` off disk, and `tests/worker/security-headers.test.ts` exercises the middleware in workerd. Neither test can see the other's surface, so a green `npm run test:unit` says nothing about the Worker's copy; only `npm test` covers both.
+
+Before changing the apex, confirm no subdomain is expected to answer over plain HTTP. `includeSubDomains` commits every subdomain to HTTPS for a year and cannot be withdrawn from browsers that already saw it. The 2026-07-28 audit found only the mail return-path subdomain `cf-bounce`, which carried DNS records rather than an HTTP service; recheck the zone before any later policy change. `preload` is omitted on purpose.
+
+After deploying, confirm exactly one policy is in force:
+
+```powershell
+(curl.exe -sSI https://candidary.online/ | Select-String 'strict-transport-security').Count
+```
+
+Expected `1`. A `2` means the zone's own HSTS setting is on as well and is appending a second policy, which may carry a different max-age — switch the dashboard setting off rather than reconciling the two. Keeping one source in the repo is what keeps the value under version control and under test.
+
 ## Secrets
 
 Generate independent 32-byte values and store them with Wrangler. The guest encryption value is base64url-encoded for AES-256-GCM.
@@ -44,7 +62,11 @@ npx wrangler d1 migrations apply candidary-core --remote
 npm run deploy
 ```
 
-This applies the private-delivery/publication split and partitioned-export schema, then deploys the export Workflow, Images binding, private asset routing, the daily cleanup trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the HTTPS origin before printing a QR code.
+This applies every pending migration, including the private-delivery/publication split,
+partitioned-export schema, host accounts, and canonical per-event theme configuration. The deploy
+then publishes the export Workflow, Images binding, private asset routing, the daily cleanup
+trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the
+HTTPS origin before printing a QR code.
 
 ## Wedding rehearsal gate
 
@@ -70,8 +92,8 @@ by the automated suite and nothing below may be recorded as passed on the streng
 `npm run test:e2e`. The suite runs one Chromium engine under viewport emulation on Windows: it can
 prove geometry, containment, target size, focus order, resolved contrast, reduced motion, and
 `axe-core` 4.12.1's default rule set plus `target-size` — 90 of the 105 rules it ships, nothing
-scoped away, with the omissions enumerated in `design-qa.md` — on eleven surfaces, and it can prove
-none of the following.
+scoped away, with the omissions and complete global/event-theme surface matrix enumerated in
+`design-qa.md` — and it can prove none of the following.
 
 The engine currently reports zero accessibility violations, but note what that is and is not. It
 means computed colour pairings clear WCAG AA arithmetically on the states the suite renders. Muted

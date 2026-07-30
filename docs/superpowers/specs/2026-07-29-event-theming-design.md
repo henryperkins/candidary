@@ -2,7 +2,15 @@
 
 **Date:** 2026-07-29
 
-**Status:** Revised after code review; written specification awaiting approval
+**Status:** Approved and implemented
+
+> **Integration note (2026-07-29):** The later approved
+> `docs/superpowers/plans/2026-07-29-chestnut-denim-palette.md` migration supersedes only this
+> document's historical Candidary Default/global palette values and pre-integration screenshot
+> hashes. `design/design-system.md`, `shared/event-theme.ts`, and
+> `design/fidelity-ledger.md` are the current authorities for those values and evidence. The
+> event-scoping, persistence, API, validation, accessibility, and workflow decisions below remain
+> unchanged.
 
 ## 1. Decision
 

@@ -184,8 +184,8 @@ describe('event theme create and read serialization', () => {
     expect(Object.keys(body.data.event.theme.tokens).sort()).toEqual([...THEME_TOKEN_KEYS].sort());
     expect(body.data.event.theme.tokens).toMatchObject({
       page: '#f7f1e7',
-      primary: '#42103b',
-      accent: '#f3a578',
+      primary: '#4a2415',
+      accent: '#3f6d95',
       frameRadius: '25px',
     });
   });

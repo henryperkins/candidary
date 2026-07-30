@@ -7,6 +7,9 @@ const headersPath = resolve(process.cwd(), 'public/_headers');
 const headers = existsSync(headersPath) ? readFileSync(headersPath, 'utf8') : '';
 const manifestContentTypeRule =
   /^\/manifest\.webmanifest[ \t]*\r?\n[ \t]+Content-Type: application\/manifest\+json[ \t]*\r?$/mu;
+// Parsed as strict JSON on purpose: `wrangler.jsonc` may legally carry comments, but
+// this manifest is read by tooling that does not strip them, so it is kept comment-free
+// and that is asserted by this file failing loudly if it ever is not.
 const wranglerConfig = JSON.parse(readFileSync(resolve(process.cwd(), 'wrangler.jsonc'), 'utf8')) as {
   assets?: { run_worker_first?: string[] };
 };
@@ -24,6 +27,7 @@ describe('static asset security headers', () => {
     expect(headers).toContain('X-Content-Type-Options: nosniff');
     expect(headers).toContain('Permissions-Policy: camera=(), microphone=(), geolocation=()');
     expect(headers).toContain('Cross-Origin-Opener-Policy: same-origin');
+    expect(headers).toContain('Strict-Transport-Security: max-age=31536000; includeSubDomains');
   });
 
   it('serves the manifest with an explicit content type under nosniff', () => {
@@ -40,5 +44,16 @@ describe('static asset security headers', () => {
     expect(patterns).toEqual(expect.arrayContaining(['/create', '/event/*', '/manage/*']));
     expect(patterns).toContain('/recover/manage');
     expect(patterns).not.toContain('!/manage/event/*');
+  });
+
+  // Every one of these is deep-linkable by definition: recovery email links and every
+  // `hostSignInHref` point straight at them, so a host reaches them cold rather than by
+  // navigating within an already-loaded SPA. Without an entry here the Worker never
+  // runs and `ASSETS.fetch` serves the shell with none of the security headers on it.
+  it('routes the host account entry points through it too', () => {
+    const patterns = wranglerConfig.assets?.run_worker_first ?? [];
+    expect(patterns).toEqual(expect.arrayContaining([
+      '/host/login', '/host/register', '/host/events', '/host/verify',
+    ]));
   });
 });

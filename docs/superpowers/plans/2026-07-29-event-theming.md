@@ -1,5 +1,11 @@
 # Candidary Per-Event Theming Implementation Plan
 
+> **Integration note (2026-07-29):** This plan was executed on its isolated historical base. The
+> later Chestnut/Denim migration supersedes its Candidary Default palette values and screenshot
+> hashes; current values and evidence live in `design/design-system.md`,
+> `shared/event-theme.ts`, and `design/fidelity-ledger.md`. The original base/branch constraints
+> below remain as execution history rather than instructions for the integrated tree.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give every event a versioned, isolated, accessible visual theme while

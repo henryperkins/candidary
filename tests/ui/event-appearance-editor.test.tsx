@@ -75,7 +75,7 @@ describe('event appearance editor', () => {
 
     expect(primary).toHaveAccessibleDescription('Enter a six-digit hex color, such as #245c46.');
     expect(screen.getByText('Unsaved changes')).toBeVisible();
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#42103b' });
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
     expect(screen.getByRole('button', { name: 'Save appearance' })).toBeDisabled();
   });
 
@@ -90,7 +90,7 @@ describe('event appearance editor', () => {
     render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
 
     const preview = screen.getByTestId('event-appearance-preview');
-    expect(preview).toHaveStyle({ '--event-primary': '#42103b' });
+    expect(preview).toHaveStyle({ '--event-primary': '#4a2415' });
 
     await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
 
@@ -134,10 +134,10 @@ describe('event appearance editor', () => {
     expect(preview).toHaveStyle({ '--event-primary': '#123456' });
 
     await user.click(screen.getByRole('button', { name: 'Use preset primary' }));
-    expect(primary).toHaveValue('#42103b');
+    expect(primary).toHaveValue('#4a2415');
     expect(accent).toHaveValue('#c85f50');
     expect(preview).toHaveStyle({
-      '--event-primary': '#42103b',
+      '--event-primary': '#4a2415',
       '--event-accent': '#c85f50',
     });
 

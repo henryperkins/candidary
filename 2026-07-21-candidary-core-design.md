@@ -1,5 +1,13 @@
 # Candidary Core — Workflow-Parity MVP Design
 
+> **Historical baseline:** Later approved specifications supersede this document's guest hierarchy,
+> account model, publication flow, limits, global palette, and event-appearance decisions. Use
+> `docs/superpowers/specs/2026-07-22-wedding-photo-drop-design.md`,
+> `docs/superpowers/specs/2026-07-28-host-account-hardening-design.md`,
+> `docs/superpowers/specs/2026-07-29-event-theming-design.md`, and
+> `design/design-system.md` as current authority. This file remains as the original architecture
+> record.
+
 **Date:** 2026-07-21
 
 **Status:** Approved direction, written specification awaiting review

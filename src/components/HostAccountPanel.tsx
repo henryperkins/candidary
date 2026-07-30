@@ -129,17 +129,28 @@ export function HostAccountPanel({
       {error && <p className="form-error" role="alert">{error}</p>}
       {notice && <p className="form-note" role="status">{notice}</p>}
       <form className="create-form" onSubmit={confirm} noValidate>
-        <div className="create-field">
-          <label>Confirmation code
-            <input name="code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required />
+        {/* One input, never six boxes: `autocomplete="one-time-code"` resolves on a
+            single field only, and splitting it breaks paste, autofill, and the value a
+            screen reader reads back. The tracking is what makes the digits countable
+            at a glance, which is the only thing six boxes were ever doing. */}
+        <div className="create-field code-field">
+          <label htmlFor="confirmation-code">Confirmation code
+            <input id="confirmation-code" name="code" inputMode="numeric" autoComplete="one-time-code"
+              maxLength={6} placeholder="000000" required aria-describedby="confirmation-code-hint" />
           </label>
+          <small id="confirmation-code-hint" className="field-hint">Six digits, from the email we just sent.</small>
         </div>
         <button className="button button--primary button--wide" disabled={busy}>
           {busy ? 'Checking…' : 'Confirm my email'}
         </button>
       </form>
-      <button type="button" className="text-link" onClick={resend} disabled={busy}>Send another code</button>
-      {mode === 'registration' && <button type="button" className="text-link" onClick={restart} disabled={busy}>Start over</button>}
+      {/* The links row owns the gap. As bare siblings these two ran together into one
+          unreadable string — JSX drops the newline between them, and neither carries
+          spacing of its own. */}
+      <div className="host-panel__links">
+        <button type="button" className="text-link" onClick={resend} disabled={busy}>Send another code</button>
+        {mode === 'registration' && <button type="button" className="text-link" onClick={restart} disabled={busy}>Start over</button>}
+      </div>
       {/* Skippable on purpose. Confirming gates the emails, never the event itself —
           but until the code is entered nothing has been saved, so this must not say
           it has. */}
@@ -169,9 +180,12 @@ export function HostAccountPanel({
             aria-invalid={Boolean(fields.password)}
             aria-describedby={fields.password ? 'host-password-error' : 'host-password-hint'} />
         </label>
+        {/* The hint is generated from the constant, so the floor and the promise about
+            it can never drift apart. It is not an error and must not borrow the colour
+            that means one. */}
         {fields.password
           ? <small id="host-password-error">{fields.password}</small>
-          : <small id="host-password-hint">At least {MIN_HOST_PASSWORD_LENGTH} characters.</small>}
+          : <small id="host-password-hint" className="field-hint">At least {MIN_HOST_PASSWORD_LENGTH} characters.</small>}
       </div>
       <button className="button button--primary button--wide" disabled={busy}>
         {busy ? 'Creating your account…' : 'Create account'}

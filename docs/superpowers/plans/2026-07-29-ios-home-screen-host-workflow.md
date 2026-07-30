@@ -1,5 +1,10 @@
 # iOS Home Screen Host Workflow Implementation Plan
 
+> **Palette note (2026-07-29):** This plan records the implemented route-preserving PWA workflow.
+> The later Chestnut/Denim migration supersedes its historical Aubergine/Apricot artwork and
+> theme-color literals; current values live in `design/design-system.md`,
+> `public/manifest.webmanifest`, and `design/assets/candidary-app-icon.svg`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship route-preserving iOS Home Screen metadata and artwork, plus account-or-management-link recovery that keeps an installed host manager usable after either credential lapses.

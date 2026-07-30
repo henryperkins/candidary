@@ -9,7 +9,7 @@
 
 ## Visual contract
 
-Candidary is editorial and intimate rather than celebratory-software generic. True warm parchment is the page ground, aubergine anchors actions and typography, apricot marks active/selected states, and moss communicates safe completion. Surfaces use thin warm-gray rules, restrained 8–12px radii, and almost-flat shadows.
+Candidary is editorial and intimate rather than celebratory-software generic. True warm parchment is the page ground, chestnut anchors actions and typography, denim marks active/selected states, and moss communicates safe completion. Surfaces use thin warm-gray rules, restrained 8–12px radii, and almost-flat shadows.
 
 ### Tokens
 
@@ -17,17 +17,17 @@ Candidary is editorial and intimate rather than celebratory-software generic. Tr
 | --- | --- |
 | Parchment page | `#f7f1e7` |
 | Paper surface | `#fffaf3` |
-| Ink | `#2b1728` |
+| Ink | `#2b1d17` |
 | Muted ink | `#766c70` |
-| Aubergine | `#42103b` |
-| Aubergine strong | `#2c0c2a` |
-| Apricot | `#f3a578` |
-| Apricot soft | `#f9ddc4` |
+| Chestnut | `#4a2415` |
+| Chestnut strong | `#31170c` |
+| Denim | `#3f6d95` |
+| Denim soft | `#dde7f0` |
 | Moss | `#68763d` |
 | Moss soft | `#e8ecd8` |
 | Danger | `#b54033` |
 | Border | `#d9cec2` |
-| Focus | `#8b3f79` |
+| Focus | `#2c5c85` |
 
 Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The manager uses a 184px navigation rail, open Live intake workspace, and 330px utility rail at wide widths.
 
@@ -101,7 +101,7 @@ Version 1 has four stable presets in this order:
 
 | Stable ID | Name | Page / surface | Text / muted | Primary / accent / focus | Input / action / card / frame radius | Exact no-cover gradient stops |
 | --- | --- | --- | --- | --- | --- | --- |
-| `candidary-default` | Candidary Default | `#f7f1e7` / `#fffaf3` | `#35242f` / `#776a70` | `#42103b` / `#f3a578` / `#8b3f79` | `11px` / `12px` / `10px` / `25px` | `#63345c` → `#9f5a6b` → `#d98b6a` |
+| `candidary-default` | Candidary Default | `#f7f1e7` / `#fffaf3` | `#352924` / `#776e6a` | `#4a2415` / `#3f6d95` / `#2c5c85` | `11px` / `12px` / `10px` / `25px` | `#634134` → `#a06e5a` → `#d98b6a` |
 | `garden-party` | Garden Party | `#f2f1e8` / `#fffcf5` | `#1f3028` / `#5b6b62` | `#245c46` / `#c36f42` / `#6f3e7c` | `14px` / `16px` / `16px` / `28px` | `#244d3e` → `#5f7a53` → `#c18a58` |
 | `midnight-film` | Midnight Film | `#eef1f7` / `#fafbff` | `#192136` / `#5d667b` | `#263868` / `#b7693f` / `#7551a6` | `7px` / `8px` / `7px` / `14px` | `#1d294e` → `#4a3e68` → `#8b4e5a` |
 | `coastal-light` | Coastal Light | `#edf7f5` / `#fffefa` | `#17343a` / `#526d72` | `#0c6370` / `#c85f50` / `#6c3c78` | `12px` / `14px` / `12px` / `20px` | `#0b5965` → `#4a8c91` → `#d27a62` |
@@ -183,10 +183,10 @@ upload, asset, or background-image system.
 
 ### Components and states
 
-- Buttons: filled aubergine primary, outlined aubergine secondary, quiet text tertiary, moss completion, danger hide/delete.
+- Buttons: filled chestnut primary, outlined chestnut secondary, quiet text tertiary, moss completion, danger hide/delete.
 - Fields: 48px minimum height, parchment/paper fill, 1px border, 2px focus outline with 2px offset.
 - Toggles: 44px hit area, moss on, warm gray off.
-- Media: 8px radius, natural cover crop, apricot selected/new treatment, and an explicit remove control before delivery.
+- Media: 8px radius, natural cover crop, denim selected/new treatment, and an explicit remove control before delivery.
 - Status: textual state plus icon; never color alone. Upload states are selected, preparing, queued, sending, confirming, delivered, and needs attention. Publication states are unpublished, published, and hidden.
 - Motion: 160–220ms for disclosure/selection; disable nonessential transforms under `prefers-reduced-motion`.
 

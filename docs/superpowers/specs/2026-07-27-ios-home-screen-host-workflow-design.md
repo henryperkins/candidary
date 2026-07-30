@@ -1,5 +1,10 @@
 # iOS Home Screen Host Workflow Design
 
+> **Palette note (2026-07-29):** The route-preserving PWA design remains current, but the later
+> Chestnut/Denim migration supersedes historical Aubergine/Apricot artwork and theme-color values
+> below. `design/design-system.md`, `public/manifest.webmanifest`, and
+> `design/assets/candidary-app-icon.svg` are the current visual authority.
+
 - **Date:** 2026-07-27
 - **Revalidated:** 2026-07-28 against `origin/main` at `051478a`
 - **Status:** Implemented; physical-iPhone acceptance pending

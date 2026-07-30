@@ -316,18 +316,20 @@ describe('guest event theme rendering', () => {
       return declarationMatch![1]!.trim();
     };
 
-    expect(declaration('.photo-drop__name strong', 'color')).toBe('var(--event-required-text, #8b3150)');
-    expect(declaration('.sending-as', 'border')).toContain('var(--event-remembered-name-border, #dfd4d8)');
-    expect(declaration('.review-heading', 'border-bottom')).toContain('var(--event-review-divider, #eadfe3)');
+    expect(declaration('.photo-drop__name strong', 'color')).toBe('var(--event-required-text, #8b4b31)');
+    expect(declaration('.sending-as', 'border')).toContain('var(--event-remembered-name-border, #dfd7d4)');
+    expect(declaration('.review-heading', 'border-bottom')).toContain('var(--event-review-divider, #eae2df)');
     expect(declaration('.selection-card__image', 'background')).toContain('var(--event-media-placeholder-start, #e9ddd5)');
-    expect(declaration('.selection-card__image', 'color')).toBe('var(--event-media-placeholder-foreground, #806575)');
-    expect(declaration('.selection-summary', 'color')).toBe('var(--event-selection-summary-text, #6f6168)');
-    expect(declaration('.guest-shell--drop .text-button', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
-    expect(declaration('.new-badge', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
+    expect(declaration('.selection-card__image', 'color')).toBe('var(--event-media-placeholder-foreground, #806d65)');
+    expect(declaration('.selection-summary', 'color')).toBe('var(--event-selection-summary-text, #6f6561)');
+    expect(declaration('.guest-shell--drop .text-button', 'color')).toBe('var(--event-primary-on-surface, #4a2415)');
+    expect(declaration('.new-badge', 'color')).toBe('var(--event-primary-on-surface, #4a2415)');
     expect(brightPrimaryTheme.tokens.primary).toBe('#f2c94c');
     expect(brightPrimaryTheme.tokens.primaryOnSurface).not.toBe(brightPrimaryTheme.tokens.primary);
-    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary-on-surface, #42103b)');
-    expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary, #42103b)');
+    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary-on-surface, #4a2415)');
+    expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary, #4a2415)');
+    expect(declaration('.photo-drop__hero::after', 'background'))
+      .toContain('var(--event-hero-overlay-top, rgb(31 15 9 / 10%))');
     expect(declaration('.selection-card--failed', 'border-color')).toBe('#d99b93');
     expect(declaration('.selection-card--delivered', 'border-color')).toBe('#b8c9ae');
     expect(declaration('.selection-card__delivered', 'color')).toBe('#31552d');

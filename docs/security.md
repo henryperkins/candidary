@@ -18,6 +18,11 @@ For creator ownership, eligibility ends at the earlier of the event's management
 
 Password authority is versioned. `host_accounts.auth_version` starts at 1 and every host session records the version it authenticated against; resolution requires the two to match. A reset increments the version, changes the password, verifies the address, and revokes existing host sessions in one D1 batch, so a login that authenticated with the old password cannot mint a session afterwards. Opportunistic rehash is a compare-and-swap on the previous hash and version, so it can upgrade a hash's cost without resurrecting a superseded password.
 
+New registrations and password resets enforce the current 15-character minimum. Sign-in deliberately
+does not reuse that creation-time floor: it accepts an otherwise valid shorter legacy password so an
+existing host is not locked out after the policy rises, and opportunistically upgrades the stored
+hash when its encoded cost is below the current parameters.
+
 Registration, sign-in, verification resend, and password-reset requests reserve fixed-window capacity in `host_auth_rate_limits` before any scrypt or mail work, through one atomic UPSERT per scope. Scopes are HMAC digests keyed with `LOGIN_HMAC_KEY` and domain-separated as `rate-limit:<action>:<scope-kind>:<normalized-value>`. The client IP comes from `CF-Connecting-IP`; a missing header shares one `unknown` scope rather than trusting a client-supplied alternative. Exhaustion returns the same `429 RATE_LIMITED` body for new and existing addresses.
 
 Durable ownership is deliberately narrow. A partial unique index permits one `owner` row per event. For events created after migration 0006 only the creator session may claim that owner; every later management-link exchange is marked ineligible. Events that predate 0006 carry no creator provenance, so each gets exactly one legacy first-owner claim through a live management credential, and a successful claim closes that path in the same batch that inserts the owner. An existing non-owner membership never authorizes promotion, and this release adds no cohost invitation or removal.
@@ -36,6 +41,7 @@ Confirming an address gates notifications only, never access; a bounced confirma
 - Token exchange redirects immediately to token-free `/event/:slug` or `/manage/event/:eventId` routes.
 - Content responses are `private, no-store` and include `X-Content-Type-Options: nosniff`.
 - The Worker applies a restrictive content security policy, no-referrer policy, and stable request IDs.
+- HTTPS is pinned for a year including subdomains: `Strict-Transport-Security: max-age=31536000; includeSubDomains`. No credential here has a second factor behind it — an access link carries its secret in the URL, and a session cookie is the whole authorization story. Cloudflare **Always Use HTTPS** keeps a first plain-HTTP navigation out of the Worker; after a browser receives the policy, HSTS upgrades later requests before sending them. Because `preload` is deliberately omitted, HSTS alone does not protect a browser's first-ever request to the host. The Worker sends the header only on HTTPS requests, as RFC 6797 requires; `public/_headers` has no scheme predicate, which is harmless because a browser ignores the header over plain HTTP. The preload list is not practically reversible, so joining it remains a separate decision rather than a side effect of this control.
 - Permanent R2 URLs are never public. PUT URLs are object-specific, MIME-bound, and valid for ten minutes; export GET URLs are manager-only and valid for fifteen minutes.
 
 ## Upload defenses

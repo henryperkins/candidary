@@ -29,7 +29,7 @@ if (manifest.name !== 'Candidary'
   || manifest.short_name !== 'Candidary'
   || manifest.display !== 'standalone'
   || manifest.scope !== '/'
-  || manifest.theme_color !== '#42103b'
+  || manifest.theme_color !== '#31170c'
   || manifest.background_color !== '#f7f1e7') {
   throw new Error('Built manifest metadata does not match the approved PWA contract.');
 }
@@ -39,7 +39,7 @@ if (Object.hasOwn(manifest, 'start_url') || Object.hasOwn(manifest, 'id')) {
 
 const html = contents.get('index.html').toString();
 const htmlRequirements = [
-  /<meta\s+name="theme-color"\s+content="#42103b"\s*\/?>/u,
+  /<meta\s+name="theme-color"\s+content="#31170c"\s*\/?>/u,
   /<meta\s+name="mobile-web-app-capable"\s+content="yes"\s*\/?>/u,
   /<meta\s+name="apple-mobile-web-app-capable"\s+content="yes"\s*\/?>/u,
   /<meta\s+name="apple-mobile-web-app-title"\s+content="Candidary"\s*\/?>/u,

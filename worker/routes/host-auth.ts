@@ -27,6 +27,7 @@ import { HostAuthService } from '../services/host-auth';
 
 const emailSchema = z.string().trim().min(3).max(254).email('Enter a valid email address.');
 const passwordSchema = z.string().min(MIN_PASSWORD_LENGTH).max(MAX_PASSWORD_LENGTH);
+const loginPasswordSchema = z.string().min(1).max(MAX_PASSWORD_LENGTH);
 const codeSchema = z.string().trim().regex(/^\d{6}$/u, 'Enter the six-digit code.');
 
 const registerSchema = z.object({
@@ -35,7 +36,7 @@ const registerSchema = z.object({
   displayName: z.string().trim().min(1).max(80).nullish(),
   bindEventId: z.uuid().nullish(),
 });
-const loginSchema = z.object({ email: emailSchema, password: passwordSchema });
+const loginSchema = z.object({ email: emailSchema, password: loginPasswordSchema });
 const codeOnlySchema = z.object({ code: codeSchema });
 const forgotSchema = z.object({ email: emailSchema });
 const resetSchema = z.object({ email: emailSchema, code: codeSchema, password: passwordSchema });
