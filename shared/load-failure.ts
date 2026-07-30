@@ -48,6 +48,18 @@ const LOAD_FAILURE_DECISION = {
   RATE_LIMITED: decision('retry'),
   LOGIN_EMAIL_UNDELIVERABLE: decision('retry'),
   ACCOUNT_DISABLED: decision('latest-link'),
+  // Disabling a printed entry is irreversible and has no replacement link, so
+  // offering "get the latest link" would be a promise this product cannot keep.
+  EVENT_ENTRY_UNAVAILABLE: decision('ended-event'),
+  RSVP_UNAVAILABLE: decision('retry'),
+  RSVP_CLOSED: decision('retry'),
+  // The printed QR still works; only the household session lapsed, and the RSVP
+  // flow sends the guest back to exact lookup before this table is consulted.
+  RSVP_SESSION_REQUIRED: decision('retry'),
+  RSVP_HOUSEHOLD_CONFLICT: decision('retry'),
+  RSVP_SUBMISSION_CONFLICT: decision('retry'),
+  RSVP_ROSTER_INVALID: decision('retry'),
+  RSVP_IMPORT_CONFLICT: decision('retry'),
   INTERNAL_ERROR: decision('retry'),
 } as const satisfies Record<ApiErrorCode, LoadFailureDecision>;
 

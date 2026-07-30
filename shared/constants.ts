@@ -29,3 +29,18 @@ export const UPLOAD_RESERVATION_TTL_SECONDS = 15 * 60;
 // second factor. Eight is permitted only as one factor of MFA, which this is not.
 export const MIN_HOST_PASSWORD_LENGTH = 15;
 export const MAX_HOST_PASSWORD_LENGTH = 256;
+
+// RSVP limits. `shared/rsvp.ts` re-exports the five capacity numbers so the
+// domain module reads as one piece, but this file stays the single place a
+// number is allowed to change.
+export const MAX_EVENT_RSVP_CAPACITY = 500;
+export const MAX_RSVP_HOUSEHOLDS = 500;
+export const MAX_NAMED_INVITEES_PER_HOUSEHOLD = 20;
+export const MAX_PLUS_ONES_PER_HOUSEHOLD = 10;
+export const MAX_HOUSEHOLD_CAPACITY = 30;
+// Household labels and person names, measured after whitespace collapse.
+export const MAX_RSVP_TEXT_LENGTH = 80;
+export const MAX_RSVP_HOUSEHOLD_KEY_LENGTH = 64;
+// UTF-8 bytes, not code units. A 500-household roster is far under this.
+export const MAX_RSVP_CSV_BYTES = 256 * 1024;
+export const MANAGER_RSVP_PAGE_SIZE = 50;

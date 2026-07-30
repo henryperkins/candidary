@@ -1,3 +1,4 @@
+import { csvCell as cell } from '../../shared/csv';
 import type { MediaRecord } from '../db/types';
 import { exportPartName, exportPath } from './paths';
 
@@ -5,11 +6,6 @@ const columns = [
   'media_id', 'original_filename', 'guest_name', 'caption', 'mime_type',
   'byte_size', 'width', 'height', 'uploaded_at', 'publication_status', 'published_at',
 ] as const;
-
-function cell(value: string | number | null): string {
-  const text = value === null ? '' : String(value);
-  return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
 
 export function buildMediaCsv(media: MediaRecord[]): string {
   const rows = media.map((item) => [

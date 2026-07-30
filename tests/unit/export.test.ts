@@ -25,6 +25,32 @@ describe('export metadata', () => {
     expect(csv).toContain('Zoë');
   });
 
+  it('neutralizes formula-shaped filenames, guest names, and captions', () => {
+    const hostile = {
+      ...media,
+      originalFilename: '=cmd|calc.png',
+      guestName: '+Zoe',
+      caption: '@SUM(A1:A2)',
+    };
+    const csv = buildMediaCsv([hostile]);
+    expect(csv).toContain("'=cmd|calc.png");
+    expect(csv).toContain("'+Zoe");
+    expect(csv).toContain("'@SUM(A1:A2)");
+
+    const manifest = buildExportManifest([{ partNumber: 1, media: [hostile] }]);
+    expect(manifest).toContain("'=cmd|calc.png");
+    expect(manifest).toContain("'+Zoe");
+    expect(manifest).toContain("'@SUM(A1:A2)");
+  });
+
+  it('leaves ordinary cells byte-for-byte unchanged', () => {
+    // The hardening must not rewrite the existing export format for the
+    // overwhelming majority of rows, so this pins the unquoted/quoted split.
+    const csv = buildMediaCsv([media]);
+    expect(csv).toContain('media-a,"Maya, ""laughing"".png",Zoë,"A bright, ""golden"" hour",image/png,64,800,600');
+    expect(csv).not.toContain("'");
+  });
+
   it('builds deterministic collision-safe paths', () => {
     expect(exportPath(media, 0)).toBe('photos/001-maya-laughing.png');
     expect(exportPath({ ...media, id: 'media-b' }, 1)).toBe('photos/002-maya-laughing.png');
