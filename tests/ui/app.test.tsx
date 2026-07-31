@@ -168,6 +168,9 @@ describe('public Candidary experience', () => {
     expect(screen.getByText('Management link')).toBeVisible();
     expect(screen.getByRole('link', { name: /open event manager/i }))
       .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
+    // A new event is paused by default, so the receipt names the next real step.
+    expect(screen.getByRole('link', { name: 'Set up guest list' }))
+      .toHaveAttribute('href', `/manage/event/${CREATED.event.id}?section=rsvp`);
     expect(screen.getByText(CREATED.managementLink)).toBeInTheDocument();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -404,7 +407,16 @@ const MANAGED_EVENT = {
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+  eventTimezone: 'America/Chicago', rsvpEnabled: false,
+  rsvpDeadlineAt: '2026-09-05T04:59:59.999Z', rsvpDeadlineDate: '2026-09-04',
+  rsvpRosterVersion: 7,
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
+};
+
+const RSVP_SUMMARY = {
+  invitedCapacity: 8, namedInvitees: 6, plusOneCapacity: 2,
+  attending: 3, declined: 2, awaitingResponse: 3,
+  householdsResponded: 1, householdsAwaitingResponse: 2,
 };
 
 interface MediaPage { media: unknown[]; nextCursor: string | null }
@@ -424,6 +436,10 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
     if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+    // The RSVP panel is mounted only from its own destination, so these answer
+    // nothing until the host navigates there.
+    if (url.includes('/rsvp/summary')) return json(RSVP_SUMMARY);
+    if (url.includes('/rsvp/households')) return json({ households: [], nextCursor: null });
     throw new Error(`Unexpected request ${url}`);
   });
 }
@@ -467,7 +483,7 @@ describe('manager experience', () => {
     await screen.findByRole('heading', { name: 'Live intake' });
 
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
-    expect(within(navigation).getAllByRole('button')).toHaveLength(5);
+    expect(within(navigation).getAllByRole('button')).toHaveLength(6);
     await userEvent.setup().click(within(navigation).getByRole('button', { name: /settings/i }));
 
     const settingsForm = screen.getByRole('button', { name: 'Save settings' }).closest('form');
@@ -1315,6 +1331,116 @@ describe('manager experience', () => {
     }
   });
 
+  it('keeps the RSVP destination out of the initial manager load', async () => {
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    // Guest-list data is its own destination: it must not join the initial
+    // `Promise.all` that every manager arrival pays for.
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/rsvp/'))).toBe(false);
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'RSVP' }));
+    expect(await screen.findByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Invited capacity' }))
+      .toHaveTextContent('8'));
+  });
+
+  it('opens the guest list directly from the create receipt destination', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a?section=rsvp'])} />);
+
+    expect(await screen.findByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Live intake' })).not.toBeInTheDocument();
+  });
+
+  it('signs guest devices out without changing the printed event link', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/guest-sessions/rotate')) {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return json({ rotated: true, eventLink: 'https://example.test/join#entry-id.entry-secret' });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    // The old rotatable guest link is gone; the printed credential is permanent.
+    expect(screen.queryByRole('button', { name: /rotate guest link/iu })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Sign out guest devices' }));
+    const confirmation = screen.getByRole('group', { name: 'Sign out guest devices' });
+    expect(confirmation).toHaveTextContent('every printed QR code stays the same');
+    const confirm = within(confirmation)
+      .getByRole('button', { name: 'Sign out guest devices for Maya & Theo' });
+    expect(confirm).toBeDisabled();
+    await user.type(within(confirmation).getByLabelText('Confirm event name'), 'Maya & Theo');
+    await user.click(confirm);
+
+    await waitFor(() => expect(bodies).toEqual([{ confirmName: 'Maya & Theo' }]));
+    expect(screen.getByText('https://example.test/join#entry-id.entry-secret')).toBeVisible();
+    // Byte-identical QR input before and after: the printed artefact never moves.
+    expect(new Set(qrToDataURL.mock.calls.map(([value]: unknown[]) => value)))
+      .toEqual(new Set(['https://example.test/join#entry-id.entry-secret']));
+  });
+
+  it('requires the exact event name to disable the printed QR and warns it is permanent', async () => {
+    let disabled = false;
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/entry/disable')) {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        disabled = true;
+        return json({ disabledAt: '2026-07-31T12:00:00.000Z' });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) {
+        return json(disabled
+          ? { eventLink: null, disabledAt: '2026-07-31T12:00:00.000Z' }
+          : { eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Disable printed event QR' }));
+
+    const confirmation = screen.getByRole('group', { name: 'Disable printed event QR' });
+    expect(confirmation).toHaveTextContent('every invitation and sign using this QR stop working');
+    expect(confirmation).toHaveTextContent('cannot be undone');
+    const confirm = within(confirmation)
+      .getByRole('button', { name: 'Disable printed event QR for Maya & Theo' });
+    expect(confirm).toBeDisabled();
+    await user.type(within(confirmation).getByLabelText('Confirm event name'), 'Maya & Theo');
+    await user.click(confirm);
+
+    await waitFor(() => expect(bodies).toEqual([{ confirmName: 'Maya & Theo' }]));
+    expect(await screen.findByText(/cannot be replaced/iu)).toBeVisible();
+    expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
+    // There is no replacement to offer, so the action itself retires.
+    expect(screen.queryByRole('button', { name: 'Disable printed event QR' }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign out guest devices' }))
+      .not.toBeInTheDocument();
+  });
+
   it('keeps creator-session recovery out of a refused manager-link rotation', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1340,15 +1466,20 @@ describe('manager experience', () => {
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Share' }));
+    // Rotating the manager credential is a Settings concern; Share now carries only
+    // the printed event entry.
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(screen.getByRole('button', { name: 'Rotate manager link' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Save this event from its original creator session before rotating its management link.',
     );
-    expect(screen.getByRole('heading', { name: 'Share your event' })).toBeVisible();
-    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Management link')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeVisible();
+    // The refusal is an ordinary rejected write. Settings keeps its own account
+    // card, so the proof is that the notice itself offers no credential recovery.
+    const notice = screen.getByRole('region', { name: 'Manager notice' });
+    expect(within(notice).queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(within(notice).queryByLabelText('Management link')).not.toBeInTheDocument();
   });
 
   it('preserves loaded media and offers access recovery when pagination loses the manager credential', async () => {

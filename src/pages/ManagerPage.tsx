@@ -1,7 +1,7 @@
-import { Check, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2, X } from 'lucide-react';
+import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import { hostSignInHref } from '../app/recovery';
@@ -17,11 +17,22 @@ import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
 import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
+import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
 
-type Section = 'intake' | 'gallery' | 'messages' | 'share' | 'settings';
+type Section = 'intake' | 'rsvp' | 'gallery' | 'messages' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
+
+// The only destination a link may open directly. The create receipt sends a brand
+// new event here, because a paused event's next real step is its guest list.
+function initialSection(requested: string | null): Section {
+  return requested === 'rsvp' ? 'rsvp' : 'intake';
+}
+
+// One confirmation is open at a time, so the exact-name field they share cannot
+// be ambiguous about which irreversible thing it is confirming.
+type EntryAction = 'rotate' | 'disable';
 
 // The rows and the cursor that continues them are one value. Polling has to compare an incoming first
 // page against the rows on screen and decide the cursor from that same verdict, and React only
@@ -90,6 +101,7 @@ const STORAGE_CAP = `${Math.round(MAX_EVENT_BYTES / 1024 ** 3)} GB`;
 
 export function ManagerPage() {
   const { eventId = '' } = useParams();
+  const [searchParams] = useSearchParams();
   const [event, setEvent] = useState<EventView | null>(null);
   const [mediaPage, setMediaPage] = useState<MediaPageState>({ rows: [], cursor: null });
   const { rows: media, cursor: nextMediaCursor } = mediaPage;
@@ -100,7 +112,9 @@ export function ManagerPage() {
   const [entryDisabledAt, setEntryDisabledAt] = useState<string | null>(null);
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
-  const [section, setSection] = useState<Section>('intake');
+  const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
+  const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
+  const [entryConfirm, setEntryConfirm] = useState('');
   const [status, setStatus] = useState<MediaStatus>('all');
   const [searchInput, setSearchInput] = useState('');
   const [guestFilter, setGuestFilter] = useState('');
@@ -319,6 +333,8 @@ export function ManagerPage() {
     setSection(next);
     setSelected([]);
     setActionError(null);
+    setEntryAction(null);
+    setEntryConfirm('');
     if (next === 'intake') setStatus('all');
     if (next === 'gallery' && status === 'all') setStatus('unpublished');
     // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
@@ -390,6 +406,25 @@ export function ManagerPage() {
     const rotated = await api<{ managementLink: string }>(`/api/manage/events/${eventId}/links/manager/rotate`, { method: 'POST', body: '{}' });
     window.location.assign(rotated.managementLink);
   }
+  // Two irreversible-feeling entry actions, both confirmed by the exact event
+  // name. Only one touches the printed credential; the copy has to keep them
+  // apart, because a host cannot undo the second one.
+  async function runEntryAction(action: EntryAction) {
+    const path = action === 'rotate' ? 'guest-sessions/rotate' : 'entry/disable';
+    await api(`/api/manage/events/${eventId}/${path}`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmName: entryConfirm.trim() }),
+    });
+    setEntryAction(null);
+    setEntryConfirm('');
+    await refresh();
+  }
+  // Roster and activation changes land on the event record, not on the media the
+  // whole manager refresh pays for.
+  async function refreshEvent() {
+    const loaded = await api<{ event: EventView }>(`/api/manage/events/${eventId}`);
+    setEvent(loaded.event);
+  }
   async function deleteEvent(element: HTMLFormElement) {
     const form = new FormData(element);
     await api(`/api/manage/events/${eventId}`, { method: 'DELETE', body: JSON.stringify({ confirmation: form.get('confirmation') }) });
@@ -457,6 +492,32 @@ export function ManagerPage() {
   const activeExport = exports[0];
   // One panel, two placements: the wide utility rail and the narrow Share section. The stylesheet
   // reveals exactly one of them, so the host never sees the same export control twice.
+  // Both entry actions are confirmed the same way, and both name the event so the
+  // host cannot mistake which one they are typing into.
+  const entryConfirmationForm = (action: EntryAction, verb: string, warning: string) => <fieldset
+    className={action === 'disable' ? 'entry-confirm entry-confirm--danger' : 'entry-confirm'}
+  >
+    <legend>{verb}</legend>
+    <p>{warning}</p>
+    <label htmlFor="entry-confirm-name">Confirm event name</label>
+    <input
+      id="entry-confirm-name"
+      value={entryConfirm}
+      autoComplete="off"
+      spellCheck={false}
+      onChange={(change) => setEntryConfirm(change.target.value)}
+    />
+    <div className="button-row">
+      <button
+        type="button"
+        className={action === 'disable' ? 'button button--danger-outline' : 'button button--secondary'}
+        disabled={entryConfirm.trim() !== event.name}
+        onClick={() => void runManagerAction(() => runEntryAction(action))}
+      >{verb} for {event.name}</button>
+      <button type="button" className="text-button" onClick={() => { setEntryAction(null); setEntryConfirm(''); }}>Cancel</button>
+    </div>
+  </fieldset>;
+
   const exportPanel = (variant: 'share' | 'utility') => <ManagerExportPanel
     className={`manager-export-panel--${variant}`}
     job={activeExport}
@@ -471,6 +532,7 @@ export function ManagerPage() {
         `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
     <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
       <button aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
+      <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => openSection('rsvp')}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
       <button aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
       <button aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <span className="manager-nav__count">{messages.length}</span>}</button>
       <button aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
@@ -505,6 +567,13 @@ export function ManagerPage() {
         {renderMediaGrid(false)}
       </section>}
 
+      {/* Mounted only from its own destination, so the CSV, household, and totals
+          requests never join the manager's initial load. */}
+      {section === 'rsvp' && <ManagerRsvpPanel
+        event={event}
+        onEventChanged={() => void runManagerAction(refreshEvent)}
+      />}
+
       {section === 'gallery' && <section aria-labelledby="gallery-publishing-title">
         <div className="workspace-heading"><div><p className="section-label">Optional shared view</p><h2 id="gallery-publishing-title">Gallery publishing</h2></div><div className="filter-tabs" role="group" aria-label="Publication status">{(['unpublished', 'published', 'hidden'] as const).map((value) => <button className={status === value ? 'active' : ''} onClick={() => { setStatus(value); setSelected([]); }} key={value}>{value}</button>)}</div></div>
         {!event.galleryVisible && <p className="manager-notice">The guest gallery is off. Publishing choices are saved for whenever you enable it.</p>}
@@ -516,15 +585,48 @@ export function ManagerPage() {
         {renderMediaGrid(true)}
       </section>}
 
-      {section === 'share' && <section className="manager-panel"><p className="section-label">Invite your guests</p><h2>Share your event</h2><div className="share-layout"><div>{eventLink
-        ? <CopyableLinkCard label="Event link" value={eventLink} />
-        : <p className="manager-notice">{entryDisabledAt
-          ? 'This event QR was disabled and cannot be replaced.'
-          : 'This event has no printed entry.'}</p>}<div className="button-row"><button className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></div></div>{qr && <div className="manager-qr"><img src={qr} alt="Event QR code" /><a className="button button--secondary" href={qr} download="candidary-event-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}</div>{exportPanel('share')}</section>}
+      {section === 'share' && <section className="manager-panel">
+        <p className="section-label">Invite your guests</p>
+        <h2>Share your event</h2>
+        <div className="share-layout">
+          <div>{eventLink
+            ? <CopyableLinkCard label="Event link" value={eventLink} />
+            : <p className="manager-notice">{entryDisabledAt
+              ? 'This event QR was disabled and cannot be replaced.'
+              : 'This event has no printed entry.'}</p>}
+            <p className="form-note">One code for RSVPs now and event photos later. Print it once.</p>
+          </div>
+          {qr && <div className="manager-qr"><img src={qr} alt="Event QR code" /><a className="button button--secondary" href={qr} download="candidary-event-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}
+        </div>
+        {eventLink && <section className="entry-controls" aria-labelledby="entry-controls-title">
+          <h3 id="entry-controls-title">Event entry controls</h3>
+          {entryAction === null && <div className="entry-controls__choices">
+            <div>
+              <p>Guests must scan again to get back in. The event link and every printed QR code stays the same.</p>
+              <button type="button" className="button button--secondary" onClick={() => { setEntryAction('rotate'); setEntryConfirm(''); }}>Sign out guest devices</button>
+            </div>
+            <div className="entry-controls__danger">
+              <p>This immediately signs out guests, pauses RSVP and photo intake, and makes every invitation and sign using this QR stop working. It cannot be undone.</p>
+              <button type="button" className="button button--danger-outline" onClick={() => { setEntryAction('disable'); setEntryConfirm(''); }}>Disable printed event QR</button>
+            </div>
+          </div>}
+          {entryAction === 'rotate' && entryConfirmationForm(
+            'rotate',
+            'Sign out guest devices',
+            'Guests must scan again to get back in. The event link and every printed QR code stays the same.',
+          )}
+          {entryAction === 'disable' && entryConfirmationForm(
+            'disable',
+            'Disable printed event QR',
+            'This immediately signs out guests, pauses RSVP and photo intake, and makes every invitation and sign using this QR stop working. It cannot be undone, and there is no replacement.',
+          )}
+        </section>}
+        {exportPanel('share')}
+      </section>}
 
       {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
 
-      {section === 'settings' && <section className="manager-panel"><p className="section-label">Event controls</p><h2>Settings</h2><form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => saveSettings(element)); }}><label>Event name<input name="name" defaultValue={event.name} /></label><label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label><label>Event time zone<input name="eventTimezone" defaultValue={event.eventTimezone} required autoComplete="off" spellCheck={false} /></label><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" defaultValue={event.rsvpDeadlineDate ?? ''} required /></label><label className="toggle"><input type="checkbox" name="rsvpEnabled" defaultChecked={event.rsvpEnabled} /><span>Accept RSVPs</span></label><label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label><label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label><label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label><button className="button button--primary">Save settings</button></form><EventAppearanceEditor key={event.id} event={event} onEventSaved={(updated) => setEvent(updated)} /><EventAccountCard eventId={event.id} /><div className="danger-zone"><h3>Delete this event</h3><p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p><form onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => deleteEvent(element)); }}><input name="confirmation" aria-label="Confirm event name" autoComplete="off" /><button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button></form></div></section>}
+      {section === 'settings' && <section className="manager-panel"><p className="section-label">Event controls</p><h2>Settings</h2><form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => saveSettings(element)); }}><label>Event name<input name="name" defaultValue={event.name} /></label><label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label><label>Event time zone<input name="eventTimezone" defaultValue={event.eventTimezone} required autoComplete="off" spellCheck={false} /></label><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" defaultValue={event.rsvpDeadlineDate ?? ''} required /></label><label className="toggle"><input type="checkbox" name="rsvpEnabled" defaultChecked={event.rsvpEnabled} /><span>Accept RSVPs</span></label><label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label><label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label><label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label><button className="button button--primary">Save settings</button></form><EventAppearanceEditor key={event.id} event={event} onEventSaved={(updated) => setEvent(updated)} /><EventAccountCard eventId={event.id} /><section className="manager-credential" aria-labelledby="manager-credential-title"><h3 id="manager-credential-title">Manager access</h3><p>Rotating issues a new management link and stops this one immediately. It does not change the printed event QR.</p><button type="button" className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></section><div className="danger-zone"><h3>Delete this event</h3><p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p><form onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => deleteEvent(element)); }}><input name="confirmation" aria-label="Confirm event name" autoComplete="off" /><button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button></form></div></section>}
     </main>
 
     <aside className="manager-utility">

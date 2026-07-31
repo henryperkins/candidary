@@ -15,7 +15,7 @@ import {
 } from './helpers/geometry';
 
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
-const DESTINATIONS = ['Intake', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
+const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
 // The compact rail band: 761 opens it and 1100 is the last width before the wide rails return.
 const RAIL_WIDTHS = [761, 768, 780, 860, 1024, 1100];
 // 1134 is the first width the old fixed tracks fit inside; everything under it pushed the page sideways.
@@ -150,9 +150,9 @@ test('manager rail keeps its brand and destinations packed at the top', async ({
     const brand = await measureTarget(page.locator('.manager-nav .brand'));
     expect(brand.height, `brand height at ${width}`).toBeLessThanOrEqual(60);
 
-    // Five buttons of at most 52px plus four 5px gaps is 280; a stretched rail measures over 500.
+    // Six buttons of at most 58px plus five 5px gaps is 373; a stretched rail measures over 600.
     const destinations = await measureTarget(page.locator('.manager-nav nav'));
-    expect(destinations.height, `destination block height at ${width}`).toBeLessThanOrEqual(340);
+    expect(destinations.height, `destination block height at ${width}`).toBeLessThanOrEqual(380);
   }
 });
 

@@ -31,10 +31,11 @@ const NOTE = {
   moderationStatus: 'approved' as const,
   createdAt: '2026-09-19T20:00:00Z',
 };
-// The five manager destinations, paired with the heading that proves the section is on screen before
+// The six manager destinations, paired with the heading that proves the section is on screen before
 // the engine reads it. An axe pass over a section that has not rendered yet proves nothing.
 const MANAGER_SECTIONS = [
   { name: 'Intake', heading: 'Live intake' },
+  { name: 'RSVP', heading: 'Guest list and RSVPs' },
   { name: 'Gallery', heading: 'Gallery publishing' },
   { name: 'Notes', heading: 'Notes from the day' },
   { name: 'Share', heading: 'Share your event' },
@@ -314,7 +315,7 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
 
   const intake = page.getByRole('button', { name: 'Intake', exact: true });
   await expect(intake).toHaveAttribute('aria-pressed', 'true');
-  for (const name of ['Intake', 'Gallery', 'Notes', 'Share', 'Settings']) {
+  for (const name of MANAGER_SECTIONS.map(({ name: destination }) => destination)) {
     const button = page.getByRole('button', { name, exact: true });
     await expect(button).toBeVisible();
     const box = await button.boundingBox();

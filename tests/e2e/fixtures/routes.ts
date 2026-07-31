@@ -6,9 +6,13 @@ import type {
   EventThemePresetId,
   EventView,
   GuestEventView,
+  RsvpHouseholdDetail,
+  RsvpHouseholdListPage,
   RsvpHouseholdView,
+  RsvpImportPreview,
   RsvpLookupResponse,
   RsvpSubmissionResponse,
+  RsvpSummary,
 } from '../../../shared/contracts';
 import { resolveEventTheme } from '../../../shared/event-theme';
 import { PHOTOGRAPHIC_COVER } from './cover-images';
@@ -91,6 +95,72 @@ export const RSVP_HOUSEHOLD_FIXTURE: RsvpHouseholdView = {
   latestActor: null,
 };
 
+export const RSVP_SUMMARY_FIXTURE: RsvpSummary = {
+  invitedCapacity: 8,
+  namedInvitees: 6,
+  plusOneCapacity: 2,
+  attending: 3,
+  declined: 2,
+  awaitingResponse: 3,
+  householdsResponded: 1,
+  householdsAwaitingResponse: 2,
+};
+
+export const RSVP_HOUSEHOLD_DETAIL_FIXTURE: RsvpHouseholdDetail = {
+  id: '11111111-1111-4111-8111-111111111111',
+  householdKey: 'morgan',
+  label: 'The Morgan household',
+  plusOneSlots: 1,
+  version: 4,
+  archivedAt: null,
+  invitees: [
+    {
+      id: '22222222-2222-4222-8222-222222222222',
+      kind: 'named',
+      displayName: 'Taylor Morgan',
+      attendance: 'attending',
+      order: 0,
+    },
+    {
+      id: '33333333-3333-4333-8333-333333333333',
+      kind: 'named',
+      displayName: 'Alex Morgan',
+      attendance: 'declined',
+      order: 1,
+    },
+    {
+      id: '44444444-4444-4444-8444-444444444444',
+      kind: 'plus_one',
+      displayName: 'Jamie Rivera',
+      attendance: 'attending',
+      order: 2,
+    },
+  ],
+  firstRespondedAt: '2026-08-01T00:00:00Z',
+  latestRespondedAt: '2026-08-02T00:00:00Z',
+  latestActor: 'household',
+  updatedAt: '2026-08-02T00:00:00Z',
+};
+
+export const RSVP_HOUSEHOLD_LIST_FIXTURE: RsvpHouseholdListPage = {
+  households: [{
+    id: RSVP_HOUSEHOLD_DETAIL_FIXTURE.id,
+    householdKey: RSVP_HOUSEHOLD_DETAIL_FIXTURE.householdKey,
+    label: RSVP_HOUSEHOLD_DETAIL_FIXTURE.label,
+    version: RSVP_HOUSEHOLD_DETAIL_FIXTURE.version,
+    archivedAt: null,
+    attending: 2,
+    declined: 1,
+    awaitingResponse: 0,
+    invitedCapacity: 3,
+    firstRespondedAt: RSVP_HOUSEHOLD_DETAIL_FIXTURE.firstRespondedAt,
+    latestRespondedAt: RSVP_HOUSEHOLD_DETAIL_FIXTURE.latestRespondedAt,
+    latestActor: RSVP_HOUSEHOLD_DETAIL_FIXTURE.latestActor,
+    updatedAt: RSVP_HOUSEHOLD_DETAIL_FIXTURE.updatedAt,
+  }],
+  nextCursor: null,
+};
+
 interface GuestMessage {
   id: string;
   guestName: string;
@@ -117,7 +187,18 @@ interface ManagerRouteOptions {
   messages?: GuestMessage[];
   exports?: unknown[];
   cover?: Buffer;
+  entry?: { eventLink: string | null; disabledAt: string | null };
+  rsvp?: {
+    summary?: RsvpSummary;
+    households?: RsvpHouseholdListPage;
+    detail?: RsvpHouseholdDetail;
+    preview?: RsvpImportPreview;
+  };
 }
+
+// The one durable entry URL every browser test scans. It is a fixture string, not
+// a credential: the real exchange is proved in `tests/worker/event-entry-api`.
+export const EVENT_ENTRY_FIXTURE_TOKEN = `entry-fixture-id.${'entry-fixture-secret'.repeat(2)}`;
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
   const event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
@@ -231,9 +312,87 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   await page.route(`${base}/exports`, (route) => route.fulfill({
     json: { data: { exports: options.exports ?? [] }, requestId: 'request-a' },
   }));
+  const summary = options.rsvp?.summary ?? RSVP_SUMMARY_FIXTURE;
+  const households = options.rsvp?.households ?? RSVP_HOUSEHOLD_LIST_FIXTURE;
+  const detail = options.rsvp?.detail ?? RSVP_HOUSEHOLD_DETAIL_FIXTURE;
+
+  await page.route(`${base}/rsvp/summary`, (route) => route.fulfill({
+    json: { data: summary, requestId: 'request-a' },
+  }));
+  await page.route(`${base}/rsvp/export.csv`, (route) => route.fulfill({
+    status: 200,
+    headers: {
+      'content-type': 'text/csv; charset=utf-8',
+      'content-disposition': `attachment; filename="${event.slug}-rsvp-2026-07-31.csv"`,
+    },
+    body: 'household_key,household_label\n',
+  }));
+  await page.route(`${base}/rsvp/import/preview`, (route) => route.fulfill({
+    json: {
+      data: options.rsvp?.preview ?? {
+        issues: [],
+        totals: { households: 1, namedInvitees: 2, plusOneCapacity: 1, invitedCapacity: 3 },
+        sourceDigest: 'a'.repeat(64),
+        rosterVersion: event.rsvpRosterVersion,
+      },
+      requestId: 'request-a',
+    },
+  }));
+  await page.route(`${base}/rsvp/import/commit`, (route) => route.fulfill({
+    status: 201,
+    json: {
+      data: {
+        totals: { households: 1, namedInvitees: 2, plusOneCapacity: 1, invitedCapacity: 3 },
+        rosterVersion: event.rsvpRosterVersion + 1,
+      },
+      requestId: 'request-a',
+    },
+  }));
+  // `*` does not cross a slash, so the list glob and the household globs below
+  // stay disjoint rather than shadowing one another.
+  await page.route(`${base}/rsvp/households*`, (route) => route.fulfill({
+    json: {
+      data: route.request().method() === 'POST'
+        ? { household: detail, rosterVersion: event.rsvpRosterVersion + 1 }
+        : households,
+      requestId: 'request-a',
+    },
+    ...(route.request().method() === 'POST' ? { status: 201 } : {}),
+  }));
+  await page.route(`${base}/rsvp/households/*`, (route) => route.fulfill({
+    json: {
+      data: route.request().method() === 'GET'
+        ? detail
+        : { household: detail, rosterVersion: event.rsvpRosterVersion + 1 },
+      requestId: 'request-a',
+    },
+  }));
+  for (const action of ['response', 'archive'] as const) {
+    await page.route(`${base}/rsvp/households/*/${action}`, (route) => route.fulfill({
+      json: {
+        data: {
+          household: action === 'archive'
+            ? { ...detail, version: detail.version + 1, archivedAt: '2026-08-03T00:00:00Z' }
+            : { ...detail, version: detail.version + 1, latestActor: 'host' },
+          rosterVersion: event.rsvpRosterVersion + 1,
+        },
+        requestId: 'request-a',
+      },
+    }));
+  }
+  await page.route(`${base}/guest-sessions/rotate`, (route) => route.fulfill({
+    json: {
+      data: { rotated: true, eventLink: `https://candidary.test/join#${EVENT_ENTRY_FIXTURE_TOKEN}` },
+      requestId: 'request-a',
+    },
+  }));
+  await page.route(`${base}/entry/disable`, (route) => route.fulfill({
+    json: { data: { disabledAt: '2026-07-31T12:00:00.000Z' }, requestId: 'request-a' },
+  }));
   await page.route(`${base}/entry`, (route) => route.fulfill({
     json: {
-      data: { eventLink: `https://candidary.test/join#${'entry-secret-'.repeat(8)}`, disabledAt: null },
+      data: options.entry
+        ?? { eventLink: `https://candidary.test/join#${EVENT_ENTRY_FIXTURE_TOKEN}`, disabledAt: null },
       requestId: 'request-a',
     },
   }));

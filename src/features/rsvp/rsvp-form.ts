@@ -1,5 +1,5 @@
 import type {
-  RsvpHouseholdView,
+  RsvpInviteeView,
   RsvpSubmissionInvitee,
 } from '../../../shared/contracts';
 
@@ -9,7 +9,14 @@ export interface RsvpDraftValue {
 }
 export type RsvpDraft = Record<string, RsvpDraftValue>;
 
-export function createHouseholdDraft(household: RsvpHouseholdView): RsvpDraft {
+// The household and the host both answer the same roster, so both go through
+// these rules. Only the invitee list is needed, which is the one part a
+// household view and a manager detail agree on exactly.
+interface RsvpRoster {
+  invitees: RsvpInviteeView[];
+}
+
+export function createHouseholdDraft(household: RsvpRoster): RsvpDraft {
   return Object.fromEntries(household.invitees.map((invitee) => [
     invitee.id,
     {
@@ -20,7 +27,7 @@ export function createHouseholdDraft(household: RsvpHouseholdView): RsvpDraft {
 }
 
 export function validateHouseholdDraft(
-  household: RsvpHouseholdView,
+  household: RsvpRoster,
   draft: Record<string, RsvpDraftValue>,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -40,7 +47,7 @@ export function validateHouseholdDraft(
 }
 
 export function submissionInvitees(
-  household: RsvpHouseholdView,
+  household: RsvpRoster,
   draft: RsvpDraft,
 ): RsvpSubmissionInvitee[] {
   return household.invitees.map((invitee) => {

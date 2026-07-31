@@ -116,7 +116,12 @@ export function CreatePage() {
       <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
       <p className="form-note">RSVP is paused until you add and validate the guest list, and photo delivery is paused until you open it.</p>
       <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
-      <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
+      <div className="button-row">
+        <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
+        {/* The event is paused on purpose, so the receipt names the step that
+            actually unpauses it rather than leaving the host to find it. */}
+        <Link className="button button--secondary" to={`/manage/event/${created.event.id}?section=rsvp`}>Set up guest list</Link>
+      </div>
     </section>
     <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Event QR code</h2><p>The same code handles RSVPs now and event photos later. Print it once.</p>{qr && <img src={qr} alt="QR code for the event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
     {/* Mounted on whether creation already attached the event, not on `saved`.
