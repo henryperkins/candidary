@@ -26,6 +26,11 @@ interface HostAccountPanelProps {
   // `verification` confirms the address of an account that is already signed in,
   // so it answers to the host session. They are never interchangeable.
   mode?: 'registration' | 'verification';
+  // Set where the surface already carries the heading and the reason — the
+  // registration page — so the form arrives once rather than under a second title
+  // restating the first. The later stages keep their own headings either way,
+  // because they replace the form rather than sit beneath it.
+  embedded?: boolean;
 }
 
 type Stage = 'form' | 'code' | 'done';
@@ -39,6 +44,7 @@ export function HostAccountPanel({
   onRestarted,
   initialStage = 'form',
   mode = 'registration',
+  embedded = false,
 }: HostAccountPanelProps) {
   const [stage, setStage] = useState<Stage>(initialStage);
   const [busy, setBusy] = useState(false);
@@ -161,9 +167,11 @@ export function HostAccountPanel({
   }
 
   return <section className="host-panel">
-    <h2>Save this event to your email</h2>
-    <p>Create an account so you can get back to this event without the management link,
-      and so we can email you before your access ends.</p>
+    {!embedded && <>
+      <h2>Save this event to your email</h2>
+      <p>You’ll be able to get back to it without the management link,
+        and we’ll warn you before your access ends.</p>
+    </>}
     {error && <p className="form-error" role="alert">{error}</p>}
     <form className="create-form" onSubmit={register} noValidate>
       <div className="create-field">

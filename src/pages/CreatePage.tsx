@@ -109,7 +109,7 @@ export function CreatePage() {
   }
 
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
-    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the event link when you’re ready.</p><p className="form-note">The creator session’s ownership eligibility ends at the earlier of the management deadline and 12 hours after creation.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
+    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the event link when you’re ready.</p><p className="form-note">You can save this event to an account until its management deadline, or 12 hours after it was created — whichever comes first.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
       {/* The warning is only true while the link is the sole way in. Once the event
           is saved to an account it stops being true, and leaving it up would talk a
           host out of the recovery they just set up. */}
