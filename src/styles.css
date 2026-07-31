@@ -50,6 +50,19 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
    14px floor of the control band and holds a gap between them; the wider band restores 16px. */
 .page-header { gap: 12px; }
 .page-header .text-link { min-width: 44px; justify-content: center; font-size: .875rem; }
+/* The header is `space-between`: with the brand and one exit that reads as opposite ends of the row,
+   but a third child would park itself in the middle. Exits past the first therefore travel as one
+   right-aligned group, and 16px is the band they hold apart from each other. */
+.page-header__actions { display: flex; align-items: center; gap: 16px; }
+/* Sign in is the quieter of the two: `Create an event` is what the page is for, and a returning host
+   is looking for their own way back rather than being sold one. Muted on parchment is the pairing
+   that clears AA by 0.0046 — never darken the ground or lighten the ink to "improve" it. */
+.page-header .header-signin { color: var(--muted); }
+/* The header's third exit only exists above 760px; below that the brand and `Create an event`
+   already fill the row and the hero block carries both routes on its own. Matching the same
+   `<760` boundary the product uses keeps the exit matrix in `accessibility.spec.ts` honest at every
+   width: 320 counts two, 768 counts three. */
+@media (max-width: 760px) { .page-header .header-signin { display: none; } }
 .button { min-height: 48px; padding: 12px 20px; border: 1px solid transparent; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; font-weight: 600; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; }
 .button:not(:disabled):hover { transform: translateY(-1px); }
 .button:disabled { opacity: .48; cursor: not-allowed; }
@@ -66,9 +79,13 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .hero__copy { max-width: 710px; grid-row: 1; }
 .hero h1 { margin-bottom: 30px; font-size: 3.15rem; }
 .hero__copy > p { max-width: 600px; margin-bottom: 35px; color: var(--muted); font-size: clamp(1.05rem, 1.5vw, 1.3rem); }
-/* The returning-host entry point. Sized under the lede rather than at it, because it speaks to the
-   minority of visitors who already have an account; the link itself still carries the 44px floor. */
-.hero__copy > p.hero__account { margin: 24px 0 0; font-size: .95rem; }
+/* The two account doors sit under the primary CTA behind a hairline divider: `Sign in to your
+   events` for returning hosts, `Create one` for first-timers, sized as answering copy rather than
+   navigation surface. Both links keep the 44px floor. The template's same numbers are copied, not
+   re-derived. */
+.hero__copy > .hero__account { max-width: 560px; margin: 26px 0 0; padding-top: 22px; border-top: 1px solid var(--border); display: grid; gap: 9px; }
+.hero__account p { margin: 0; font-size: .95rem; }
+.hero__account p + p { color: var(--muted); }
 .hero__account .text-link { min-height: 44px; display: inline-flex; align-items: center; }
 .hero__image { height: clamp(280px, 82vw, 360px); max-height: 650px; grid-row: 2; position: relative; }
 .hero__image::before { content: ''; position: absolute; inset: -17px 20px 17px -17px; background: var(--denim-soft); border-radius: 48% 48% 10px 10px; transform: rotate(-2deg); }

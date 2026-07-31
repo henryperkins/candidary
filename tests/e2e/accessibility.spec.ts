@@ -18,11 +18,16 @@ import { computedStyleContrast } from './helpers/theme-contrast';
 const HEADER_WIDTHS = [320, 768];
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
 // The public header keeps exactly these exits: the count is asserted so neither a
-// hidden one nor an added one can pass unnoticed.
-const HEADER_EXITS = [
-  { path: '/', names: ['Candidary home', 'Create an event'] },
-  { path: '/create', names: ['Candidary home', 'Back home'] },
-];
+// hidden one nor an added one can pass unnoticed. On `/` the `Sign in` exit is visible only above
+// 760px — the hero block carries both account routes at every width, so a phone visitor is never
+// stranded. See `.header-signin` in `src/styles.css`.
+function headerExits(width: number): { path: string; names: string[] }[] {
+  const signIn = width > 760 ? ['Sign in'] : [];
+  return [
+    { path: '/', names: ['Candidary home', ...signIn, 'Create an event'] },
+    { path: '/create', names: ['Candidary home', 'Back home'] },
+  ];
+}
 
 const NOTE = {
   id: 'message-a',
@@ -113,7 +118,15 @@ test('public actions and creation fields are keyboard reachable with named landm
   await expect(page.getByRole('main')).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Candidary home' })).toBeFocused();
-  // The header exit is now reachable at every width, so the tab order no longer varies by viewport.
+  // `Sign in` is the one header exit whose presence varies by width: visible above 760px, hidden
+  // below it, where the hero block carries both account routes instead. This spec runs in the
+  // desktop *and* mobile projects, so the tab order is asserted against what is actually on screen
+  // rather than against one project's width.
+  const signIn = page.getByRole('link', { name: 'Sign in', exact: true });
+  if (await signIn.isVisible()) {
+    await page.keyboard.press('Tab');
+    await expect(signIn).toBeFocused();
+  }
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Create an event', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
@@ -127,7 +140,7 @@ test('public actions and creation fields are keyboard reachable with named landm
 test('every public header exit stays visible and mobile-sized across the width matrix', async ({ page }) => {
   for (const width of HEADER_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
-    for (const { path, names } of HEADER_EXITS) {
+    for (const { path, names } of headerExits(width)) {
       await page.goto(path);
       const header = page.getByRole('banner');
       // Hiding an exit strands the visitor; adding one is unapproved navigation. Both fail here.
@@ -141,9 +154,15 @@ test('every public header exit stays visible and mobile-sized across the width m
         expect(target.height, `${name} height on ${path} at ${width}`).toBeGreaterThanOrEqual(44);
       }
 
-      // Two exits that touch are one mis-tap apart, and 320 is where they come closest.
-      const separation = await measureSeparation(header.getByRole('link').first(), header.getByRole('link').last());
-      expect(separation, `header exits stay apart on ${path} at ${width}`).toBeGreaterThanOrEqual(8);
+      // Exits that touch are one mis-tap apart. Once a third exit joins the row the tightest pair is
+      // no longer the outermost two — `Sign in` and `Create an event` sit together in the right-hand
+      // group, far from the brand — so every neighbouring pair is measured instead of first-to-last.
+      const exits = await header.getByRole('link').all();
+      for (let index = 1; index < exits.length; index += 1) {
+        const separation = await measureSeparation(exits[index - 1]!, exits[index]!);
+        expect(separation, `${names[index - 1]} and ${names[index]} stay apart on ${path} at ${width}`)
+          .toBeGreaterThanOrEqual(8);
+      }
 
       const documentSize = await measureDocument(page);
       expect(documentSize.scrollWidth, `${path} contained at ${width}`)

@@ -5,7 +5,15 @@ import { PageHeader } from '../components/Brand';
 
 export function LandingPage() {
   return <div className="public-shell">
-    <PageHeader action={<Link className="text-link" to="/create">Create an event <ArrowRight aria-hidden="true" /></Link>} />
+    {/* `.page-header` is `space-between`, so a third direct child would strand `Sign in` in the
+        middle of the row; both exits travel as one right-aligned group instead. Sign in drops out
+        below 761px — see `.header-signin` in `styles.css` and the exit matrix in
+        `tests/e2e/accessibility.spec.ts`. The hero block carries both routes on its own at every
+        width, so a phone visitor is never stranded. */}
+    <PageHeader action={<div className="page-header__actions">
+      <Link className="text-link header-signin" to="/host/login">Sign in</Link>
+      <Link className="text-link" to="/create">Create an event <ArrowRight aria-hidden="true" /></Link>
+    </div>} />
     <main>
       <section className="hero">
         <div className="hero__copy">
@@ -15,13 +23,20 @@ export function LandingPage() {
             <Link className="button button--primary" to="/create">Create your event <ArrowRight aria-hidden="true" /></Link>
             <a className="button button--quiet" href="#how-it-works">See how it works</a>
           </div>
-          {/* Until now the account system could only be entered from a manager card or a typed URL,
-              so a returning host had no way back to their events from here. It sits below the primary
-              CTA rather than in the header, where a third exit cannot hold its 44px beside the brand
-              at 320 — see the header exit matrix in `accessibility.spec.ts`. */}
-          <p className="hero__account">Already have an account?{' '}
-            <Link className="text-link" to="/host/login">Sign in to your events</Link>
-          </p>
+          {/* The two account doors sit under the primary CTA, behind a hairline divider. State both
+              outcomes so a returning host can sign in and a first-time host can register without
+              either path hiding the other; both links keep the 44px floor. The design system lists
+              account copy as banned *above the fold* in the header chrome — these are below the CTA,
+              sized as 0.95rem answering copy, not navigation surface. */}
+          <div className="hero__account">
+            <p>Already have an account?{' '}
+              <Link className="text-link" to="/host/login">Sign in to your events</Link>
+            </p>
+            <p>No account yet?{' '}
+              <Link className="text-link" to="/host/register">Create one</Link>
+              {' '}to find your events again. Creating an event never needs one.
+            </p>
+          </div>
         </div>
         <figure className="hero__image"><img src="/assets/candidary-hero.png" alt="Friends celebrating together at a candlelit outdoor table" /></figure>
       </section>
