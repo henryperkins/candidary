@@ -529,6 +529,25 @@ export class RsvpService {
   }
 
   /**
+   * Identifies what the guest submitted without consulting the mutable roster.
+   *
+   * Row order is not part of an answer, and a declined row has no guest name
+   * regardless of what an older client happened to send in that field.
+   */
+  private async receiptDigest(request: RsvpSubmissionRequest): Promise<string> {
+    const invitees = request.invitees
+      .map(({ id, attendance, displayName }) => ({
+        id,
+        attendance,
+        displayName: attendance === 'declined' ? null : displayName,
+      }))
+      .sort((left, right) => (
+        left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+      ));
+    return this.requestDigest(request.version, invitees);
+  }
+
+  /**
    * Commits one household's response.
    *
    * Two different things can look like a repeat, and they are answered
@@ -543,12 +562,13 @@ export class RsvpService {
     request: RsvpSubmissionRequest,
     now = new Date(),
   ): Promise<RsvpSubmissionResponse> {
+    const receiptDigest = await this.receiptDigest(request);
+    const replayed = await this.settleReceipt(auth, request, receiptDigest, now);
+    if (replayed) return replayed;
+
     const invitees = await this.rsvp.listInvitees(auth.event.id, auth.household.id);
     const canonical = this.canonicalize(invitees, request.invitees);
-    const digest = await this.requestDigest(request.version, canonical);
-
-    const replayed = await this.settleReceipt(auth, request, digest, now);
-    if (replayed) return replayed;
+    const appliedDigest = await this.requestDigest(request.version, canonical);
 
     if (request.version !== auth.household.version) {
       throw this.householdConflict();
@@ -573,7 +593,7 @@ export class RsvpService {
           canonical.length,
           request.version,
           request.idempotencyKey,
-          digest,
+          appliedDigest,
           nowIso,
           nowIso,
           'household',
@@ -585,7 +605,7 @@ export class RsvpService {
           eventId: auth.event.id,
           householdId: auth.household.id,
           idempotencyKey: request.idempotencyKey,
-          requestDigest: digest,
+          requestDigest: receiptDigest,
           resultVersion: request.version + 1,
           createdAt: nowIso,
         }),
@@ -602,7 +622,7 @@ export class RsvpService {
       if (error instanceof ApiError) throw error;
       // A concurrent identical request won the receipt key. Whether that is a
       // success or a conflict is decided by the digest, exactly as above.
-      const settled = await this.settleReceipt(auth, request, digest, now);
+      const settled = await this.settleReceipt(auth, request, receiptDigest, now);
       if (settled) return settled;
       throw this.householdConflict();
     }

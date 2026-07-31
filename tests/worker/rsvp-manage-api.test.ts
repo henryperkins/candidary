@@ -674,6 +674,111 @@ describe('manager response correction and conflicts', () => {
     expect(replayed.data.committedVersion).toBe(2);
     expect((await getDetail(access, detail.id)).invitees[0]!.attendance).toBe('declined');
   });
+
+  it('replays a successful household key after supported roster edits without overwriting them', async () => {
+    const access = await eventAccess();
+    await importRoster(access, [
+      'household_key,household_label,invitee_name,plus_one_slots',
+      'roster-replay,Roster replay household,Original Guest,1',
+    ].join('\n'));
+    await openRsvp(access);
+    const rsvp = await lookupHousehold(access, 'Original Guest');
+    const detail = await getDetail(access, rsvp.household.id);
+    const named = detail.invitees.find((invitee) => invitee.kind === 'named')!;
+    const plusOne = detail.invitees.find((invitee) => invitee.kind === 'plus_one')!;
+    const request = {
+      version: 1,
+      idempotencyKey: 'before-roster-edits',
+      invitees: [
+        { id: named.id, attendance: 'attending', displayName: null },
+        { id: plusOne.id, attendance: 'declined', displayName: 'Ignored old name' },
+      ],
+    };
+    const submitted = await createApp().request(
+      `/api/event/${access.event.slug}/rsvp/household`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          cookie: rsvp.cookie,
+          origin,
+          'x-candidary-rsvp-csrf': rsvp.csrf,
+        },
+        body: JSON.stringify(request),
+      },
+      testEnv,
+    );
+    expect(submitted.status).toBe(200);
+
+    const editedResponse = await updateHousehold(access, detail.id, {
+      label: detail.label,
+      plusOneSlots: 2,
+      namedInvitees: [
+        { id: named.id, displayName: 'Renamed Guest' },
+        { id: null, displayName: 'Added Guest', attendance: 'declined' },
+      ],
+      newPlusOneResponses: [{ attendance: 'declined', displayName: 'Ignored new name' }],
+      expectedVersion: 2,
+      expectedRosterVersion: 1,
+    });
+    const edited = (await editedResponse.json<any>()).data.household as HouseholdDetail;
+    expect(editedResponse.status).toBe(200);
+    expect(edited.version).toBe(3);
+    expect(edited.invitees).toHaveLength(4);
+    expect(edited.invitees.find((invitee) => invitee.id === named.id)?.displayName)
+      .toBe('Renamed Guest');
+
+    const replay = await createApp().request(
+      `/api/event/${access.event.slug}/rsvp/household`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          cookie: rsvp.cookie,
+          origin,
+          'x-candidary-rsvp-csrf': rsvp.csrf,
+        },
+        body: JSON.stringify(request),
+      },
+      testEnv,
+    );
+    const replayed = await replay.json<any>();
+
+    expect(replay.status).toBe(200);
+    expect(replayed.data.replayed).toBe(true);
+    expect(replayed.data.committedVersion).toBe(2);
+
+    const irrelevantNameReplay = await createApp().request(
+      `/api/event/${access.event.slug}/rsvp/household`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          cookie: rsvp.cookie,
+          origin,
+          'x-candidary-rsvp-csrf': rsvp.csrf,
+        },
+        body: JSON.stringify({
+          ...request,
+          invitees: request.invitees.map((invitee) => (
+            invitee.id === plusOne.id
+              ? { ...invitee, displayName: 'Another ignored name' }
+              : invitee
+          )),
+        }),
+      },
+      testEnv,
+    );
+    expect(irrelevantNameReplay.status).toBe(200);
+    expect((await irrelevantNameReplay.json<any>()).data.replayed).toBe(true);
+
+    const stored = await getDetail(access, detail.id);
+    expect(stored.version).toBe(3);
+    expect(stored.invitees.map((invitee) => invitee.id))
+      .toEqual(edited.invitees.map((invitee) => invitee.id));
+    expect(stored.invitees.find((invitee) => invitee.id === named.id)?.displayName)
+      .toBe('Renamed Guest');
+  });
 });
 
 describe('manager summary, filters, and pagination', () => {
