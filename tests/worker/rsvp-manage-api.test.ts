@@ -675,23 +675,27 @@ describe('manager response correction and conflicts', () => {
     expect((await getDetail(access, detail.id)).invitees[0]!.attendance).toBe('declined');
   });
 
-  it('replays a successful household key after supported roster edits without overwriting them', async () => {
+  it('replays a canonical attending plus-one name after supported roster edits without overwriting them', async () => {
     const access = await eventAccess();
     await importRoster(access, [
       'household_key,household_label,invitee_name,plus_one_slots',
-      'roster-replay,Roster replay household,Original Guest,1',
+      'roster-replay,Roster replay household,Original Guest,2',
     ].join('\n'));
     await openRsvp(access);
     const rsvp = await lookupHousehold(access, 'Original Guest');
     const detail = await getDetail(access, rsvp.household.id);
     const named = detail.invitees.find((invitee) => invitee.kind === 'named')!;
-    const plusOne = detail.invitees.find((invitee) => invitee.kind === 'plus_one')!;
+    const [plusOne, declinedPlusOne] = detail.invitees.filter((invitee) => invitee.kind === 'plus_one');
+    // This is intentionally not the canonical spelling: the guest's device
+    // sent a full-width S and non-breaking spaces.  A lost confirmation must
+    // still replay when it retries the parsePersonText-normalized name.
     const request = {
       version: 1,
       idempotencyKey: 'before-roster-edits',
       invitees: [
         { id: named.id, attendance: 'attending', displayName: null },
-        { id: plusOne.id, attendance: 'declined', displayName: 'Ignored old name' },
+        { id: plusOne!.id, attendance: 'attending', displayName: '  Ｓam\u00a0Rivera  ' },
+        { id: declinedPlusOne!.id, attendance: 'declined', displayName: 'Ignored old name' },
       ],
     };
     const submitted = await createApp().request(
@@ -712,7 +716,7 @@ describe('manager response correction and conflicts', () => {
 
     const editedResponse = await updateHousehold(access, detail.id, {
       label: detail.label,
-      plusOneSlots: 2,
+      plusOneSlots: 3,
       namedInvitees: [
         { id: named.id, displayName: 'Renamed Guest' },
         { id: null, displayName: 'Added Guest', attendance: 'declined' },
@@ -724,7 +728,7 @@ describe('manager response correction and conflicts', () => {
     const edited = (await editedResponse.json<any>()).data.household as HouseholdDetail;
     expect(editedResponse.status).toBe(200);
     expect(edited.version).toBe(3);
-    expect(edited.invitees).toHaveLength(4);
+    expect(edited.invitees).toHaveLength(5);
     expect(edited.invitees.find((invitee) => invitee.id === named.id)?.displayName)
       .toBe('Renamed Guest');
 
@@ -738,7 +742,14 @@ describe('manager response correction and conflicts', () => {
           origin,
           'x-candidary-rsvp-csrf': rsvp.csrf,
         },
-        body: JSON.stringify(request),
+        body: JSON.stringify({
+          ...request,
+          invitees: request.invitees.map((invitee) => (
+            invitee.id === plusOne!.id
+              ? { ...invitee, displayName: 'Sam Rivera' }
+              : invitee
+          )),
+        }),
       },
       testEnv,
     );
@@ -761,7 +772,7 @@ describe('manager response correction and conflicts', () => {
         body: JSON.stringify({
           ...request,
           invitees: request.invitees.map((invitee) => (
-            invitee.id === plusOne.id
+            invitee.id === declinedPlusOne!.id
               ? { ...invitee, displayName: 'Another ignored name' }
               : invitee
           )),
@@ -778,6 +789,8 @@ describe('manager response correction and conflicts', () => {
       .toEqual(edited.invitees.map((invitee) => invitee.id));
     expect(stored.invitees.find((invitee) => invitee.id === named.id)?.displayName)
       .toBe('Renamed Guest');
+    expect(stored.invitees.find((invitee) => invitee.id === plusOne!.id))
+      .toMatchObject({ attendance: 'attending', displayName: 'Sam Rivera' });
   });
 });
 

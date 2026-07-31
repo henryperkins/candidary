@@ -536,11 +536,24 @@ export class RsvpService {
    */
   private async receiptDigest(request: RsvpSubmissionRequest): Promise<string> {
     const invitees = request.invitees
-      .map(({ id, attendance, displayName }) => ({
-        id,
-        attendance,
-        displayName: attendance === 'declined' ? null : displayName,
-      }))
+      .map(({ id, attendance, displayName }) => {
+        if (attendance === 'declined') {
+          return { id, attendance, displayName: null };
+        }
+        if (displayName === null) {
+          return { id, attendance, displayName };
+        }
+        const name = parsePersonText(displayName);
+        if (!name.ok) {
+          throw new ApiError(
+            'VALIDATION_FAILED',
+            'Enter a name for each attending guest.',
+            422,
+            { [`${id}.displayName`]: 'Enter this guest’s name.' },
+          );
+        }
+        return { id, attendance, displayName: name.value };
+      })
       .sort((left, right) => (
         left.id < right.id ? -1 : left.id > right.id ? 1 : 0
       ));
