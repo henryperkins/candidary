@@ -81,6 +81,24 @@ afterEach(() => {
 });
 
 describe('household RSVP guest flow', () => {
+  it('shows the guest hero on primary RSVP and keeps it off the secondary disclosure', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/rsvp/household')) return sessionRequired();
+      throw new Error(`Unexpected request ${String(input)}`);
+    }));
+    const primary = render(<GuestRsvpFlow event={event} presentation="primary" />);
+    expect(await screen.findByRole('heading', { name: 'Find your household invitation' })).toBeVisible();
+    expect(primary.container.querySelector('.photo-drop__hero')).not.toBeNull();
+    expect(primary.container.querySelector('.rsvp-flow--with-hero')).not.toBeNull();
+    expect(screen.getByText(event.welcomeMessage)).toBeVisible();
+    primary.unmount();
+
+    const secondary = render(<GuestRsvpFlow event={event} presentation="secondary" />);
+    expect(await screen.findByRole('heading', { name: 'Find your household invitation' })).toBeVisible();
+    expect(secondary.container.querySelector('.photo-drop__hero')).toBeNull();
+    expect(secondary.container.querySelector('.rsvp-flow--with-hero')).toBeNull();
+  });
+
   it('performs only an explicit exact-name lookup and never treats a remembered upload name as RSVP authority', async () => {
     localStorage.setItem('candidary_guest_name', 'Taylor Upload');
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

@@ -329,6 +329,23 @@ describe('event theme create and read serialization', () => {
       'theme.overrides.primaryColor': 'Primary color needs a 4.5:1 foreground contrast ratio.',
     });
   });
+
+  it('refuses an accent that disappears into the event surfaces', async () => {
+    const response = await createEvent({
+      theme: {
+        version: 1,
+        presetId: 'candidary-default',
+        overrides: { accentColor: '#f5efe6' },
+      },
+    });
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors).toEqual({
+      'theme.overrides.accentColor': 'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    });
+  });
 });
 
 describe('authorized event theme updates', () => {
@@ -337,6 +354,24 @@ describe('authorized event theme updates', () => {
     presetId: 'garden-party',
     overrides: { primaryColor: '#123456' },
   } as const;
+
+  /* The floor sits on the write, not on the read: an accent already saved keeps resolving for guests
+     and is only refused when the host next edits it. */
+  it('refuses an accent that disappears into the event surfaces', async () => {
+    const access = await eventAccess('Illegible accent');
+    const response = await putTheme(access.event.id, {
+      version: 1,
+      presetId: 'candidary-default',
+      overrides: { accentColor: '#f5efe6' },
+    }, writeHeaders(access.manager));
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors).toEqual({
+      'overrides.accentColor': 'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    });
+  });
 
   it('updates through either a matching manager link or the owning account', async () => {
     const linked = await eventAccess('Linked event');

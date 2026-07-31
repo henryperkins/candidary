@@ -2,6 +2,7 @@ import type {
   GuestEventView,
   RsvpHouseholdView,
 } from '../../../shared/contracts';
+import { RsvpShell } from './RsvpShell';
 
 interface RsvpReceiptProps {
   event: GuestEventView;
@@ -39,8 +40,8 @@ export function RsvpReceipt({
     && !household.renewalRequired;
   let plusOneNumber = 0;
 
-  return <section className={`rsvp-flow rsvp-flow--${presentation} rsvp-flow--receipt`} aria-live="polite">
-    <div className="rsvp-card rsvp-receipt">
+  return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--receipt">
+    <div className="rsvp-card rsvp-receipt" aria-live="polite">
       <p className="rsvp-eyebrow">{event.name}</p>
       <h1>{mode === 'receipt' ? "You're all set" : 'Your RSVP'}</h1>
       {mode === 'receipt' && <p>Your household response has been saved.</p>}
@@ -78,5 +79,5 @@ export function RsvpReceipt({
         Find my invitation again
       </button>}
     </div>
-  </section>;
+  </RsvpShell>;
 }

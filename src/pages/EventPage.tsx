@@ -14,6 +14,10 @@ import type { LoadFailure } from '../components/States';
 import { GuestRsvpFlow } from '../features/rsvp/GuestRsvpFlow';
 import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
 
+/* `GuestEventView.theme` is required in the contract, but this value arrives over the network: during
+   a deploy an older Worker can still answer without one, and the guest would meet a blank error page
+   instead of an event. The type cannot police that, so the canonical default stands behind it. This is
+   deliberate, not the dead fallback the stylesheet used to carry. */
 const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
 
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {

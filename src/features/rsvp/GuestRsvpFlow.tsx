@@ -11,6 +11,7 @@ import { rememberGuestName } from '../../app/guest-name-storage';
 import { RsvpHouseholdForm } from './RsvpHouseholdForm';
 import { RsvpLookup } from './RsvpLookup';
 import { RsvpReceipt } from './RsvpReceipt';
+import { RsvpShell } from './RsvpShell';
 import {
   createHouseholdDraft,
   type RsvpDraft,
@@ -231,11 +232,11 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   }
 
   if (screen.kind === 'restoring') {
-    return <section className={`rsvp-flow rsvp-flow--${presentation}`}>
+    return <RsvpShell event={event} presentation={presentation}>
       <div className="rsvp-card rsvp-restoring" aria-live="polite">
         <p>Checking for a saved RSVP…</p>
       </div>
-    </section>;
+    </RsvpShell>;
   }
 
   if (screen.kind === 'lookup') {
@@ -251,6 +252,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
 
   if (screen.kind === 'editing' || screen.kind === 'saving') {
     return <RsvpHouseholdForm
+      event={event}
       presentation={presentation}
       household={screen.household}
       draft={screen.draft}
@@ -295,7 +297,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
     />;
   }
 
-  return <section className={`rsvp-flow rsvp-flow--${presentation}`}>
+  return <RsvpShell event={event} presentation={presentation}>
     <div className="rsvp-card rsvp-unavailable" aria-live="polite">
       <p className="rsvp-eyebrow">{event.name}</p>
       <h1>{event.rsvpState === 'paused' ? 'RSVP is paused' : 'RSVP is closed'}</h1>
@@ -303,5 +305,5 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
         ? 'The host has paused RSVP for now. Try again later.'
         : 'The response deadline has passed.'}</p>
     </div>
-  </section>;
+  </RsvpShell>;
 }

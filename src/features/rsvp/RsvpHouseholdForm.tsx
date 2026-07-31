@@ -1,12 +1,14 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 
-import type { RsvpHouseholdView } from '../../../shared/contracts';
+import type { GuestEventView, RsvpHouseholdView } from '../../../shared/contracts';
 import {
   type RsvpDraft,
   validateHouseholdDraft,
 } from './rsvp-form';
+import { RsvpShell } from './RsvpShell';
 
 interface RsvpHouseholdFormProps {
+  event: GuestEventView;
   presentation: 'primary' | 'secondary' | 'read-only';
   household: RsvpHouseholdView;
   draft: RsvpDraft;
@@ -17,6 +19,7 @@ interface RsvpHouseholdFormProps {
   onSubmit: (draft: RsvpDraft) => Promise<void>;
 }
 export function RsvpHouseholdForm({
+  event,
   presentation,
   household,
   draft,
@@ -88,7 +91,7 @@ export function RsvpHouseholdForm({
   const unanswered = household.invitees.length - attending - declined;
   let plusOneNumber = 0;
 
-  return <section className={`rsvp-flow rsvp-flow--${presentation} rsvp-flow--household`}>
+  return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--household">
     <div className="rsvp-card rsvp-household">
       <header className="rsvp-household__heading">
         <p className="rsvp-eyebrow">{household.label}</p>
@@ -164,5 +167,5 @@ export function RsvpHouseholdForm({
       </form>
       <p className="rsvp-status" aria-live="polite">{saveError}</p>
     </div>
-  </section>;
+  </RsvpShell>;
 }

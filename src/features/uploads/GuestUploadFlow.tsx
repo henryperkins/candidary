@@ -1,10 +1,9 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { MAX_IMAGE_BYTES } from '../../../shared/constants';
-import { guestEventCoverPath } from '../../app/api';
 import { readGuestName, rememberGuestName } from '../../app/guest-name-storage';
-import { useEventCover } from '../../app/use-event-cover';
+import { GuestEventHero } from '../../components/GuestEventHero';
 import { createBrowserTransport } from './browser-upload-transport';
 import {
   getReceiptCount,
@@ -79,14 +78,12 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
 }
 
 export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUploadFlowProps) {
-  const cover = useEventCover(event.coverObjectKey ? guestEventCoverPath(slug) : null);
   const rememberedName = useMemo(readGuestName, []);
   const [name, setName] = useState(rememberedName);
   const [editingName, setEditingName] = useState(!rememberedName);
   const [nameError, setNameError] = useState('');
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [sending, setSending] = useState(false);
-  const [welcomeExpanded, setWelcomeExpanded] = useState(false);
   const cameraInput = useRef<HTMLInputElement>(null);
   const libraryInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
@@ -185,13 +182,8 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const validationFailureCount = items.filter(({ validationError }) => validationError).length;
   const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
   const reviewMode = items.length > 0;
-  const welcomeMessage = event.welcomeMessage || 'Help us remember tonight.';
-  const welcomeNeedsDisclosure = welcomeMessage.length > 180;
   const eventDate = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
     .format(new Date(`${event.eventDate}T12:00:00`));
-  const heroStyle = cover
-    ? ({ '--event-cover': `url("${cover}")` } as CSSProperties)
-    : undefined;
 
   if (receiptCount) {
     return <section className="photo-drop photo-drop--receipt" aria-live="polite">
@@ -206,27 +198,13 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   }
 
   return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
-    {!reviewMode && <div
-      className={`photo-drop__hero${cover ? ' photo-drop__hero--cover' : ''}${welcomeExpanded ? ' photo-drop__hero--welcome-expanded' : ''}`}
-      style={heroStyle}
-    >
-      <div className="photo-drop__hero-copy">
-        <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
-        <h1
-          id="guest-welcome"
-          className={welcomeNeedsDisclosure && !welcomeExpanded ? 'photo-drop__welcome--clamped' : undefined}
-        >{welcomeMessage}</h1>
-        {welcomeNeedsDisclosure && <button
-          type="button"
-          className="photo-drop__welcome-toggle"
-          aria-controls="guest-welcome"
-          aria-expanded={welcomeExpanded}
-          onClick={() => setWelcomeExpanded((current) => !current)}
-        >
-          {welcomeExpanded ? 'Show less' : 'Read full welcome'}
-        </button>}
-      </div>
-    </div>}
+    {!reviewMode && <GuestEventHero
+      name={event.name}
+      eventDate={event.eventDate}
+      welcomeMessage={event.welcomeMessage}
+      coverObjectKey={event.coverObjectKey}
+      slug={slug}
+    />}
 
     <div className="photo-drop__card">
       {reviewMode && <header className="review-heading">

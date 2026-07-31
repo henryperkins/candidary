@@ -182,7 +182,7 @@ export class EventsRepository {
     return (await this.getById(id))!;
   }
 
-  async setCover(id: string, objectKey: string): Promise<EventRecord> {
+  async setCover(id: string, objectKey: string | null): Promise<EventRecord> {
     const result = await this.db.prepare(`
       UPDATE events SET cover_object_key = ? WHERE id = ? AND deleted_at IS NULL
     `).bind(objectKey, id).run();

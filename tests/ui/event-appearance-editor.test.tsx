@@ -155,6 +155,29 @@ describe('event appearance editor', () => {
     });
   });
 
+  /* Accent is only ever drawn as a mark on the event's own grounds, so one that vanishes into them is
+     refused on the accent field where the host chose it, the last legible preview stands, and
+     `Use preset accent` is the way back out. */
+  it('reports an accent that disappears into the event surfaces', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    const user = userEvent.setup();
+    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+
+    const preview = screen.getByTestId('event-appearance-preview');
+    const accent = screen.getByRole('textbox', { name: 'Accent color' });
+
+    await user.clear(accent);
+    await user.type(accent, '#f5efe6');
+    expect(accent).toHaveAttribute('aria-invalid', 'true');
+    expect(accent).toHaveAccessibleDescription('Accent color needs a 3:1 contrast ratio against the event surfaces.');
+    expect(preview).toHaveStyle({ '--event-accent': '#3f6d95' });
+    expect(screen.getByRole('button', { name: 'Save appearance' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Use preset accent' }));
+    expect(accent).toHaveValue('#3f6d95');
+    expect(preview).toHaveStyle({ '--event-accent': '#3f6d95' });
+  });
+
   it('resets locally, sends the canonical configuration, and adopts the normalized response', async () => {
     const normalizedTheme = resolveEventTheme({
       version: 1,
@@ -282,6 +305,45 @@ describe('event appearance editor', () => {
     expect(save).toHaveTextContent('Saving…');
     resolveSave(await json({ event: savedEvent }));
     await waitFor(() => expect(screen.getByText('Saved')).toBeVisible());
+  });
+
+  it('uploads and removes the cover immediately without a theme write', async () => {
+    const onEventSaved = vi.fn();
+    const covered = { ...event, coverObjectKey: 'events/event-a/cover/new.png' };
+    const cleared = { ...event, coverObjectKey: null };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (path === '/api/manage/events/event-a/cover' && method === 'GET') {
+        return Promise.resolve(new Response(null, { status: 404 }));
+      }
+      if (path === '/api/manage/events/event-a/cover' && method === 'POST') {
+        return json({ objectKey: 'events/event-a/cover/new.png', url: 'https://upload.test/cover' });
+      }
+      if (path === 'https://upload.test/cover' && method === 'PUT') {
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }
+      if (path === '/api/manage/events/event-a/cover/finalize' && method === 'POST') {
+        return json({ event: covered });
+      }
+      if (path === '/api/manage/events/event-a/cover' && method === 'DELETE') {
+        return json({ event: cleared });
+      }
+      throw new Error(`Unexpected request ${method} ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    const view = render(<EventAppearanceEditor event={event} onEventSaved={onEventSaved} />);
+
+    const file = new File([new Uint8Array([1, 2, 3])], 'cover.png', { type: 'image/png' });
+    await user.upload(screen.getByLabelText(/Add cover|Change cover/i), file);
+    await waitFor(() => expect(onEventSaved).toHaveBeenCalledWith(covered));
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+
+    view.rerender(<EventAppearanceEditor event={covered} onEventSaved={onEventSaved} />);
+    await user.click(screen.getByRole('button', { name: 'Remove cover' }));
+    await waitFor(() => expect(onEventSaved).toHaveBeenLastCalledWith(cleared));
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
   });
 
   it('associates server field errors with the matching color input', async () => {

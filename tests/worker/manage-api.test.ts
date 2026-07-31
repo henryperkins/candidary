@@ -307,6 +307,16 @@ describe('manager settings and private photo intake', () => {
     expect(managerCover.status).toBe(200);
     expect(managerCover.headers.get('content-type')).toBe('image/png');
     expect(managerCover.headers.get('cache-control')).toBe('private, no-store');
+
+    const removed = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
+      method: 'DELETE', headers: writeHeaders(access.manager),
+    }, testEnv);
+    expect(removed.status).toBe(200);
+    expect((await removed.json<any>()).data.event.coverObjectKey).toBeNull();
+    const gone = await createApp().request(`/api/event/${access.event.slug}/cover`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(gone.status).toBe(404);
   });
 
   it('keeps every delivery in intake, filters by guest name, and publishes separately', async () => {

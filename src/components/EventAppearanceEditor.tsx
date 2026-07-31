@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { ImagePlus } from 'lucide-react';
+import { useRef, useState } from 'react';
 
 import type {
   EventThemeConfigV1,
@@ -8,7 +9,9 @@ import type {
   ResolvedEventTheme,
 } from '../../shared/contracts';
 import {
+  assertAccentLegible,
   DEFAULT_EVENT_THEME_CONFIG,
+  EVENT_THEME_VERSION,
   EventThemeResolutionError,
   resolveEventTheme,
   serializeEventThemeConfig,
@@ -28,6 +31,8 @@ type ColorKind = 'primaryColor' | 'accentColor';
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/u;
 const SYNTAX_ERROR = 'Enter a six-digit hex color, such as #245c46.';
+const COVER_ACCEPT = 'image/jpeg,image/png,image/webp';
+const COVER_MAX_BYTES = 10 * 1024 * 1024;
 
 function rawColors(theme: ResolvedEventTheme) {
   return {
@@ -49,7 +54,10 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
   const [rawAccent, setRawAccent] = useState<string>(initialRaw.accent);
   const [errors, setErrors] = useState<ThemeErrors>({});
   const [busy, setBusy] = useState(false);
+  const [coverBusy, setCoverBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [coverError, setCoverError] = useState<string | null>(null);
+  const coverInput = useRef<HTMLInputElement>(null);
 
   const dirty = serializeEventThemeConfig(draftTheme) !== serializeEventThemeConfig(savedTheme);
   const invalid = Boolean(errors['overrides.primaryColor'] || errors['overrides.accentColor']);
@@ -61,7 +69,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
   }
 
   function choosePreset(presetId: EventThemePresetId) {
-    const resolved = resolveEventTheme({ version: 1, presetId, overrides: {} });
+    const resolved = resolveEventTheme({ version: EVENT_THEME_VERSION, presetId, overrides: {} });
     const raw = rawColors(resolved);
     adoptDraft(resolved);
     setRawPrimary(raw.primary);
@@ -89,7 +97,9 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
       },
     };
     try {
-      adoptDraft(resolveEventTheme(candidate));
+      const resolved = resolveEventTheme(candidate);
+      assertAccentLegible(resolved);
+      adoptDraft(resolved);
       setErrors((current) => {
         const next = { ...current };
         delete next[field];
@@ -127,7 +137,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
   }
 
   async function save() {
-    if (!dirty || invalid || busy) return;
+    if (!dirty || invalid || busy || coverBusy) return;
     setBusy(true);
     setSaveError(null);
     try {
@@ -163,17 +173,70 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
     }
   }
 
+  async function uploadCover(file: File) {
+    if (busy || coverBusy) return;
+    if (file.size > COVER_MAX_BYTES) {
+      setCoverError('Cover photos must be 10 MB or smaller.');
+      return;
+    }
+    setCoverBusy(true);
+    setCoverError(null);
+    try {
+      const upload = await api<{ objectKey: string; url: string }>(`/api/manage/events/${event.id}/cover`, {
+        method: 'POST',
+        body: JSON.stringify({ filename: file.name, mimeType: file.type, byteSize: file.size }),
+      });
+      const transferred = await fetch(upload.url, {
+        method: 'PUT',
+        headers: { 'content-type': file.type },
+        body: file,
+      });
+      if (!transferred.ok) throw new Error('Cover transfer failed.');
+      const result = await api<{ event: EventView }>(`/api/manage/events/${event.id}/cover/finalize`, {
+        method: 'POST',
+        body: JSON.stringify({ objectKey: upload.objectKey, mimeType: file.type }),
+      });
+      onEventSaved(result.event);
+    } catch (caught) {
+      setCoverError(caught instanceof ClientApiError
+        ? caught.message
+        : 'The cover photo could not be saved. Try again.');
+    } finally {
+      setCoverBusy(false);
+      if (coverInput.current) coverInput.current.value = '';
+    }
+  }
+
+  async function removeCover() {
+    if (busy || coverBusy || !event.coverObjectKey) return;
+    setCoverBusy(true);
+    setCoverError(null);
+    try {
+      const result = await api<{ event: EventView }>(`/api/manage/events/${event.id}/cover`, {
+        method: 'DELETE',
+      });
+      onEventSaved(result.event);
+    } catch (caught) {
+      setCoverError(caught instanceof ClientApiError
+        ? caught.message
+        : 'The cover photo could not be removed. Try again.');
+    } finally {
+      setCoverBusy(false);
+    }
+  }
+
   const primaryError = errors['overrides.primaryColor'];
   const accentError = errors['overrides.accentColor'];
   const primaryPickerValue = HEX_COLOR.test(rawPrimary) ? rawPrimary : previewTheme.tokens.primary;
   const accentPickerValue = HEX_COLOR.test(rawAccent) ? rawAccent : previewTheme.tokens.accent;
+  const locked = busy || coverBusy;
 
   return <section className="event-appearance-editor" aria-label="Event appearance editor">
     <div className="event-appearance-editor__heading">
       <div>
         <p className="section-label">Guest experience</p>
         <h3>Event appearance</h3>
-        <p>Choose the colors and shape guests see. Changes stay in this preview until you save.</p>
+        <p>Choose the colors and shape guests see. Color changes stay in this preview until you save. Cover changes apply immediately.</p>
       </div>
       <span className={`event-appearance-editor__status${unsaved ? ' event-appearance-editor__status--dirty' : ''}`}>
         {unsaved ? 'Unsaved changes' : 'Saved'}
@@ -181,6 +244,41 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
     </div>
 
     {saveError && <p className="form-error" role="alert">{saveError}</p>}
+    {coverError && <p className="form-error" role="alert">{coverError}</p>}
+
+    <div className="event-appearance-editor__cover">
+      <div className="event-appearance-editor__cover-copy">
+        <strong>Cover photo</strong>
+        <p>{event.coverObjectKey
+          ? 'Shown on the guest hero for RSVP and photo delivery.'
+          : 'Optional. JPEG, PNG, or WebP · 10 MB max.'}</p>
+      </div>
+      <div className="event-appearance-editor__cover-actions">
+        <label className="cover-field cover-field--compact">
+          <ImagePlus aria-hidden="true" />
+          <span className="button button--secondary">{coverBusy ? 'Working…' : event.coverObjectKey ? 'Change cover' : 'Add cover'}</span>
+          <input
+            ref={coverInput}
+            className="sr-only cover-field__input"
+            type="file"
+            accept={COVER_ACCEPT}
+            disabled={locked}
+            onChange={(changeEvent) => {
+              const file = changeEvent.target.files?.[0];
+              if (file) void uploadCover(file);
+            }}
+          />
+        </label>
+        {event.coverObjectKey && <button
+          type="button"
+          className="button button--secondary"
+          disabled={locked}
+          onClick={() => void removeCover()}
+        >
+          Remove cover
+        </button>}
+      </div>
+    </div>
 
     <form onSubmit={(formEvent) => {
       formEvent.preventDefault();
@@ -191,14 +289,14 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
           name={`event-theme-${event.id}`}
           value={draftTheme.presetId}
           onChange={choosePreset}
-          disabled={busy}
+          disabled={locked}
         />
 
         <div className="event-appearance-editor__color-list">
           <div className="event-appearance-editor__color">
             <div className="event-appearance-editor__color-heading">
               <strong>Primary color</strong>
-              <button type="button" onClick={() => usePresetColor('primaryColor')} disabled={busy}>
+              <button type="button" onClick={() => usePresetColor('primaryColor')} disabled={locked}>
                 Use preset primary
               </button>
             </div>
@@ -208,7 +306,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                 <input
                   type="color"
                   value={primaryPickerValue}
-                  disabled={busy}
+                  disabled={locked}
                   onChange={(changeEvent) => changeColor('primaryColor', changeEvent.target.value)}
                 />
               </label>
@@ -217,7 +315,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                 <input
                   type="text"
                   value={rawPrimary}
-                  disabled={busy}
+                  disabled={locked}
                   spellCheck={false}
                   autoComplete="off"
                   aria-invalid={Boolean(primaryError)}
@@ -232,7 +330,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
           <div className="event-appearance-editor__color">
             <div className="event-appearance-editor__color-heading">
               <strong>Accent color</strong>
-              <button type="button" onClick={() => usePresetColor('accentColor')} disabled={busy}>
+              <button type="button" onClick={() => usePresetColor('accentColor')} disabled={locked}>
                 Use preset accent
               </button>
             </div>
@@ -242,7 +340,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                 <input
                   type="color"
                   value={accentPickerValue}
-                  disabled={busy}
+                  disabled={locked}
                   onChange={(changeEvent) => changeColor('accentColor', changeEvent.target.value)}
                 />
               </label>
@@ -251,7 +349,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                 <input
                   type="text"
                   value={rawAccent}
-                  disabled={busy}
+                  disabled={locked}
                   spellCheck={false}
                   autoComplete="off"
                   aria-invalid={Boolean(accentError)}
@@ -275,14 +373,14 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
           type="button"
           className="button button--secondary"
           onClick={reset}
-          disabled={busy}
+          disabled={locked}
         >
           Reset to Candidary default
         </button>
         <button
           type="submit"
           className="button button--primary"
-          disabled={!dirty || invalid || busy}
+          disabled={!dirty || invalid || locked}
         >
           {busy ? 'Saving…' : 'Save appearance'}
         </button>

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import {
+  assertAccentLegible,
   eventThemeConfigSchema,
   EventThemeResolutionError,
   resolveEventTheme,
@@ -159,6 +160,14 @@ manageRoutes.post('/manage/events/:eventId/cover/finalize', async (context) => {
   return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
 });
 
+manageRoutes.delete('/manage/events/:eventId/cover', async (context) => {
+  const auth = await managerForEvent(context, true);
+  const previousKey = auth.event.coverObjectKey;
+  const event = await new EventsRepository(context.env.DB).setCover(auth.event.id, null);
+  if (previousKey) await context.env.MEDIA_BUCKET.delete(previousKey);
+  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
+});
+
 manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
   const auth = await requireManager(context, { write: true });
   const parsed = eventThemeConfigSchema.safeParse(await context.req.json().catch(() => null));
@@ -174,6 +183,7 @@ manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
   let resolved;
   try {
     resolved = resolveEventTheme(parsed.data);
+    assertAccentLegible(resolved);
   } catch (error) {
     if (!(error instanceof EventThemeResolutionError)) throw error;
     throw new ApiError(

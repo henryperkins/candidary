@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 
 import type { GuestEventView } from '../../../shared/contracts';
+import { RsvpShell } from './RsvpShell';
 
 interface RsvpLookupProps {
   event: GuestEventView;
@@ -55,11 +56,13 @@ export function RsvpLookup({
     await onLookup(first, secondNameRequired ? second : undefined);
   }
 
-  return <section className={`rsvp-flow rsvp-flow--${presentation}`}>
+  const withHero = presentation === 'primary' || presentation === 'read-only';
+
+  return <RsvpShell event={event} presentation={presentation}>
     <header className="rsvp-identity">
-      <p className="rsvp-identity__event">{event.name}</p>
+      {!withHero && <p className="rsvp-identity__event">{event.name}</p>}
       <h1>Find your household invitation</h1>
-      <p>{displayDate(event.eventDate)}</p>
+      {!withHero && <p>{displayDate(event.eventDate)}</p>}
       {event.rsvpDeadlineDate && <p className="rsvp-deadline">Please RSVP by {displayDate(event.rsvpDeadlineDate)}.</p>}
     </header>
     <div className="rsvp-card rsvp-lookup">
@@ -109,5 +112,5 @@ export function RsvpLookup({
       </form>
       <p className="rsvp-status" aria-live="polite">{message}</p>
     </div>
-  </section>;
+  </RsvpShell>;
 }

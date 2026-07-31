@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { ApiError } from '../../shared/errors';
 import { canonicalTimeZone, endOfLocalDate, isIanaTimeZone } from '../../shared/event-time';
 import {
+  assertAccentLegible,
   DEFAULT_EVENT_THEME_CONFIG,
   eventThemeConfigSchema,
   EventThemeResolutionError,
@@ -76,7 +77,9 @@ publicRoutes.post('/events', async (context) => {
 
   let theme;
   try {
-    theme = resolveEventTheme(parsed.data.theme).config;
+    const resolved = resolveEventTheme(parsed.data.theme);
+    assertAccentLegible(resolved);
+    theme = resolved.config;
   } catch (error) {
     if (!(error instanceof EventThemeResolutionError)) throw error;
     throw new ApiError(

@@ -321,20 +321,20 @@ describe('guest event theme rendering', () => {
       return declarationMatch![1]!.trim();
     };
 
-    expect(declaration('.photo-drop__name strong', 'color')).toBe('var(--event-required-text, #8b4b31)');
-    expect(declaration('.sending-as', 'border')).toContain('var(--event-remembered-name-border, #dfd7d4)');
-    expect(declaration('.review-heading', 'border-bottom')).toContain('var(--event-review-divider, #eae2df)');
-    expect(declaration('.selection-card__image', 'background')).toContain('var(--event-media-placeholder-start, #e9ddd5)');
-    expect(declaration('.selection-card__image', 'color')).toBe('var(--event-media-placeholder-foreground, #806d65)');
-    expect(declaration('.selection-summary', 'color')).toBe('var(--event-selection-summary-text, #6f6561)');
-    expect(declaration('.guest-shell--drop .text-button', 'color')).toBe('var(--event-primary-on-surface, #4a2415)');
-    expect(declaration('.new-badge', 'color')).toBe('var(--event-primary-on-surface, #4a2415)');
+    expect(declaration('.photo-drop__name strong', 'color')).toBe('var(--event-required-text)');
+    expect(declaration('.sending-as', 'border')).toContain('var(--event-remembered-name-border)');
+    expect(declaration('.review-heading', 'border-bottom')).toContain('var(--event-review-divider)');
+    expect(declaration('.selection-card__image', 'background')).toContain('var(--event-media-placeholder-start)');
+    expect(declaration('.selection-card__image', 'color')).toBe('var(--event-media-placeholder-foreground)');
+    expect(declaration('.selection-summary', 'color')).toBe('var(--event-selection-summary-text)');
+    expect(declaration('.guest-shell--drop .text-button', 'color')).toBe('var(--event-primary-on-surface)');
+    expect(declaration('.new-badge', 'color')).toBe('var(--event-primary-on-surface)');
     expect(brightPrimaryTheme.tokens.primary).toBe('#f2c94c');
     expect(brightPrimaryTheme.tokens.primaryOnSurface).not.toBe(brightPrimaryTheme.tokens.primary);
-    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary-on-surface, #4a2415)');
-    expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary, #4a2415)');
+    expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary-on-surface)');
+    expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary)');
     expect(declaration('.photo-drop__hero::after', 'background'))
-      .toContain('var(--event-hero-overlay-top, rgb(31 15 9 / 10%))');
+      .toContain('var(--event-hero-overlay-top)');
     expect(declaration('.selection-card--failed', 'border-color')).toBe('#d99b93');
     expect(declaration('.selection-card--delivered', 'border-color')).toBe('#b8c9ae');
     expect(declaration('.selection-card__delivered', 'color')).toBe('#31552d');
@@ -342,12 +342,21 @@ describe('guest event theme rendering', () => {
     expect(declaration('.fullscreen figcaption', 'background')).toContain('rgb(0 0 0 / 65%)');
   });
 
+  /* The stylesheet used to carry a second copy of the Candidary Default preset: a 45-declaration
+     block plus a literal inside every `var()`. Nothing ever reached it — the three roots that scope
+     these variables each inject the resolved set inline — so it was a silent duplicate that had to be
+     re-derived by hand on every palette change, and the chestnut/denim migration shows what that
+     costs. Removing it only holds if it cannot grow back one declaration at a time. */
+  it('reads event tokens without restating the default preset as a fallback', () => {
+    expect(guestStyles.match(/var\(--event-[a-z0-9-]+,[^)]*/gu) ?? []).toEqual([]);
+  });
+
   it('keeps RSVP controls narrow-first and mapped to event semantic variables', () => {
     expect(guestStyles).toContain('.rsvp-flow');
     expect(guestStyles).toContain('.rsvp-attendance');
-    expect(guestStyles).toContain('var(--event-surface, #fffaf3)');
-    expect(guestStyles).toContain('var(--event-primary, #4a2415)');
-    expect(guestStyles).toContain('var(--event-focus, #2c5c85)');
+    expect(guestStyles).toContain('var(--event-surface)');
+    expect(guestStyles).toContain('var(--event-primary)');
+    expect(guestStyles).toContain('var(--event-focus)');
     expect(guestStyles).toMatch(/\.rsvp-[^{]+\{[^}]*min-height:\s*44px/u);
   });
 });

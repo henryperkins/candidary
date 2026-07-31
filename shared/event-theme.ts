@@ -12,12 +12,19 @@ import type {
 
 export const EVENT_THEME_VERSION = 1 as const;
 
+/* `z.enum` needs literals, so the offered order stays a hand-written tuple; `PRESETS` below is what
+   closes the set. Keying that table by `EventThemePresetId` proves both directions — an id added to
+   the union with no entry fails to compile, and an entry outside the union is an excess property.
+   `satisfies readonly EventThemePresetId[]` only ever proved this tuple was a subset, so a new id
+   compiled, `z.enum` refused it at runtime, and `parseStoredEventThemeConfig` quietly reverted that
+   host's saved theme to Default. The remaining direction — a preset in the table that no one is
+   offered — is held by `tests/unit/event-theme.test.ts`. */
 export const EVENT_THEME_PRESET_IDS = [
   'candidary-default',
   'garden-party',
   'midnight-film',
   'coastal-light',
-] as const satisfies readonly EventThemePresetId[];
+] as const satisfies readonly (keyof typeof PRESETS)[];
 
 const hexColorSchema = z.string()
   .regex(/^#[0-9a-fA-F]{6}$/u)
@@ -41,8 +48,8 @@ interface EventThemePreset {
 
 const tokens = (value: EventThemeTokens) => value;
 
-export const EVENT_THEME_PRESETS: readonly EventThemePreset[] = [
-  {
+const PRESETS = {
+  'candidary-default': {
     id: 'candidary-default',
     name: 'Candidary Default',
     description: 'Warm chestnut and denim, matching the Candidary guest experience.',
@@ -50,7 +57,7 @@ export const EVENT_THEME_PRESETS: readonly EventThemePreset[] = [
       page: '#f7f1e7', surface: '#fffaf3', raisedSurface: '#ffffff', text: '#352924', pageText: '#2b1d17', cardText: '#4a413e', mutedText: '#776e6a', secondaryMutedText: '#766c70', quietText: '#665c58', requiredText: '#8b4b31', selectionSummaryText: '#6f6561', primary: '#4a2415', primaryForeground: '#ffffff', primaryHover: '#31170c', primaryOnSurface: '#4a2415', primaryShadow: 'rgb(74 36 21 / 13%)', accent: '#3f6d95', accentForeground: '#ffffff', accentSoft: '#dde7f0', accentSoftForeground: '#4a2415', border: '#e3dcd8', sectionBorder: '#d9cec2', rememberedNameBorder: '#dfd7d4', reviewDivider: '#eae2df', inputBorder: '#928a84', focus: '#2c5c85', mediaPlaceholderStart: '#e9ddd5', mediaPlaceholderEnd: '#cbbbb5', mediaPlaceholderForeground: '#806d65', heroStart: '#634134', heroMid: '#a06e5a', heroEnd: '#d98b6a', heroOverlayTop: 'rgb(31 15 9 / 10%)', heroOverlayBottom: 'rgb(31 15 9 / 52%)', coverOverlayTop: 'rgb(31 15 9 / 5%)', coverOverlayBottom: 'rgb(31 15 9 / 62%)', coverTextScrim: 'rgb(31 15 9 / 64%)', fullscreenBackdrop: '#170e0a', fullscreenForeground: '#ffffff', inputShadow: 'rgb(43 29 23 / 4%)', frameShadow: 'rgb(54 37 30 / 13%)', inputRadius: '11px', actionRadius: '12px', cardRadius: '10px', frameRadius: '25px',
     }),
   },
-  {
+  'garden-party': {
     id: 'garden-party',
     name: 'Garden Party',
     description: 'Verdant greens with soft terracotta accents.',
@@ -58,7 +65,7 @@ export const EVENT_THEME_PRESETS: readonly EventThemePreset[] = [
       page: '#f2f1e8', surface: '#fffcf5', raisedSurface: '#ffffff', text: '#1f3028', pageText: '#17271f', cardText: '#2b3e34', mutedText: '#5b6b62', secondaryMutedText: '#53675d', quietText: '#4d6258', requiredText: '#8a4036', selectionSummaryText: '#53675d', primary: '#245c46', primaryForeground: '#ffffff', primaryHover: '#194b38', primaryOnSurface: '#245c46', primaryShadow: 'rgb(36 92 70 / 13%)', accent: '#c36f42', accentForeground: '#111111', accentSoft: '#f8ebe0', accentSoftForeground: '#1f3028', border: '#d7d9ca', sectionBorder: '#cbd1c2', rememberedNameBorder: '#d3d8ce', reviewDivider: '#e1e2d7', inputBorder: '#788b80', focus: '#6f3e7c', mediaPlaceholderStart: '#dde1d2', mediaPlaceholderEnd: '#b9c6b5', mediaPlaceholderForeground: '#526d5c', heroStart: '#244d3e', heroMid: '#5f7a53', heroEnd: '#c18a58', heroOverlayTop: 'rgb(14 34 27 / 10%)', heroOverlayBottom: 'rgb(14 34 27 / 54%)', coverOverlayTop: 'rgb(14 34 27 / 8%)', coverOverlayBottom: 'rgb(14 34 27 / 64%)', coverTextScrim: 'rgb(14 34 27 / 64%)', fullscreenBackdrop: '#10231b', fullscreenForeground: '#ffffff', inputShadow: 'rgb(23 39 31 / 4%)', frameShadow: 'rgb(31 48 40 / 13%)', inputRadius: '14px', actionRadius: '16px', cardRadius: '16px', frameRadius: '28px',
     }),
   },
-  {
+  'midnight-film': {
     id: 'midnight-film',
     name: 'Midnight Film',
     description: 'Ink-blue evening tones with a cinematic warmth.',
@@ -66,7 +73,7 @@ export const EVENT_THEME_PRESETS: readonly EventThemePreset[] = [
       page: '#eef1f7', surface: '#fafbff', raisedSurface: '#ffffff', text: '#192136', pageText: '#11182c', cardText: '#283047', mutedText: '#5d667b', secondaryMutedText: '#566177', quietText: '#4f5a70', requiredText: '#8b3f5b', selectionSummaryText: '#566177', primary: '#263868', primaryForeground: '#ffffff', primaryHover: '#1d2b55', primaryOnSurface: '#263868', primaryShadow: 'rgb(38 56 104 / 13%)', accent: '#b7693f', accentForeground: '#111111', accentSoft: '#f2e9e8', accentSoftForeground: '#192136', border: '#d5d9e4', sectionBorder: '#c6ccdb', rememberedNameBorder: '#d4d9e5', reviewDivider: '#e1e4ed', inputBorder: '#7c879f', focus: '#7551a6', mediaPlaceholderStart: '#dce1eb', mediaPlaceholderEnd: '#b8c0d1', mediaPlaceholderForeground: '#59657f', heroStart: '#1d294e', heroMid: '#4a3e68', heroEnd: '#8b4e5a', heroOverlayTop: 'rgb(9 16 37 / 8%)', heroOverlayBottom: 'rgb(9 16 37 / 52%)', coverOverlayTop: 'rgb(9 16 37 / 6%)', coverOverlayBottom: 'rgb(9 16 37 / 62%)', coverTextScrim: 'rgb(9 16 37 / 64%)', fullscreenBackdrop: '#0b1020', fullscreenForeground: '#ffffff', inputShadow: 'rgb(17 24 44 / 4%)', frameShadow: 'rgb(25 33 54 / 13%)', inputRadius: '7px', actionRadius: '8px', cardRadius: '7px', frameRadius: '14px',
     }),
   },
-  {
+  'coastal-light': {
     id: 'coastal-light',
     name: 'Coastal Light',
     description: 'Sea-glass teal with a bright coral accent.',
@@ -74,14 +81,15 @@ export const EVENT_THEME_PRESETS: readonly EventThemePreset[] = [
       page: '#edf7f5', surface: '#fffefa', raisedSurface: '#ffffff', text: '#17343a', pageText: '#0d2a30', cardText: '#24464b', mutedText: '#526d72', secondaryMutedText: '#4b686d', quietText: '#456267', requiredText: '#913c46', selectionSummaryText: '#4b686d', primary: '#0c6370', primaryForeground: '#ffffff', primaryHover: '#08505a', primaryOnSurface: '#0c6370', primaryShadow: 'rgb(12 99 112 / 13%)', accent: '#c85f50', accentForeground: '#111111', accentSoft: '#f8ebe6', accentSoftForeground: '#17343a', border: '#cfe2df', sectionBorder: '#bdd7d4', rememberedNameBorder: '#c9dfdc', reviewDivider: '#dcebe8', inputBorder: '#748f92', focus: '#6c3c78', mediaPlaceholderStart: '#dcecea', mediaPlaceholderEnd: '#adcfcf', mediaPlaceholderForeground: '#48777b', heroStart: '#0b5965', heroMid: '#4a8c91', heroEnd: '#d27a62', heroOverlayTop: 'rgb(5 31 35 / 14%)', heroOverlayBottom: 'rgb(5 31 35 / 54%)', coverOverlayTop: 'rgb(5 31 35 / 8%)', coverOverlayBottom: 'rgb(5 31 35 / 64%)', coverTextScrim: 'rgb(5 31 35 / 64%)', fullscreenBackdrop: '#071d21', fullscreenForeground: '#ffffff', inputShadow: 'rgb(13 42 48 / 4%)', frameShadow: 'rgb(23 52 58 / 13%)', inputRadius: '12px', actionRadius: '14px', cardRadius: '12px', frameRadius: '20px',
     }),
   },
-];
+} as const satisfies Record<EventThemePresetId, EventThemePreset>;
 
-const presetById = new Map(EVENT_THEME_PRESETS.map((preset) => [preset.id, preset]));
+/* Taken from the table, not the offered tuple, so it cannot agree with the tuple by construction. A
+   preset defined here but left out of `EVENT_THEME_PRESET_IDS` — one that exists and is offered to no
+   one — shows up as an extra entry, which is what `tests/unit/event-theme.test.ts` watches for. */
+export const EVENT_THEME_PRESETS: readonly EventThemePreset[] = Object.values(PRESETS);
 
 function presetFor(presetId: EventThemePresetId): EventThemePreset {
-  const preset = presetById.get(presetId);
-  if (!preset) throw new Error(`Unknown event theme preset: ${presetId}`);
-  return preset;
+  return PRESETS[presetId];
 }
 
 function canonicalConfig(
@@ -230,12 +238,14 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
 
   if (config.overrides.accentColor) {
     const accent = config.overrides.accentColor;
+    /* Derived, never a gate. No rule pairs text with an accent-filled ground, so refusing an accent
+       over that pairing turned away colors on a contrast nothing renders — and because both white and
+       near-black fall below 4.5:1 across a narrow band of mid luminances, the colors it turned away
+       were ordinary mid-tones. `highestContrast` always answers, so the derivation cannot fail.
+       What accent does render on is guarded by `assertAccentLegible` at the point of choosing. */
     const accentForeground = contrastRatio(resolvedTokens.accentForeground, accent) >= 4.5
       ? resolvedTokens.accentForeground
-      : passingForeground(['#ffffff', '#111111'], accent);
-    if (!accentForeground) {
-      throw new EventThemeResolutionError('overrides.accentColor', 'Accent color needs a 4.5:1 foreground contrast ratio.');
-    }
+      : highestContrast(['#ffffff', '#111111'], accent);
     const [softRed, softGreen, softBlue] = parseHex(preset.tokens.accentSoft);
     const [accentRed, accentGreen, accentBlue] = parseHex(accent);
     const [presetAccentRed, presetAccentGreen, presetAccentBlue] = parseHex(preset.tokens.accent);
@@ -257,6 +267,28 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
   }
 
   return { config, tokens: resolvedTokens };
+}
+
+/* The floor that actually renders. Accent is only ever drawn as a mark on the event's own grounds —
+   the empty-state and notes glyphs, the guest footer mark — so `design/design-system.md` asks it to
+   clear 3:1 there as meaningful non-text. `fullscreenBackdrop` is deliberately outside the set: the
+   full-screen brand mark sits on near-black while that same accent sits on near-white surfaces, and
+   no one color clears 3:1 against both, so that mark stays decorative brand chrome.
+   Deliberately not part of `resolveEventTheme`: this runs only where a host picks a color, so raising
+   the floor can never retire a theme that is already saved. A stored accent below it keeps resolving
+   exactly as it does today, and is only refused when that host next edits it. */
+const ACCENT_SURFACE_CONTRAST = 3;
+
+export function assertAccentLegible(theme: ResolvedEventTheme): void {
+  if (!theme.config.overrides.accentColor) return;
+  const legible = [theme.tokens.page, theme.tokens.surface, theme.tokens.raisedSurface]
+    .every((surface) => contrastRatio(theme.tokens.accent, surface) >= ACCENT_SURFACE_CONTRAST);
+  if (!legible) {
+    throw new EventThemeResolutionError(
+      'overrides.accentColor',
+      'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+  }
 }
 
 export function resolvedThemeView(input: EventThemeConfigV1): ResolvedEventTheme {

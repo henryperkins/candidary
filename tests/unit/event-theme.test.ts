@@ -4,6 +4,7 @@ import {
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_PRESET_IDS,
   EVENT_THEME_PRESETS,
+  assertAccentLegible,
   contrastRatio,
   eventThemeConfigSchema,
   parseStoredEventThemeConfig,
@@ -134,7 +135,12 @@ describe('event theme contract', () => {
     expect(resolvedThemeView(config).config).toEqual(DEFAULT_EVENT_THEME_CONFIG);
   });
 
+  /* These two lists reach here by different routes — the tuple is hand-written for `z.enum`, the
+     registry comes off the preset table — so holding them to the same members closes the last gap the
+     type system leaves: a preset that exists but is offered to nobody. The other three directions are
+     compile errors. */
   it('publishes the fixed registry in stable display order', () => {
+    expect(EVENT_THEME_PRESETS.map((preset) => preset.id)).toEqual([...EVENT_THEME_PRESET_IDS]);
     expect(EVENT_THEME_PRESET_IDS).toEqual([
       'candidary-default', 'garden-party', 'midnight-film', 'coastal-light',
     ]);
@@ -184,6 +190,47 @@ describe('event theme contract', () => {
     expect(() => resolveEventTheme({
       version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#777777' },
     })).toThrow(expect.objectContaining({ field: 'overrides.primaryColor' } satisfies Partial<EventThemeResolutionError>));
+  });
+
+  /* `accentForeground` reaches no rule: nothing fills a surface with accent and sets text on it. So
+     the retired gate refused colors over a pairing that is never drawn, and because both #ffffff and
+     #111111 sit under 4.5:1 across a narrow band of mid luminances, the colors it refused were
+     ordinary mid greys. #797979 is inside that band. */
+  it('resolves a mid-luminance accent that the retired foreground gate refused', () => {
+    expect(Math.max(contrastRatio('#ffffff', '#797979'), contrastRatio('#111111', '#797979')))
+      .toBeLessThan(4.5);
+    expect(resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { accentColor: '#797979' },
+    }).tokens.accent).toBe('#797979');
+  });
+
+  /* What accent is actually drawn as: a mark on the event's own grounds. The floor belongs where a
+     host picks a color, never on the read path — so a theme saved before the floor existed keeps
+     resolving, and is only refused when that host next edits it. */
+  it('refuses an accent that cannot be seen on the event surfaces', () => {
+    const resolved = resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { accentColor: '#f5efe6' },
+    });
+    expect(resolved.tokens.accent).toBe('#f5efe6');
+    expect(() => assertAccentLegible(resolved))
+      .toThrow(expect.objectContaining({ field: 'overrides.accentColor' } satisfies Partial<EventThemeResolutionError>));
+  });
+
+  it('keeps a stored accent below the floor resolving instead of reverting to Default', () => {
+    const stored = parseStoredEventThemeConfig(
+      '{"version":1,"presetId":"candidary-default","overrides":{"accentColor":"#f5efe6"}}',
+    );
+    expect(resolvedThemeView(stored).tokens.accent).toBe('#f5efe6');
+    expect(resolvedThemeView(stored).config.presetId).toBe('candidary-default');
+  });
+
+  it.each(EVENT_THEME_PRESET_IDS)('keeps the authored %s accent legible on its own surfaces', (presetId) => {
+    const { tokens } = EVENT_THEME_PRESETS.find((candidate) => candidate.id === presetId)!;
+    expect(Math.min(
+      contrastRatio(tokens.accent, tokens.page),
+      contrastRatio(tokens.accent, tokens.surface),
+      contrastRatio(tokens.accent, tokens.raisedSurface),
+    )).toBeGreaterThanOrEqual(3);
   });
 
   it.each(EVENT_THEME_PRESET_IDS)('keeps accent continuity around the authored %s accent', (presetId) => {
