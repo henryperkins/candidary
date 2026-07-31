@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import {
+  applySettings,
   eventAccess,
   importRoster,
   openRsvp,
@@ -98,6 +99,30 @@ describe('exact-name household lookup', () => {
 
     expect(response.status).toBe(200);
     expect(parsed.data).toEqual({
+      status: 'not_available',
+      message: expect.any(String),
+    });
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  // `second_name_required` is a fact about the live roster: it says the name is
+  // on the list twice. While RSVP is not open a household that never answered is
+  // already invisible, so an ambiguous name must be too — otherwise a stranger
+  // who cannot open anything can still confirm a name.
+  it.each<[string, Record<string, unknown>]>([
+    ['paused', { rsvpEnabled: false }],
+    ['closed', { rsvpDeadlineDate: '2020-01-01' }],
+  ])('hides an ambiguous name behind the generic refusal while RSVP is %s', async (_label, patch) => {
+    const access = await ready();
+    const current = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    access.event = (await current.json<any>()).data.event;
+    const changed = await applySettings(access, { rsvpEnabled: false, ...patch });
+    expect(changed.status).toBe(200);
+
+    const response = await lookup(access, { firstName: 'Alex Lee' });
+    expect((await response.json<any>()).data).toEqual({
       status: 'not_available',
       message: expect.any(String),
     });

@@ -146,11 +146,17 @@ export function ManagerRsvpPanel({
     }
   }
 
+  // Runs only after a write has already committed, so a failure here is a stale
+  // total rather than a refused change. Saying so in the same status line keeps
+  // a host from undoing work that actually landed.
   async function refreshRoster() {
-    await Promise.all([
-      loadSummary(),
-      loadList(),
-    ]);
+    try {
+      await Promise.all([loadSummary(), loadList()]);
+    } catch {
+      setAnnouncement((current) => (current
+        ? `${current} The totals could not be refreshed — reload to see them.`
+        : 'The totals could not be refreshed — reload to see them.'));
+    }
   }
 
   function applyMutation(result: ManagerMutation, message: string) {
@@ -227,6 +233,12 @@ export function ManagerRsvpPanel({
       await refreshRoster();
     } catch (caught) {
       setNotice(failureMessage(caught, 'That household could not be created.'));
+      // Creation is the one mutation guarded on the roster version alone, so a
+      // refusal has to reload the event that carries it. Without this the typed
+      // household is retried against the same stale version forever.
+      if (caught instanceof ClientApiError && caught.code === 'RSVP_HOUSEHOLD_CONFLICT') {
+        onEventChanged();
+      }
     } finally {
       setBusy(false);
     }

@@ -419,6 +419,96 @@ describe('manager RSVP panel', () => {
     expect(await screen.findByText('Archived')).toBeVisible();
   });
 
+  // The create form is the one mutation that does not run through the shared
+  // household-write path, so its conflict recovery has to be proved separately:
+  // without a resync the host retries the same stale version forever.
+  it('resyncs the roster version after a refused create so the retry can succeed', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/rsvp/summary')) return success(summary);
+      if (url.pathname.endsWith('/rsvp/households') && (init?.method ?? 'GET') === 'GET') {
+        return success({ households: [], nextCursor: null });
+      }
+      if (url.pathname.endsWith('/rsvp/households') && init?.method === 'POST') {
+        sent.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        attempts += 1;
+        return attempts === 1
+          ? failure('RSVP_HOUSEHOLD_CONFLICT', 'This household changed since you opened it.', 409)
+          : success({ household, rosterVersion: 12 }, 201);
+      }
+      // The refused create re-reads the event, which is where the current roster
+      // version comes from.
+      if (url.pathname.endsWith('/events/event-a')) {
+        return success({ event: { ...event, rsvpRosterVersion: 11 } });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    const onEventChanged = vi.fn();
+    const { rerender } = render(<ManagerRsvpPanel event={event} onEventChanged={onEventChanged} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add household' }));
+    await user.type(screen.getByLabelText('Household key'), 'morgan');
+    await user.type(screen.getByLabelText('Household label'), 'The Morgan household');
+    await user.type(screen.getByLabelText('Named guests'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Create household' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('changed since you opened it');
+    expect(sent[0]).toMatchObject({ expectedRosterVersion: 7 });
+    // The form survives so the host retries their typed household, not a blank one.
+    expect(screen.getByLabelText('Household key')).toHaveValue('morgan');
+
+    // The shell reloads the event on the failure path, exactly as it does after a
+    // successful write, so the retry carries the version the server now holds.
+    expect(onEventChanged).toHaveBeenCalled();
+    rerender(<ManagerRsvpPanel
+      event={{ ...event, rsvpRosterVersion: 11 }}
+      onEventChanged={onEventChanged}
+    />);
+    await user.click(screen.getByRole('button', { name: 'Create household' }));
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]).toMatchObject({ expectedRosterVersion: 11 });
+  });
+
+  // A committed edit followed by a failed refresh is still a committed edit. It
+  // must not be announced as a refusal, or a host undoes work that landed.
+  it('does not report a committed edit as refused when only the refresh fails', async () => {
+    let refreshes = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/rsvp/summary')) {
+        refreshes += 1;
+        return refreshes > 1
+          ? failure('INTERNAL_ERROR', 'The guest list totals could not be loaded.', 503)
+          : success(summary);
+      }
+      if (url.pathname.endsWith('/rsvp/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') {
+        return success(household);
+      }
+      if (url.pathname.endsWith(`/${household.id}`) && init?.method === 'PUT') {
+        return success({ household: { ...household, version: 5 }, rosterVersion: 8 });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.clear(await screen.findByLabelText('Household label'));
+    await user.type(screen.getByLabelText('Household label'), 'Edited label');
+    await user.click(screen.getByRole('button', { name: 'Save household' }));
+
+    const announced = await screen.findByRole('status');
+    expect(announced).toHaveTextContent('saved');
+    // A stale total is worth saying; it is not a failed write, so it does not
+    // get the alert that a refused one does.
+    expect(announced).toHaveTextContent('could not be refreshed');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('offers the current server CSV export', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = route(input);

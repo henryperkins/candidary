@@ -467,4 +467,57 @@ describe('replay and conflict', () => {
     expect(refused.status).toBe(403);
     expect((await refused.json<any>()).code).toBe('CSRF_INVALID');
   });
+
+  // A host edit that changes the roster shape also bumps the version, so this is
+  // the ordinary collision — not an exotic one. It has to arrive as the conflict
+  // the guest UI knows how to recover from, never as a validation refusal that
+  // leaves them re-sending the same stale answer set forever.
+  it('answers a host roster change with a conflict rather than a validation refusal', async () => {
+    const { access, session } = await opened();
+    const listed = await createApp().request(
+      `/api/manage/events/${access.event.id}/rsvp/households`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+    const household = (await listed.json<any>()).data.households[0];
+    const current = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const rosterVersion = (await current.json<any>()).data.event.rsvpRosterVersion;
+
+    // The host adds a plus-one slot while the household is mid-answer, so the
+    // guest's invitee set no longer matches the roster and the version moved.
+    const edited = await createApp().request(
+      `/api/manage/events/${access.event.id}/rsvp/households/${household.id}`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({
+          label: household.label,
+          plusOneSlots: 3,
+          namedInvitees: session.household.invitees
+            .filter((invitee) => invitee.kind === 'named')
+            .map((invitee) => ({ id: invitee.id, displayName: invitee.displayName })),
+          expectedVersion: household.version,
+          expectedRosterVersion: rosterVersion,
+        }),
+      },
+      testEnv,
+    );
+    expect(edited.status).toBe(200);
+
+    const stale = await submit(access, session, {
+      version: session.household.version,
+      idempotencyKey: 'stale-after-roster-edit',
+      invitees: answers(session.household, 'attending', 'Jordan Lee'),
+    });
+
+    expect(stale.status).toBe(409);
+    expect((await stale.json<any>()).code).toBe('RSVP_HOUSEHOLD_CONFLICT');
+    // Nothing was written: the host's two named guests and three slots are all
+    // still unanswered, so the guest's re-read finds the roster the host made.
+    const stored = await storedAttendance(session.household.id);
+    expect(stored).toHaveLength(5);
+    expect(stored.every(([, , attendance]) => attendance === 'pending')).toBe(true);
+  });
 });

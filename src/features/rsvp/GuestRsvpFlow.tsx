@@ -54,6 +54,38 @@ function screenWithoutHousehold(event: GuestEventView): Screen {
     : { kind: 'paused', household: null };
 }
 
+/**
+ * Where a refused write lands.
+ *
+ * The write path has no separate closed or paused refusal: a deadline that
+ * passes, RSVP being paused, or the session's write window lapsing all fail the
+ * server's guarded write and come back as a conflict. So the refetched household
+ * is the only thing that says whether answering is still possible, and it has to
+ * be read — reopening the form unconditionally would leave a guest pressing a
+ * Submit button the server can never accept.
+ */
+function screenAfterConflict(
+  event: GuestEventView,
+  presentation: Presentation,
+  household: RsvpHouseholdView,
+  draft: RsvpDraft,
+): Screen {
+  const settled = screenForHousehold(event, presentation, household);
+  // A household that may still write goes back to the form even if it has
+  // answered before, because the point of the conflict is to review and resend.
+  if (settled.kind !== 'receipt' && settled.kind !== 'editing') return settled;
+  // Only a roster whose people actually changed invalidates what was typed. A
+  // host correcting attendance — or a transient fault reported as a conflict —
+  // must not silently discard answers the guest still has on screen.
+  const sameRoster = household.invitees.length === Object.keys(draft).length
+    && household.invitees.every((invitee) => draft[invitee.id]);
+  return {
+    kind: 'editing',
+    household,
+    draft: sameRoster ? draft : createHouseholdDraft(household),
+  };
+}
+
 export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   const [screen, setScreen] = useState<Screen>({ kind: 'restoring' });
   const [lookupBusy, setLookupBusy] = useState(false);
@@ -139,12 +171,11 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
         try {
           const current = await readCurrentHousehold();
           idempotencyKey.current = null;
-          setReviewUpdated(true);
-          setScreen({
-            kind: 'editing',
-            household: current.household,
-            draft: createHouseholdDraft(current.household),
-          });
+          const next = screenAfterConflict(event, presentation, current.household, draft);
+          // The review banner is an instruction, so it belongs only where the
+          // guest can still act on it.
+          setReviewUpdated(next.kind === 'editing');
+          setScreen(next);
           return;
         } catch (refreshError) {
           setSaveError(refreshError instanceof Error

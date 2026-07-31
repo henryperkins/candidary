@@ -437,10 +437,21 @@ export class RsvpService {
       ));
     }
 
-    const candidates = matches.reduce<string[]>(
-      (narrowed, current) => narrowed.filter((id) => current.includes(id)),
+    const narrowed = matches.reduce<string[]>(
+      (remaining, current) => remaining.filter((id) => current.includes(id)),
       matches[0] ?? [],
     );
+    const households = (await Promise.all(
+      narrowed.map((id) => this.rsvp.getHousehold(event.id, id)),
+    )).filter((record) => record !== null && record.archivedAt === null);
+    // Paused or closed, a household may still read what it already sent. One
+    // that never answered stays invisible, and that has to be applied before the
+    // ambiguity test as well: `second_name_required` is itself a statement that
+    // the name is on the list twice, so a roster nobody can open must not make it.
+    const candidates = rsvpState === 'open'
+      ? households
+      : households.filter((record) => record!.firstRespondedAt !== null);
+
     if (candidates.length === 0) return notAvailable;
     if (candidates.length > 1) {
       // Only ever with one name in hand: two names that still do not resolve is
@@ -448,14 +459,7 @@ export class RsvpService {
       return names.length === 1 ? { status: 'second_name_required' } : notAvailable;
     }
 
-    const household = await this.rsvp.getHousehold(event.id, candidates[0]!);
-    if (!household || household.archivedAt) return notAvailable;
-    // Paused or closed, a household may still read what it already sent. One
-    // that never answered stays invisible, so the closed state cannot be used
-    // to confirm that a name is on the list.
-    if (rsvpState !== 'open' && !household.firstRespondedAt) return notAvailable;
-
-    return { status: 'matched', household };
+    return { status: 'matched', household: candidates[0]! };
   }
 
   /**
@@ -579,13 +583,18 @@ export class RsvpService {
     const replayed = await this.settleReceipt(auth, request, receiptDigest, now);
     if (replayed) return replayed;
 
-    const invitees = await this.rsvp.listInvitees(auth.event.id, auth.household.id);
-    const canonical = this.canonicalize(invitees, request.invitees);
-    const appliedDigest = await this.requestDigest(request.version, canonical);
-
+    // The version is decided before the roster is canonicalized, and the order
+    // matters. A host edit that changes the roster's shape bumps the version in
+    // the same batch, so canonicalizing first would refuse the submission as
+    // malformed — a 422 the guest cannot act on — instead of the conflict whose
+    // whole purpose is to send them back to re-read the household.
     if (request.version !== auth.household.version) {
       throw this.householdConflict();
     }
+
+    const invitees = await this.rsvp.listInvitees(auth.event.id, auth.household.id);
+    const canonical = this.canonicalize(invitees, request.invitees);
+    const appliedDigest = await this.requestDigest(request.version, canonical);
 
     const nowIso = now.toISOString();
     try {

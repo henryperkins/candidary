@@ -118,12 +118,12 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh.
 - `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
-- `GUEST_LINK_UNAVAILABLE` — the event's internal guest grant is missing; sign guest devices out again from a current manager session.
-- `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code.
+- `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
+- `EVENT_EXPIRED` on a scan — the printed credential is valid but the event's internal guest grant has expired. The event's own guest window has ended; nothing about the QR is wrong. (`GUEST_LINK_UNAVAILABLE` is retired: the route that raised it was replaced by `GET /api/manage/events/:eventId/entry`, and no code path emits it any more.)
 - `RSVP_UNAVAILABLE` — RSVP is disabled or paused for this event.
 - `RSVP_CLOSED` — the earlier of the event deadline and the session's captured write deadline has passed. A prior response is still readable; a host may still correct it.
 - `RSVP_SESSION_REQUIRED` — the household session is missing, expired, revoked, or archived. The guest looks the invitation up again.
-- `RSVP_HOUSEHOLD_CONFLICT` — the version the write was built on is no longer current. The response carries the winning view; review it and submit again.
+- `RSVP_HOUSEHOLD_CONFLICT` — the version the write was built on is no longer current, and nothing was written. The response carries a message only, deliberately: the caller re-reads the household (`GET /api/event/:slug/rsvp/household`, or the manager household detail) and submits again against the current version. A host roster edit that changes who is in a household reports this too, rather than a validation failure.
 - `RSVP_SUBMISSION_CONFLICT` — a previously successful idempotency key was reused with different content. Use a new key rather than editing the old payload.
 - `RSVP_ROSTER_INVALID` — the roster cannot be opened or edited into this shape: a collision no second name can resolve, an active household with no named guest, a capacity limit, or a plus-one reduction that would remove an attending slot.
 - `RSVP_IMPORT_CONFLICT` — the file, the roster version, or the event's emptiness changed since preview. Preview the same file again.

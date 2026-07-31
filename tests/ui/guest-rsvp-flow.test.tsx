@@ -376,6 +376,72 @@ describe('household RSVP guest flow', () => {
     expect(within(screen.getByRole('group', { name: 'Taylor Morgan' })).getByRole('radio', { name: 'Not attending' })).toBeChecked();
   });
 
+  // The server has no separate closed/paused refusal on the write path: a deadline
+  // that passes mid-edit fails the guarded write and arrives as a conflict. The
+  // refetched household is the only thing that says the window shut, so the flow
+  // has to read it rather than reopening a form that can never be submitted.
+  it('lands read-only when the household it refetches after a conflict can no longer be written', async () => {
+    const closed = {
+      ...household,
+      version: 7,
+      editable: false,
+      firstRespondedAt: '2026-08-01T12:00:00.000Z',
+      latestRespondedAt: '2026-08-01T12:00:00.000Z',
+      latestActor: 'household' as const,
+      invitees: household.invitees.map((invitee) => ({ ...invitee, attendance: 'attending' as const })),
+    };
+    let householdReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/household') && init?.method === 'PUT') {
+        return failure('RSVP_HOUSEHOLD_CONFLICT', 'This invitation changed since you opened it. Review it and send again.', 409);
+      }
+      if (path.endsWith('/rsvp/household')) {
+        householdReads += 1;
+        return success({ household: householdReads === 1 ? household : closed });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    render(<GuestRsvpFlow event={event} presentation="primary" />);
+    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await selectAllAttendance(user, 'Attending');
+    await user.type(screen.getByLabelText('Plus one 1 name'), 'Jordan Lee');
+    await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
+
+    expect(await screen.findByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Submit RSVP' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Review updated household' })).not.toBeInTheDocument();
+  });
+
+  // A conflict whose roster is unchanged — a host correcting attendance, or a
+  // transient fault dressed as a conflict — must not throw away answers the guest
+  // already typed. Only a roster whose people changed invalidates them.
+  it('keeps the answers already typed when a conflict leaves the roster unchanged', async () => {
+    let householdReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/household') && init?.method === 'PUT') {
+        return failure('RSVP_HOUSEHOLD_CONFLICT', 'This invitation changed since you opened it. Review it and send again.', 409);
+      }
+      if (path.endsWith('/rsvp/household')) {
+        householdReads += 1;
+        return success({ household: householdReads === 1 ? household : { ...household, version: 9 } });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    render(<GuestRsvpFlow event={event} presentation="primary" />);
+    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await selectAllAttendance(user, 'Attending');
+    await user.type(screen.getByLabelText('Plus one 1 name'), 'Jordan Lee');
+    await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
+
+    await screen.findByRole('heading', { name: 'Review updated household' });
+    expect(within(screen.getByRole('group', { name: 'Taylor Morgan' })).getByRole('radio', { name: 'Attending' })).toBeChecked();
+    expect(screen.getByLabelText('Plus one 1 name')).toHaveValue('Jordan Lee');
+  });
+
   it('shows saved read-only responses after a deadline, requires renewed lookup after an extension, and retains a paused response', async () => {
     const saved = {
       ...household,
