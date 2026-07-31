@@ -753,3 +753,42 @@ describe('access link rotation', () => {
     expect(exchangedSession.status).toBe(200);
   });
 });
+
+describe('host-initiated event deletion', () => {
+  it('needs the exact event name and leaves nothing of the event behind', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'keeper');
+    await testEnv.MEDIA_BUCKET.put(`events/${access.event.id}/media/extra`, png());
+
+    const refused = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      method: 'DELETE',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({ confirmation: 'maya & theo' }),
+    }, testEnv);
+    expect(refused.status).toBe(422);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).not.toBeNull();
+
+    const deleted = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      method: 'DELETE',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({ confirmation: access.event.name }),
+    }, testEnv);
+    expect(deleted.status).toBe(200);
+
+    // The row is gone rather than soft-deleted, so a purge that already ran does
+    // not leave the event waiting for a later scheduled pass.
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+    expect((await testEnv.MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` })).objects)
+      .toHaveLength(0);
+    expect((await testEnv.DB.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+
+    // The manager's own session cascaded away with the event, so the credential
+    // is refused rather than answering that this particular event once existed.
+    const reread = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect(reread.status).toBe(401);
+  });
+});
