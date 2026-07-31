@@ -37,18 +37,28 @@ export function HostRegisterPage() {
       <section className="host-panel">
         <AuthReturnNote returnTo={returnTo} adopt={adopt} />
         <p className="section-label">Host account</p>
-        <h1>Create your account</h1>
-        <p>Use your email to get back to saved events without relying on a management link.</p>
+        {/* Arriving with an event makes this page about that event, not about
+            accounts in general. One heading and one sentence either way — the panel
+            below is embedded so it does not restate them. */}
+        <h1>{adopt ? 'Save this event to your email' : 'Create your account'}</h1>
+        <p>{adopt
+          ? 'You’ll be able to get back to it without the management link, and we’ll warn you before your access ends.'
+          : 'Your email gets you back to your events without a management link.'}</p>
         {/* Once the code has been sent, the pair is no longer a choice: switching
             doors mid-flow would strand a registration the host cannot see. */}
         {!pending && <AuthModeSwitch mode="register" returnTo={returnTo} adopt={adopt} />}
-        <p className="form-note">The creator session’s ownership eligibility ends at the earlier of the management deadline and 12 hours after creation.</p>
+        {/* The window is a fact about claiming an event, so it is disclosed only
+            where an event is actually being claimed. On a registration carrying no
+            event it named nothing on the page. */}
+        {adopt && <p className="form-note">You can save this event to an account until its management
+          deadline, or 12 hours after it was created — whichever comes first.</p>}
         {/* The panel is only a tabpanel while its tab is on the page; naming an absent
             tab would point `aria-labelledby` at an id that does not exist here. */}
         <div {...(pending
           ? {}
           : { id: 'auth-panel-register', role: 'tabpanel', 'aria-labelledby': 'auth-tab-register' })}>
           <HostAccountPanel
+            embedded
             bindEventId={adopt ?? undefined}
             initialStage={pending ? 'code' : 'form'}
             onStarted={resumePending}

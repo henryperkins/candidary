@@ -1913,15 +1913,31 @@ describe('host recovery from a dead credential', () => {
     expect(screen.getByRole('heading', { name: 'Save this event to your email' })).toBeVisible();
   });
 
-  it('states the 12-hour creator ownership window on registration and creation success', async () => {
-    render(<RouterProvider router={createAppRouter(['/host/register'])} />);
-    expect(screen.getByText(/earlier of the management deadline and 12 hours after creation/i)).toBeVisible();
+  it('states the 12-hour ownership window wherever an event is being claimed', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    const window = /until its management deadline, or 12 hours after it was created/i;
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT_SUMMARY })));
+    render(<RouterProvider router={createAppRouter([
+      `/host/register?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`,
+    ])} />);
+    expect(await screen.findByText(window)).toBeVisible();
 
     cleanup();
     vi.stubGlobal('fetch', vi.fn(() => json(CREATED, 201)));
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     await createEvent(userEvent.setup());
-    expect(screen.getByText(/earlier of the management deadline and 12 hours after creation/i)).toBeVisible();
+    expect(screen.getByText(window)).toBeVisible();
+  });
+
+  // The window is a fact about an event, and the panel's own title is about an
+  // event. A registration carrying neither must say neither, or the page promises
+  // to save something the host has not got.
+  it('says nothing about an event when registration carries none', () => {
+    render(<RouterProvider router={createAppRouter(['/host/register'])} />);
+
+    expect(screen.getByRole('heading', { name: 'Create your account' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Save this event to your email' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/12 hours after it was created/i)).not.toBeInTheDocument();
   });
 });
 
