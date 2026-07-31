@@ -29,7 +29,7 @@ Candidary is editorial and intimate rather than celebratory-software generic. Tr
 | Border | `#d9cec2` |
 | Focus | `#2c5c85` |
 
-Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The manager uses a 184px navigation rail, open Live intake workspace, and 330px utility rail at wide widths.
+Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The guest RSVP uses the same canvas and the same card surface, so a household reaching the event before the day and a guest reaching it on the day are visibly the same product. The manager uses a 184px navigation rail carrying six destinations, an open Live intake workspace, and a 330px utility rail at wide widths; below 761px that rail becomes a six-column bar whose labels stay at the 14px control-text floor.
 
 ## Event theme overlay
 
@@ -190,9 +190,31 @@ upload, asset, or background-image system.
 - Status: textual state plus icon; never color alone. Upload states are selected, preparing, queued, sending, confirming, delivered, and needs attention. Publication states are unpublished, published, and hidden.
 - Motion: 160–220ms for disclosure/selection; disable nonessential transforms under `prefers-reduced-motion`.
 
+### RSVP states
+
+RSVP is a themed guest surface and installs the same 45-property registry on
+`.rsvp-flow`; the manager's guest list is global chrome and uses the global
+tokens above. Every state below is narrow-first at 320px and carries 44px targets.
+
+| Surface | State | Contract |
+| --- | --- | --- |
+| Guest lookup | first visit | Event name, date, deadline, one `Full name` field, the privacy sentence, and the complete `Find my invitation` action all inside the 320 × 568 first viewport. No roster suggestion, listbox, or autocomplete of invited names — `autoComplete="name"` is the browser's own memory, not ours. |
+| Guest lookup | ambiguous | A second `Another full name` field receives focus. Nothing names, counts, or hints at a candidate household. |
+| Guest lookup | refused | One generic sentence in the polite live region. It is identical for a miss, a paused event, an archived household, and an unresolved second name. |
+| Guest household | editing | One `fieldset`/`legend` per person, native radios labelled `Attending` and `Not attending`, a conditional name field for an attending plus-one, live household counts, and one explicit `Submit RSVP`. Selection is carried by a thicker border as well as colour. |
+| Guest household | incomplete | The first invalid row's radio takes focus and its inline error is its `aria-describedby`. |
+| Guest household | conflict | The winning roster replaces the draft and a `tabIndex={-1}` review heading takes focus, so the respondent reads it from the top. |
+| Guest receipt | saved | `You're all set`, the household's counts, one row per person with a textual attendance word and glyph, the closing date, and `Change RSVP` while the event is open. |
+| Guest receipt | closed or paused | The same saved response with the reason stated and no write action. A deadline extension offers `Find my invitation again` instead. |
+| Manager RSVP | dashboard | Eight server-derived totals as labelled groups, a search field, a status filter, the CSV download, the household list, and stable `Load more households` paging. Totals are never recomputed in the browser from one page. |
+| Manager RSVP | CSV issues | A labelled `CSV issues` region reporting row, field, and message as text. It is the only region on the page permitted its own scrollbar, and it never echoes the uploaded file. |
+| Manager RSVP | household editor | The household's own heading is `tabIndex={-1}` so a refused write can return focus to it. Roster edit and response correction are separate forms with separate submits. |
+| Manager RSVP | archive | A named confirmation group that states that lookup and signed-in guest devices stop while the export keeps the rows, and whose action stays disabled until the exact household name is typed. |
+| Manager Share | entry controls | `Sign out guest devices` and `Disable printed event QR` are separate actions with separate copy; each requires the exact event name. The disable copy states that every invitation and sign using the QR stops working and that it cannot be undone. After a disable there is no link, no QR, and no replacement action. |
+
 ### Icon inventory
 
-Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCircle`, `Link`, `Copy`, `QrCode`, `Check`, `Ban`, `Trash2`, `Download`, `Settings`, `CalendarDays`, `ShieldCheck`, and `ChevronRight`. Icons remain secondary to text labels except familiar close controls.
+Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCircle`, `Link`, `Copy`, `QrCode`, `Check`, `Ban`, `Trash2`, `Download`, `Settings`, `CalendarDays`, `ShieldCheck`, `ClipboardCheck`, `Search`, `Inbox`, `Eye`, `EyeOff`, and `ChevronRight`. Icons remain secondary to text labels except familiar close controls.
 
 ### Allowed above-the-fold copy
 
@@ -200,6 +222,10 @@ Public: `Candidary`, `Gather the moments you didn’t see.`, the approved suppor
 
 Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
 
-Manager: `Candidary`, event name/date, guest-upload state, capacity/lifecycle facts, and the active section title.
+Guest RSVP: event name/date, the deadline sentence worded exactly `Please RSVP by <date>.`, `Find your household invitation`, `Full name`, the privacy sentence, and `Find my invitation`. On the household surface: the household label, `Your household RSVP`, each person's name, `Attending`, `Not attending`, the live counts, and `Submit RSVP`. On the receipt: `You're all set`, the counts, the roster, the closing date, and `Change RSVP`. Nothing here may name, count, or suggest anyone the household has not already been matched to.
 
-Apart from that entry point, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.
+Create receipt: the existing links plus `Set up guest list`. It is permitted because a new event starts with RSVP and photo intake paused, so the receipt would otherwise name no way to make the event usable.
+
+Manager: `Candidary`, event name/date, guest-upload state, capacity/lifecycle facts, the active section title, and the six destination labels `Intake`, `RSVP`, `Gallery`, `Notes`, `Share`, `Settings`. The RSVP destination's eight totals are labelled facts derived from the server, not marketing metrics.
+
+Apart from those entry points, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.

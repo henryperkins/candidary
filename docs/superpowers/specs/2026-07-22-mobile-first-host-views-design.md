@@ -3,6 +3,13 @@
 **Date:** July 22, 2026
 **Status:** Approved direction
 
+> **Supersession note (2026-07-31):** The Manager is no longer five destinations. RSVP was inserted
+> after Intake, so every "five destinations" statement below reads as six: the narrow bar is a
+> six-column grid, and the wide rail carries six labelled entries. The responsive contract itself is
+> unchanged — labels stay visible at the 14 px control-text floor, targets stay 44 × 44, and the
+> shell stays contained from 320 px upward. Share also changed: it now carries the permanent event
+> link, its QR, and the two entry controls, while manager-link rotation moved to Settings.
+
 ## Context
 
 Candidary's create-success and event-manager host views currently adapt a desktop layout at narrow widths. The supplied iPhone screenshots and a 390 px local browser audit show two related problems:

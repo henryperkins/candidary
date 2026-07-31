@@ -22,6 +22,14 @@ Candidary Core will prove one complete private-photo workflow:
 
 The MVP targets workflow parity with the central event-photo collection loop, not feature parity with Guestpix's commercial product. It deliberately excludes albums, video, invitations, RSVP, separate guestbook infrastructure, paid plans, and public SaaS account management.
 
+> **Superseded on 2026-07-31 for RSVP only.** Household RSVP shipped as a first-class capability
+> alongside the photo drop; see
+> `docs/superpowers/specs/2026-07-30-event-rsvp-and-photo-entry-design.md`. Invitation composition,
+> RSVP questionnaires, meal or dietary fields, seating, and reminders remain excluded. Everything
+> else in this exclusion list still holds. The guest access model below is also superseded: guest
+> access is now one permanent printed entry credential exchanged from a URL fragment, and the
+> rotatable guest link it describes no longer exists.
+
 The implementation target is a React/Vite single-page application and Hono API on Cloudflare Workers, with D1 for records, private R2 storage for objects, and Cloudflare Workflows for ZIP exports.
 
 Host ownership will use event-specific, high-entropy management links. There is no general host account or multi-event dashboard in this release. Guest access will use a separate high-entropy event link and QR code. Both links are exchanged for short-lived, HTTP-only event sessions before the user reaches the application screen.
@@ -42,7 +50,7 @@ Host ownership will use event-specific, high-entropy management links. There is 
 
 - Video uploads, transcoding, video thumbnails, or resumable multipart uploads.
 - Multiple galleries, albums, hidden albums, or album PINs.
-- Invitation composition, guest-list management, RSVP questions, or RSVP reporting.
+- Invitation composition, RSVP questions, or RSVP reporting. Guest-list management and household RSVP were added on 2026-07-31 and are no longer excluded; the rest of this line still is.
 - A separate guestbook product. The MVP has lightweight guest messages only.
 - Guest downloads of gallery media.
 - Multi-event analytics or portfolio-level host reporting.
@@ -535,7 +543,7 @@ Only after Candidary Core passes the acceptance criteria should additional syste
 2. Multiple events and a minimal event list.
 3. Guest media downloads, if privacy policy is validated.
 4. Albums and their authorization model.
-5. Invitations and RSVP as a separate product slice.
+5. ~~Invitations and RSVP as a separate product slice.~~ Household RSVP shipped on 2026-07-31 as part of the same event rather than as a separate slice. Invitation composition remains future work.
 6. Video ingestion and multipart/resumable upload as a separate infrastructure slice.
 
 ## 20. Source References

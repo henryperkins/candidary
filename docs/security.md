@@ -8,6 +8,34 @@ Every event-scoped request resolves an HttpOnly session, loads its current acces
 
 Access links contain a random token ID and 256-bit secret. D1 stores keyed HMAC digests, not raw secrets. The guest secret is additionally stored as AES-256-GCM ciphertext so an authenticated manager can redisplay the current share link; the one-time management secret is not recoverable. Rotating a role revokes both its tokens and sessions.
 
+## The printed event entry
+
+A guest reaches an event only by scanning the code printed on the invitation, and that code must not change for the life of the event. `event_entry_credentials` holds one permanent `id.secret` per event, digested with `ENTRY_HMAC_KEY` and additionally stored as AES-256-GCM ciphertext under `ENTRY_ENCRYPTION_KEY` so a manager can redisplay it.
+
+The QR encodes `/join#<id.secret>`. A URL fragment is never placed in a request line, a `Referer` header, an access log, or a proxy record, so the credential does not reach the Worker through the URL at all. `EventEntryPage` reads it once into a local variable, erases it with `history.replaceState` before any network call, and sends it in a same-origin `POST /api/entry/exchange` body. After that the credential exists nowhere in the browser: not in React state, not in history, not in a log line, and not on the page. A missing, malformed, or refused credential lands on one token-free recovery page that says the same thing in every case, because distinguishing them would tell a stranger which guess was closest.
+
+The exchange mints an ordinary guest event session against the event's *internal* guest access token, which is a separate credential the browser never sees. That internal grant can be replaced whenever a host wants to sign guest devices out — `POST /api/manage/events/:eventId/guest-sessions/rotate`, confirmed by the exact event name — and the printed URL is byte-identical afterwards.
+
+Disabling the printed entry is irreversible in v1. `POST /api/manage/events/:eventId/entry/disable` sets `disabled_at`, pauses uploads and RSVP, and revokes active guest sessions and every household RSVP session in one batch. Manager and host-account sessions are untouched. There is no replacement and no re-enable, because a code that has been printed on paper cannot be recalled; every settings path that would reopen uploads or RSVP re-reads `disabled_at` inside its guarded write, so manager authority cannot bypass the state.
+
+## Household RSVP
+
+RSVP is a third authority, independent of both the event guest session and the host account. A household proves itself by typing a full name exactly as printed on its invitation. The normalizer is version 1 and immutable for this release: NFKC, trim, collapse Unicode whitespace, curly apostrophes to `'`, Unicode dashes to `-`, lowercase without locale rules, diacritics and all other punctuation preserved. `José` and `Jose` are therefore different people. D1 stores only `HMAC(RSVP_LOOKUP_HMAC_KEY, "rsvp-name:v1:<eventId>:<normalized>")`, so the invitee table cannot be read back into a list of submitted names.
+
+This is knowledge-based access, and its limitation is stated plainly: anyone who knows an invited guest's exact full name can open that household's response. It is bounded by never disclosing the list and by two independent abuse controls, not by secrecy of the names themselves.
+
+- The Cloudflare rate binding `RSVP_LOOKUP_RATE_LIMIT` refuses more than 30 attempts per IP per minute, applied before any body parse or D1 read, with `Retry-After: 60`.
+- D1 defense-in-depth then charges 20 attempts per event/IP and 8 attempts per event/normalized-name in a fixed 15-minute bucket, with `Retry-After: 900`. A two-name request charges the IP once and each supplied name once. Both scopes are stored as domain-separated HMAC digests; the table holds no address and no name.
+- The client IP is read only from `CF-Connecting-IP` (`worker/http/client-ip.ts`). `X-Forwarded-For` and `Forwarded` are ignored, and a missing header shares one literal `unknown` scope. Host authentication uses the same helper.
+
+A first name matching more than one household returns only `second_name_required` — never a count, a candidate, or a label. Misses, paused RSVP, archived households, unresolved second names, and closed events with nothing saved all return one identical `not_available` body. A roster whose collisions cannot be resolved by any second name blocks RSVP activation instead of quietly making some households unreachable.
+
+Success sets `candidary_rsvp` and `candidary_rsvp_csrf`. That pair authorizes only that household's read and write; it cannot authorize an upload, a host write, or another household, and neither of the other CSRF pairs can authorize an RSVP write. The session captures the event's deadline at the moment it was issued, and every write enforces the *earlier* of that captured deadline and the event's current one — shortening a deadline takes effect immediately, while an extension requires a fresh exact lookup.
+
+Every successful `(household, idempotencyKey)` is retained in `rsvp_submission_receipts` with the canonical payload digest and committed version until the event is purged. Replaying a successful key with the same payload returns success, so a household whose response was lost in transit can safely retry; reusing it with different content is refused. Receipts are not a host-visible revision history and never appear in a manager list or an export.
+
+No raw credential, ciphertext, submitted name, RSVP body, or CSV row is ever logged. Import failures are reported by row number, field, and code — never by content.
+
 ## Host accounts
 
 Registration does not create an account. `POST /api/host/register` reserves rate-limit capacity, hashes the proposed password, and stores a short-lived `host_registration_challenges` row holding the normalized address, the proposed hash, digests of an opaque browser secret and the emailed code, and — only when the request held that event's live management session — the event to bind and the exact session authorizing that claim. No account, membership, or host session exists until `POST /api/host/register/complete` proves both the browser secret and the mailbox code. Completion re-resolves that same creator session live, so rotation, expiry, or a different browser cannot replay a pending claim.
@@ -38,7 +66,8 @@ Confirming an address gates notifications only, never access; a bounced confirma
 - Session cookie: `HttpOnly`, `Secure`, `SameSite=Lax`, path `/`.
 - CSRF cookie: `Secure`, `SameSite=Strict`; writes require a matching HMAC-verified header and allowed origin.
 - Account sessions use a second, independent cookie pair (`candidary_host`, `candidary_host_csrf`) with the same flags and their own CSRF header, so the two credentials cannot authorize each other's writes.
-- Token exchange redirects immediately to token-free `/event/:slug` or `/manage/event/:eventId` routes.
+- Household RSVP uses a third independent pair (`candidary_rsvp`, `candidary_rsvp_csrf`) with the same flags and the `X-Candidary-RSVP-CSRF` header. All three may coexist in one browser, and each route validates only the credential it accepts.
+- The printed entry is exchanged in a same-origin POST body, never a URL; the join shell removes the fragment before the request. Management-link exchange redirects immediately to a token-free `/manage/event/:eventId` route.
 - Content responses are `private, no-store` and include `X-Content-Type-Options: nosniff`.
 - The Worker applies a restrictive content security policy, no-referrer policy, and stable request IDs.
 - HTTPS is pinned for a year including subdomains: `Strict-Transport-Security: max-age=31536000; includeSubDomains`. No credential here has a second factor behind it — an access link carries its secret in the URL, and a session cookie is the whole authorization story. Cloudflare **Always Use HTTPS** keeps a first plain-HTTP navigation out of the Worker; after a browser receives the policy, HSTS upgrades later requests before sending them. Because `preload` is deliberately omitted, HSTS alone does not protect a browser's first-ever request to the host. The Worker sends the header only on HTTPS requests, as RFC 6797 requires; `public/_headers` has no scheme predicate, which is harmless because a browser ignores the header over plain HTTP. The preload list is not practically reversible, so joining it remains a separate decision rather than a side effect of this control.
@@ -48,9 +77,25 @@ Confirming an address gates notifications only, never access; a bounced confirma
 
 The API accepts JPEG, PNG, WebP, HEIC, and HEIF originals up to 20 MB, 10,000 media rows per event, and 100 GiB stored per event. `shared/constants.ts` is the single source of truth for these values; the authoritative quota guard is in the reservation SQL itself, so concurrent reservations cannot oversubscribe an event. The cap counts reserved plus stored rows, so in-flight reservations hold quota until they finalize or expire. Initiation reserves counters atomically and is idempotent per guest session. A phone may present a `.heic` or `.heif` file with an empty, vendor-specific, or `application/octet-stream` type, so reservation resolves the type from the extension only provisionally and finalization confirms it by container inspection. Finalization checks R2 size, content type, file signature, and dimensions before making the row visible. Invalid objects are deleted and reservations released. Abandoned reservations expire after fifteen minutes.
 
+## Export safety
+
+Every cell in every generated CSV passes through `csvCell()` in `shared/csv.ts`. A cell whose first non-whitespace character is `=`, `+`, `-`, or `@` gains a leading apostrophe, so a guest-supplied name, filename, caption, or household label cannot become a formula when the host opens the file in a spreadsheet. Ordinary cells are byte-for-byte unchanged. This applies to the media CSV and manifest as well as the RSVP export; both keep backward-output regression coverage.
+
+## Key rotation limits
+
+`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `LOGIN_HMAC_KEY` protect credentials that can be reissued, so rotating one costs an ordinary sign-out. Three keys are different in kind, because they protect data already written down:
+
+- `ENTRY_HMAC_KEY` digests the credential printed on every invitation. Rotating it without re-digesting `event_entry_credentials` makes every printed QR stop working.
+- `ENTRY_ENCRYPTION_KEY` encrypts the same credential for redisplay. Rotating it without re-encrypting makes the share link unrecoverable, though the printed code keeps working.
+- `RSVP_LOOKUP_HMAC_KEY` keys every stored name digest and every rate-limit scope. Rotating it without recomputing `rsvp_invitees.lookup_digest` makes every household unreachable by lookup.
+
+Rotating an internal guest grant or a management link is a routine operation and must never touch these three keys.
+
 ## Data lifecycle
 
-Event dates anchor immutable access and purge timestamps. Explicit deletion atomically marks the event inaccessible and revokes tokens/sessions before R2 cleanup. The daily scheduled handler uses the same deny-first behavior for retention purges. Export snapshots include every stored, non-deleted original as of their recorded snapshot, regardless of publication status.
+Event dates anchor immutable access and purge timestamps. Explicit deletion first marks the event inaccessible, revokes guest, session, and household RSVP credentials, and disables the printed entry; it then removes the event's R2 prefix, and only afterwards deletes `media`, `guest_messages`, and the event row so the remaining cascades run. If object deletion fails, the failure propagates and the event stays soft-deleted so a later scheduled pass retries the same row — D1 is never hard-deleted ahead of objects nothing could then discover. The daily scheduled handler uses the same deny-first behavior for retention purges, and also sweeps expired or revoked RSVP sessions and rate windows older than one 15-minute bucket in bounded passes. Export snapshots include every stored, non-deleted original as of their recorded snapshot, regardless of publication status.
+
+Archiving a household is irreversible in v1. It revokes that household's RSVP sessions, removes it from lookup and from active totals, and keeps its marked rows in the host list and CSV export until the event is purged.
 
 ## Operational launch requirements
 
@@ -59,5 +104,7 @@ Event dates anchor immutable access and purge timestamps. Explicit deletion atom
 - Monitor repeated validation, authorization, quota, and export failures by stable error code and request ID.
 - Treat management links as bearer credentials. An event with no account bound to it still has no recovery path.
 - Rate limit and Turnstile-protect registration, sign-in, and password-reset requests alongside event creation.
+- Verify the `RSVP_LOOKUP_RATE_LIMIT` binding and its 30-per-minute rule before an event goes live; the D1 budgets are defense in depth, not a replacement for it.
+- Review live logs after deployment and confirm that no line carries a raw credential, ciphertext, submitted name, RSVP body, or CSV row.
 - Outbound mail requires a domain onboarded to Cloudflare Email Service and the Workers Paid plan; sends to arbitrary recipients fail without both.
 - Run dependency, secret, and configuration review before every production release.

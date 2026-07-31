@@ -1,11 +1,16 @@
 # Candidary
 
-Candidary is a mobile-first private photo drop for weddings and large events. A guest scans the event QR code, enters one required name, takes a photo or chooses recent photos, reviews the selection, and sends the untouched originals directly to the host. No account is required.
+Candidary is a mobile-first private RSVP and photo drop for weddings and large events. One permanent QR code is printed on the invitation and on the signs at the venue. Before the event it opens the household RSVP; on the day it opens the private photo drop. No account is required, and the printed code never changes.
 
-The primary journey ends with an exact delivery receipt. Shared galleries, notes, and publication controls remain available as secondary features; they never block private host delivery or complete exports.
+A household finds its invitation by typing a full name exactly as it appears on it — the guest list is never shown, suggested, or searchable. Each named guest and each approved plus-one slot answers individually, and the response can be revised until the host's deadline.
+
+The photo journey ends with an exact delivery receipt. Shared galleries, notes, and publication controls remain available as secondary features; they never block private host delivery or complete exports.
 
 ## What it supports
 
+- One permanent printed event QR that survives guest sign-out, session expiry, and the change from RSVP to photos.
+- Household RSVP by exact-name lookup, with individual attendance for every named guest and plus-one slot.
+- A host guest list built by one CSV import or by hand, with live totals, filters, archive, and a safe CSV export.
 - Camera capture with an environment-camera hint and multi-select recent photos.
 - JPEG, PNG, WebP, HEIC, and HEIF originals up to 20 MB each.
 - Ordered reservation batches and at most two concurrent transfers per guest.
@@ -35,7 +40,9 @@ Generate independent local secrets with Node:
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Run that command four times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and `LOGIN_HMAC_KEY`. Direct upload URLs also require an R2 API token in `.dev.vars`.
+Run that command seven times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, `LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY`. `GUEST_TOKEN_ENCRYPTION_KEY` and `ENTRY_ENCRYPTION_KEY` must each be exactly 32 bytes encoded as base64url. Direct upload URLs also require an R2 API token in `.dev.vars`.
+
+`ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY` are persisted-data keys, not rotation controls: rotating one without a re-encryption or re-digest migration breaks every printed QR or the roster lookup. See [security.md](docs/security.md).
 
 Outbound email needs no local configuration: `wrangler dev` simulates the `EMAIL` binding and writes each message to a file it names in the console. Real sending is described in [deployment.md](docs/deployment.md).
 
@@ -48,17 +55,19 @@ npm run lint
 npm run build
 npm run test:e2e
 npm run test:load:wedding
+npm run test:load:rsvp
 ```
 
-The load command is a dry run unless an operator supplies a dedicated rehearsal event and the explicit live confirmation described in [operations.md](docs/operations.md). Browser automation at 390 by 844 pixels supplements—but does not replace—physical iPhone Safari and Android Chrome acceptance.
+Both load commands are dry runs unless an operator supplies a dedicated rehearsal event and the explicit live confirmation described in [operations.md](docs/operations.md). Browser automation at 390 by 844 pixels supplements—but does not replace—physical iPhone Safari and Android Chrome acceptance.
 
 ## Architecture
 
-- `src/` — React event drop, upload queue, secondary guest content, and host intake.
-- `worker/` — Hono API, authorization, host accounts, D1 repositories, private R2 storage, Images previews, exports, notifications, and cleanup.
+- `src/` — React event entry, household RSVP, event drop, upload queue, secondary guest content, and host intake.
+- `worker/` — Hono API, durable event entry, authorization, host accounts, RSVP services, D1 repositories, private R2 storage, Images previews, exports, notifications, and cleanup.
 - `migrations/` — D1 schema and state constraints.
-- `shared/` — contracts, limits, and stable errors.
+- `shared/` — contracts, limits, RSVP normalization, event-local time, CSV parsing, and stable errors.
 - `tests/` — unit, Worker integration, and real-browser coverage.
-- `docs/superpowers/` — the approved wedding photo-drop design and implementation plan.
+- `docs/superpowers/` — the approved designs and implementation plans.
+- `docs/rsvp-csv.md` — the exact guest-list import and export contract.
 
 Deployment and rehearsal steps are in [deployment.md](docs/deployment.md). Operational limits and recovery are in [operations.md](docs/operations.md).

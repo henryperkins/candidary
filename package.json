@@ -17,6 +17,7 @@
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
     "test:load:wedding": "node scripts/wedding-load-harness.mjs",
+    "test:load:rsvp": "node scripts/rsvp-load-harness.mjs",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

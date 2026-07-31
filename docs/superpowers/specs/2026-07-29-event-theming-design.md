@@ -12,6 +12,15 @@
 > event-scoping, persistence, API, validation, accessibility, and workflow decisions below remain
 > unchanged.
 
+> **Supersession note (2026-07-31):** The guest surface a theme installs on now includes the
+> household RSVP lookup, household form, and receipt. `.rsvp-flow` is inside `.guest-shell--drop`,
+> so it receives the same scoped 45-property registry with the same fallbacks and adds no new key,
+> preset, override, or property. `tests/e2e/event-theming.spec.ts` runs the full RSVP lifecycle for
+> all four presets against the same 4.5:1 and 44 px contracts. The registry, persistence, API,
+> validation, and non-overridable semantics below are unchanged. Manager Settings gained event
+> time-zone, RSVP deadline, and `Accept RSVPs` controls, and the Manager gained a sixth destination;
+> neither receives event variables, so the appearance-isolation decision below still holds.
+
 ## 1. Decision
 
 Candidary events receive a versioned, event-scoped visual theme. Hosts choose one

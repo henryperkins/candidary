@@ -103,7 +103,12 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `manager-nav-768.png` | `/manage/event/:id` compact 104 px rail | 768 x 900 |
 | `manager-nav-count-390.png` | `/manage/event/:id` stacked rail with the count at the 10,000-photo cap | 390 x 844 |
 | `manager-actions-320.png` | `/manage/event/:id` Gallery card with all four controls | 320 x 844 |
-| `manager-export-first-390.png` | `/manage/event/:id` Share section including the mobile export panel | 390 wide |
+| `manager-export-first-390.png` | `/manage/event/:id` Share section: event link, QR, both entry controls, and the mobile export panel | 390 wide |
+| `manager-rsvp-390.png` | `/manage/event/:id?section=rsvp` guest list: totals, filters, list, editor entry, import | 390 wide |
+| `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
+| `rsvp-household-320.png` | `/event/:slug` household card: a named attend, a decline, an attending plus-one | 320 wide |
+| `rsvp-receipt-390.png` | `/event/:slug` saved household receipt with `Change RSVP` | 390 wide |
+| `rsvp-closed-390.png` | `/event/:slug` closed deadline showing the saved response and no action | 390 wide |
 
 The event-theme suite adds exactly eight tracked images:
 
@@ -115,7 +120,7 @@ The event-theme suite adds exactly eight tracked images:
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review/getting-ready crop | 320 x 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 x 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal receipt | 390 x 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3297 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3792 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 x 900 |
 
 At the event-theming feature head, three existing Default files were deliberately updated:
@@ -255,19 +260,37 @@ in the final handoff and are not preclaimed here.
 | Photo sources and name error | 390 x 844 | 44 x 44 targets; an empty name focuses the field and announces through `role="alert"` |
 | Reduced motion | any | App, selection-card and send spinners all resolve `animation-name: none` |
 
+### RSVP and durable entry — `tests/e2e/rsvp-journey.spec.ts`, `tests/e2e/rsvp-responsive.spec.ts`, `tests/e2e/accessibility.spec.ts`, `tests/e2e/security.spec.ts`
+
+| Surface | Widths / viewports | Result |
+| --- | --- | --- |
+| Printed entry, both phases | 390 x 844 | The real `/join#…` shell erases the fragment before any request, exchanges it in a same-origin POST body, and replaces the URL with `/event/:slug`. The same URL opens RSVP before the event and the photo drop on the day |
+| Printed entry, refused or missing | 390 x 844 | One token-free `/recover/event-entry` page; the credential appears in no URL, no request line, no rendered page, and no console message |
+| Lookup first viewport | 320 x 568 | Event identity, date, deadline, `Full name`, the privacy sentence, and the complete `Find my invitation` action all above the fold at 44 x 44; no listbox and no roster suggestion |
+| Lookup, ambiguous | 390 x 844 | Focus moves to `Another full name`; nothing on the page names, counts, or hints at a candidate |
+| Lookup, no match | 390 x 844 | The same generic sentence a paused event returns |
+| Maximum household | 320, 390 | 20 named guests plus 10 plus-one slots; every attendance label 44 x 44; 80-character names wrap inside their legend; no page-level horizontal scroll |
+| Household at 200% zoom | 640 x 512 | Attendance targets stay 44 x 44 and the flow stays contained |
+| Incomplete household | 320 x 844 | The first invalid row takes focus, its error is its `aria-describedby`, and an attending plus-one's 80-character name stays contained |
+| Version conflict | 390 x 844 | The winning roster replaces the draft and the `Review updated household` heading receives focus |
+| Receipt and closed state | 320, 390 | Saved response contained with maximum-length names; the closed state offers no write action |
+| All four presets, full lifecycle | 390 x 844 | Lookup, household, refusal copy, and receipt each clear 4.5:1 from resolved colours; selection carries a thicker border, not colour alone |
+| Manager guest list | 320, 390, 768 | Six destinations at 44 x 44; totals, filters, CSV download, household rows, and the editor all contained; the CSV issue region is the only one with its own scrollbar and never scrolls sideways |
+| SPA security headers | any | `/event/:slug`, `/manage/event/:id`, `/recover/event-entry`, and `/join` each carry the shipped CSP, `Referrer-Policy: no-referrer`, and `nosniff`. Entry-exchange and RSVP API headers are Worker behaviour and are asserted in `tests/worker`, never from a route stub |
+
 ### Manager — `tests/e2e/manager-responsive.spec.ts`, `tests/e2e/manager-scale.spec.ts`, `tests/e2e/visual-qa.spec.ts`
 
 | Surface | Widths | Result |
 | --- | --- | --- |
 | Shell and media grid turnover | 320, 360, 390, 430 / 431, 470, 760 / 761, 768, 780, 860, 1024, 1100 / 1101, 1120, 1133, 1134, 1440 | 1, 2, 2 and 3 media columns; no shell tracks below 761, a 104 px rail through 1100, and 184 px + 330 px rails from 1101 |
-| Destination labels | 320, 390, 761, 768, 780, 860, 1024, 1100, 1101, 1440 | Five labels rendered, each at or above 14 px, each target 44 x 44 |
+| Destination labels | 320, 390, 761, 768, 780, 860, 1024, 1100, 1101, 1440 | Six labels rendered, each at or above 14 px, each target 44 x 44 |
 | Label contrast | 320, 390, 761, 1024, 1440 | Every destination label at or above 4.5:1, measured from resolved colours |
-| Rail packing | 761 through 1440 | Brand at or under 60 px; the five destinations occupy at most 340 px rather than stretching |
+| Rail packing | 761 through 1440 | Brand at or under 60 px; the six destinations occupy at most 380 px rather than stretching |
 | Manager Brand target | 320, 761, 1101 | Clickable Brand remains at least 44 x 44 when each navigation layout begins |
 | Lifecycle facts at capacity | 761 through 1440 | Each of the three facts stays on one line at 10,000 photos and 100 GiB |
 | Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide; count text is at least 12 px at the three layout starts |
-| All five sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
-| All five sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
+| All six sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
+| All six sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
 | Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
@@ -290,7 +313,7 @@ in the final handoff and are not preclaimed here.
 `@axe-core/playwright` 4.12.1 runs over the whole document — no `include`, no `exclude`, no
 `runOnly`, no `withTags`, no `disableRules` — on `/`, the `/create` form, the `/create` success state
 with the guest link revealed, the guest hero, the guest secondary content with all three disclosures
-open, `/event/:slug/fullscreen`, each of the five manager sections, and the full-page and inline
+open, `/event/:slug/fullscreen`, each of the six manager sections, and the full-page and inline
 manager credential-recovery states. Dedicated theme cases separately scan the complete guest
 document for all four curated presets plus custom black, white, and `#767676` configurations, and
 scan the full Manager Settings appearance editor. It supplements rather than replaces the keyboard,

@@ -4,6 +4,17 @@
 
 **Status:** Approved direction; written specification awaiting review
 
+> **Supersession note (2026-07-31):** `2026-07-30-event-rsvp-and-photo-entry-design.md` broadens the
+> guest surface this document describes. Before the event the same URL now opens a household RSVP,
+> and on the day it opens the photo drop below; a secondary disclosure carries RSVP once photos are
+> primary. The QR itself changed too: guest access is one permanent printed entry credential carried
+> in a URL fragment, not the rotatable guest link described here.
+>
+> Everything this document says about the photo journey remains authoritative and unchanged: the
+> required guest name, camera-or-library entry, review, explicit send, per-file progress and retry,
+> and the terminal delivered receipt that hides every secondary section. RSVP never became a
+> prerequisite for sending photos, and `GuestUploadFlow` is not an RSVP state controller.
+
 ## 1. Decision
 
 Candidary is a private event photo drop first. At a wedding or other large party, a guest scans the event QR code, enters one required name, takes a new photo or chooses recent photos, reviews the selection, and sends the originals directly to the host. The journey ends with an unambiguous delivery receipt.

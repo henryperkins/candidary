@@ -14,6 +14,7 @@ npm run test:unit      # jsdom: tests/unit + tests/ui
 npm run test:worker    # workerd (vitest-pool-workers): tests/worker
 npm run test:e2e       # Playwright against a built `vite preview`
 npm run test:load:wedding   # dry-run plan unless CANDIDARY_LOAD_CONFIRM is set
+npm run test:load:rsvp      # dry-run plan unless CANDIDARY_RSVP_CONFIRM is set
 npm run cf-typegen     # regenerate worker-configuration.d.ts after binding changes
 npx wrangler d1 migrations apply candidary-core --local   # required before first `npm run dev`
 ```
@@ -27,15 +28,18 @@ npx playwright test tests/e2e/core-journey.spec.ts --project=mobile
 ```
 
 Local secrets go in `.dev.vars` (copy `.dev.vars.example`). `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`,
-`LOGIN_HMAC_KEY`, and `GUEST_TOKEN_ENCRYPTION_KEY` must be independent values; the last must be
-exactly 32 bytes encoded as base64url.
+`LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and
+`ENTRY_ENCRYPTION_KEY` must be independent values; the two encryption keys must each be exactly
+32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY`
+are persisted-data keys: rotating one without a re-encryption/re-digest migration breaks every
+printed QR or the roster lookup. Ordinary guest-grant and session rotation must leave them alone.
 
 ## Architecture
 
 One Cloudflare Worker (`worker/index.ts`) serves everything: a Hono API, the React SPA via the `ASSETS`
 binding, daily cleanup and hourly notification-dispatch scheduled jobs, and the exported
 `ExportWorkflow` class. Bindings are `DB` (D1), `MEDIA_BUCKET` (private R2), `IMAGES`,
-`EXPORT_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, and `ASSETS`.
+`EXPORT_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`, and `ASSETS`.
 
 Two build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`) and
 `tsconfig.worker.json` (`worker`, `tests/worker`). Both include `shared/`, which is imported by relative
@@ -51,10 +55,18 @@ Host accounts and `event_hosts` membership (`migrations/0006_host_accounts.sql`,
 `worker/routes/host-auth.ts`) let an owner manage an event without its link. The management link keeps
 working until its own lifecycle ends, and an account is never required to create or run an event.
 There is no guest account.
-`GET /join/:token` and `/manage/:token` (`routes/exchange.ts`)
-exchange the link for an HttpOnly session cookie plus a readable CSRF cookie, then redirect to a
-token-free URL. The guest secret is additionally kept as AES-GCM ciphertext so a manager can re-display
-the share link; the manager secret is unrecoverable by design.
+
+The printed guest credential is separate again and permanent. `event_entry_credentials` holds one
+`id.secret` per event, digested with `ENTRY_HMAC_KEY` and additionally kept as AES-GCM ciphertext under
+`ENTRY_ENCRYPTION_KEY` so a manager can re-display it. The QR encodes `/join#<id.secret>`: the fragment
+is never sent in a request line or a `Referer`, so `EventEntryPage` reads it once, erases it with
+`history.replaceState`, and posts it to `POST /api/entry/exchange` (`routes/entry.ts`), which mints an
+ordinary guest event session against the event's current internal guest grant. That internal grant may
+be rotated freely — `POST /api/manage/events/:eventId/guest-sessions/rotate` signs guest devices out —
+and the printed URL is byte-identical afterwards. `POST .../entry/disable` is irreversible: it pauses
+uploads and RSVP, revokes guest and RSVP sessions, and there is no replacement. `/manage/:token`
+(`routes/exchange.ts`) still exchanges the management link; the old guest branch is gone and
+`GET /join/:token` only strips a legacy credential from the address bar.
 
 Guest routes resolve the event session and compare its event, role, and slug with the path; route
 identifiers alone never grant access. Manager routes use `requireManager`/`resolveManager` from
@@ -63,6 +75,31 @@ precedence and lifecycle handling. Manager writes pass `{ write: true }`, so CSR
 the credential that actually authorized the request; guest writes use their event-session CSRF pair.
 Do not replace these helpers with a route-id check or assume the event and host cookies are
 interchangeable.
+
+There are three cookie scopes, and none of them can authorize another's writes:
+`candidary_session`/`candidary_csrf` (event guest), `candidary_host`/`candidary_host_csrf` (host
+account), and `candidary_rsvp`/`candidary_rsvp_csrf` (one household). `assertCsrf()` picks the header
+by scope; `src/app/api.ts` offers all three and each route validates only the one it accepts.
+
+### RSVP
+
+A household proves itself by typing a full name exactly as printed. `normalizeInvitedName()` in
+`shared/rsvp.ts` is version 1 and immutable for this release; the normalized name is keyed with
+`RSVP_LOOKUP_HMAC_KEY` into `rsvp_invitees.lookup_digest`, so D1 never stores a submitted name.
+`POST /api/event/:slug/rsvp/lookup` needs an event guest session, applies the edge limiter before
+parsing any body, then charges the D1 budgets (20 per event/IP and 8 per event/name in a fixed
+15-minute bucket) before reading anything. A first name matching more than one household returns only
+`second_name_required`; misses, paused events, archived households, and unresolved second names all
+share one `not_available` body. Success mints the RSVP session and returns the safe household view.
+
+`RsvpService` owns import, lookup, submission, and every host mutation. Household writes are one
+guarded `DB.batch()` whose invitee update carries the version, the event's `rsvp_enabled`/deadline, and
+the session's captured write deadline in its `WHERE`; a count mismatch sets `version = NULL` so the
+NOT NULL constraint rolls the batch back. Every successful `(household, idempotencyKey)` is kept in
+`rsvp_submission_receipts` until the event is purged: replaying the same key and payload digest
+returns success, and reusing it with different content is `RSVP_SUBMISSION_CONFLICT`. The browser never
+infers phase — `resolveGuestEventPhase()` runs on the Worker and returns `rsvp-primary`,
+`photos-primary`, or `waiting` with the current `rsvpState`.
 
 ### Upload path (the core journey)
 
@@ -98,8 +135,16 @@ the preview route.
 through R2 multipart upload, and writes `candidary-export-manifest.csv`. Retries bump `attempt`, write to
 a new prefix, and clear prior part rows. Failures surface as `EXPORT_*` codes carried in `errorCode`.
 
-The daily cron (`workflows/cleanup.ts`) releases expired reservations, deletes expired export objects,
-and purges retention-due events. The hourly cron dispatches the bounded host-notification outbox.
+The daily cron (`workflows/cleanup.ts`) sweeps bounded auth and RSVP scratch, releases expired
+reservations, deletes expired export objects, and purges retention-due events. The hourly cron
+dispatches the bounded host-notification outbox.
+
+`deleteEventData()` order is load-bearing: revoke every credential and disable the entry, delete the
+event's R2 prefix, then delete `media` and `guest_messages` before the event row. Those two tables
+reference `event_sessions` with `ON DELETE RESTRICT`, so the event cascade alone cannot remove a
+populated event. If object deletion fails the error propagates and the event stays soft-deleted;
+the scheduled pass selects `deleted_at IS NOT NULL` rows too, so it retries rather than stranding
+objects nothing can find again.
 
 ## Conventions
 
@@ -111,8 +156,14 @@ and purges retention-due events. The hourly cron dispatches the bounded host-not
   `db.batch([...])` where the first statement has the guard in its `WHERE` and later statements append
   `AND changes() = 1`; then check `results[0].meta.changes === 1` and derive the error from current state.
   See `MediaRepository.reserve`/`finalize`/`delete`. Do not read-then-write counters.
-- **Limits** live in `shared/constants.ts` (20 MB/photo, 10,000 photos, 100 GiB/event, batch of 20).
-  Treat that file as the source of truth.
+- **Limits** live in `shared/constants.ts` (20 MB/photo, 10,000 photos, 100 GiB/event, batch of 20)
+  and `shared/rsvp.ts` (500 event capacity, 500 households, 20 named and 10 plus-one slots per
+  household, 30 people per household). Treat those files as the source of truth.
+- **D1 parameter bound**: no statement may bind more than 100 values. A 500-person import commits as
+  one `DB.batch()` of parameter-bounded multi-row statements; a household write passes its rows as one
+  JSON binding and uses `json_each()`.
+- **CSV output**: every exported cell goes through `csvCell()` in `shared/csv.ts`, which prefixes an
+  apostrophe to any cell starting with `=`, `+`, `-`, or `@`. Both the media and RSVP exports use it.
 - **New image format**: update `SUPPORTED_IMAGE_TYPES`, the client `accept`/validation sets in
   `GuestUploadFlow.tsx`, the signature sniffer, *and* add a migration — `mime_type` has a table CHECK
   constraint.
@@ -141,4 +192,5 @@ and purges retention-due events. The hourly cron dispatches the bounded host-not
 above-the-fold copy per surface (no eyebrows, badges, pills, fake metrics, or pricing). `design-qa.md`
 and `design/fidelity-ledger.md` record verified responsive states. Approved specs and implementation
 plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`; `docs/deployment.md` holds the
-wedding and physical-device rehearsal gates.
+wedding and physical-device rehearsal gates, and `docs/rsvp-csv.md` is the guest-list import and
+export contract.

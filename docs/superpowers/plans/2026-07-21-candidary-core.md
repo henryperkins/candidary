@@ -10,6 +10,11 @@
 
 ## Global Constraints
 
+> **Historical.** This plan records the first release as it was executed and is not updated as the
+> product moves. Host accounts, email, event theming, and — on 2026-07-31 — household RSVP with a
+> permanent printed entry credential have all since shipped, so several exclusions below no longer
+> describe the product. See `docs/superpowers/plans/2026-07-30-event-rsvp-and-durable-entry.md`.
+
 - Accepted media types are exactly `image/jpeg`, `image/png`, and `image/webp`.
 - Maximum image size is 10 MiB; maximum stored media is 50 images and 300 MiB per event.
 - Guest sessions last at most seven days; management sessions last at most twelve hours.

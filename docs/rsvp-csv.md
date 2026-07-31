@@ -123,7 +123,47 @@ Archiving a household does not undo that: archived households are kept.
 
 ## Exports
 
-The guest list exports as CSV from the event manager at any time. Any cell whose
-first non-whitespace character is `=`, `+`, `-`, or `@` is written with a leading
-apostrophe so a spreadsheet reads it as text rather than a formula. Every other
-cell is exported unchanged.
+The guest list exports as CSV from the event manager at any time, from
+`GET /api/manage/events/:eventId/rsvp/export.csv`. It is served as
+`text/csv; charset=utf-8` with
+`Content-Disposition: attachment; filename="<slug>-rsvp-<YYYY-MM-DD>.csv"`, where
+the filename date is today's calendar date **in the event's own time zone** — not
+the server's and not the browser's.
+
+The header is exactly:
+
+```
+household_key,household_label,household_archived_at,member_kind,member_name,attendance,member_order,household_version,first_responded_at,last_responded_at,last_actor,event_timezone
+```
+
+One row per named guest and per plus-one slot, including rows nobody has answered
+yet and rows belonging to archived households, so the file always reconciles
+against the invited capacity rather than against whoever happened to reply.
+
+| Column | Meaning |
+| --- | --- |
+| `household_key` | Your own stable identifier, exactly as imported or entered. |
+| `household_label` | The household's current label. |
+| `household_archived_at` | Empty for an active household; an ISO UTC timestamp for an archived one. |
+| `member_kind` | `named` or `plus_one`. |
+| `member_name` | The named guest, or the attending plus-one's name. Empty for a plus-one slot that is pending or declined. |
+| `attendance` | `pending`, `attending`, or `declined`. |
+| `member_order` | The household's own stable ordering, starting at 0. |
+| `household_version` | The version this row was exported at. |
+| `first_responded_at` | ISO UTC timestamp of the household's first response, or empty. |
+| `last_responded_at` | ISO UTC timestamp of the most recent response, or empty. |
+| `last_actor` | `household` or `host`, or empty if nobody has responded. |
+| `event_timezone` | The event's IANA zone, so the timestamps above can be read locally. |
+
+Every timestamp in the file is ISO 8601 in UTC. The event's zone is carried in its
+own column rather than applied to the timestamps, so no reader has to guess which
+convention a column follows.
+
+Any cell whose first non-whitespace character is `=`, `+`, `-`, or `@` is written
+with a leading apostrophe so a spreadsheet reads it as text rather than a formula.
+Every other cell is exported unchanged, byte for byte. The same encoder is used
+for the photo export's CSV and manifest.
+
+Submission receipts are never exported. They exist so a lost response can be
+safely retried, not as a revision history, and they are not visible to a host in
+any surface.
