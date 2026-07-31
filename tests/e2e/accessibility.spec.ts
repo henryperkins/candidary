@@ -3,7 +3,13 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
 import { EVENT_THEME_PRESETS } from '../../shared/event-theme';
-import { EVENT_FIXTURE, eventTheme, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import {
+  EVENT_FIXTURE,
+  RSVP_HOUSEHOLD_FIXTURE,
+  eventTheme,
+  stubGuestRoutes,
+  stubManagerRoutes,
+} from './fixtures/routes';
 import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
 import { measureContrast, measureDocument, measureSeparation, measureTarget } from './helpers/geometry';
 import { computedStyleContrast } from './helpers/theme-contrast';
@@ -175,7 +181,9 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event: {
     id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Help us remember tonight.',
     uploadsEnabled: true, galleryVisible: false, moderationRequired: true,
-    coverObjectKey: null, theme: eventTheme('candidary-default'),
+    coverObjectKey: null, eventTimezone: 'America/Chicago',
+    rsvpDeadlineAt: null, rsvpDeadlineDate: null, phase: 'photos-primary', rsvpState: 'disabled',
+    theme: eventTheme('candidary-default'),
   }, role: 'guest' }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
@@ -190,6 +198,50 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await camera.click();
   await expect(page.getByLabel('Your name')).toBeFocused();
   await expect(page.getByText('Enter your name before adding photos.')).toHaveAttribute('role', 'alert');
+});
+
+test('guest RSVP lookup and household editor are semantic, touch-sized, focus-correct, and axe-clean', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubGuestRoutes(page, {
+    event: {
+      uploadsEnabled: false,
+      phase: 'rsvp-primary',
+      rsvpState: 'open',
+      rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+      rsvpDeadlineDate: '2026-09-05',
+    },
+    lookup: { status: 'matched', household: RSVP_HOUSEHOLD_FIXTURE },
+  });
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  const name = page.getByLabel('Full name');
+  await expect(name).toBeVisible();
+  await expect(name).toHaveAttribute('autocomplete', 'name');
+  await expect(page.getByRole('listbox')).toHaveCount(0);
+  await expectNoAxeViolations(page, 'guest RSVP lookup');
+
+  await name.fill('Taylor Morgan');
+  await page.getByRole('button', { name: 'Find my invitation' }).click();
+  await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
+  await expect(page.getByRole('group')).toHaveCount(3);
+  for (const fieldset of await page.getByRole('group').all()) {
+    for (const label of ['Attending', 'Not attending']) {
+      const radio = fieldset.getByRole('radio', { name: label, exact: true });
+      await expect(radio).toHaveAccessibleName(label);
+      const target = await measureTarget(radio.locator('..'));
+      expect(target.width).toBeGreaterThanOrEqual(44);
+      expect(target.height).toBeGreaterThanOrEqual(44);
+    }
+  }
+  await expectNoAxeViolations(page, 'guest RSVP household editor');
+
+  await page.getByRole('button', { name: 'Submit RSVP' }).click();
+  const first = page.getByRole('group', { name: 'Taylor Morgan' })
+    .getByRole('radio', { name: 'Attending', exact: true });
+  await expect(first).toBeFocused();
+  const describedBy = await first.getAttribute('aria-describedby');
+  expect(describedBy).toBeTruthy();
+  await expect(page.locator(`[id="${describedBy}"]`)).toHaveText('Choose attending or not attending.');
 });
 
 test('reduced motion stops every guest spinner instead of racing it', async ({ page }) => {

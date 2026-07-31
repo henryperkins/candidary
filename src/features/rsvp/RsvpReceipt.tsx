@@ -5,21 +5,24 @@ import type {
 
 interface RsvpReceiptProps {
   event: GuestEventView;
+  presentation: 'primary' | 'secondary' | 'read-only';
   household: RsvpHouseholdView;
   mode: 'receipt' | 'read-only' | 'paused';
   onChange: () => void;
   onRenew: () => void;
 }
-function displayDeadline(value: string) {
+function displayDeadline(value: string, timeZone: string) {
   return new Intl.DateTimeFormat('en-US', {
     month: 'long',
     day: 'numeric',
     year: 'numeric',
+    timeZone,
   }).format(new Date(value));
 }
 
 export function RsvpReceipt({
   event,
+  presentation,
   household,
   mode,
   onChange,
@@ -36,7 +39,7 @@ export function RsvpReceipt({
     && !household.renewalRequired;
   let plusOneNumber = 0;
 
-  return <section className="rsvp-flow rsvp-flow--receipt" aria-live="polite">
+  return <section className={`rsvp-flow rsvp-flow--${presentation} rsvp-flow--receipt`} aria-live="polite">
     <div className="rsvp-card rsvp-receipt">
       <p className="rsvp-eyebrow">{event.name}</p>
       <h1>{mode === 'receipt' ? "You're all set" : 'Your RSVP'}</h1>
@@ -65,7 +68,9 @@ export function RsvpReceipt({
           </li>;
         })}
       </ul>
-      <p className="rsvp-receipt__deadline">Changes close {displayDeadline(household.deadlineAt)}.</p>
+      <p className="rsvp-receipt__deadline">
+        Changes close {displayDeadline(household.deadlineAt, event.eventTimezone)}.
+      </p>
       {canChange && <button className="rsvp-button rsvp-button--secondary" type="button" onClick={onChange}>
         Change RSVP
       </button>}

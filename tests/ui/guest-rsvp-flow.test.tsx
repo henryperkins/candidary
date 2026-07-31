@@ -298,6 +298,53 @@ describe('household RSVP guest flow', () => {
     await screen.findByRole('heading', { name: 'Your household RSVP' });
   });
 
+  it('starts a new submission intent when answers change after an interrupted save', async () => {
+    const attempts: string[] = [];
+    let submitCount = 0;
+    vi.stubGlobal('crypto', {
+      randomUUID: vi.fn()
+        .mockReturnValueOnce('first-rsvp-key')
+        .mockReturnValueOnce('changed-rsvp-key'),
+    });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/household') && init?.method === 'PUT') {
+        submitCount += 1;
+        const body = JSON.parse(String(init.body)) as { idempotencyKey: string };
+        attempts.push(body.idempotencyKey);
+        return submitCount === 1
+          ? Promise.reject(new TypeError('network dropped'))
+          : success({ household: { ...household, version: 5 }, committedVersion: 5, replayed: false });
+      }
+      if (path.endsWith('/rsvp/household')) return success({ household });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    render(<GuestRsvpFlow event={event} presentation="primary" />);
+    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await selectAllAttendance(user, 'Not attending');
+    await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
+    await screen.findByText('We could not save your RSVP. Your answers are still here.');
+
+    await user.click(within(screen.getByRole('group', { name: 'Taylor Morgan' }))
+      .getByRole('radio', { name: 'Attending' }));
+    await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
+    await screen.findByRole('heading', { name: "You're all set" });
+    expect(attempts).toEqual(['first-rsvp-key', 'changed-rsvp-key']);
+  });
+
+  it('keeps the household editor compact when RSVP is opened as a secondary action', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (requestPath(input).endsWith('/rsvp/household')) return success({ household });
+      throw new Error(`Unexpected request ${requestPath(input)}`);
+    }));
+
+    render(<GuestRsvpFlow event={event} presentation="secondary" />);
+    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    expect(screen.getByRole('heading', { name: 'Your household RSVP' }).closest('.rsvp-flow'))
+      .toHaveClass('rsvp-flow--secondary');
+  });
+
   it('refetches the current household after a stale version and focuses review without overwriting it', async () => {
     const current = {
       ...household,

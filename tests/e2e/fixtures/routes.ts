@@ -6,6 +6,9 @@ import type {
   EventThemePresetId,
   EventView,
   GuestEventView,
+  RsvpHouseholdView,
+  RsvpLookupResponse,
+  RsvpSubmissionResponse,
 } from '../../../shared/contracts';
 import { resolveEventTheme } from '../../../shared/event-theme';
 import { PHOTOGRAPHIC_COVER } from './cover-images';
@@ -53,6 +56,41 @@ export const EVENT_FIXTURE: EventView = {
   rsvpRosterVersion: 0,
 };
 
+export const RSVP_HOUSEHOLD_FIXTURE: RsvpHouseholdView = {
+  id: 'household-a',
+  label: 'The Morgan household',
+  version: 4,
+  editable: true,
+  renewalRequired: false,
+  deadlineAt: '2026-09-05T23:59:59.999Z',
+  invitees: [
+    {
+      id: '11111111-1111-4111-8111-111111111111',
+      kind: 'named',
+      displayName: 'Taylor Morgan',
+      attendance: 'pending',
+      order: 0,
+    },
+    {
+      id: '22222222-2222-4222-8222-222222222222',
+      kind: 'named',
+      displayName: 'Alex Morgan',
+      attendance: 'pending',
+      order: 1,
+    },
+    {
+      id: '33333333-3333-4333-8333-333333333333',
+      kind: 'plus_one',
+      displayName: null,
+      attendance: 'pending',
+      order: 2,
+    },
+  ],
+  firstRespondedAt: null,
+  latestRespondedAt: null,
+  latestActor: null,
+};
+
 interface GuestMessage {
   id: string;
   guestName: string;
@@ -67,6 +105,9 @@ interface GuestRouteOptions {
   contributions?: ReturnType<typeof makeMedia>;
   messages?: GuestMessage[];
   cover?: Buffer;
+  household?: RsvpHouseholdView | null;
+  lookup?: RsvpLookupResponse;
+  submission?: RsvpSubmissionResponse;
 }
 
 interface ManagerRouteOptions {
@@ -109,6 +150,54 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { items: messages }, requestId: 'request-a' },
   }));
+  await page.route(`${base}/rsvp/lookup`, (route) => route.fulfill({
+    json: {
+      data: options.lookup ?? (options.household
+        ? { status: 'matched', household: options.household }
+        : {
+            status: 'not_available',
+            message: 'We could not open an invitation with those details.',
+          }),
+      requestId: 'request-a',
+    },
+  }));
+  await page.route(`${base}/rsvp/household`, (route) => {
+    if (route.request().method() === 'PUT') {
+      const household = options.submission?.household ?? options.household;
+      if (!household) {
+        return route.fulfill({
+          status: 401,
+          json: {
+            code: 'RSVP_SESSION_REQUIRED',
+            message: 'Find your invitation to continue.',
+            requestId: 'request-a',
+          },
+        });
+      }
+      return route.fulfill({
+        json: {
+          data: options.submission ?? {
+            household,
+            committedVersion: household.version,
+            replayed: false,
+          },
+          requestId: 'request-a',
+        },
+      });
+    }
+    return options.household
+      ? route.fulfill({
+          json: { data: { household: options.household }, requestId: 'request-a' },
+        })
+      : route.fulfill({
+          status: 401,
+          json: {
+            code: 'RSVP_SESSION_REQUIRED',
+            message: 'Find your invitation to continue.',
+            requestId: 'request-a',
+          },
+        });
+  });
 }
 
 export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions) {

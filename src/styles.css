@@ -427,7 +427,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .rsvp-button--secondary { border: 1px solid var(--event-primary-on-surface, #4a2415); background: transparent; color: var(--event-primary-on-surface, #4a2415); }
 .rsvp-button:disabled, .rsvp-person:disabled { opacity: .58; cursor: not-allowed; }
 .rsvp-button:focus-visible, .rsvp-attendance input:focus-visible + span, .rsvp-field input:focus-visible, .rsvp-household__heading h1:focus-visible { outline: 3px solid var(--event-focus, #2c5c85); outline-offset: 3px; }
-.rsvp-counts { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--event-accent-soft, #dde7f0); color: var(--event-accent-soft-foreground, #4a2415); font-size: .85rem; font-weight: 800; line-height: 1.4; }
+.rsvp-card > .rsvp-counts { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--event-accent-soft, #dde7f0); color: var(--event-accent-soft-foreground, #4a2415); font-size: .85rem; font-weight: 800; line-height: 1.4; }
 .rsvp-person { min-width: 0; margin: 0; padding: 15px 13px; border: 1px solid var(--event-border, #e3dcd8); border-radius: var(--event-card-radius, 10px); }
 .rsvp-person legend { max-width: 100%; padding: 0 5px; color: var(--event-page-text, #2b1d17); font-family: 'Manrope', sans-serif; font-weight: 800; overflow-wrap: anywhere; }
 .rsvp-attendance { margin-top: 5px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }

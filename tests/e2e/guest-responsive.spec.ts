@@ -15,6 +15,37 @@ import {
 const KEEPER = { name: LONG_FILENAME, mimeType: 'image/jpeg', buffer: Buffer.from('keeper') };
 const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
 
+test('RSVP lookup keeps identity, deadline, privacy, and its complete action in the 320 by 568 first viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await stubGuestRoutes(page, {
+    event: {
+      uploadsEnabled: false,
+      phase: 'rsvp-primary',
+      rsvpState: 'open',
+      rsvpDeadlineAt: '2026-09-05T23:59:59.999Z',
+      rsvpDeadlineDate: '2026-09-05',
+    },
+  });
+
+  await page.goto('/event/maya-theo');
+  await expect(page.getByRole('heading', { name: 'Find your household invitation' })).toBeVisible();
+  await expect(page.getByText('Maya & Theo', { exact: true })).toBeVisible();
+  await expect(page.getByText('Please RSVP by Sep 5, 2026.')).toBeVisible();
+  const name = page.getByLabel('Full name');
+  await expect(name).toHaveAttribute('autocomplete', 'name');
+  await expect(page.getByText(/We never show or suggest the guest list/u)).toBeVisible();
+  const action = page.getByRole('button', { name: 'Find my invitation' });
+  const fold = await measureFold(page, action);
+  expect(fold.bottom, 'lookup action ends within the first viewport').toBeLessThanOrEqual(fold.fold);
+  const target = await measureTarget(action);
+  expect(target.width).toBeGreaterThanOrEqual(44);
+  expect(target.height).toBeGreaterThanOrEqual(44);
+  expect(await page.getByRole('button', { name: 'Take a photo' }).count()).toBe(0);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
 async function stubUploadDelivery(page: Page) {
   const base = `**/api/event/${EVENT_FIXTURE.slug}`;
   await page.route(`${base}/uploads/batch`, async (route) => {

@@ -7,6 +7,7 @@ import {
 } from './rsvp-form';
 
 interface RsvpHouseholdFormProps {
+  presentation: 'primary' | 'secondary' | 'read-only';
   household: RsvpHouseholdView;
   draft: RsvpDraft;
   saving: boolean;
@@ -16,6 +17,7 @@ interface RsvpHouseholdFormProps {
   onSubmit: (draft: RsvpDraft) => Promise<void>;
 }
 export function RsvpHouseholdForm({
+  presentation,
   household,
   draft,
   saving,
@@ -86,7 +88,7 @@ export function RsvpHouseholdForm({
   const unanswered = household.invitees.length - attending - declined;
   let plusOneNumber = 0;
 
-  return <section className="rsvp-flow rsvp-flow--household">
+  return <section className={`rsvp-flow rsvp-flow--${presentation} rsvp-flow--household`}>
     <div className="rsvp-card rsvp-household">
       <header className="rsvp-household__heading">
         <p className="rsvp-eyebrow">{household.label}</p>

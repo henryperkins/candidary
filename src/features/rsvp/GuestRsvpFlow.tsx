@@ -181,6 +181,11 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   }
 
   function changeDraft(draft: RsvpDraft) {
+    // A changed payload is a new submission intent. Keeping the earlier key
+    // would correctly trigger a server digest conflict if the dropped request
+    // actually committed, but would strand the guest instead of letting the
+    // normal version check refetch that winning response.
+    idempotencyKey.current = null;
     setSaveError('');
     setScreen((current) => current.kind === 'editing'
       ? { ...current, draft }
@@ -215,6 +220,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
 
   if (screen.kind === 'editing' || screen.kind === 'saving') {
     return <RsvpHouseholdForm
+      presentation={presentation}
       household={screen.household}
       draft={screen.draft}
       saving={screen.kind === 'saving'}
@@ -228,6 +234,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   if (screen.kind === 'receipt') {
     return <RsvpReceipt
       event={event}
+      presentation={presentation}
       household={screen.household}
       mode="receipt"
       onChange={() => changeResponse(screen.household)}
@@ -238,6 +245,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   if (screen.kind === 'read-only') {
     return <RsvpReceipt
       event={event}
+      presentation={presentation}
       household={screen.household}
       mode="read-only"
       onChange={() => changeResponse(screen.household)}
@@ -248,6 +256,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   if (screen.household) {
     return <RsvpReceipt
       event={event}
+      presentation={presentation}
       household={screen.household}
       mode="paused"
       onChange={() => undefined}
