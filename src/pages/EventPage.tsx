@@ -11,6 +11,7 @@ import type { MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
+import { GuestRsvpFlow } from '../features/rsvp/GuestRsvpFlow';
 import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
 
 const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
@@ -25,6 +26,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const [loaded, setLoaded] = useState({ gallery: false, contributions: false, notes: false });
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [terminal, setTerminal] = useState(false);
+  const [rsvpExpanded, setRsvpExpanded] = useState(false);
   // Each load takes the next ticket and only the newest one may install its answer. A slug change, a
   // second Try again press, or an unmount all leave an older load holding a ticket nobody honours.
   const loadTicket = useRef(0);
@@ -113,18 +115,49 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
 
   return <div className="guest-shell guest-shell--drop" style={themeStyle}>
     <main className="guest-drop-main">
-      <GuestUploadFlow
+      {event.phase === 'rsvp-primary' && <GuestRsvpFlow
+        event={event}
+        presentation="primary"
+      />}
+
+      {event.phase === 'photos-primary' && <GuestUploadFlow
         event={event}
         slug={slug}
         onDelivered={() => setTerminal(true)}
-      />
+      />}
 
-      {!terminal && <section className="guest-secondary" aria-labelledby="more-from-event">
+      {event.phase === 'waiting' && event.rsvpDeadlineAt && <GuestRsvpFlow
+        event={event}
+        presentation="read-only"
+      />}
+
+      {/* Existing events without RSVP metadata still retain the paused-photo
+          landing state instead of turning into an empty page. */}
+      {event.phase === 'waiting' && !event.rsvpDeadlineAt && <GuestUploadFlow
+        event={event}
+        slug={slug}
+        onDelivered={() => setTerminal(true)}
+      />}
+
+      {!terminal && event.phase === 'photos-primary' && <section className="guest-secondary" aria-labelledby="more-from-event">
         <div className="guest-secondary__heading">
           <p className="section-label">More from the event</p>
           <h2 id="more-from-event">Here when you want it.</h2>
           <p>Photos are delivered privately first. The shared gallery and notes stay out of your way until you choose them.</p>
         </div>
+
+        {event.rsvpDeadlineAt && <details
+          className="event-extra"
+          onToggle={(toggle) => setRsvpExpanded(toggle.currentTarget.open)}
+        >
+          <summary>
+            <span>{event.rsvpState === 'open' ? 'View or change RSVP' : 'View RSVP'} <small>Household response</small></span>
+            <ChevronDown aria-hidden="true" />
+          </summary>
+          {rsvpExpanded && <div className="event-extra__content guest-secondary">
+            <GuestRsvpFlow event={event} presentation="secondary" />
+          </div>}
+        </details>}
 
         <details className="event-extra" onToggle={(toggle) => toggleExtra('gallery', toggle.currentTarget.open)}>
           <summary><span>Shared gallery <small>{event.galleryVisible ? loaded.gallery ? `${gallery.length} shared` : 'Available' : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>

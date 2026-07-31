@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, RouterProvider } from 'react-router-dom';
+import { MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type * as ManagementLinkModule from '../../src/app/management-link';
@@ -19,12 +19,14 @@ vi.mock('../../src/app/management-link', async (importOriginal) => ({
 vi.mock('qrcode', () => ({ default: { toDataURL: qrToDataURL } }));
 
 import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import type { GuestEventView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
 import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
+import { EventPage } from '../../src/pages/EventPage';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
@@ -344,7 +346,8 @@ describe('guest event experience', () => {
       if (url.endsWith('/api/event/maya-theo')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
         welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
-        galleryVisible: true, moderationRequired: true,
+        galleryVisible: true, moderationRequired: true, phase: 'photos-primary',
+        rsvpState: 'disabled', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
       }, role: 'guest' });
       if (url.endsWith('/gallery')) return json({ media: [{
         id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'Golden hour',
@@ -376,7 +379,8 @@ describe('guest event experience', () => {
       if (url.endsWith('/api/event/maya-theo')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
         welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
-        galleryVisible: false, moderationRequired: true,
+        galleryVisible: false, moderationRequired: true, phase: 'photos-primary',
+        rsvpState: 'disabled', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
       }, role: 'guest' });
       if (url.endsWith('/messages')) return json({ items: [] });
       throw new Error(`Unexpected request ${url}`);
@@ -1835,5 +1839,159 @@ describe('host account preferences and sign out', () => {
     await user.click(toggle);
     await waitFor(() => expect(enabled).toBe(false));
     await waitFor(() => expect(screen.getByRole('checkbox', { name: /event emails/i })).not.toBeChecked());
+  });
+});
+
+describe('guest event phase composition', () => {
+  const guestEvent: GuestEventView = {
+    id: 'event-a',
+    slug: 'maya-theo',
+    name: 'Maya & Theo',
+    eventDate: '2026-09-19',
+    welcomeMessage: 'Come celebrate with us.',
+    coverObjectKey: null,
+    uploadsEnabled: true,
+    galleryVisible: false,
+    moderationRequired: true,
+    eventTimezone: 'America/Chicago',
+    rsvpDeadlineAt: '2026-09-05T23:59:59.999Z',
+    rsvpDeadlineDate: '2026-09-05',
+    rsvpState: 'open',
+    phase: 'photos-primary',
+    theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
+  };
+
+  function renderEvent(event = guestEvent) {
+    return render(<MemoryRouter initialEntries={[`/event/${event.slug}`]}>
+      <Routes><Route path="/event/:slug" element={<EventPage />} /></Routes>
+    </MemoryRouter>);
+  }
+
+  it('puts RSVP first for the rsvp-primary phase without mounting photo controls', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, uploadsEnabled: false, phase: 'rsvp-primary' }, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return errorJson({ code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'r' }, 401);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEvent({ ...guestEvent, uploadsEnabled: false, phase: 'rsvp-primary' });
+    await screen.findByRole('button', { name: 'Find my invitation' });
+    expect(screen.queryByRole('button', { name: 'Take a photo' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Your name')).not.toBeInTheDocument();
+  });
+
+  it('keeps photos first and does not request a household until the open RSVP disclosure is opened', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: guestEvent, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return errorJson({ code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'r' }, 401);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    renderEvent();
+    await screen.findByRole('button', { name: 'Take a photo' });
+    expect(screen.queryByRole('button', { name: 'Find my invitation' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain('/api/event/maya-theo/rsvp/household');
+
+    await user.click(screen.getByText('View or change RSVP'));
+    await screen.findByRole('button', { name: 'Find my invitation' });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('/api/event/maya-theo/rsvp/household');
+  });
+
+  it.each(['closed', 'paused'] as const)('offers a secondary saved-response view for %s RSVP without delaying photo controls', async (rsvpState) => {
+    const savedHousehold = {
+      id: 'household-a', label: 'The Morgan household', version: 4, editable: false, renewalRequired: false,
+      deadlineAt: '2026-09-05T23:59:59.999Z', invitees: [], firstRespondedAt: '2026-08-01T12:00:00.000Z',
+      latestRespondedAt: '2026-08-01T12:00:00.000Z', latestActor: 'household' as const,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, rsvpState }, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return json({ household: savedHousehold });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+
+    renderEvent({ ...guestEvent, rsvpState });
+    await screen.findByRole('button', { name: 'Take a photo' });
+    await user.click(screen.getByText('View RSVP'));
+    await screen.findByRole('heading', { name: 'Your RSVP' });
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
+  });
+
+  it('keeps a previously matched household readable while waiting', async () => {
+    const savedHousehold = {
+      id: 'household-a', label: 'The Morgan household', version: 4, editable: false, renewalRequired: false,
+      deadlineAt: '2026-09-05T23:59:59.999Z', invitees: [], firstRespondedAt: '2026-08-01T12:00:00.000Z',
+      latestRespondedAt: '2026-08-01T12:00:00.000Z', latestActor: 'household' as const,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, uploadsEnabled: false, phase: 'waiting', rsvpState: 'paused' }, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return json({ household: savedHousehold });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+
+    renderEvent({ ...guestEvent, uploadsEnabled: false, phase: 'waiting', rsvpState: 'paused' });
+    await screen.findByText('RSVP is paused. Your saved response is still here.');
+    expect(screen.queryByRole('button', { name: 'Take a photo' })).not.toBeInTheDocument();
+  });
+
+  it('hides an already-mounted RSVP section with every secondary section after photo delivery', async () => {
+    class SuccessfulXmlHttpRequest {
+      status = 200;
+      upload = new EventTarget();
+      private readonly events = new EventTarget();
+
+      open() {}
+      setRequestHeader() {}
+      addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+        this.events.addEventListener(type, listener);
+      }
+      send() {
+        queueMicrotask(() => this.events.dispatchEvent(new Event('load')));
+      }
+      abort() {
+        this.events.dispatchEvent(new Event('abort'));
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', SuccessfulXmlHttpRequest);
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: guestEvent, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return errorJson({ code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'r' }, 401);
+      if (path.endsWith('/uploads/batch')) {
+        const payload = JSON.parse(String(init?.body)) as { files: Array<{ idempotencyKey: string; mimeType: string }> };
+        return json({ items: payload.files.map((file) => ({
+          idempotencyKey: file.idempotencyKey,
+          status: 'accepted',
+          media: { id: `media-${file.idempotencyKey}`, mimeType: file.mimeType },
+          uploadUrl: `/direct-upload/${file.idempotencyKey}`,
+        })) }, 201);
+      }
+      if (path.includes('/uploads/') && path.endsWith('/finalize')) return json({ media: { uploadState: 'stored' } });
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    renderEvent();
+    await screen.findByRole('button', { name: 'Take a photo' });
+    await user.click(screen.getByText('View or change RSVP'));
+    await screen.findByRole('button', { name: 'Find my invitation' });
+    await user.type(screen.getByLabelText('Your name'), 'Taylor Morgan');
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Send 1 photo' }));
+
+    await screen.findByRole('heading', { name: 'Your 1 photo was sent.' });
+    expect(screen.queryByText('View or change RSVP')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Find my invitation' })).not.toBeInTheDocument();
+    expect(screen.queryByText('More from the event')).not.toBeInTheDocument();
   });
 });

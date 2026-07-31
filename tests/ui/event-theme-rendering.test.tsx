@@ -341,4 +341,13 @@ describe('guest event theme rendering', () => {
     expect(declaration('.field-error', 'color')).toBe('var(--danger)');
     expect(declaration('.fullscreen figcaption', 'background')).toContain('rgb(0 0 0 / 65%)');
   });
+
+  it('keeps RSVP controls narrow-first and mapped to event semantic variables', () => {
+    expect(guestStyles).toContain('.rsvp-flow');
+    expect(guestStyles).toContain('.rsvp-attendance');
+    expect(guestStyles).toContain('var(--event-surface, #fffaf3)');
+    expect(guestStyles).toContain('var(--event-primary, #4a2415)');
+    expect(guestStyles).toContain('var(--event-focus, #2c5c85)');
+    expect(guestStyles).toMatch(/\.rsvp-[^{]+\{[^}]*min-height:\s*44px/u);
+  });
 });
