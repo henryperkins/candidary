@@ -111,12 +111,46 @@ Three existing baselines changed intentionally and were inspected before accepta
 time-zone/RSVP-deadline/`Accept RSVPs` settings controls, and the `Manager access` section that now
 holds manager-link rotation.
 
+### Production release, 2026-07-31
+
+| | |
+| --- | --- |
+| Deployed SHA | `07432ea` (`feat: keep printed pre-0008 QR codes working`) |
+| Worker version | `5860f15f-ed73-4d91-906c-9b1e7c3d0761` |
+| Account / database | Henry Flare `a77e479f…` / `candidary-core` `60bec5de-c8c7-41b5-a26b-2d3f7d184c71` |
+| Migration | `0008_event_rsvp.sql`; ledger clean, `PRAGMA foreign_key_check` empty, 13 objects created |
+| Events at deploy | 8 active, all with photo intake open, none with RSVP enabled |
+
+`wrangler d1 migrations apply --remote` refused the migration with `incomplete input` and applied
+nothing; it was applied through `d1 execute --remote --file` after the identical file was proved
+against a throwaway remote database built from 0001–0007. The symptom and the recovery sequence are
+in `docs/deployment.md`.
+
+### Physical-device evidence
+
+One gate has passed. It is recorded at exactly the strength it was observed, and no more.
+
+| Gate | Result |
+| --- | --- |
+| A printed pre-0008 QR opens its event against the deployed Worker | **Passed** — confirmed by the operator on 2026-07-31 by scanning a real printed code on a physical phone. Device model, OS version, and browser were **not recorded**; `docs/deployment.md` requires them, so this entry is incomplete until they are supplied. |
+
+Corroborating server-side evidence for that gate, which does not depend on the report: the live
+`tracy-and-bill-s-wedding-celebration-tn9o3c` event holds an entry credential whose id equals its
+guest access token id — an adoption of the printed token rather than a freshly minted credential, so
+the code already in circulation is the one that now works.
+
 ### Not yet evidenced
 
-No physical-device evidence exists for this feature. The printed-QR scan on iPhone Safari and Android
-Chrome, the VoiceOver and TalkBack passes over the RSVP household form, the degraded-network retry,
-and the live emergency-disable rehearsal are all release gates in `docs/deployment.md` and none of
-them may be recorded as passed on the strength of the automated suite.
+Everything else in the physical and assistive-technology gate list remains unproven and may not be
+recorded as passed on the strength of the automated suite or of the gate above:
+
+- the printed QR scanned during **RSVP-primary** — no production event has RSVP enabled yet, so this
+  state has never existed outside the test suite;
+- the printed QR scanned **after a *Sign out guest devices* rotation**, which is the specific claim
+  that separates this design from a fragile one;
+- **VoiceOver** and **TalkBack** over the RSVP lookup, household form, and manager guest list;
+- **degraded-network** retry of an RSVP submission; and
+- the **emergency-disable rehearsal** on a disposable event.
 
 ## Intentional adaptations
 
