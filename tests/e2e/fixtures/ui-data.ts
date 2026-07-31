@@ -8,6 +8,9 @@ export const LONG_WELCOME = `Share the night as you saw it, from every table and
 // raster when expanded. The separate responsive matrix retains maximum-length welcome coverage.
 export const NATURAL_420_WELCOME = 'Share every bright moment you notice tonight, from quiet smiles and happy tears '
   + 'to dance-floor joy. We would love to see the celebration through your eyes and keep each memory close.';
+// The product maximum for a household label or an invitee name, with no space the
+// browser could break at. Anything narrower than this has to wrap it anyway.
+export const LONG_RSVP_NAME = `Alexandra${'-Mackenzie'.repeat(7)}`.slice(0, 80);
 export const TEST_NOTE = {
   id: 'message-a',
   guestName: 'Rowan',

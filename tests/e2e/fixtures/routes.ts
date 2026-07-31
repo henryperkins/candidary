@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Page, Route } from '@playwright/test';
 
 import type {
   EventThemeConfigV1,
@@ -11,6 +11,7 @@ import type {
   RsvpHouseholdView,
   RsvpImportPreview,
   RsvpLookupResponse,
+  RsvpSubmissionRequest,
   RsvpSubmissionResponse,
   RsvpSummary,
 } from '../../../shared/contracts';
@@ -178,6 +179,10 @@ interface GuestRouteOptions {
   household?: RsvpHouseholdView | null;
   lookup?: RsvpLookupResponse;
   submission?: RsvpSubmissionResponse;
+  // Whether the browser starts already holding a household session. It defaults to
+  // true whenever a household fixture is supplied, so a test that wants the
+  // first-visit lookup screen with a matchable household says so explicitly.
+  rsvpSession?: boolean;
 }
 
 interface ManagerRouteOptions {
@@ -231,54 +236,87 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { items: messages }, requestId: 'request-a' },
   }));
-  await page.route(`${base}/rsvp/lookup`, (route) => route.fulfill({
+  // The RSVP half of the guest API is deliberately stateful: a successful lookup
+  // grants the session, a saved response becomes what a later visit reads back,
+  // and a reload has to find the same answer a real household would.
+  let household = options.household ?? null;
+  let session = options.rsvpSession ?? options.household !== undefined;
+  const sessionRequired = (route: Route) => route.fulfill({
+    status: 401,
     json: {
-      data: options.lookup ?? (options.household
-        ? { status: 'matched', household: options.household }
+      code: 'RSVP_SESSION_REQUIRED',
+      message: 'Find your invitation to continue.',
+      requestId: 'request-a',
+    },
+  });
+
+  await page.route(`${base}/rsvp/lookup`, (route) => {
+    const answer: RsvpLookupResponse = options.lookup
+      ?? (household
+        ? { status: 'matched', household }
         : {
             status: 'not_available',
             message: 'We could not open an invitation with those details.',
-          }),
-      requestId: 'request-a',
-    },
-  }));
+          });
+    if (answer.status === 'matched') {
+      household = answer.household;
+      session = true;
+    }
+    return route.fulfill({ json: { data: answer, requestId: 'request-a' } });
+  });
   await page.route(`${base}/rsvp/household`, (route) => {
     if (route.request().method() === 'PUT') {
-      const household = options.submission?.household ?? options.household;
-      if (!household) {
-        return route.fulfill({
-          status: 401,
-          json: {
-            code: 'RSVP_SESSION_REQUIRED',
-            message: 'Find your invitation to continue.',
-            requestId: 'request-a',
-          },
-        });
+      if (options.submission) {
+        household = options.submission.household;
+        session = true;
+        return route.fulfill({ json: { data: options.submission, requestId: 'request-a' } });
       }
+      if (!household || !session) return sessionRequired(route);
+      const submitted = route.request().postDataJSON() as RsvpSubmissionRequest;
+      const answered = new Map(submitted.invitees.map((invitee) => [invitee.id, invitee]));
+      const committed = household.version + 1;
+      household = {
+        ...household,
+        version: committed,
+        invitees: household.invitees.map((invitee) => {
+          const answer = answered.get(invitee.id);
+          if (!answer) return invitee;
+          return {
+            ...invitee,
+            attendance: answer.attendance,
+            displayName: invitee.kind === 'named' ? invitee.displayName : answer.displayName,
+          };
+        }),
+        firstRespondedAt: household.firstRespondedAt ?? '2026-08-01T00:00:00Z',
+        latestRespondedAt: '2026-08-02T00:00:00Z',
+        latestActor: 'household',
+      };
       return route.fulfill({
         json: {
-          data: options.submission ?? {
-            household,
-            committedVersion: household.version,
-            replayed: false,
-          },
+          data: { household, committedVersion: committed, replayed: false },
           requestId: 'request-a',
         },
       });
     }
-    return options.household
-      ? route.fulfill({
-          json: { data: { household: options.household }, requestId: 'request-a' },
-        })
-      : route.fulfill({
-          status: 401,
-          json: {
-            code: 'RSVP_SESSION_REQUIRED',
-            message: 'Find your invitation to continue.',
-            requestId: 'request-a',
-          },
-        });
+    return household && session
+      ? route.fulfill({ json: { data: { household }, requestId: 'request-a' } })
+      : sessionRequired(route);
   });
+}
+
+// The printed credential never travels in a URL the Worker sees, so the browser
+// suite navigates the real `/join#…` shell and stubs only the same-origin POST it
+// makes. Cookie and header behaviour is proved in `tests/worker`.
+export async function stubEntryExchange(page: Page, slug = GUEST_EVENT_FIXTURE.slug) {
+  const submitted: string[] = [];
+  await page.route('**/api/entry/exchange', (route) => {
+    const body = route.request().postDataJSON() as { token?: string };
+    submitted.push(body.token ?? '');
+    return route.fulfill({
+      json: { data: { location: `/event/${slug}` }, requestId: 'request-a' },
+    });
+  });
+  return submitted;
 }
 
 export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions) {

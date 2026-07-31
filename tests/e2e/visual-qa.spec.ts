@@ -3,7 +3,12 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
-import { EVENT_FIXTURE, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import {
+  EVENT_FIXTURE,
+  RSVP_HOUSEHOLD_FIXTURE,
+  stubGuestRoutes,
+  stubManagerRoutes,
+} from './fixtures/routes';
 import { LONG_FILENAME, LONG_WELCOME, TEST_NOTE, makeMedia } from './fixtures/ui-data';
 import { measureViewportEscapes } from './helpers/geometry';
 import { settleRendering } from './helpers/rendering';
@@ -19,8 +24,15 @@ const previewBytes = readFileSync('public/assets/candidary-hero.png');
 // with both a real thumbnail and the worst filename a phone produces.
 const KEEPER = { name: LONG_FILENAME.replace(/\.HEIC$/u, '.png'), mimeType: 'image/png', buffer: previewBytes };
 const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
-const DESTINATIONS = ['Intake', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
+const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
+const RSVP_PRIMARY = {
+  uploadsEnabled: false,
+  phase: 'rsvp-primary' as const,
+  rsvpState: 'open' as const,
+  rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+  rsvpDeadlineDate: '2026-09-05',
+};
 // Unpublished is the Gallery's default filter and the only state carrying every card control at once.
 const MEDIA_PAGES = { first: { media: makeMedia(3, 'unpublished'), nextCursor: null } };
 
@@ -125,6 +137,87 @@ test('the guest secondary sections and the full-screen caption hold their longes
   // The first item carries the 80-character filename as its caption, which is the case that overflows.
   await expect(page.locator('.fullscreen figure').first())
     .toHaveScreenshot('fullscreen-long-caption-320.png');
+});
+
+test('the RSVP lookup, household, and receipt hold their composition', async ({ page }) => {
+  await stubGuestRoutes(page, {
+    event: RSVP_PRIMARY,
+    household: RSVP_HOUSEHOLD_FIXTURE,
+    rsvpSession: false,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('heading', { name: 'Find your household invitation' })).toBeVisible();
+  await settle(page);
+  // Viewport-sized: the claim is about the whole first screen a scan lands on.
+  await expect(page).toHaveScreenshot('rsvp-lookup-390.png');
+
+  // The household is taller than a phone screen, so the card itself is the evidence.
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.getByLabel('Full name').fill('Taylor Morgan');
+  await page.getByRole('button', { name: 'Find my invitation' }).click();
+  await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
+  await page.getByRole('group', { name: 'Taylor Morgan', exact: true })
+    .getByRole('radio', { name: 'Attending', exact: true }).check();
+  await page.getByRole('group', { name: 'Alex Morgan', exact: true })
+    .getByRole('radio', { name: 'Not attending', exact: true }).check();
+  await page.getByRole('group', { name: 'Plus one 1', exact: true })
+    .getByRole('radio', { name: 'Attending', exact: true }).check();
+  await page.getByLabel('Plus one 1 name').fill('Jamie Rivera');
+  await settle(page);
+  await expect(page.locator('.rsvp-household')).toHaveScreenshot('rsvp-household-320.png');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Submit RSVP' }).click();
+  await expect(page.getByRole('heading', { name: "You're all set" })).toBeVisible();
+  await settle(page);
+  await expect(page.locator('.rsvp-receipt')).toHaveScreenshot('rsvp-receipt-390.png');
+});
+
+test('the closed RSVP keeps its saved response readable without an action', async ({ page }) => {
+  await stubGuestRoutes(page, {
+    event: {
+      uploadsEnabled: false,
+      phase: 'waiting',
+      rsvpState: 'closed',
+      rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+      rsvpDeadlineDate: '2026-09-05',
+    },
+    household: {
+      ...RSVP_HOUSEHOLD_FIXTURE,
+      editable: false,
+      invitees: [
+        { ...RSVP_HOUSEHOLD_FIXTURE.invitees[0]!, attendance: 'attending' },
+        { ...RSVP_HOUSEHOLD_FIXTURE.invitees[1]!, attendance: 'declined' },
+        { ...RSVP_HOUSEHOLD_FIXTURE.invitees[2]!, attendance: 'attending', displayName: 'Jamie Rivera' },
+      ],
+      firstRespondedAt: '2026-08-01T00:00:00Z',
+      latestRespondedAt: '2026-08-01T00:00:00Z',
+      latestActor: 'household',
+    },
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
+  await settle(page);
+  await expect(page.locator('.rsvp-receipt')).toHaveScreenshot('rsvp-closed-390.png');
+});
+
+test('the manager guest list holds its totals, filters, and household rows', async ({ page }) => {
+  await stubManagerRoutes(page, { mediaPages: MEDIA_PAGES, messages: [TEST_NOTE] });
+  // The panel is taller than a phone screen and the rail is sticky, so the width
+  // stays at 390 and only the capture window is opened far enough to lay it out.
+  await page.setViewportSize({ width: 390, height: 1600 });
+  await page.goto(`${managerUrl}?section=rsvp`);
+  await expect(page.getByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Invited capacity' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /The Morgan household/u })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY), 'the panel is laid out without scrolling').toBe(0);
+  await settle(page);
+  await expect(page.locator('.rsvp-manager')).toHaveScreenshot('manager-rsvp-390.png');
 });
 
 test('the manager rail holds its labels at 768', async ({ page }) => {

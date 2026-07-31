@@ -7,7 +7,13 @@ import {
   PURE_BLACK_COVER,
   PURE_WHITE_COVER,
 } from './fixtures/cover-images';
-import { EVENT_FIXTURE, eventTheme, stubGuestRoutes, stubManagerRoutes } from './fixtures/routes';
+import {
+  EVENT_FIXTURE,
+  RSVP_HOUSEHOLD_FIXTURE,
+  eventTheme,
+  stubGuestRoutes,
+  stubManagerRoutes,
+} from './fixtures/routes';
 import {
   LONG_FILENAME,
   LONG_WELCOME,
@@ -15,7 +21,7 @@ import {
   TEST_NOTE,
   makeMedia,
 } from './fixtures/ui-data';
-import { measureDocument, measureTarget } from './helpers/geometry';
+import { measureContrast, measureDocument, measureTarget } from './helpers/geometry';
 import { settleRendering } from './helpers/rendering';
 import {
   makeTextTransparent,
@@ -263,6 +269,82 @@ test.describe('responsive themed guest state matrix', () => {
     }
   }
 });
+
+// The RSVP lifecycle is a themed guest surface like every other one, so each preset
+// has to carry it from lookup through refusal to receipt without losing paint,
+// target size, or the 4.5:1 floor.
+const RSVP_PRIMARY_EVENT = {
+  uploadsEnabled: false,
+  phase: 'rsvp-primary' as const,
+  rsvpState: 'open' as const,
+  rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+  rsvpDeadlineDate: '2026-09-05',
+};
+
+for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'coastal-light'] as const) {
+  test(`${presetId} carries lookup, household, refusal, and receipt above the contrast floor`, async ({ page }, testInfo) => {
+    onlyOnce(testInfo);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const theme = eventTheme(presetId);
+    await stubGuestRoutes(page, {
+      event: { theme, ...RSVP_PRIMARY_EVENT },
+      household: RSVP_HOUSEHOLD_FIXTURE,
+      rsvpSession: false,
+    });
+    await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+
+    const shell = page.locator('.guest-shell--drop');
+    await expectTheme(shell, theme);
+    for (const selector of ['.rsvp-identity h1', '.rsvp-deadline', '.rsvp-field label', '.rsvp-privacy']) {
+      expect(await measureContrast(page.locator(selector).first()), `${presetId} lookup ${selector}`)
+        .toBeGreaterThanOrEqual(4.5);
+    }
+    const find = page.getByRole('button', { name: 'Find my invitation' });
+    await expectTargets([find], `${presetId} lookup`);
+    expect(await measureContrast(find), `${presetId} lookup action`).toBeGreaterThanOrEqual(4.5);
+    await expectContained(page, `${presetId} RSVP lookup`);
+
+    await page.getByLabel('Full name').fill('Taylor Morgan');
+    await find.click();
+    await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
+    await expectTheme(shell, theme);
+    const attendance = page.locator('.rsvp-attendance label');
+    await expectTargets([attendance.first()], `${presetId} attendance`);
+    for (const selector of ['.rsvp-person legend', '.rsvp-counts', '.rsvp-attendance span']) {
+      expect(await measureContrast(page.locator(selector).first()), `${presetId} household ${selector}`)
+        .toBeGreaterThanOrEqual(4.5);
+    }
+
+    // A refusal has to read as a refusal even where the theme is darkest.
+    await page.getByRole('button', { name: 'Submit RSVP' }).click();
+    const error = page.locator('.rsvp-error').first();
+    await expect(error).toBeVisible();
+    expect(await measureContrast(error), `${presetId} refusal copy`).toBeGreaterThanOrEqual(4.5);
+
+    // Chosen attendance is carried by a thicker border as well as colour.
+    const unchosen = await attendance.first().evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).borderTopWidth));
+    await page.getByRole('group', { name: RSVP_HOUSEHOLD_FIXTURE.invitees[0]!.displayName!, exact: true })
+      .getByRole('radio', { name: 'Attending', exact: true }).check();
+    const chosen = await attendance.first().evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).borderTopWidth));
+    expect(chosen, `${presetId} selection is not colour alone`).toBeGreaterThan(unchosen);
+
+    await page.getByRole('group', { name: RSVP_HOUSEHOLD_FIXTURE.invitees[1]!.displayName!, exact: true })
+      .getByRole('radio', { name: 'Not attending', exact: true }).check();
+    await page.getByRole('group', { name: 'Plus one 1', exact: true })
+      .getByRole('radio', { name: 'Not attending', exact: true }).check();
+    await page.getByRole('button', { name: 'Submit RSVP' }).click();
+
+    await expect(page.getByRole('heading', { name: "You're all set" })).toBeVisible();
+    await expectTheme(shell, theme);
+    for (const selector of ['.rsvp-receipt h1', '.rsvp-receipt__roster span', '.rsvp-response', '.rsvp-receipt__deadline']) {
+      expect(await measureContrast(page.locator(selector).first()), `${presetId} receipt ${selector}`)
+        .toBeGreaterThanOrEqual(4.5);
+    }
+    await expectContained(page, `${presetId} RSVP receipt`);
+  });
+}
 
 test('remembered-name, validation, and keyboard operation retain themed 44 px actions', async ({ page }, testInfo) => {
   onlyOnce(testInfo);

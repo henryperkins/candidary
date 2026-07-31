@@ -17,8 +17,8 @@ import { computedStyleContrast } from './helpers/theme-contrast';
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
 const HEADER_WIDTHS = [320, 768];
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
-// The five manager destinations are unchanged and the public header keeps exactly these exits: the
-// count is asserted so neither a hidden one nor an added one can pass unnoticed.
+// The public header keeps exactly these exits: the count is asserted so neither a
+// hidden one nor an added one can pass unnoticed.
 const HEADER_EXITS = [
   { path: '/', names: ['Candidary home', 'Create an event'] },
   { path: '/create', names: ['Candidary home', 'Back home'] },
@@ -243,6 +243,128 @@ test('guest RSVP lookup and household editor are semantic, touch-sized, focus-co
   const describedBy = await first.getAttribute('aria-describedby');
   expect(describedBy).toBeTruthy();
   await expect(page.locator(`[id="${describedBy}"]`)).toHaveText('Choose attending or not attending.');
+});
+
+test('RSVP ambiguity, conflict, receipt, and keyboard-only operation stay announced and focused', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let ambiguous = true;
+  let refused = false;
+  const winner = {
+    ...RSVP_HOUSEHOLD_FIXTURE,
+    version: 9,
+    invitees: [
+      ...RSVP_HOUSEHOLD_FIXTURE.invitees,
+      {
+        id: '55555555-5555-4555-8555-555555555555',
+        kind: 'named' as const,
+        displayName: 'Robin Morgan',
+        attendance: 'pending' as const,
+        order: 3,
+      },
+    ],
+  };
+  await stubGuestRoutes(page, {
+    event: {
+      uploadsEnabled: false,
+      phase: 'rsvp-primary',
+      rsvpState: 'open',
+      rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+      rsvpDeadlineDate: '2026-09-05',
+    },
+  });
+  await page.route(`**/api/event/${EVENT_FIXTURE.slug}/rsvp/lookup`, (route) => {
+    if (ambiguous) {
+      ambiguous = false;
+      return route.fulfill({ json: { data: { status: 'second_name_required' }, requestId: 'r' } });
+    }
+    return route.fulfill({
+      json: { data: { status: 'matched', household: RSVP_HOUSEHOLD_FIXTURE }, requestId: 'r' },
+    });
+  });
+  await page.route(`**/api/event/${EVENT_FIXTURE.slug}/rsvp/household`, (route) => {
+    if (route.request().method() !== 'PUT') {
+      return refused
+        ? route.fulfill({ json: { data: { household: winner }, requestId: 'r' } })
+        : route.fulfill({
+            status: 401,
+            json: { code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation to continue.', requestId: 'r' },
+          });
+    }
+    refused = true;
+    return route.fulfill({
+      status: 409,
+      json: { code: 'RSVP_HOUSEHOLD_CONFLICT', message: 'This invitation changed.', requestId: 'r' },
+    });
+  });
+
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  // Keyboard only: reach the name field and the action without a pointer.
+  const firstName = page.getByLabel('Full name');
+  let tabs = 0;
+  while (tabs < 8 && !await firstName.evaluate((element) => element === document.activeElement)) {
+    await page.keyboard.press('Tab');
+    tabs += 1;
+  }
+  expect(tabs, 'the lookup field is a few tabs from the top of the page').toBeLessThan(8);
+  await expect(firstName).toBeFocused();
+  await page.keyboard.type('Alex Lee');
+  await page.keyboard.press('Enter');
+
+  const second = page.getByLabel('Another full name');
+  await expect(second, 'ambiguity moves focus to the second name').toBeFocused();
+  const status = page.locator('.rsvp-status');
+  await expect(status).toHaveAttribute('aria-live', 'polite');
+  await expect(status).toHaveText('Enter the full name of another person on this invitation.');
+  await expectNoAxeViolations(page, 'guest RSVP ambiguity');
+
+  await page.keyboard.type('Taylor Morgan');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
+  for (const invitee of RSVP_HOUSEHOLD_FIXTURE.invitees) {
+    const name = invitee.kind === 'named' ? invitee.displayName! : 'Plus one 1';
+    await page.getByRole('group', { name, exact: true })
+      .getByRole('radio', { name: 'Not attending', exact: true }).check();
+  }
+  await page.getByRole('button', { name: 'Submit RSVP' }).click();
+
+  const review = page.getByRole('heading', { name: 'Review updated household' });
+  await expect(review, 'a conflict returns the respondent to the top of the winning roster').toBeFocused();
+  await expectNoAxeViolations(page, 'guest RSVP conflict review');
+});
+
+test('the saved RSVP receipt is announced, contained, and axe-clean', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubGuestRoutes(page, {
+    event: {
+      uploadsEnabled: false,
+      phase: 'rsvp-primary',
+      rsvpState: 'open',
+      rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+      rsvpDeadlineDate: '2026-09-05',
+    },
+    household: {
+      ...RSVP_HOUSEHOLD_FIXTURE,
+      invitees: RSVP_HOUSEHOLD_FIXTURE.invitees.map((invitee, index) => ({
+        ...invitee,
+        attendance: index === 1 ? ('declined' as const) : ('attending' as const),
+        displayName: invitee.kind === 'plus_one' ? 'Jamie Rivera' : invitee.displayName,
+      })),
+      firstRespondedAt: '2026-08-01T00:00:00Z',
+      latestRespondedAt: '2026-08-01T00:00:00Z',
+      latestActor: 'household' as const,
+    },
+  });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+
+  const receipt = page.locator('.rsvp-flow--receipt');
+  await expect(receipt).toHaveAttribute('aria-live', 'polite');
+  await expect(page.getByRole('heading', { name: "You're all set" })).toBeVisible();
+  await expect(page.getByText('2 attending · 1 not attending')).toBeVisible();
+  const change = page.getByRole('button', { name: 'Change RSVP' });
+  const target = await measureTarget(change);
+  expect(target.width).toBeGreaterThanOrEqual(44);
+  expect(target.height).toBeGreaterThanOrEqual(44);
+  await expectNoAxeViolations(page, 'guest RSVP receipt');
 });
 
 test('reduced motion stops every guest spinner instead of racing it', async ({ page }) => {

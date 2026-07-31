@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
-import { EVENT_FIXTURE } from './fixtures/routes';
+import { EVENT_ENTRY_FIXTURE_TOKEN, EVENT_FIXTURE, stubEntryExchange } from './fixtures/routes';
 import { measureDocument } from './helpers/geometry';
 
 const event = {
@@ -74,7 +74,11 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
     return route.fulfill({ json: { data: { media: { uploadState: 'stored' } }, requestId: 'r' } });
   });
 
-  await page.goto('/event/maya-theo');
+  // The guest arrives the only way a guest ever does: by scanning the printed code.
+  const exchanged = await stubEntryExchange(page);
+  await page.goto(`/join#${EVENT_ENTRY_FIXTURE_TOKEN}`);
+  await expect(page).toHaveURL(/\/event\/maya-theo$/u);
+  expect(exchanged).toEqual([EVENT_ENTRY_FIXTURE_TOKEN]);
   await expect(page.getByRole('heading', { name: event.welcomeMessage })).toBeVisible();
   await expect(page.getByText(/Maya & Theo/).first()).toBeVisible();
   const takePhoto = page.getByRole('button', { name: 'Take a photo', exact: true });
