@@ -74,6 +74,26 @@ npx wrangler d1 migrations apply candidary-core --remote
 npm run deploy
 ```
 
+> **`migrations apply --remote` failed on 0008 (wrangler 4.113.0).** It returned
+> `incomplete input: SQLITE_ERROR [code: 7500]` and applied nothing — the ledger stayed at 0007 and no
+> object was created, so the database was never left half-migrated. The file itself is fine: applying
+> the identical file with `wrangler d1 execute --remote --file` to a throwaway remote database created
+> from 0001–0007 executed all 17 statements cleanly, and so did the same command against production.
+> It is a fault in the `migrations apply` code path, not in the SQL.
+>
+> If it happens again, do not edit the migration to work around it. Take an export first, apply the
+> file directly, then record it in the ledger yourself so future migrations still resolve:
+>
+> ```powershell
+> npx wrangler d1 export candidary-core --remote --output pre-migration-backup.sql
+> npx wrangler d1 execute candidary-core --remote --file migrations/<name>.sql
+> npx wrangler d1 execute candidary-core --remote --command "INSERT INTO d1_migrations (name) VALUES ('<name>.sql')"
+> npx wrangler d1 migrations list candidary-core --remote   # expect: No migrations to apply
+> ```
+>
+> The export contains real event, guest, and message data — keep it outside the repository and delete
+> it once the deploy is confirmed.
+
 This applies every pending migration, including the private-delivery/publication split,
 partitioned-export schema, host accounts, and canonical per-event theme configuration. The deploy
 then publishes the export Workflow, Images binding, private asset routing, the daily cleanup
