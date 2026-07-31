@@ -16,6 +16,19 @@ The QR encodes `/join#<id.secret>`. A URL fragment is never placed in a request 
 
 The exchange mints an ordinary guest event session against the event's *internal* guest access token, which is a separate credential the browser never sees. That internal grant can be replaced whenever a host wants to sign guest devices out — `POST /api/manage/events/:eventId/guest-sessions/rotate`, confirmed by the exact event name — and the printed URL is byte-identical afterwards.
 
+### Codes printed before migration 0008
+
+Events created before 0008 carry a QR encoding `/join/<id>.<secret>`, where the token is the event's guest access token. A code already printed on a sign or an invitation cannot be recalled, so that path still resolves — for those events only.
+
+On first use the printed token is *adopted*: its secret is decrypted under `GUEST_TOKEN_ENCRYPTION_KEY` (it was stored recoverably so a host could redisplay the share link), re-digested under `ENTRY_HMAC_KEY`, re-encrypted under `ENTRY_ENCRYPTION_KEY`, and written to `event_entry_credentials` under the same id. The printed string is then the entry credential itself, and the exchange runs through exactly the same `exchangeEntry` as the fragment form. Because it is its own row rather than a pointer at the guest grant, signing guest devices out replaces the internal grant and leaves the printed code working — the same guarantee a post-0008 event gets — while disabling the entry stops it.
+
+Two limits keep this from widening the attack surface:
+
+- **The path form is closed to everything issued since.** An adopted credential's id is also an `event_access_tokens` row id, and revoking a token leaves that row behind, so the fact is durable. A credential minted after 0008 has a fresh random id with no token behind it and is refused on this path even when otherwise valid.
+- **Adoption requires possession.** The unauthenticated scan path verifies the supplied secret against the stored guest-token digest before writing anything, so a caller who does not already hold guest access cannot cause a credential to be created.
+
+The trade-off is stated plainly: a path carries the secret in the request line, so it reaches access logs and any outbound `Referer` in a way the fragment form does not. That exposure is inherent to codes that were already printed in this shape; it is not extended to anything issued afterwards.
+
 Disabling the printed entry is irreversible in v1. `POST /api/manage/events/:eventId/entry/disable` sets `disabled_at`, pauses uploads and RSVP, and revokes active guest sessions and every household RSVP session in one batch. Manager and host-account sessions are untouched. There is no replacement and no re-enable, because a code that has been printed on paper cannot be recalled; every settings path that would reopen uploads or RSVP re-reads `disabled_at` inside its guarded write, so manager authority cannot bypass the state.
 
 ## Household RSVP

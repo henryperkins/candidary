@@ -6,6 +6,7 @@ import { ApiError } from '../../shared/errors';
 import type { AppBindings } from '../env';
 import { setSessionCookies } from '../http/cookies';
 import { AuthService } from '../auth/service';
+import { EventEntryService } from '../services/event-entry';
 
 export const exchangeRoutes = new Hono<AppBindings>();
 
@@ -33,14 +34,43 @@ async function exchange(context: Context<AppBindings>, role: Role) {
   return context.redirect(location, 302);
 }
 
-// Not a compatibility exchange. Guest entry moved to `/join#<credential>` and a
-// POST body, and this path only ever carried a credential in the URL. It exists
-// to get that credential out of the address bar and off the next Referer header,
-// and it never accepts the token it is handed.
-exchangeRoutes.get('/join/:token', (context) => context.redirect(
-  '/recover/event-entry?kind=unavailable',
-  302,
-));
+/**
+ * The path form printed on invitations before 0008.
+ *
+ * Guest entry moved to `/join#<credential>` because a fragment never reaches a
+ * request line, a `Referer`, or an access log. This path does, which is the
+ * reason it is not how anything is issued any more — but a QR already printed on
+ * a sign cannot be recalled, so it keeps resolving for the events that carry it.
+ *
+ * It is not a second authority. The token is adopted as the event's entry
+ * credential on first use and then verified through the same `exchangeEntry` as
+ * the fragment form, so disabling the entry stops it and signing guest devices
+ * out does not. Every failure lands on the same token-free page, and nothing
+ * here logs the credential it was handed.
+ */
+exchangeRoutes.get('/join/:token', async (context) => {
+  const raw = context.req.param('token') ?? '';
+  context.header('Cache-Control', 'no-store');
+  try {
+    const entries = new EventEntryService(context.env);
+    await entries.adoptPrintedToken(raw);
+    // A credential issued after 0008 is a fragment credential and is refused
+    // here even when it is otherwise valid, so this path cannot become a second,
+    // leakier way to use the codes printed since.
+    if (!await entries.isPrintedPathCredential(raw)) {
+      return context.redirect('/recover/event-entry?kind=unavailable', 302);
+    }
+    const exchanged = await new AuthService(context.env).exchangeEntry(raw);
+    const maxAge = Math.max(
+      1,
+      Math.floor((Date.parse(exchanged.session.expiresAt) - Date.now()) / 1000),
+    );
+    setSessionCookies(context, 'event', exchanged.sessionToken, exchanged.csrfToken, maxAge);
+    return context.redirect(`/event/${exchanged.event.slug}`, 302);
+  } catch {
+    return context.redirect('/recover/event-entry?kind=unavailable', 302);
+  }
+});
 exchangeRoutes.get('/manage/:token', async (context) => {
   try {
     return await exchange(context, 'manager');

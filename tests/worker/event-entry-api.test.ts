@@ -273,7 +273,11 @@ describe('durable event entry', () => {
     expect((await refused.json<any>()).code).toBe('EVENT_EXPIRED');
   });
 
-  it('never accepts the old tokenized join path', async () => {
+  // The path form exists only for codes printed before 0008 — see
+  // `tests/worker/legacy-entry-api.test.ts`. A credential issued as a fragment is
+  // refused there even though it is perfectly valid, so the leaky form cannot
+  // become a second way to redeem anything issued since.
+  it('never accepts a fragment-issued credential on the tokenized join path', async () => {
     const access = await eventAccess();
     const legacy = await createApp().request(
       `/join/${entryFragment(access.eventLink)}`,
@@ -285,6 +289,7 @@ describe('durable event entry', () => {
     const location = legacy.headers.get('location') ?? '';
     expect(location).toBe('/recover/event-entry?kind=unavailable');
     expect(location).not.toContain(entryFragment(access.eventLink));
+    expect(legacy.headers.get('set-cookie')).toBeNull();
   });
 
   it('stores the entry secret only as a digest and as ciphertext', async () => {

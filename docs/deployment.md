@@ -97,26 +97,39 @@ paragraph remembers.
 
 `0008_event_rsvp.sql` is purely additive — new columns on `events`, two deadline triggers, and the
 entry, household, invitee, receipt, session, and rate-limit tables — so applying it to a populated
-database succeeds. What it deliberately does **not** do is create an entry credential for events that
-already exist. There is no backfill and no compatibility fallback for the old `/join/:token` URL, by
-design: existing data is not a supported input to this first product shape.
+database succeeds. What the migration itself does **not** do is create an entry credential row for
+events that already exist; no SQL migration could, because that row needs an HMAC digest and AES
+ciphertext computed with the new secrets.
 
-An event created before 0008 therefore has no printed entry after the deploy, and its guests cannot
-reach it at all. Before applying 0008, count what would be affected on the pre-0008 ledger:
+Existing events survive anyway. An event created before 0008 adopts its printed credential on first
+use — see the "Codes printed before migration 0008" section of [security.md](security.md) — so the QR
+already on its invitations keeps working, and the manager surface unlocks the first time it is
+opened. Nothing has to be run by hand.
+
+Two consequences worth knowing before you deploy:
+
+1. **Adoption needs the new secrets in place.** It re-digests under `ENTRY_HMAC_KEY` and re-encrypts
+   under `ENTRY_ENCRYPTION_KEY`. Provision both before the deploy, not after, or the first scan of a
+   legacy code fails. Once adopted, those two become persisted-data keys for that event like any
+   other.
+2. **The path form stays open only for those events.** Anything issued after 0008 is a fragment
+   credential and is refused on `/join/<token>` even when valid.
+
+Count what will be affected so you know what to watch:
 
 ```powershell
-npx wrangler d1 execute candidary-core --remote --command "SELECT count(*) AS active FROM events WHERE deleted_at IS NULL"
+npx wrangler d1 execute candidary-core --remote --command "SELECT id, slug, event_date, uploads_enabled, guest_access_expires_at FROM events WHERE deleted_at IS NULL ORDER BY guest_access_expires_at"
 ```
 
-If the result is zero, apply 0008 and deploy normally. If it is not zero, do not ship mixed-version
-behaviour. Use the authorized clean-D1 or fresh-D1 binding procedure instead, and before doing so:
+If that returns nothing, there is nothing to adopt. If it returns rows, scan one of their printed
+codes yourself after deploying and confirm it lands on `/event/<slug>` with a session cookie, then
+confirm the manager's Share surface shows a link for that event.
 
-1. Confirm the exact account, Worker, D1 database ID **and** name, and R2 bucket you are pointed at.
-   A destructive operation aimed at the wrong database is not recoverable.
-2. Record whether existing R2 objects are preserved or deleted. That is a **separate** explicit
-   decision: permission to reset D1 is never permission to delete objects, and objects whose D1 rows
-   are gone can no longer be discovered by any cleanup pass.
-3. Only then apply 0008 to the chosen target.
+A clean-D1 or fresh-D1 reset is therefore no longer required to ship this migration. If you choose
+one anyway, first confirm the exact account, Worker, D1 database ID **and** name, and R2 bucket you
+are pointed at, and record separately whether R2 objects are preserved — permission to reset D1 is
+never permission to delete objects, and objects whose D1 rows are gone cannot be found by any later
+cleanup pass.
 
 After applying, prove there are no pending migrations and that referential integrity is intact:
 

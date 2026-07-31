@@ -65,8 +65,16 @@ ordinary guest event session against the event's current internal guest grant. T
 be rotated freely — `POST /api/manage/events/:eventId/guest-sessions/rotate` signs guest devices out —
 and the printed URL is byte-identical afterwards. `POST .../entry/disable` is irreversible: it pauses
 uploads and RSVP, revokes guest and RSVP sessions, and there is no replacement. `/manage/:token`
-(`routes/exchange.ts`) still exchanges the management link; the old guest branch is gone and
-`GET /join/:token` only strips a legacy credential from the address bar.
+(`routes/exchange.ts`) still exchanges the management link.
+
+`GET /join/:token` is the path form printed before 0008. It still resolves, because a QR already on a
+sign cannot be recalled, but it is deliberately narrow. On first use `EventEntryService.adoptPrintedToken`
+copies that event's guest access token — id and secret — into `event_entry_credentials`, re-digested
+under `ENTRY_HMAC_KEY` and re-encrypted under `ENTRY_ENCRYPTION_KEY`, so the printed string becomes the
+entry credential itself; the exchange then runs through the same `exchangeEntry` as the fragment form.
+Because it is its own row, signing guest devices out leaves it working and disabling the entry stops it.
+`isPrintedPathCredential` refuses anything issued since: a post-0008 entry id has no
+`event_access_tokens` row behind it, so the leaky path form cannot be used for it.
 
 Guest routes resolve the event session and compare its event, role, and slug with the path; route
 identifiers alone never grant access. Manager routes use `requireManager`/`resolveManager` from
