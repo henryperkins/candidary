@@ -9,10 +9,10 @@ import type {
   ResolvedEventTheme,
 } from '../../shared/contracts';
 import {
-  assertAccentLegible,
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_VERSION,
   EventThemeResolutionError,
+  overrideLegibilityErrors,
   resolveEventTheme,
   serializeEventThemeConfig,
 } from '../../shared/event-theme';
@@ -68,6 +68,28 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
     setPreviewTheme(theme);
   }
 
+  /* The legibility floors gate Save, not rendering, so which color a refusal names decides what
+     happens to the choice that provoked it. A floor refusing the color the host just chose keeps the
+     last valid preview, as this editor has always done. A floor refusing the *other* saved color is
+     not a verdict on this choice: dropping it there left the field showing one color, the preview
+     showing another, Save disabled, and the only error sitting on a field the host never touched.
+     So the choice takes effect, and the error stays on the color that has to change before Save is
+     possible. Only stored colors can reach that state — both floors run on every write — which is
+     exactly the case the floors were written to tolerate rather than retire. */
+  function applyResolved(resolved: ResolvedEventTheme, field: ThemeField) {
+    const refusals = overrideLegibilityErrors(resolved);
+    if (!refusals[field]) adoptDraft(resolved);
+    setErrors((current) => {
+      const next = { ...current };
+      delete next[field];
+      for (const [refusedField, message] of Object.entries(refusals)) {
+        const target = refusedField as ThemeField;
+        if (target === field || !next[target]) next[target] = message;
+      }
+      return next;
+    });
+  }
+
   function choosePreset(presetId: EventThemePresetId) {
     const resolved = resolveEventTheme({ version: EVENT_THEME_VERSION, presetId, overrides: {} });
     const raw = rawColors(resolved);
@@ -96,33 +118,25 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
         [kind]: value.toLowerCase() as HexColor,
       },
     };
+    let resolved: ResolvedEventTheme;
     try {
-      const resolved = resolveEventTheme(candidate);
-      assertAccentLegible(resolved);
-      adoptDraft(resolved);
-      setErrors((current) => {
-        const next = { ...current };
-        delete next[field];
-        return next;
-      });
+      resolved = resolveEventTheme(candidate);
     } catch (caught) {
       if (!(caught instanceof EventThemeResolutionError)) throw caught;
+      // Nothing can be drawn from this color at all, so the last valid preview stands.
       setErrors((current) => ({ ...current, [caught.field]: caught.message }));
+      return;
     }
+    applyResolved(resolved, field);
   }
 
   function usePresetColor(kind: ColorKind) {
     const overrides = { ...draftTheme.overrides };
     delete overrides[kind];
     const resolved = resolveEventTheme({ ...draftTheme, overrides });
-    adoptDraft(resolved);
+    applyResolved(resolved, fieldFor(kind));
     if (kind === 'primaryColor') setRawPrimary(resolved.tokens.primary);
     else setRawAccent(resolved.tokens.accent);
-    setErrors((current) => {
-      const next = { ...current };
-      delete next[fieldFor(kind)];
-      return next;
-    });
     setSaveError(null);
   }
 
@@ -307,6 +321,8 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                   type="color"
                   value={primaryPickerValue}
                   disabled={locked}
+                  aria-invalid={Boolean(primaryError)}
+                  aria-describedby={primaryError ? 'event-theme-primary-error' : undefined}
                   onChange={(changeEvent) => changeColor('primaryColor', changeEvent.target.value)}
                 />
               </label>
@@ -341,6 +357,8 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                   type="color"
                   value={accentPickerValue}
                   disabled={locked}
+                  aria-invalid={Boolean(accentError)}
+                  aria-describedby={accentError ? 'event-theme-accent-error' : undefined}
                   onChange={(changeEvent) => changeColor('accentColor', changeEvent.target.value)}
                 />
               </label>

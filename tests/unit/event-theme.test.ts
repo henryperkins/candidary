@@ -4,7 +4,7 @@ import {
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_PRESET_IDS,
   EVENT_THEME_PRESETS,
-  assertAccentLegible,
+  assertOverridesLegible,
   contrastRatio,
   eventThemeConfigSchema,
   parseStoredEventThemeConfig,
@@ -175,7 +175,11 @@ describe('event theme contract', () => {
     });
   });
 
-  it.each(['#000000', '#ffffff', '#112233', '#f8d4c4'] as const)('resolves accessible primary override %s', (primaryColor) => {
+  /* Resolution only ever promised these three: a label that clears its button, an on-surface variant
+     that clears the grounds, and a shadow of the right shape. Whether the button itself can be seen
+     is `assertOverridesLegible`, below — this list deliberately still runs the extremes that floor
+     refuses, because a value already saved must keep resolving. */
+  it.each(['#000000', '#ffffff', '#112233', '#f8d4c4'] as const)('derives label, on-surface, and shadow tokens for primary %s', (primaryColor) => {
     const theme = resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: { primaryColor } });
     expect(contrastRatio(theme.tokens.primaryForeground, theme.tokens.primary)).toBeGreaterThanOrEqual(4.5);
     expect(Math.min(
@@ -184,6 +188,58 @@ describe('event theme contract', () => {
       contrastRatio(theme.tokens.primaryOnSurface, theme.tokens.raisedSurface),
     )).toBeGreaterThanOrEqual(4.5);
     expect(theme.tokens.primaryShadow).toMatch(RGBA);
+  });
+
+  /* Both poles used to blend toward the side they already sat on, so the hover state resolved to the
+     button itself. Every primary now moves somewhere, whichever end it starts from. */
+  it.each(['#000000', '#010101', '#0c0c0c', '#ffffff', '#fcfcfc', '#f5f5f5'] as const)('keeps a hover step on the extreme primary %s', (primaryColor) => {
+    const theme = resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: { primaryColor } });
+    expect(theme.tokens.primaryHover).not.toBe(theme.tokens.primary);
+    expect(contrastRatio(theme.tokens.primaryHover, theme.tokens.primary)).toBeGreaterThanOrEqual(1.02);
+  });
+
+  /* `#000000` is the one extreme a host can still choose — it clears the surface floor at 21:1 — so
+     the reversal has to hold for a color that reaches the write path, not only for stored history. */
+  it('lets a host save pure black and still answer the pointer', () => {
+    const theme = resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#000000' } });
+    expect(() => assertOverridesLegible(theme)).not.toThrow();
+    expect(theme.tokens.primaryHover).toBe('#1a1a1a');
+  });
+
+  /* The flip is a last resort, not a new direction of travel: an ordinary primary still deepens under
+     a white label and lightens under dark ink, exactly as every authored preset hover does. */
+  it.each(EVENT_THEME_PRESET_IDS)('keeps the authored %s primary deepening on hover', (presetId) => {
+    const preset = EVENT_THEME_PRESETS.find((candidate) => candidate.id === presetId)!;
+    const theme = resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: preset.tokens.primary },
+    });
+    expect(theme.tokens.primaryForeground).toBe('#ffffff');
+    expect(contrastRatio(theme.tokens.primaryHover, '#ffffff'))
+      .toBeGreaterThan(contrastRatio(theme.tokens.primary, '#ffffff'));
+  });
+
+  it('lightens a light primary under dark ink', () => {
+    const theme = resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#c85f50' },
+    });
+    expect(() => assertOverridesLegible(theme)).not.toThrow();
+    expect(theme.tokens.primaryForeground).toBe('#111111');
+    expect(theme.tokens.primaryHover).toBe('#ce6f62');
+  });
+
+  it('keeps the hover of a write-eligible primary above the surface and label floors', () => {
+    const theme = resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#8b8b8b' },
+    });
+
+    expect(() => assertOverridesLegible(theme)).not.toThrow();
+    expect(Math.min(
+      contrastRatio(theme.tokens.primaryHover, theme.tokens.page),
+      contrastRatio(theme.tokens.primaryHover, theme.tokens.surface),
+      contrastRatio(theme.tokens.primaryHover, theme.tokens.raisedSurface),
+    )).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(theme.tokens.primaryForeground, theme.tokens.primaryHover)).toBeGreaterThanOrEqual(4.5);
+    expect(theme.tokens.primaryHover).not.toBe(theme.tokens.primary);
   });
 
   it('rejects a primary override with no allowlisted 4.5:1 foreground', () => {
@@ -212,16 +268,45 @@ describe('event theme contract', () => {
       version: 1, presetId: 'candidary-default', overrides: { accentColor: '#f5efe6' },
     });
     expect(resolved.tokens.accent).toBe('#f5efe6');
-    expect(() => assertAccentLegible(resolved))
+    expect(() => assertOverridesLegible(resolved))
       .toThrow(expect.objectContaining({ field: 'overrides.accentColor' } satisfies Partial<EventThemeResolutionError>));
   });
 
-  it('keeps a stored accent below the floor resolving instead of reverting to Default', () => {
-    const stored = parseStoredEventThemeConfig(
-      '{"version":1,"presetId":"candidary-default","overrides":{"accentColor":"#f5efe6"}}',
-    );
-    expect(resolvedThemeView(stored).tokens.accent).toBe('#f5efe6');
-    expect(resolvedThemeView(stored).config.presetId).toBe('candidary-default');
+  /* `primaryForeground` only ever promised the label inside the button. These three clear it — the
+     resolver pairs each with `#111111` above 4.5:1 — and still leave the send button itself at
+     roughly 1:1 against the surface it sits on, which is what the surface floor is for. */
+  it.each(['#ffffff', '#e8f0d0', '#f8d4c4'] as const)('refuses a primary %s that dissolves into the event surfaces', (primaryColor) => {
+    const resolved = resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: { primaryColor } });
+    expect(contrastRatio(resolved.tokens.primaryForeground, resolved.tokens.primary)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(resolved.tokens.primary, resolved.tokens.surface)).toBeLessThan(3);
+    expect(() => assertOverridesLegible(resolved))
+      .toThrow(expect.objectContaining({ field: 'overrides.primaryColor' } satisfies Partial<EventThemeResolutionError>));
+  });
+
+  it('names the primary first when both overridden colors sit below the floor', () => {
+    const resolved = resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#ffffff', accentColor: '#f5efe6' },
+    });
+    expect(() => assertOverridesLegible(resolved))
+      .toThrow(expect.objectContaining({ field: 'overrides.primaryColor' } satisfies Partial<EventThemeResolutionError>));
+  });
+
+  it.each(EVENT_THEME_PRESET_IDS)('keeps the authored %s primary legible on its own surfaces', (presetId) => {
+    const { tokens } = EVENT_THEME_PRESETS.find((candidate) => candidate.id === presetId)!;
+    expect(Math.min(
+      contrastRatio(tokens.primary, tokens.page),
+      contrastRatio(tokens.primary, tokens.surface),
+      contrastRatio(tokens.primary, tokens.raisedSurface),
+    )).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each([
+    ['{"version":1,"presetId":"candidary-default","overrides":{"accentColor":"#f5efe6"}}', 'accent', '#f5efe6'],
+    ['{"version":1,"presetId":"candidary-default","overrides":{"primaryColor":"#ffffff"}}', 'primary', '#ffffff'],
+  ] as const)('keeps a stored %#: below-floor color resolving instead of reverting to Default', (stored, token, value) => {
+    const config = parseStoredEventThemeConfig(stored);
+    expect(resolvedThemeView(config).tokens[token]).toBe(value);
+    expect(resolvedThemeView(config).config.presetId).toBe('candidary-default');
   });
 
   it.each(EVENT_THEME_PRESET_IDS)('keeps the authored %s accent legible on its own surfaces', (presetId) => {
