@@ -833,6 +833,8 @@ Expected: creation, error focus, and type checks pass.
 
 ### Task 6: Add the Manager Event appearance editor
 
+> **Superseded (2026-08-01):** The manual **Save appearance** workflow below is superseded by [Candidary Settings Autosave Design](../specs/2026-08-01-settings-autosave-design.md); this completed plan remains as historical context.
+
 **Files:**
 
 - Create: `src/components/EventAppearanceEditor.tsx`

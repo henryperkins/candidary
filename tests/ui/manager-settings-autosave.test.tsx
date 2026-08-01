@@ -192,4 +192,94 @@ describe('manager settings autosave guards', () => {
     await waitFor(() => expect(removed.mock.calls.filter(([type]) => type === 'beforeunload').length)
       .toBeGreaterThan(0));
   });
+
+  it('keeps three deferred mutation responses from restoring each other’s stale state', async () => {
+    const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
+    const releases: Array<() => void> = [];
+    const hold = () => new Promise<void>((resolve) => { releases.push(resolve); });
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        await hold();
+        // Built from a row read before the theme changed.
+        return json({ event: { ...MANAGED_EVENT, moderationRequired: false, theme: MANAGED_EVENT.theme } });
+      }
+      if (url.endsWith('/theme') && method === 'PUT') {
+        await hold();
+        // Built from a row read before the moderation switch changed.
+        return json({ event: { ...MANAGED_EVENT, theme: gardenTheme } });
+      }
+      return fetchMock(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
+    await waitFor(() => expect(releases).toHaveLength(2));
+
+    // Settle the theme first, then the older settings response.
+    releases[1]!();
+    releases[0]!();
+
+    await waitFor(() => expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked());
+    // The settings response carried the pre-change theme; it must not travel.
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    // And the theme response carried the pre-change switch; that must not travel either.
+    expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
+  });
+
+  it('keeps a deferred cover response from restoring stale settings or theme', async () => {
+    const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
+    let releaseCover: (() => void) | null = null;
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/cover') && method === 'POST') {
+        return json({ objectKey: 'events/event-a/cover/new.jpg', url: 'https://r2.test/put' }, 201);
+      }
+      if (url === 'https://r2.test/put') return Promise.resolve(new Response(null, { status: 200 }));
+      if (url.endsWith('/cover/finalize') && method === 'POST') {
+        await new Promise<void>((resolve) => { releaseCover = resolve; });
+        // Built from a row read before either later write.
+        return json({
+          event: {
+            ...MANAGED_EVENT,
+            coverObjectKey: 'events/event-a/cover/new.jpg',
+            moderationRequired: true,
+            theme: MANAGED_EVENT.theme,
+          },
+        });
+      }
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        return json({ event: { ...MANAGED_EVENT, moderationRequired: false } });
+      }
+      if (url.endsWith('/theme') && method === 'PUT') {
+        return json({ event: { ...MANAGED_EVENT, theme: gardenTheme } });
+      }
+      return fetchMock(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    const file = new File([new Uint8Array([1, 2, 3])], 'cover.png', { type: 'image/png' });
+    await user.upload(document.querySelector<HTMLInputElement>('.cover-field__input')!, file);
+    await waitFor(() => expect(releaseCover).not.toBeNull());
+
+    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
+    await waitFor(() => expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked());
+
+    releaseCover!();
+
+    // The cover response owns the cover and nothing else.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove cover' })).toBeVisible());
+    expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+  });
 });

@@ -32,7 +32,7 @@ WebKit/Safari, physical-device, or native camera-picker evidence.
 The narrow feature gate is:
 
 ```powershell
-npx vitest run --config vitest.config.ts tests/unit/event-theme.test.ts tests/unit/event-theme-style.test.ts tests/ui/event-theme-creation.test.tsx tests/ui/event-appearance-editor.test.tsx tests/ui/event-theme-rendering.test.tsx tests/ui/guest-upload-flow.test.tsx
+npx vitest run --config vitest.config.ts tests/unit/event-theme.test.ts tests/unit/event-theme-style.test.ts tests/unit/settings-autosave-queue.test.ts tests/unit/event-settings-draft.test.ts tests/unit/manager-event-merge.test.ts tests/unit/autosave-status-text.test.ts tests/ui/event-theme-creation.test.tsx tests/ui/event-appearance-editor.test.tsx tests/ui/event-settings-editor.test.tsx tests/ui/manager-settings-autosave.test.tsx tests/ui/event-theme-rendering.test.tsx tests/ui/guest-upload-flow.test.tsx
 npx vitest run --config vitest.worker.config.ts tests/worker/migration-0007.test.ts tests/worker/event-theme-api.test.ts tests/worker/manage-api.test.ts tests/worker/core-journey.test.ts
 npx tsc -p tsconfig.e2e.json --pretty false
 npx playwright test tests/e2e/event-theming.spec.ts tests/e2e/event-theming-visual.spec.ts tests/e2e/accessibility.spec.ts tests/e2e/guest-responsive.spec.ts tests/e2e/visual-qa.spec.ts
@@ -120,7 +120,7 @@ The event-theme suite adds exactly eight tracked images:
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review/getting-ready crop | 320 x 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 x 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal receipt | 390 x 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3792 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3907 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 x 900 |
 
 At the event-theming feature head, three existing Default files were deliberately updated:
@@ -194,13 +194,15 @@ Supplementary browser evidence covers:
 
 ### Manager preview and persistence isolation
 
-The Settings editor keeps `savedTheme` and `draftTheme` separate. Preset and color changes update
-only the inert `.event-appearance-preview`; Manager navigation, workspace, forms, account access,
-and danger area remain on global Candidary tokens. Reset installs canonical Default locally and does
-not write. Save sends the canonical configuration to the event-scoped PUT and adopts only the
-server-normalized response. A failed Save preserves the raw input, last-valid draft and preview,
-unsaved state, Settings scroll position, and retryable action. Guest rendering stays on the saved
-theme until the write succeeds.
+The Settings editor keeps its confirmed theme and draft theme separate. Valid preset choices,
+preset-color restoration, and Reset autosave immediately; valid color edits autosave after 600 ms of
+inactivity, on blur, or when Enter flushes them. The inert `.event-appearance-preview` still updates
+from the newest valid local draft, while guests keep the last Worker-confirmed theme. Manager
+navigation, workspace, forms, account access, and danger area remain on global Candidary tokens.
+The autosave status vocabulary is `Saved`, `Saving…`, `Fix the highlighted field to save.`, and
+`Couldn’t save.`; retryable failures also offer `Retry`. A failed autosave preserves raw input, the
+last-valid draft and preview, Settings scroll position, and the newest draft — not the snapshot that
+failed — is what Retry sends.
 
 Migration and Worker evidence pins the non-null `0007_event_theme.sql` column, canonical Default
 backfill, 512-character/valid-object checks, explicit guest-versus-manager views, credential-specific

@@ -59,6 +59,11 @@ export const EVENT_FIXTURE: EventView = {
   deletedAt: null,
   rsvpEnabled: false,
   rsvpRosterVersion: 0,
+  // The guest fixtures keep a null deadline on purpose. The manager cannot:
+  // its settings editor validates the deadline, and a null one would leave
+  // every manager browser test sitting on an unsendable draft.
+  rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+  rsvpDeadlineDate: '2026-09-05',
 };
 
 export const RSVP_HOUSEHOLD_FIXTURE: RsvpHouseholdView = {
@@ -343,6 +348,12 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   });
   await page.route(new RegExp(`/api/manage/events/${event.id}$`, 'u'), (route) => route.fulfill({
     json: { data: { event }, requestId: 'request-a' },
+  }));
+  await page.route(`${base}/settings`, (route) => route.fulfill({
+    json: {
+      data: { event: { ...event, ...route.request().postDataJSON() as Partial<EventView> } },
+      requestId: 'request-a',
+    },
   }));
   await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { messages: options.messages ?? [] }, requestId: 'request-a' },
