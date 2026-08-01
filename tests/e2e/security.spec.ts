@@ -55,6 +55,7 @@ test('a scanned entry leaves no credential in the URL, the page, or the console'
       uploadsEnabled: false,
       phase: 'rsvp-primary',
       rsvpState: 'open',
+      rsvpAccess: 'editable',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },

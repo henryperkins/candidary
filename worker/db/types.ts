@@ -37,6 +37,12 @@ export interface EventRecord {
   // The IANA zone the host chose. Every deadline is computed in it, never in
   // the Worker's zone or a browser's.
   eventTimezone: string;
+  // The absolute instant the event begins, resolved from `eventDate`, the
+  // host's local start time, and `eventTimezone`. Never sent by a browser.
+  eventStartAt: string;
+  // Null means "photo delivery opens automatically at the start". A non-null
+  // value is the server instant at which the host opened it early.
+  photosOpenFrom: string | null;
   rsvpEnabled: boolean;
   rsvpDeadlineAt: string | null;
   rsvpRosterVersion: number;

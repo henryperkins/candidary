@@ -125,6 +125,19 @@ export interface EventView {
   createdAt: string;
   deletedAt: string | null;
   eventTimezone: string;
+  // The absolute instant the event begins, derived server-side from
+  // `eventDate`, the host's local start time, and `eventTimezone`.
+  eventStartAt: string;
+  // That same instant as a 24-hour local wall clock in `eventTimezone`: what
+  // the host typed, and what settings edits back.
+  eventStartTime: string;
+  // Whether photo delivery is effectively open right now — permitted, and past
+  // its scheduled or manually advanced opening.
+  photosOpen: boolean;
+  photoIntakeState: PhotoIntakeState;
+  // Relative delay to the next future scheduled opening or event start, or
+  // null. Same reasoning as `lifecycleRecheckAfterMs`.
+  photoIntakeRecheckAfterMs: number | null;
   rsvpEnabled: boolean;
   rsvpDeadlineAt: string | null;
   // The same instant as a calendar date in `eventTimezone`. Sent alongside the
@@ -149,6 +162,9 @@ export type GuestEventView = Pick<
   | 'galleryVisible'
   | 'moderationRequired'
   | 'eventTimezone'
+  // Carried so the before-start surface can render a correctly zoned start
+  // without asking the guest's device what time it is.
+  | 'eventStartAt'
   | 'rsvpDeadlineAt'
   | 'rsvpDeadlineDate'
   | 'theme'
@@ -161,14 +177,39 @@ export type GuestEventView = Pick<
 export type RsvpAttendance = 'pending' | 'attending' | 'declined';
 export type RsvpInviteeKind = 'named' | 'plus_one';
 export type RsvpState = 'disabled' | 'paused' | 'open' | 'closed';
-export type GuestEventPhase = 'rsvp-primary' | 'photos-primary' | 'waiting';
+// `before-start` is a product state of its own, not merely a reason photos are
+// unavailable: the deadline has gone, the event has not begun, and a household
+// may still read back what it already sent. `waiting` now means exactly one
+// thing — the event has started and photo delivery is currently unavailable.
+export type GuestEventPhase =
+  | 'rsvp-primary'
+  | 'before-start'
+  | 'photos-primary'
+  | 'waiting';
+// Phase says *where* RSVP appears; this says *whether and how*. `rsvpState`
+// still supplies the paused/closed wording. Split apart because `rsvpState`
+// alone cannot tell "closed before the start" from "closed because the event
+// started", and resolving that in a browser would mean comparing a clock.
+export type RsvpAccess = 'editable' | 'read-only' | 'unavailable';
 // Who committed a response. Hosts may correct a household after the deadline;
 // households never act as a host.
 export type RsvpActor = 'household' | 'host';
 
+// What the host's photo-delivery controls are chosen from. `paused` is decided
+// first, so an event whose capability is withheld never reports itself as
+// scheduled to open.
+export type PhotoIntakeState = 'scheduled' | 'open-early' | 'open' | 'paused';
+
 export interface GuestPhaseView {
   phase: GuestEventPhase;
   rsvpState: RsvpState;
+  rsvpAccess: RsvpAccess;
+  // A *relative* delay to the next guest-view boundary, computed by the server
+  // from the same instant that resolved this view, or null when none remains.
+  // Relative on purpose: an absolute instant compared against `Date.now()` is a
+  // browser-clock comparison, and a device whose clock is wrong would switch
+  // early or hours late.
+  lifecycleRecheckAfterMs: number | null;
 }
 
 export interface RsvpInviteeView {

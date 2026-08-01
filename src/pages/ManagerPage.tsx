@@ -10,6 +10,7 @@ import {
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
+import type { PhotoIntakeState } from '../../shared/contracts';
 import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -18,12 +19,17 @@ import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
 import { EventSettingsEditor } from '../components/EventSettingsEditor';
 import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
+import { ManagerPhotoIntakePanel } from '../components/ManagerPhotoIntakePanel';
+import type { PhotoIntakeAction } from '../components/ManagerPhotoIntakePanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import { UnsavedSettingsPrompt } from '../components/UnsavedSettingsPrompt';
 import type { LoadFailure } from '../components/States';
+import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
+import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRecheck';
 import {
   mergeCoverResponse,
+  mergePhotoIntakeResponse,
   mergeSettingsResponse,
   mergeThemeResponse,
 } from '../features/settings/event-merge';
@@ -107,6 +113,16 @@ function formatBytes(bytes = 0) {
 
 const PHOTO_CAP = MAX_EVENT_MEDIA.toLocaleString();
 const STORAGE_CAP = `${Math.round(MAX_EVENT_BYTES / 1024 ** 3)} GB`;
+
+// The chip reads the server-derived intake state rather than `uploadsEnabled`,
+// which now only says delivery is permitted. A permitted event that has not
+// reached its opening is scheduled, and no browser clock decides which.
+const UPLOAD_CHIP: Record<PhotoIntakeState, { tone: 'approved' | 'pending'; label: string }> = {
+  scheduled: { tone: 'pending', label: 'Guest uploads scheduled' },
+  'open-early': { tone: 'approved', label: 'Guest uploads open' },
+  open: { tone: 'approved', label: 'Guest uploads open' },
+  paused: { tone: 'pending', label: 'Guest uploads paused' },
+};
 
 export function ManagerPage() {
   const { eventId = '' } = useParams();
@@ -552,7 +568,7 @@ export function ManagerPage() {
       entryDisabled.current = true;
       setEntryDisabledAt(result.disabledAt ?? null);
       setEvent((current) => current
-        ? { ...current, uploadsEnabled: false, rsvpEnabled: false }
+        ? { ...current, uploadsEnabled: false, photosOpen: false, photoIntakeState: 'paused', rsvpEnabled: false }
         : current);
     }
     setEntryAction(null);
@@ -566,6 +582,35 @@ export function ManagerPage() {
     const loaded = await api<{ event: EventView }>(`/api/manage/events/${eventId}`);
     if (eventReads.current.adopt(readToken)) setEvent(loaded.event);
   }
+  // Photo delivery is an explicit action rather than an autosaved setting, and
+  // only the server decides which transition is legal from the row as it stands.
+  // A page that loaded before the start therefore cannot send a pre-start action
+  // after it: the refusal arrives as an ordinary manager notice telling the host
+  // to reload.
+  async function applyPhotoIntake(action: PhotoIntakeAction) {
+    const result = await eventWrite(() => api<{ event: EventView }>(`/api/manage/events/${eventId}/photo-intake`, {
+      method: 'POST', body: JSON.stringify({ action }),
+    }));
+    setEvent((current) => current
+      ? mergePhotoIntakeResponse(current, result.event, { entryDisabled: entryDisabled.current })
+      : result.event);
+  }
+  // The quiet boundary refetch, so a manager page left open across the scheduled
+  // opening updates its status and its action without consulting this browser's
+  // clock. It reports `changed` only when the server actually moved, and it
+  // deliberately stays off the manager notice: a background refresh that fails
+  // must leave the working page exactly as it is, and the hook backs off instead.
+  async function recheckPhotoIntake(): Promise<LifecycleRecheckOutcome> {
+    const loaded = await eventRead(() => api<{ event: EventView }>(`/api/manage/events/${eventId}`));
+    const moved = event === null
+      || event.photoIntakeState !== loaded.event.photoIntakeState
+      || event.photoIntakeRecheckAfterMs !== loaded.event.photoIntakeRecheckAfterMs;
+    setEvent((current) => current
+      ? mergePhotoIntakeResponse(current, loaded.event, { entryDisabled: entryDisabled.current })
+      : loaded.event);
+    return moved ? 'changed' : 'unchanged';
+  }
+  useLifecycleRecheck(event?.photoIntakeRecheckAfterMs ?? null, recheckPhotoIntake);
   async function deleteEvent(element: HTMLFormElement) {
     const form = new FormData(element);
     await api(`/api/manage/events/${eventId}`, { method: 'DELETE', body: JSON.stringify({ confirmation: form.get('confirmation') }) });
@@ -630,6 +675,7 @@ export function ManagerPage() {
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 
   const photoCount = event.storedMediaCount ?? 0;
+  const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
   const activeExport = exports[0];
   // One panel, two placements: the wide utility rail and the narrow Share section. The stylesheet
   // reveals exactly one of them, so the host never sees the same export control twice.
@@ -684,7 +730,7 @@ export function ManagerPage() {
     </nav></header>
 
     <main className="manager-main">
-      <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
+      <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
       {visibleNotice && <section className="manager-action-error" aria-label="Manager notice">
@@ -809,6 +855,11 @@ export function ManagerPage() {
             ? mergeSettingsResponse(current, updated, { entryDisabled: entryDisabled.current })
             : updated)}
           onAutosaveStateChange={recordAutosaveState}
+        />
+        <ManagerPhotoIntakePanel
+          event={event}
+          entryDisabled={entryDisabledAt !== null}
+          onAction={(action) => void runManagerAction(() => applyPhotoIntake(action))}
         />
         <EventAppearanceEditor
           key={'appearance-' + event.id}

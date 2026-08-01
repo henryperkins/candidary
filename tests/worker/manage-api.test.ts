@@ -10,6 +10,7 @@ import {
   applySettings,
   cookiesFrom,
   eventAccess,
+  importRoster,
   png,
   resetDatabase,
   secondGuest,
@@ -299,19 +300,27 @@ describe('manager settings and private photo intake', () => {
 
   it('classifies a guarded settings refusal as the entry stop, not a roster race', async () => {
     const access = await eventAccess();
+    await importRoster(
+      access,
+      'household_key,household_label,invitee_name,plus_one_slots\nperkins,Perkins household,Henry Perkins,0',
+    );
+    const current = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    access.event = (await current.json<any>()).data.event;
     const entries = new EventEntriesRepository(env.DB);
     const guardedUpdate = vi.spyOn(EventsRepository.prototype, 'updateSettings').mockImplementationOnce(
       async (eventId) => {
         // The route's first entry read succeeded. The irreversible stop lands in
         // the narrow window before the atomic settings statement decides whether
-        // it can reopen intake, so the route receives the guarded null result.
+        // it can reopen RSVP, so the route receives the guarded null result.
         await entries.disableForEvent(eventId, '2026-07-21T12:00:00.000Z');
         return null;
       },
     );
 
     try {
-      const response = await applySettings(access, { uploadsEnabled: true });
+      const response = await applySettings(access, { rsvpEnabled: true });
 
       expect(response.status).toBe(410);
       expect((await response.json<any>()).code).toBe('EVENT_ENTRY_UNAVAILABLE');
@@ -379,9 +388,9 @@ describe('manager settings and private photo intake', () => {
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
       body: JSON.stringify({
-        galleryVisible: true, uploadsEnabled: true, moderationRequired: true,
-        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
-        rsvpEnabled: false, rsvpRosterVersion: 0,
+        galleryVisible: true, moderationRequired: true,
+        eventTimezone: 'America/Chicago', eventStartTime: '00:00',
+        rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,
       }),
     }, testEnv);
     const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${avery.id}`, {

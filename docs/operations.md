@@ -56,11 +56,59 @@ Two host actions look similar and are not:
   verify afterwards that manager access still works while both future scans and existing guest and
   household sessions do not.
 
+`uploads_enabled` means photo delivery is **permitted** for this event, not that it is open. Three
+stored values decide what a guest actually sees:
+
+- `uploads_enabled` — capability. A new event is created with it on.
+- `event_start_at` — the schedule. It is derived server-side from `event_date`, the host's local
+  start time, and `event_timezone`, and it opens photo delivery by itself. Nothing has to be run and
+  nobody has to remember anything on the day of the event.
+- `photos_open_from` — `NULL` normally. A non-null value is a manual early opening and holds the
+  server instant at which the host performed it.
+
+`POST /api/manage/events/:eventId/photo-intake` takes one of four explicit actions and never a client
+timestamp. Which one is legal is decided in SQL against the row as it stands, not against the state a
+manager page read earlier:
+
+| Action | Legal from | Effect |
+| --- | --- | --- |
+| `open_early` | `scheduled` — permitted, before the start, not already opened early | Stamps `photos_open_from` with the server's own clock |
+| `return_to_schedule` | `open-early` | Clears `photos_open_from` |
+| `pause` | `open` — permitted, at or after the start | `uploads_enabled = 0` |
+| `reopen` | `paused`, at or after the start, printed entry still enabled | `uploads_enabled = 1` |
+
+A pause **before** the start is `return_to_schedule`, and it clears `photos_open_from` only. It
+deliberately does not withdraw capability: if it did, a host who opened photos early and then thought
+better of it would silently cancel the scheduled opening, and the event would sit on the guest waiting
+surface through its own reception. There is deliberately no pre-start control that revokes capability
+at all — a host who wants photo delivery off for the event does it after the start, when the effect is
+visible to them.
+
+A stale or illegal transition — most often a manager page that loaded before the start sending a
+pre-start action after it — is the existing `VALIDATION_FAILED` envelope at HTTP 409, telling the host
+to reload. No new error code was added for it.
+
+The irreversible entry disable still wins over all four: it sets `uploads_enabled = 0` and
+`rsvp_enabled = 0`, and no photo-intake action may open or reopen an event whose printed entry is
+disabled. That is enforced inside the statement, not only ahead of it.
+
+`uploadsEnabled` has left the settings payload entirely; `PATCH .../settings` no longer accepts it.
+This follows `Sign out guest devices` and `Disable printed event QR`, which are explicit actions for
+the same reason: a stale autosave draft could send `uploadsEnabled: false` meaning "pause until the
+start" and instead destroy capability for the whole event.
+
 RSVP opens only when the event has a deadline and the active roster passes collision and capacity
 validation. The deadline is a calendar date in the event's IANA time zone; the server stores the final
-millisecond of that local day. Shortening a deadline takes effect immediately for sessions already
-issued; extending one requires each household to look itself up again before it regains write
-authority. A host may correct any household after the deadline.
+millisecond of that local day, and that instant must be strictly earlier than `event_start_at`. Because
+the stored deadline is the last millisecond of its own local day, the deadline date must therefore be
+earlier than the event date. Create and settings enforce the rule identically, on the resolved instants
+rather than on the dates, and report it on `rsvpDeadlineDate`. Any edit to the deadline date, the start
+time, or the time zone recomputes both instants from the same tuple in the same guarded write, so a
+zone change can never move one without the other. Shortening a deadline takes effect immediately for
+sessions already issued; extending one requires each household to look itself up again before it
+regains write authority. A host may correct any household after the deadline, and after the start:
+from `event_start_at` onward every guest RSVP route is unavailable while manager correction, roster
+management, import, and export all keep working.
 
 The manager's **Add guests** workspace is additive at both initial setup and later use. It stages file,
 paste, and direct-entry sources locally, previews a normalized batch without writes, and commits every
@@ -128,7 +176,7 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
 - `EVENT_EXPIRED` on a scan — the printed credential is valid but the event's internal guest grant has expired. The event's own guest window has ended; nothing about the QR is wrong. (`GUEST_LINK_UNAVAILABLE` is retired: the route that raised it was replaced by `GET /api/manage/events/:eventId/entry`, and no code path emits it any more.)
 - `RSVP_UNAVAILABLE` — RSVP is disabled or paused for this event.
-- `RSVP_CLOSED` — the earlier of the event deadline and the session's captured write deadline has passed. A prior response is still readable; a host may still correct it.
+- `RSVP_CLOSED` — one of three has passed: the event deadline, the session's captured write deadline, or the event start. Before the start a prior response is still readable and an already committed idempotency key still replays its receipt. At and after `event_start_at` every guest RSVP route is unavailable — reads and idempotent replays included — because RSVP has left the guest experience entirely. A host may still correct the household throughout.
 - `RSVP_SESSION_REQUIRED` — the household session is missing, expired, revoked, or archived. The guest looks the invitation up again.
 - `RSVP_HOUSEHOLD_CONFLICT` — the version the write was built on is no longer current, and nothing was written. The response carries a message only, deliberately: the caller re-reads the household (`GET /api/event/:slug/rsvp/household`, or the manager household detail) and submits again against the current version. A host roster edit that changes who is in a household reports this too, rather than a validation failure.
 - `RSVP_SUBMISSION_CONFLICT` — a previously successful idempotency key was reused with different content. Use a new key rather than editing the old payload.

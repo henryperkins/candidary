@@ -26,7 +26,10 @@ const MANAGED_EVENT = {
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
-  eventTimezone: 'America/Chicago', rsvpEnabled: false,
+  eventTimezone: 'America/Chicago',
+  eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
+  photosOpen: true, photoIntakeState: 'open', photoIntakeRecheckAfterMs: null,
+  rsvpEnabled: false,
   rsvpDeadlineAt: '2026-09-05T04:59:59.999Z', rsvpDeadlineDate: '2026-09-04',
   rsvpRosterVersion: 7,
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
@@ -515,7 +518,10 @@ describe('manager settings autosave guards', () => {
 
   it('keeps intake paused when a settings response arrives after entry disable', async () => {
     const disabledAt = '2026-08-01T15:00:00.000Z';
-    const disabledEvent = { ...MANAGED_EVENT, uploadsEnabled: false, rsvpEnabled: false };
+    const disabledEvent = {
+      ...MANAGED_EVENT,
+      uploadsEnabled: false, photosOpen: false, photoIntakeState: 'paused', rsvpEnabled: false,
+    };
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     let eventReads = 0;
     let entryReads = 0;
@@ -563,7 +569,11 @@ describe('manager settings autosave guards', () => {
     expect(screen.getByText('Guest uploads paused')).toBeVisible();
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /settings/i }));
-    expect(screen.getByLabelText('Accept private photo deliveries')).not.toBeChecked();
+    // The stop is irreversible, so the panel explains it rather than offering a
+    // reopen the server would refuse anyway.
+    expect(screen.getByText('Photo delivery is paused.')).toBeVisible();
+    expect(screen.getByText('The printed event QR was disabled, so photo delivery cannot be reopened.')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Reopen photo delivery' })).not.toBeInTheDocument();
   });
 
   it('keeps a deferred cover response from restoring stale settings or theme', async () => {

@@ -15,7 +15,7 @@ import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
-import { canonicalTimeZone, endOfLocalDate, isIanaTimeZone } from '../../shared/event-time';
+import { canonicalTimeZone, isIanaTimeZone } from '../../shared/event-time';
 import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
 import { RsvpService } from '../services/rsvp';
@@ -28,6 +28,7 @@ import {
   SUPPORTED_IMAGE_TYPES,
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
+import { DEFAULT_EVENT_START_TIME, resolveEventSchedule } from '../http/event-schedule';
 import { eventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { sanitizeFilename } from '../security/filenames';
@@ -37,13 +38,20 @@ import { deleteEventData } from '../workflows/cleanup';
 
 const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 
+// `uploadsEnabled` is deliberately absent. Photo delivery now depends on the
+// server clock, and a stale autosave draft could send `uploadsEnabled: false`
+// meaning "pause until the start" and instead destroy capability for the whole
+// event. It follows the precedent of `Sign out guest devices` and `Disable
+// printed event QR`: an explicit action, not a settings field.
 const settingsSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   welcomeMessage: z.string().trim().min(1).max(500).optional(),
-  uploadsEnabled: z.boolean(),
   galleryVisible: z.boolean(),
   moderationRequired: z.boolean(),
   eventTimezone: z.string().min(1).max(64).refine(isIanaTimeZone, 'Choose a valid time zone.'),
+  eventStartTime: z.string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/u, 'Choose a valid start time.')
+    .default(DEFAULT_EVENT_START_TIME),
   rsvpDeadlineDate: z.string()
     .regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.')
     .refine(
@@ -54,6 +62,10 @@ const settingsSchema = z.object({
   // Only an early stale-view signal. The write is guarded on the version the
   // server itself read while validating, never on this number.
   rsvpRosterVersion: z.number().int().min(0),
+});
+
+const photoIntakeSchema = z.object({
+  action: z.enum(['open_early', 'return_to_schedule', 'pause', 'reopen']),
 });
 const actionSchema = z.object({
   action: z.enum(['publish', 'hide', 'delete']),
@@ -231,27 +243,20 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
       fieldErrors(parsed.error),
     );
   }
-  // Reopening either intake after the printed entry was disabled would leave
-  // guests with an event that accepts submissions and no working way in.
-  // Manager authority does not outrank the irreversible stop.
-  if (parsed.data.uploadsEnabled || parsed.data.rsvpEnabled) {
+  // Reopening RSVP after the printed entry was disabled would leave guests with
+  // an event that accepts submissions and no working way in. Manager authority
+  // does not outrank the irreversible stop.
+  if (parsed.data.rsvpEnabled) {
     await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
   }
 
   const eventTimezone = canonicalTimeZone(parsed.data.eventTimezone) ?? parsed.data.eventTimezone;
-  if (parsed.data.rsvpDeadlineDate > auth.event.eventDate) {
-    throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422, {
-      rsvpDeadlineDate: 'The RSVP deadline must be on or before the event date.',
-    });
-  }
-  let rsvpDeadlineAt: string;
-  try {
-    rsvpDeadlineAt = endOfLocalDate(parsed.data.rsvpDeadlineDate, eventTimezone);
-  } catch {
-    throw new ApiError('VALIDATION_FAILED', 'Check the event settings.', 422, {
-      rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
-    });
-  }
+  // Any edit to the start time, the deadline date, or the zone recomputes both
+  // absolute instants from the same tuple, and they are written together below.
+  const schedule = resolveEventSchedule(
+    { ...parsed.data, eventDate: auth.event.eventDate, eventTimezone },
+    'Check the event settings.',
+  );
 
   // Cheap refusal before doing the validation work, so an obviously stale host
   // page is told to reload rather than racing.
@@ -272,14 +277,14 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
 
   const event = await new EventsRepository(context.env.DB).updateSettings(
     context.req.param('eventId'),
-    { ...parsed.data, eventTimezone, rsvpDeadlineAt, expectedRosterVersion: rosterVersion },
+    { ...parsed.data, eventTimezone, ...schedule, expectedRosterVersion: rosterVersion },
   );
   if (!event) {
-    // The update now refuses an intake reopen itself, so a lost row is no longer
+    // The update now refuses an RSVP reopen itself, so a lost row is no longer
     // proof of a roster race. Re-read the entry before naming the reason: the
     // irreversible stop and a moving guest list are different problems with
     // different ways out.
-    if (parsed.data.uploadsEnabled || parsed.data.rsvpEnabled) {
+    if (parsed.data.rsvpEnabled) {
       await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
     }
     throw new ApiError(
@@ -287,6 +292,41 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
       'The guest list changed while these settings were saving. Review it and try again.',
       409,
       { rsvpEnabled: 'The guest list changed while these settings were saving.' },
+    );
+  }
+  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
+});
+
+/**
+ * The four photo-delivery transitions, and never a client timestamp.
+ *
+ * Which one is legal is decided from the row as it stands, inside the guarded
+ * write. A manager page that loaded before the event started therefore cannot
+ * send a pre-start action after it: the statement matches nothing and the host
+ * is told to reload.
+ *
+ * A stale or illegal transition is a 409 in the existing `VALIDATION_FAILED`
+ * envelope rather than a new error code — there is no new failure kind here,
+ * only a view that has fallen behind the clock.
+ */
+manageRoutes.post('/manage/events/:eventId/photo-intake', async (context) => {
+  const auth = await managerForEvent(context, true);
+  const parsed = photoIntakeSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new ApiError('VALIDATION_FAILED', 'Choose a valid photo delivery action.', 422);
+  }
+  // Cheap, honest refusal ahead of the write for the one case the host cannot
+  // resolve by reloading. The statement refuses it as well.
+  if (parsed.data.action === 'reopen') {
+    await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+  }
+  const event = await new EventsRepository(context.env.DB)
+    .applyPhotoIntake(auth.event.id, parsed.data.action);
+  if (!event) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Photo delivery has moved on since this page loaded. Reload and try again.',
+      409,
     );
   }
   return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });

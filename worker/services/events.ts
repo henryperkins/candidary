@@ -21,6 +21,7 @@ export interface CreateEventInput {
   theme: EventThemeConfigV1;
   eventTimezone: string;
   rsvpDeadlineAt: string;
+  eventStartAt: string;
 }
 
 export class EventService {
@@ -64,6 +65,7 @@ export class EventService {
         themeConfig: serializeEventThemeConfig(input.theme),
         eventTimezone: input.eventTimezone,
         rsvpDeadlineAt: input.rsvpDeadlineAt,
+        eventStartAt: input.eventStartAt,
       }),
       entries.createStatement({
         id: entryToken.id,

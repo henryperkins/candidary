@@ -19,17 +19,31 @@ const RSVP_PRIMARY: Partial<GuestEventView> = {
   uploadsEnabled: false,
   phase: 'rsvp-primary',
   rsvpState: 'open',
+  rsvpAccess: 'editable',
   rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
   rsvpDeadlineDate: '2026-09-05',
 };
 
+// Photos opened early, so the disclosure survives beside them until the deadline.
 const PHOTOS_PRIMARY: Partial<GuestEventView> = {
   uploadsEnabled: true,
   phase: 'photos-primary',
   rsvpState: 'open',
+  rsvpAccess: 'editable',
   rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
   rsvpDeadlineDate: '2026-09-05',
   galleryVisible: false,
+};
+
+// The deadline has gone and the event has not begun: the window that used to be
+// a `waiting` fallback talking about a date nobody could act on.
+const BEFORE_START: Partial<GuestEventView> = {
+  uploadsEnabled: true,
+  phase: 'before-start',
+  rsvpState: 'closed',
+  rsvpAccess: 'read-only',
+  rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
+  rsvpDeadlineDate: '2026-09-05',
 };
 
 function respondedHousehold(): RsvpHouseholdView {
@@ -258,23 +272,42 @@ test('a stale version replaces the draft with the winning roster and asks for a 
   await expect(page.getByText('4 to answer')).toBeVisible();
 });
 
-test('a closed deadline shows the saved response and offers no way to change it', async ({ page }) => {
+test('a closed deadline names the start and reads the saved response back', async ({ page }) => {
   await stubGuestRoutes(page, {
-    event: {
-      uploadsEnabled: false,
-      phase: 'waiting',
-      rsvpState: 'closed',
-      rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
-      rsvpDeadlineDate: '2026-09-05',
-    },
+    event: BEFORE_START,
     household: { ...respondedHousehold(), editable: false },
   });
   await scanPrintedEntry(page);
 
+  // The surface names when the event begins instead of a deadline nobody can act
+  // on, and thanks a household that answered rather than reading it closed copy.
+  await expect(page.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
+  await expect(page.getByText('Maya & Theo begins September 19, 2026 at 5:00 PM.')).toBeVisible();
+  await expect(page.getByText('Come back when the event begins to take or add photos.')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
-  await expect(page.getByText('RSVP is closed. Your saved response is shown below.')).toBeVisible();
+  await expect(page.getByText('We appreciate your RSVP. Your saved household response is below.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Submit RSVP' })).toHaveCount(0);
+});
+
+test('a device that never held a session may still look up a saved response', async ({ page }) => {
+  await stubGuestRoutes(page, {
+    event: BEFORE_START,
+    household: { ...respondedHousehold(), editable: false },
+    rsvpSession: false,
+  });
+  await scanPrintedEntry(page);
+
+  // The read-only lookup is the whole point of this window, and it never names a
+  // deadline: the instruction to answer would be an instruction nobody can obey.
+  await expect(page.getByRole('heading', { name: 'Find your household to view a saved response.' })).toBeVisible();
+  await expect(page.getByText(/Please RSVP by/u)).toHaveCount(0);
+  await page.getByLabel('Full name').fill('Taylor Morgan');
+  await page.getByRole('button', { name: 'Find my invitation' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+  await expect(page.getByText('2 attending · 1 not attending')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
 });
 
 test('a scan with no credential lands on the token-free unavailable page', async ({ page }) => {

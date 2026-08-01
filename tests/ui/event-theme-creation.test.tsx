@@ -6,7 +6,11 @@ import { createAppRouter } from '../../src/app/router';
 import { RouterProvider } from 'react-router-dom';
 
 const CREATED = {
-  event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+  event: {
+    id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo', eventDate: '2026-09-19',
+    eventStartAt: '2026-09-19T05:00:00.000Z', eventStartTime: '00:00',
+    eventTimezone: 'America/Chicago',
+  },
   eventLink: 'https://example.test/join#entry-id.entry-secret',
   managementLink: 'https://example.test/manage/manager-secret',
   csrfToken: 'csrf-a',
@@ -60,6 +64,8 @@ it('selects a theme during creation and submits its canonical configuration', as
     name: 'Maya & Theo',
     eventDate: '2026-09-19',
     welcomeMessage: 'Come share the moments you caught.',
+    // The visible midnight default, sent explicitly rather than assumed by the Worker.
+    eventStartTime: '00:00',
     // Defaulted from the host's own browser and sent for the server to validate.
     eventTimezone: expect.any(String),
     rsvpDeadlineDate: '2026-09-05',

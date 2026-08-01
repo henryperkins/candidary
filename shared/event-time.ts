@@ -4,6 +4,7 @@
 // somewhere else, and only the event's own zone decides when the day ends.
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/u;
+const TIME_OF_DAY = /^(\d{2}):(\d{2})$/u;
 // Rejects fixed-offset identifiers such as "+05:30", which modern engines
 // accept but which are not IANA zones and would not track a future DST rule.
 const IANA_SHAPE = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/u;
@@ -76,6 +77,30 @@ function zonedDate(formatter: Intl.DateTimeFormat, instantMs: number): CalendarD
     return Number(part.value);
   };
   return { year: read('year'), month: read('month'), day: read('day') };
+}
+
+/**
+ * The instant's local wall clock, re-encoded as if those fields were UTC.
+ *
+ * Two of those numbers subtracted give the zone's offset at that instant, and
+ * two of them compared give "is this the wall clock the host asked for" without
+ * any string formatting. Nothing here interprets the value as a real instant.
+ */
+function localFieldsAsUtc(formatter: Intl.DateTimeFormat, instantMs: number): number {
+  const parts = formatter.formatToParts(new Date(instantMs));
+  const read = (type: Intl.DateTimeFormatPartTypes): number => {
+    const part = parts.find((candidate) => candidate.type === type);
+    if (!part) throw new RangeError(`Formatted date is missing its ${type}.`);
+    return Number(part.value);
+  };
+  return Date.UTC(
+    read('year'),
+    read('month') - 1,
+    read('day'),
+    read('hour'),
+    read('minute'),
+    read('second'),
+  );
 }
 
 function parseCalendarDate(dateOnly: string): CalendarDate {
@@ -163,4 +188,83 @@ export function localDateForInstant(instant: string, timeZone: string): string {
     throw new RangeError('That timestamp could not be read.');
   }
   return isoDateOf(zonedDate(formatter, instantMs));
+}
+
+/**
+ * The 24-hour local wall-clock time an instant falls on in the event's own zone.
+ *
+ * The companion to `localDateForInstant`: together they hand a host back the
+ * exact date and time they typed, rather than the browser's rendering of an
+ * absolute value.
+ */
+export function localTimeForInstant(instant: string, timeZone: string): string {
+  const formatter = requireFormatter(timeZone);
+  const instantMs = Date.parse(instant);
+  if (!Number.isFinite(instantMs)) {
+    throw new RangeError('That timestamp could not be read.');
+  }
+  const local = localFieldsAsUtc(formatter, instantMs);
+  const asDate = new Date(local);
+  return [
+    String(asDate.getUTCHours()).padStart(2, '0'),
+    String(asDate.getUTCMinutes()).padStart(2, '0'),
+  ].join(':');
+}
+
+/**
+ * The absolute instant of a local wall-clock date and time in `timeZone`.
+ *
+ * The event's start is a time the host reads off a card, not a timestamp a
+ * browser computed, so the same rule as `endOfLocalDate` applies: only the
+ * event's own zone may turn it into an instant.
+ *
+ * Both discontinuities are answered explicitly rather than left to whatever a
+ * conversion library would do:
+ *
+ * - A local time that never happens, because the zone sprang forward over it,
+ *   is **rejected**. Silently moving a host's 02:30 to 03:30 would change what
+ *   the invitation means without telling anyone.
+ * - A local time that happens twice, because the zone fell back over it,
+ *   resolves to the **earlier** occurrence, deterministically.
+ *
+ * The search probes the window around the target for every UTC offset the zone
+ * uses near it, then solves each offset exactly. An offset that is genuinely in
+ * force yields a candidate whose own wall clock reads back as the requested
+ * one; an offset that is not in force at that moment fails that read-back and
+ * is discarded. So a skipped hour produces no candidate at all, and a repeated
+ * hour produces two, of which the earlier is returned.
+ */
+export function instantForLocalDateTime(
+  dateOnly: string,
+  timeOfDay: string,
+  timeZone: string,
+): string {
+  const formatter = requireFormatter(timeZone);
+  const date = parseCalendarDate(dateOnly);
+  const match = TIME_OF_DAY.exec(timeOfDay);
+  if (!match) {
+    throw new RangeError('Choose a valid start time in 24-hour HH:MM form.');
+  }
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) {
+    throw new RangeError('Choose a valid start time in 24-hour HH:MM form.');
+  }
+  const target = Date.UTC(date.year, date.month - 1, date.day, hour, minute);
+
+  const offsets = new Set<number>();
+  for (let probe = target - WINDOW_MS; probe <= target + WINDOW_MS; probe += PROBE_STEP_MS) {
+    offsets.add(localFieldsAsUtc(formatter, probe) - probe);
+  }
+
+  let earliest: number | null = null;
+  for (const offset of offsets) {
+    const candidate = target - offset;
+    if (localFieldsAsUtc(formatter, candidate) !== target) continue;
+    if (earliest === null || candidate < earliest) earliest = candidate;
+  }
+  if (earliest === null) {
+    throw new RangeError('That start time does not exist on that date in this time zone.');
+  }
+  return new Date(earliest).toISOString();
 }

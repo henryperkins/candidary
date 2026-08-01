@@ -391,6 +391,25 @@ Fixed under this task:
 - `color-contrast` on the guest ground — see "Contrast remediation" below.
 - `color-contrast` on the landing privacy note — see "Contrast remediation" below.
 
+## Awaiting verification — date-driven guest phase
+
+`docs/superpowers/specs/2026-08-01-date-driven-guest-phase-design.md` adds two guest surfaces and
+one manager control. **Nothing in the table below has been measured.** Every other matrix in this
+document records a browser run; this one records what the responsive and accessibility pass owes, so
+that the absence of evidence is written down rather than inferred from a missing row. No entry may
+move into "Verified states" without a run of the commands at the top of this document on the
+revision that carries it.
+
+| Surface | Widths / viewports | Claim to be measured |
+| --- | --- | --- |
+| Before-start, responded household | 320 x 568, 390 x 844 | Heading, start line, photo line, and the embedded saved response contained with no page-level horizontal scroll; exactly one `<h1>` in the document with the embedded household headings beneath it at `<h2>` |
+| Before-start, unrecognized or unresponded | 320 x 844, 390 x 844 | A 44 x 44 lookup field and complete action; the refusal sentence identical to the one a miss returns; no guest RSVP request issued at all when `rsvpAccess` is `unavailable` |
+| Waiting, photo delivery paused | 320 x 844, 390 x 844 | The event hero and the two paused sentences and nothing else; no RSVP lookup, receipt, or disclosure in the document |
+| Manager photo intake control | 320 x 844, 390 x 844 | The state rendered as text beside a 44 x 44 action at both widths, and the status and action refetching across the event start from `photoIntakeRecheckAfterMs` rather than from the browser clock |
+
+No tracked baseline is claimed for any of these. A PNG is added to the matrices above only once the
+state has been captured and inspected under the exactness rules in "Tracked visual baselines".
+
 ## Decisions recorded
 
 - **Workflow text floor.** The 160 px minimum for workflow step text applies to the one- and

@@ -43,7 +43,13 @@ function errorJson(body: Record<string, unknown>, status: number) {
 }
 
 const CREATED = {
-  event: { id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo' },
+  // The Worker resolved the instant from the date, the local start time, and the
+  // zone; the receipt reads that back rather than restating what was typed.
+  event: {
+    id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo', eventDate: '2026-09-19',
+    eventStartAt: '2026-09-19T05:00:00.000Z', eventStartTime: '00:00',
+    eventTimezone: 'America/Chicago',
+  },
   eventLink: 'https://example.test/join#entry-id.entry-secret',
   managementLink: 'https://example.test/manage/manager-secret',
   csrfToken: 'csrf-a',
@@ -76,6 +82,9 @@ async function createEvent(user: ReturnType<typeof userEvent.setup>) {
 }
 
 afterEach(() => {
+  // Lifecycle boundaries are driven with fake timers, and a suite that left them
+  // installed would hang the next test that waits on a real one.
+  vi.useRealTimers();
   cleanup();
   localStorage.clear();
   vi.unstubAllGlobals();
@@ -178,6 +187,35 @@ describe('public Candidary experience', () => {
     expect(JSON.parse(String(request?.body))).toMatchObject({
       theme: { version: 1, presetId: 'candidary-default', overrides: {} },
     });
+  });
+
+  it('offers a visible midnight start time and reads the resolved start back in the event zone', async () => {
+    // The host is creating an event in another zone, which is the case that says
+    // whether the receipt reports the start they chose or the one this laptop shows.
+    const created = {
+      ...CREATED,
+      event: { ...CREATED.event, eventTimezone: 'Europe/London', eventStartAt: '2026-09-18T23:00:00.000Z' },
+    };
+    const fetchMock = vi.fn<typeof fetch>(() => json(created, 201));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const user = userEvent.setup();
+
+    // Prefilled, so a start time is not a new completion hurdle, and visible, so
+    // it is never an invisible server assumption either.
+    expect(screen.getByLabelText('Event start time')).toBeVisible();
+    expect(screen.getByLabelText('Event start time')).toHaveValue('00:00');
+
+    await user.clear(screen.getByLabelText('Event time zone'));
+    await user.type(screen.getByLabelText('Event time zone'), 'Europe/London');
+    await createEvent(user);
+
+    const [, request] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      eventStartTime: '00:00', eventTimezone: 'Europe/London',
+    });
+    expect(screen.getByText('Maya & Theo begins September 19, 2026 at 12:00 AM (Europe/London).')).toBeVisible();
+    expect(screen.getByText('RSVP is paused until you add and validate the guest list. Photo delivery opens by itself when the event starts.')).toBeVisible();
   });
 
   it('associates create errors with their fields and focuses the first invalid one', async () => {
@@ -342,16 +380,22 @@ describe('public Candidary experience', () => {
   });
 });
 
+// The photo-drop phase with nothing else switched on, so a note test exercises the
+// notes disclosure rather than the gallery or the household one beside it.
+const GUEST_EVENT = {
+  id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
+  welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
+  galleryVisible: false, moderationRequired: true, phase: 'photos-primary',
+  rsvpState: 'disabled', rsvpAccess: 'unavailable', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
+  eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
+  lifecycleRecheckAfterMs: null,
+};
+
 describe('guest event experience', () => {
   it('loads the private photo drop first and keeps the gallery and notes secondary', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith('/api/event/maya-theo')) return json({ event: {
-        id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-        welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
-        galleryVisible: true, moderationRequired: true, phase: 'photos-primary',
-        rsvpState: 'disabled', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
-      }, role: 'guest' });
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: { ...GUEST_EVENT, galleryVisible: true }, role: 'guest' });
       if (url.endsWith('/gallery')) return json({ media: [{
         id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'Golden hour',
         publicationStatus: 'published', uploadState: 'stored', width: 800, height: 600,
@@ -379,12 +423,7 @@ describe('guest event experience', () => {
   it('names the note field after the event rather than leaving it to a placeholder', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith('/api/event/maya-theo')) return json({ event: {
-        id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-        welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
-        galleryVisible: false, moderationRequired: true, phase: 'photos-primary',
-        rsvpState: 'disabled', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
-      }, role: 'guest' });
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
       if (url.endsWith('/messages')) return json({ items: [] });
       throw new Error(`Unexpected request ${url}`);
     }));
@@ -407,7 +446,10 @@ const MANAGED_EVENT = {
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
-  eventTimezone: 'America/Chicago', rsvpEnabled: false,
+  eventTimezone: 'America/Chicago',
+  eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
+  photosOpen: true, photoIntakeState: 'open', photoIntakeRecheckAfterMs: null,
+  rsvpEnabled: false,
   rsvpDeadlineAt: '2026-09-05T04:59:59.999Z', rsvpDeadlineDate: '2026-09-04',
   rsvpRosterVersion: 7,
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
@@ -1170,7 +1212,8 @@ describe('manager experience', () => {
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
         welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: false,
-        moderationRequired: true, storedMediaCount: mediaRequests > 0 ? 1 : 0, storedBytes: 128,
+        moderationRequired: true, photoIntakeState: 'open',
+        storedMediaCount: mediaRequests > 0 ? 1 : 0, storedBytes: 128,
         guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
       } });
       if (url.includes('/media')) {
@@ -1642,7 +1685,7 @@ describe('manager experience', () => {
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
         welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: false,
-        moderationRequired: true, storedMediaCount: 2, storedBytes: 128,
+        moderationRequired: true, photoIntakeState: 'open', storedMediaCount: 2, storedBytes: 128,
         guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
       } });
       if (url.includes('/media')) {
@@ -2091,6 +2134,11 @@ describe('host account preferences and sign out', () => {
 });
 
 describe('guest event phase composition', () => {
+  const SAVED_HOUSEHOLD = {
+    id: 'household-a', label: 'The Morgan household', version: 4, editable: false, renewalRequired: false,
+    deadlineAt: '2026-09-05T23:59:59.999Z', invitees: [], firstRespondedAt: '2026-08-01T12:00:00.000Z',
+    latestRespondedAt: '2026-08-01T12:00:00.000Z', latestActor: 'household' as const,
+  };
   const guestEvent: GuestEventView = {
     id: 'event-a',
     slug: 'maya-theo',
@@ -2102,10 +2150,15 @@ describe('guest event phase composition', () => {
     galleryVisible: false,
     moderationRequired: true,
     eventTimezone: 'America/Chicago',
+    eventStartAt: '2026-09-19T22:00:00.000Z',
     rsvpDeadlineAt: '2026-09-05T23:59:59.999Z',
     rsvpDeadlineDate: '2026-09-05',
     rsvpState: 'open',
     phase: 'photos-primary',
+    // Photos opened before the event did, so the household disclosure survives
+    // into that early window. Everything about it is decided here, by the server.
+    rsvpAccess: 'editable',
+    lifecycleRecheckAfterMs: null,
     theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
   };
 
@@ -2151,42 +2204,84 @@ describe('guest event phase composition', () => {
   });
 
   it.each(['closed', 'paused'] as const)('offers a secondary saved-response view for %s RSVP without delaying photo controls', async (rsvpState) => {
-    const savedHousehold = {
-      id: 'household-a', label: 'The Morgan household', version: 4, editable: false, renewalRequired: false,
-      deadlineAt: '2026-09-05T23:59:59.999Z', invitees: [], firstRespondedAt: '2026-08-01T12:00:00.000Z',
-      latestRespondedAt: '2026-08-01T12:00:00.000Z', latestActor: 'household' as const,
-    };
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, rsvpState }, role: 'guest' });
-      if (path.endsWith('/rsvp/household')) return json({ household: savedHousehold });
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, rsvpState, rsvpAccess: 'read-only' }, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return json({ household: SAVED_HOUSEHOLD });
       throw new Error(`Unexpected request ${path}`);
     }));
     const user = userEvent.setup();
 
-    renderEvent({ ...guestEvent, rsvpState });
+    renderEvent({ ...guestEvent, rsvpState, rsvpAccess: 'read-only' });
     await screen.findByRole('button', { name: 'Take a photo' });
     await user.click(screen.getByText('View RSVP'));
     await screen.findByRole('heading', { name: 'Your RSVP' });
     expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
   });
 
-  it('keeps a previously matched household readable while waiting', async () => {
-    const savedHousehold = {
-      id: 'household-a', label: 'The Morgan household', version: 4, editable: false, renewalRequired: false,
-      deadlineAt: '2026-09-05T23:59:59.999Z', invitees: [], firstRespondedAt: '2026-08-01T12:00:00.000Z',
-      latestRespondedAt: '2026-08-01T12:00:00.000Z', latestActor: 'household' as const,
-    };
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+  /* Photos can open before the event does, so the disclosure survives that early window and
+     disappears at the start. The server says which it is; nothing here compares a date. */
+  it('keeps the household disclosure through an early opening and drops it at the start', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const earlyOpen = { ...guestEvent, rsvpState: 'closed' as const, rsvpAccess: 'read-only' as const, lifecycleRecheckAfterMs: 60_000 };
+    const started = { ...earlyOpen, rsvpAccess: 'unavailable' as const, lifecycleRecheckAfterMs: null };
+    let eventReads = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, uploadsEnabled: false, phase: 'waiting', rsvpState: 'paused' }, role: 'guest' });
-      if (path.endsWith('/rsvp/household')) return json({ household: savedHousehold });
+      if (path.endsWith('/api/event/maya-theo')) {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? earlyOpen : started, role: 'guest' });
+      }
+      if (path.endsWith('/rsvp/household')) return json({ household: SAVED_HOUSEHOLD });
       throw new Error(`Unexpected request ${path}`);
-    }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const rsvpRequests = () => fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter((path) => path.includes('/rsvp/'));
+    const user = userEvent.setup();
 
-    renderEvent({ ...guestEvent, uploadsEnabled: false, phase: 'waiting', rsvpState: 'paused' });
-    await screen.findByText('RSVP is paused. Your saved response is still here.');
+    renderEvent(earlyOpen);
+    await screen.findByRole('button', { name: 'Take a photo' });
+    await user.click(screen.getByText('View RSVP'));
+    await screen.findByRole('heading', { name: 'Your RSVP' });
+    const readBeforeStart = rsvpRequests().length;
+    expect(readBeforeStart).toBeGreaterThan(0);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    // The guest touched nothing. The disclosure is gone with the household window
+    // it belonged to, and nothing asked the server for one afterwards.
+    expect(screen.queryByText('View RSVP')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
+    expect(rsvpRequests()).toHaveLength(readBeforeStart);
+  });
+
+  it('says only that photo delivery is paused once the event has started', async () => {
+    const waiting = {
+      ...guestEvent,
+      uploadsEnabled: false,
+      phase: 'waiting' as const,
+      rsvpState: 'closed' as const,
+      rsvpAccess: 'unavailable' as const,
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: waiting, role: 'guest' });
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEvent(waiting);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Photo delivery is paused' })).toBeVisible();
+    expect(screen.getByText('The host has paused photo delivery for now. Please try again later.')).toBeVisible();
+    // The hero still names the event, so a guest who rechecked across the start
+    // lands on the same product rather than on a different page.
+    expect(screen.getByText(/Maya & Theo/, { selector: '.photo-drop__event' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Take a photo' })).not.toBeInTheDocument();
+    // RSVP has left the guest experience entirely, so none of it mounts or asks.
+    expect(screen.queryByRole('heading', { name: 'Your RSVP' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.map(([input]) => String(input)).filter((path) => path.includes('/rsvp/'))).toEqual([]);
   });
 
   it('hides an already-mounted RSVP section with every secondary section after photo delivery', async () => {

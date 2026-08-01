@@ -43,8 +43,8 @@ async function householdSession(access: Access, firstName: string) {
   return body.data.household as { id: string; version: number };
 }
 
-async function rsvpReady(uploadsEnabled = true) {
-  const access = await eventAccess('Maya & Theo', uploadsEnabled);
+async function rsvpReady(openPhotosEarly = true) {
+  const access = await eventAccess('Maya & Theo', openPhotosEarly);
   await importRoster(access, ROSTER);
   await openRsvp(access);
   return access;
@@ -65,6 +65,10 @@ describe('lifecycle cleanup', () => {
 
   it('removes expired reserved objects and releases event quota', async () => {
     const access = await eventAccess();
+    // The whole sweep is dated in the past, so photo delivery has to have been
+    // open before the reservation this releases was ever taken.
+    await testEnv.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
+      .bind('2026-07-21T11:00:00.000Z', access.event.id).run();
     const repository = new MediaRepository(testEnv.DB);
     const media = await repository.reserve({
       id: crypto.randomUUID(), eventId: access.event.id, uploaderSessionId: (await new AuthService(testEnv).resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,

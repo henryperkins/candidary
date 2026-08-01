@@ -34,6 +34,7 @@ const RSVP_PRIMARY: Partial<GuestEventView> = {
   uploadsEnabled: false,
   phase: 'rsvp-primary',
   rsvpState: 'open',
+  rsvpAccess: 'editable',
   rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
   rsvpDeadlineDate: '2026-09-05',
 };
@@ -147,13 +148,16 @@ test('the RSVP household holds the 1280 layout at 200 per cent zoom', async ({ p
   await expectContained(page, page.locator('.rsvp-flow'), 'household at 200% zoom');
 });
 
-test('the receipt and the closed state stay contained with maximum names', async ({ page }) => {
+test('the before-start receipt stays contained with maximum names', async ({ page }) => {
   const household = maximumHousehold();
   await stubGuestRoutes(page, {
+    // The read-only window: the hero, the start line, and the embedded receipt
+    // all stack on one surface, which is more of it than the old fallback held.
     event: {
-      uploadsEnabled: false,
-      phase: 'waiting',
+      uploadsEnabled: true,
+      phase: 'before-start',
       rsvpState: 'closed',
+      rsvpAccess: 'read-only',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },
@@ -177,7 +181,7 @@ test('the receipt and the closed state stay contained with maximum names', async
     await page.setViewportSize({ width, height: 844 });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
     await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
-    await expectContained(page, page.locator('.rsvp-flow'), `closed receipt at ${width}`);
+    await expectContained(page, page.locator('.guest-before-start'), `before-start receipt at ${width}`);
   }
 });
 

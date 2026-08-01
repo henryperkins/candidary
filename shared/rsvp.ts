@@ -8,7 +8,10 @@ import {
   MAX_RSVP_TEXT_LENGTH,
 } from './constants';
 import type {
+  GuestEventPhase,
   GuestPhaseView,
+  PhotoIntakeState,
+  RsvpAccess,
   RsvpAttendance,
   RsvpInviteeKind,
   RsvpState,
@@ -86,25 +89,200 @@ export function parsePersonText(value: string): PersonTextResult {
   return { ok: true, value: collapsed };
 }
 
+/**
+ * The value `migrations/0010_event_start.sql` writes where it cannot compute a
+ * correctly zoned start, because SQLite has no IANA database.
+ *
+ * It is an intermediate migration sentinel and never a live start. A row still
+ * holding it keeps the pre-0010 boolean/deadline lifecycle — phase, RSVP route
+ * availability, and the household write guard alike — so a deploy that lands
+ * before the data-aware backfill cannot begin refusing RSVPs at a start time
+ * that is up to fourteen hours wrong. Release closes on there being none left.
+ */
+export const EVENT_START_MIGRATION_SENTINEL = '1970-01-01T00:00:00.000Z';
+
+export interface EventLifecycleInput {
+  // Photo delivery is *permitted* for this event. It no longer means "open":
+  // the clock decides that.
+  uploadsEnabled: boolean;
+  rsvpEnabled: boolean;
+  rsvpDeadlineAt: string | null;
+  eventStartAt: string;
+  // Non-null only when the host opened photo delivery early, holding the server
+  // instant at which they did. Null means "open automatically at the start".
+  photosOpenFrom: string | null;
+  // The irreversible printed-entry stop. It withdraws every guest affordance,
+  // including the read-only saved-response lookup.
+  entryDisabled?: boolean;
+}
+
+function rsvpStateFor(input: EventLifecycleInput, nowMs: number): RsvpState {
+  const deadline = input.rsvpDeadlineAt ? Date.parse(input.rsvpDeadlineAt) : NaN;
+  if (!Number.isFinite(deadline)) return 'disabled';
+  if (nowMs > deadline) return 'closed';
+  return input.rsvpEnabled ? 'open' : 'paused';
+}
+
+/**
+ * The first millisecond on which RSVP reads as closed.
+ *
+ * The existing contract keeps the deadline instant itself open (`now >
+ * deadline` closes it), so a boundary scheduled at the deadline would return
+ * the same view and leave a tab editable until some later wake-up. Scheduling
+ * the first closed millisecond keeps that semantics without a spin.
+ */
+function rsvpClosesAt(input: EventLifecycleInput): number | null {
+  const deadline = input.rsvpDeadlineAt ? Date.parse(input.rsvpDeadlineAt) : NaN;
+  return Number.isFinite(deadline) ? deadline + 1 : null;
+}
+
+function nextBoundaryDelay(
+  nowMs: number,
+  boundaries: readonly (number | null)[],
+): number | null {
+  let soonest: number | null = null;
+  for (const boundary of boundaries) {
+    if (boundary === null || !Number.isFinite(boundary)) continue;
+    if (boundary <= nowMs) continue;
+    if (soonest === null || boundary < soonest) soonest = boundary;
+  }
+  return soonest === null ? null : soonest - nowMs;
+}
+
+export function isLegacyEventStart(eventStartAt: string): boolean {
+  return eventStartAt === EVENT_START_MIGRATION_SENTINEL
+    || !Number.isFinite(Date.parse(eventStartAt));
+}
+
+/**
+ * Whether the event's start has passed *and* that start is trustworthy.
+ *
+ * A migration-sentinel row is never "started", so nothing built on this — the
+ * guest RSVP routes above all — begins refusing at an instant that row does not
+ * really have.
+ */
+export function eventStartHasPassed(eventStartAt: string, now = new Date()): boolean {
+  if (isLegacyEventStart(eventStartAt)) return false;
+  return now.getTime() >= Date.parse(eventStartAt);
+}
+
+/**
+ * The instant photo delivery is scheduled to open, and whether it has.
+ *
+ * `uploadsEnabled` is capability; the clock does the opening. Separating them
+ * is what lets the schedule be authoritative while still leaving the host an
+ * override that a stale page cannot defeat.
+ */
+export function resolveScheduledOpen(input: EventLifecycleInput): number {
+  const early = input.photosOpenFrom ? Date.parse(input.photosOpenFrom) : NaN;
+  const start = Date.parse(input.eventStartAt);
+  if (Number.isFinite(early)) return early;
+  return Number.isFinite(start) ? start : 0;
+}
+
+/**
+ * Whether the event has begun. A sentinel row has no trustworthy start, so it
+ * is treated as begun for the host's photo controls — its pause and reopen keep
+ * working exactly as they did before 0010 — while `resolveGuestEventPhase`
+ * keeps its guest surface on the old rules.
+ */
+function hasStarted(input: EventLifecycleInput, nowMs: number): boolean {
+  const start = Date.parse(input.eventStartAt);
+  return Number.isFinite(start) ? nowMs >= start : true;
+}
+
 export function resolveGuestEventPhase(
-  input: {
-    uploadsEnabled: boolean;
-    rsvpEnabled: boolean;
-    rsvpDeadlineAt: string | null;
-  },
+  input: EventLifecycleInput,
   now = new Date(),
 ): GuestPhaseView {
-  const deadline = input.rsvpDeadlineAt ? Date.parse(input.rsvpDeadlineAt) : NaN;
-  const hasValidDeadline = Number.isFinite(deadline);
-  const expired = hasValidDeadline && now.getTime() > deadline;
-  const rsvpState: RsvpState = !hasValidDeadline
-    ? 'disabled'
-    : expired
-      ? 'closed'
-      : input.rsvpEnabled ? 'open' : 'paused';
-  if (input.uploadsEnabled) return { phase: 'photos-primary', rsvpState };
-  if (rsvpState === 'open') return { phase: 'rsvp-primary', rsvpState };
-  return { phase: 'waiting', rsvpState };
+  const nowMs = now.getTime();
+  const rsvpState = rsvpStateFor(input, nowMs);
+  const entryDisabled = input.entryDisabled === true;
+
+  if (isLegacyEventStart(input.eventStartAt)) {
+    // Pre-0010 rules, unchanged: the boolean is the override it used to be, and
+    // nothing refuses at a start instant this row does not really have.
+    const phase: GuestEventPhase = input.uploadsEnabled
+      ? 'photos-primary'
+      : rsvpState === 'open' ? 'rsvp-primary' : 'waiting';
+    const rsvpAccess: RsvpAccess = entryDisabled || rsvpState === 'disabled'
+      ? 'unavailable'
+      : rsvpState === 'open' ? 'editable' : 'read-only';
+    return {
+      phase,
+      rsvpState,
+      rsvpAccess,
+      lifecycleRecheckAfterMs: nextBoundaryDelay(nowMs, [rsvpClosesAt(input)]),
+    };
+  }
+
+  const scheduledOpenAt = resolveScheduledOpen(input);
+  const photosOpen = input.uploadsEnabled && nowMs >= scheduledOpenAt;
+  const started = hasStarted(input, nowMs);
+
+  const phase: GuestEventPhase = photosOpen
+    ? 'photos-primary'
+    : !started
+      ? (rsvpState === 'open' ? 'rsvp-primary' : 'before-start')
+      : 'waiting';
+
+  // Order is the contract. At or after the start RSVP has left the guest
+  // experience entirely, without exception; before it, the irreversible entry
+  // stop and a disabled RSVP withdraw it; an open RSVP is editable; and every
+  // other pre-start state leaves the read-only saved-response window.
+  const rsvpAccess: RsvpAccess = started
+    ? 'unavailable'
+    : entryDisabled || rsvpState === 'disabled'
+      ? 'unavailable'
+      : rsvpState === 'open' ? 'editable' : 'read-only';
+
+  return {
+    phase,
+    rsvpState,
+    rsvpAccess,
+    // Every guest-view boundary, not merely every phase change: during an
+    // early-open `photos-primary` period the phase does not move at the
+    // deadline or at the start, but the RSVP disclosure goes from editable to
+    // read-only and then disappears.
+    lifecycleRecheckAfterMs: nextBoundaryDelay(nowMs, [
+      scheduledOpenAt,
+      Date.parse(input.eventStartAt),
+      rsvpClosesAt(input),
+    ]),
+  };
+}
+
+export interface PhotoIntakeView {
+  photoIntakeState: PhotoIntakeState;
+  photosOpen: boolean;
+  photoIntakeRecheckAfterMs: number | null;
+}
+
+export function resolvePhotoIntake(
+  input: EventLifecycleInput,
+  now = new Date(),
+): PhotoIntakeView {
+  const nowMs = now.getTime();
+  const scheduledOpenAt = resolveScheduledOpen(input);
+  const started = hasStarted(input, nowMs);
+  const photoIntakeRecheckAfterMs = nextBoundaryDelay(nowMs, [
+    scheduledOpenAt,
+    Date.parse(input.eventStartAt),
+  ]);
+
+  if (!input.uploadsEnabled) {
+    // Checked first, so an event whose capability is withheld never reports
+    // itself as scheduled to open.
+    return { photoIntakeState: 'paused', photosOpen: false, photoIntakeRecheckAfterMs };
+  }
+  if (nowMs < scheduledOpenAt) {
+    return { photoIntakeState: 'scheduled', photosOpen: false, photoIntakeRecheckAfterMs };
+  }
+  return {
+    photoIntakeState: started ? 'open' : 'open-early',
+    photosOpen: true,
+    photoIntakeRecheckAfterMs,
+  };
 }
 
 export interface HouseholdNameKeys {

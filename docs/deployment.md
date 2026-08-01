@@ -160,6 +160,64 @@ npx wrangler d1 execute candidary-core --remote --command "PRAGMA foreign_key_ch
 
 Both must come back empty.
 
+### 0010 is gated on a data-aware backfill, not on its own SQL
+
+`0010_event_start.sql` adds `events.event_start_at` and `events.photos_open_from`, backfills the start
+from `event_date || 'T00:00:00.000Z'`, and stamps `photos_open_from` on every event whose photo
+delivery is already on. **It must not be treated as safe on the strength of that stamp alone.** SQLite
+has no IANA database, so the backfilled start lands at UTC midnight rather than local midnight — up to
+roughly fourteen hours off. For an event whose delivery is already on, the stamp makes that
+irrelevant. For an uploads-off event with an active roster it is not irrelevant at all: under the new
+Worker its guest RSVP routes would begin refusing at the approximate start, potentially most of a day
+early or late.
+
+Before start-time enforcement is enabled, release must either:
+
+1. prove there are no non-deleted legacy events; or
+2. perform a data-aware backfill that resolves each non-deleted event's start through its own IANA
+   zone.
+
+A second condition applies to either path, and checking only for the backfill's zone error is
+insufficient. An existing event whose RSVP deadline **date equals its event date** can never satisfy
+`rsvpDeadlineAt < eventStartAt` at any start time on that date: the stored deadline is the last
+millisecond of that local day, which is after every start the day contains. Those rows need an explicit
+host correction or a reviewed data correction before the new validation is enforced.
+
+The rollout order is deterministic:
+
+1. **Before applying `0010`**, inventory every non-deleted event ID and calculate its expected
+   local-midnight start through `instantForLocalDateTime`. Resolve any same-day deadline rows before
+   continuing. Do the zone arithmetic in the inventory tool, never in SQL — SQLite is what got this
+   wrong in the first place.
+
+   ```powershell
+   npx wrangler d1 execute candidary-core --remote --command "SELECT id, slug, event_date, event_timezone, rsvp_deadline_at, uploads_enabled, rsvp_enabled FROM events WHERE deleted_at IS NULL ORDER BY event_date"
+   ```
+
+2. **Apply `0010` while the old Worker is still serving.** Its UTC-midnight values are not yet
+   interpreted as lifecycle starts, so the approximation is inert for as long as this step lasts.
+3. **Backfill and verify.** Perform the data-aware backfill, then verify every inventoried ID against
+   its expected IANA instant. The new Worker is not deployed while any inventoried row still holds the
+   approximate value.
+4. **Deploy the compatible Worker.** An event created by the old Worker after the migration was
+   applied carries the epoch default `1970-01-01T00:00:00.000Z`. The new Worker recognizes that
+   sentinel and temporarily retains the pre-0010 boolean/deadline phase rules and guest RSVP route
+   availability for such a row, so a deploy-gap event cannot begin refusing RSVPs at a start it does
+   not really have.
+5. **Run a final epoch-sentinel scan.** Validate each gap row's deadline, data-aware backfill the rows
+   that satisfy the invariant, and stop for host or reviewed data correction if one does not. Verify
+   that no non-deleted event retains the sentinel before closing the release gate.
+
+   ```powershell
+   npx wrangler d1 execute candidary-core --remote --command "SELECT COUNT(*) AS remaining FROM events WHERE deleted_at IS NULL AND event_start_at = '1970-01-01T00:00:00.000Z'"
+   ```
+
+   Expected `0`.
+
+The epoch value is therefore an intermediate migration sentinel and never a live start. Corrected
+legacy rows and events created by the new Worker use the new lifecycle immediately; a deploy-gap row
+stays safely on the old behavior only until step 5.
+
 ## Wedding rehearsal gate
 
 Do not describe a deployment as wedding-ready until a dedicated rehearsal event passes all of the following:

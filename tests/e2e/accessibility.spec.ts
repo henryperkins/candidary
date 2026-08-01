@@ -201,8 +201,9 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event: {
     id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Help us remember tonight.',
     uploadsEnabled: true, galleryVisible: false, moderationRequired: true,
-    coverObjectKey: null, eventTimezone: 'America/Chicago',
+    coverObjectKey: null, eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
     rsvpDeadlineAt: null, rsvpDeadlineDate: null, phase: 'photos-primary', rsvpState: 'disabled',
+    rsvpAccess: 'unavailable', lifecycleRecheckAfterMs: null,
     theme: eventTheme('candidary-default'),
   }, role: 'guest' }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
@@ -227,6 +228,7 @@ test('guest RSVP lookup and household editor are semantic, touch-sized, focus-co
       uploadsEnabled: false,
       phase: 'rsvp-primary',
       rsvpState: 'open',
+      rsvpAccess: 'editable',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },
@@ -287,6 +289,7 @@ test('RSVP ambiguity, conflict, receipt, and keyboard-only operation stay announ
       uploadsEnabled: false,
       phase: 'rsvp-primary',
       rsvpState: 'open',
+      rsvpAccess: 'editable',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },
@@ -358,6 +361,7 @@ test('the saved RSVP receipt is announced, contained, and axe-clean', async ({ p
       uploadsEnabled: false,
       phase: 'rsvp-primary',
       rsvpState: 'open',
+      rsvpAccess: 'editable',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },

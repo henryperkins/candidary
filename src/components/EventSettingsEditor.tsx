@@ -62,8 +62,8 @@ interface EventSettingsSave {
 
 function zeroGenerations(): FieldGenerations {
   return {
-    name: 0, welcomeMessage: 0, eventTimezone: 0, rsvpDeadlineDate: 0,
-    rsvpEnabled: 0, uploadsEnabled: 0, galleryVisible: 0, moderationRequired: 0,
+    name: 0, welcomeMessage: 0, eventTimezone: 0, eventStartTime: 0,
+    rsvpDeadlineDate: 0, rsvpEnabled: 0, galleryVisible: 0, moderationRequired: 0,
   };
 }
 
@@ -361,7 +361,7 @@ export function EventSettingsEditor({
       : null;
   }
 
-  // Three fields block implicit submission, so Enter would otherwise do nothing
+  // Four fields block implicit submission, so Enter would otherwise do nothing
   // at all. It flushes instead, and never reloads the page.
   function flushOnEnter(keyEvent: KeyboardEvent) {
     if (keyEvent.key !== 'Enter') return;
@@ -439,6 +439,23 @@ export function EventSettingsEditor({
         />
         {fieldError('eventTimezone')}
       </div>
+      {/* The event date itself stays read-only here; only the local time the
+          host puts on it is editable, and the Worker resolves the instant. */}
+      <div className="settings-field">
+        <label htmlFor="settings-event-start-time">Event start time</label>
+        <input
+          id="settings-event-start-time"
+          name="eventStartTime"
+          type="time"
+          value={state.draft.eventStartTime}
+          required
+          aria-invalid={Boolean(errors.eventStartTime)}
+          aria-describedby={describedBy('eventStartTime')}
+          onChange={(change) => edit('eventStartTime', change.target.value, 'immediate')}
+          onKeyDown={flushOnEnter}
+        />
+        {fieldError('eventStartTime')}
+      </div>
       <div className="settings-field">
         <label htmlFor="settings-rsvp-deadline">RSVP deadline</label>
         <input
@@ -456,7 +473,6 @@ export function EventSettingsEditor({
       </div>
       {([
         ['rsvpEnabled', 'Accept RSVPs'],
-        ['uploadsEnabled', 'Accept private photo deliveries'],
         ['galleryVisible', 'Show the optional shared gallery'],
         ['moderationRequired', 'Review notes before sharing'],
       ] as const).map(([field, label]) => <div className="settings-toggle-field" key={field}>

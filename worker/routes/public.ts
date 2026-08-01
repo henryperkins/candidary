@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
-import { canonicalTimeZone, endOfLocalDate, isIanaTimeZone } from '../../shared/event-time';
+import { canonicalTimeZone, isIanaTimeZone } from '../../shared/event-time';
 import {
   assertOverridesLegible,
   DEFAULT_EVENT_THEME_CONFIG,
@@ -14,6 +14,7 @@ import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
 import { getSessionCookie, setSessionCookies } from '../http/cookies';
 import { assertRequestOrigin } from '../http/csrf';
+import { DEFAULT_EVENT_START_TIME, resolveEventSchedule } from '../http/event-schedule';
 import { eventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { EventService } from '../services/events';
@@ -25,36 +26,15 @@ const eventSchema = z.object({
   welcomeMessage: z.string().trim().min(1, 'Add a welcome message.').max(500, 'Use 500 characters or fewer.'),
   eventTimezone: z.string().min(1).max(64)
     .refine(isIanaTimeZone, 'Choose a valid time zone.'),
+  // Local wall clock, never an instant. Optional for rollout compatibility;
+  // the create form always sends it, prefilled to midnight.
+  eventStartTime: z.string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/u, 'Choose a valid start time.')
+    .default(DEFAULT_EVENT_START_TIME),
   rsvpDeadlineDate: z.string()
     .regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.'),
   theme: eventThemeConfigSchema.default(DEFAULT_EVENT_THEME_CONFIG),
 });
-
-/**
- * Turns the host's calendar date into the absolute instant the event closes.
- *
- * The date and the zone are the only things taken from the request; the instant
- * is derived here. A browser that sent its own timestamp would be answering a
- * question only the event's own zone can answer.
- */
-function resolveRsvpDeadline(input: {
-  eventDate: string;
-  rsvpDeadlineDate: string;
-  eventTimezone: string;
-}): string {
-  if (input.rsvpDeadlineDate > input.eventDate) {
-    throw new ApiError('VALIDATION_FAILED', 'Check the highlighted event details.', 422, {
-      rsvpDeadlineDate: 'The RSVP deadline must be on or before the event date.',
-    });
-  }
-  try {
-    return endOfLocalDate(input.rsvpDeadlineDate, input.eventTimezone);
-  } catch {
-    throw new ApiError('VALIDATION_FAILED', 'Check the highlighted event details.', 422, {
-      rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
-    });
-  }
-}
 
 export const publicRoutes = new Hono<AppBindings>();
 
@@ -92,9 +72,12 @@ publicRoutes.post('/events', async (context) => {
   // Stored canonically, so "america/chicago" and "America/Chicago" are one zone
   // in every later export and view.
   const eventTimezone = canonicalTimeZone(parsed.data.eventTimezone) ?? parsed.data.eventTimezone;
-  const rsvpDeadlineAt = resolveRsvpDeadline({ ...parsed.data, eventTimezone });
+  const schedule = resolveEventSchedule(
+    { ...parsed.data, eventTimezone },
+    'Check the highlighted event details.',
+  );
   const created = await new EventService(context.env).create(
-    { ...parsed.data, theme, eventTimezone, rsvpDeadlineAt },
+    { ...parsed.data, theme, eventTimezone, ...schedule },
     accountId,
   );
   const maxAge = Math.max(1, Math.floor((Date.parse(created.sessionExpiresAt) - Date.now()) / 1000));

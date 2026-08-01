@@ -275,7 +275,16 @@ test('the RSVP configuration fields hold their layout on the narrowest phone', a
   // Defaulted from the browser rather than left for the host to guess.
   await expect(timeZone).not.toHaveValue('');
 
-  for (const field of [timeZone, page.getByLabel('Event date'), page.getByLabel('RSVP deadline')]) {
+  // The start time is prefilled to midnight rather than left blank, so it is a
+  // choice the host can accept rather than a hurdle or an invisible assumption.
+  await expect(page.getByLabel('Event start time')).toHaveValue('00:00');
+
+  for (const field of [
+    timeZone,
+    page.getByLabel('Event date'),
+    page.getByLabel('Event start time'),
+    page.getByLabel('RSVP deadline'),
+  ]) {
     await expect(field).toBeVisible();
     const size = await measureTarget(field);
     expect(size.height, 'field height is tappable').toBeGreaterThanOrEqual(44);
@@ -294,14 +303,17 @@ test('a refused deadline takes focus and reads as a description at 320', async (
     json: {
       code: 'VALIDATION_FAILED',
       message: 'Check the highlighted event details.',
-      fieldErrors: { rsvpDeadlineDate: 'The RSVP deadline must be on or before the event date.' },
+      // The deadline is now measured against the resolved start instant, so a
+      // same-day deadline is refused too — and the refusal says so.
+      fieldErrors: { rsvpDeadlineDate: 'The RSVP deadline must be before the event starts.' },
       requestId: 'request-a',
     },
   }));
   await page.goto('/create');
   await page.getByLabel('Event name').fill('Maya & Theo');
   await page.getByLabel('Event date').fill('2026-09-19');
-  await page.getByLabel('RSVP deadline').fill('2026-09-20');
+  await page.getByLabel('Event start time').fill('17:00');
+  await page.getByLabel('RSVP deadline').fill('2026-09-19');
   await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
   await page.getByRole('button', { name: 'Create private event' }).click();
 
@@ -311,7 +323,7 @@ test('a refused deadline takes focus and reads as a description at 320', async (
   // The label still names the field; the refusal arrives only as its description.
   await expect(deadline).toHaveAccessibleName('RSVP deadline');
   await expect(deadline)
-    .toHaveAccessibleDescription('The RSVP deadline must be on or before the event date.');
+    .toHaveAccessibleDescription('The RSVP deadline must be before the event starts.');
 
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
