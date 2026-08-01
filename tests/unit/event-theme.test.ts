@@ -227,6 +227,21 @@ describe('event theme contract', () => {
     expect(theme.tokens.primaryHover).toBe('#ce6f62');
   });
 
+  it('keeps the hover of a write-eligible primary above the surface and label floors', () => {
+    const theme = resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#8b8b8b' },
+    });
+
+    expect(() => assertOverridesLegible(theme)).not.toThrow();
+    expect(Math.min(
+      contrastRatio(theme.tokens.primaryHover, theme.tokens.page),
+      contrastRatio(theme.tokens.primaryHover, theme.tokens.surface),
+      contrastRatio(theme.tokens.primaryHover, theme.tokens.raisedSurface),
+    )).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(theme.tokens.primaryForeground, theme.tokens.primaryHover)).toBeGreaterThanOrEqual(4.5);
+    expect(theme.tokens.primaryHover).not.toBe(theme.tokens.primary);
+  });
+
   it('rejects a primary override with no allowlisted 4.5:1 foreground', () => {
     expect(() => resolveEventTheme({
       version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#777777' },
@@ -276,13 +291,13 @@ describe('event theme contract', () => {
       .toThrow(expect.objectContaining({ field: 'overrides.primaryColor' } satisfies Partial<EventThemeResolutionError>));
   });
 
-  it.each(EVENT_THEME_PRESET_IDS)('accepts the authored %s primary and accent at the floor', (presetId) => {
-    const preset = EVENT_THEME_PRESETS.find((candidate) => candidate.id === presetId)!;
-    expect(() => assertOverridesLegible(resolveEventTheme({
-      version: 1,
-      presetId,
-      overrides: { primaryColor: preset.tokens.primary, accentColor: preset.tokens.accent },
-    }))).not.toThrow();
+  it.each(EVENT_THEME_PRESET_IDS)('keeps the authored %s primary legible on its own surfaces', (presetId) => {
+    const { tokens } = EVENT_THEME_PRESETS.find((candidate) => candidate.id === presetId)!;
+    expect(Math.min(
+      contrastRatio(tokens.primary, tokens.page),
+      contrastRatio(tokens.primary, tokens.surface),
+      contrastRatio(tokens.primary, tokens.raisedSurface),
+    )).toBeGreaterThanOrEqual(3);
   });
 
   it.each([

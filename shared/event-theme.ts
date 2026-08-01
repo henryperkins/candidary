@@ -209,28 +209,38 @@ function resolvePrimaryOnSurface(primary: HexColor, tokens: EventThemeTokens): H
 }
 
 /* Which way a hover moves is a decision the foreground already carries: a button with a white label
-   deepens, one with dark ink lightens. At either luminance extreme that pole is the one the color
-   already sits on, so blending toward it returned the primary unchanged and the hover state
-   disappeared outright — `#000000` and `#ffffff` both resolved to a hover identical to the button
-   they were meant to answer. Below this step the intended direction has no room left, so the move is
-   taken the other way, which is the only direction with any. The step is set where that reversal
-   reaches no color a host can still choose except a near-black one: across every color
-   `assertOverridesLegible` admits, the only ones that reverse carry a white label and none is lighter
-   than `#191915`, where deepening means nothing anyway. Every authored preset primary keeps its
-   intended direction. */
+   deepens, one with dark ink lightens. The full 10% step is preferred, then reduced until the label
+   and every surface floor still hold. If that direction has no room — at a luminance extreme or next
+   to the surface boundary — the search moves toward the opposite pole. Stored colors below the
+   write-time surface floor keep resolving; only a primary that already clears that floor requires its
+   hover to clear it too. */
 const HOVER_BLEND_WEIGHT = 0.1;
 const MIN_HOVER_CONTRAST = 1.02;
+const SURFACE_NON_TEXT_CONTRAST = 3;
 
-function resolveHover(primary: HexColor, foreground: HexColor): HexColor {
+function resolveHover(primary: HexColor, foreground: HexColor, tokens: EventThemeTokens): HexColor {
   const deepen = foreground === '#ffffff';
-  const intended = blend(primary, deepen ? '#000000' : '#ffffff', HOVER_BLEND_WEIGHT);
-  if (contrastRatio(intended, primary) >= MIN_HOVER_CONTRAST) return intended;
-  return blend(primary, deepen ? '#ffffff' : '#000000', HOVER_BLEND_WEIGHT);
+  const targets: readonly HexColor[] = deepen ? ['#000000', '#ffffff'] : ['#ffffff', '#000000'];
+  const requireSurfaceFloor = clearsSurfaces(primary, tokens, SURFACE_NON_TEXT_CONTRAST);
+
+  for (const target of targets) {
+    for (let percent = HOVER_BLEND_WEIGHT * 100; percent >= 1; percent -= 1) {
+      const candidate = blend(primary, target, percent / 100);
+      if (contrastRatio(candidate, primary) < MIN_HOVER_CONTRAST) continue;
+      if (contrastRatio(foreground, candidate) < 4.5) continue;
+      if (requireSurfaceFloor && !clearsSurfaces(candidate, tokens, SURFACE_NON_TEXT_CONTRAST)) continue;
+      return candidate;
+    }
+  }
+
+  // Foreground resolution leaves one direction enough luminance headroom; keep legacy reads total
+  // if channel rounding ever violates that invariant instead of turning an old theme into Default.
+  return blend(primary, targets[1]!, HOVER_BLEND_WEIGHT);
 }
 
 export class EventThemeResolutionError extends Error {
   constructor(
-    public readonly field: 'overrides.primaryColor' | 'overrides.accentColor',
+    public readonly field: EventThemeOverrideField,
     message: string,
   ) {
     super(message);
@@ -251,7 +261,7 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
     }
     resolvedTokens.primary = primary;
     resolvedTokens.primaryForeground = foreground;
-    resolvedTokens.primaryHover = resolveHover(primary, foreground);
+    resolvedTokens.primaryHover = resolveHover(primary, foreground, resolvedTokens);
     resolvedTokens.primaryOnSurface = resolvePrimaryOnSurface(primary, resolvedTokens);
     resolvedTokens.primaryShadow = rgba(primary, 13);
   }
@@ -302,26 +312,35 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
    Deliberately not part of `resolveEventTheme`: this runs only where a host picks a color, so raising
    a floor can never retire a theme that is already saved. A stored color below it keeps resolving
    exactly as it does today, and is only refused when that host next edits it. */
-const SURFACE_NON_TEXT_CONTRAST = 3;
+export type EventThemeOverrideField = 'overrides.primaryColor' | 'overrides.accentColor';
 
-export function assertOverridesLegible(theme: ResolvedEventTheme): void {
+export function overrideLegibilityErrors(
+  theme: ResolvedEventTheme,
+): Partial<Record<EventThemeOverrideField, string>> {
+  const errors: Partial<Record<EventThemeOverrideField, string>> = {};
   if (
     theme.config.overrides.primaryColor
-    && !clearsSurfaces(theme.tokens.primary, theme.tokens, SURFACE_NON_TEXT_CONTRAST)
+    && (
+      !clearsSurfaces(theme.tokens.primary, theme.tokens, SURFACE_NON_TEXT_CONTRAST)
+      || !clearsSurfaces(theme.tokens.primaryHover, theme.tokens, SURFACE_NON_TEXT_CONTRAST)
+    )
   ) {
-    throw new EventThemeResolutionError(
-      'overrides.primaryColor',
-      'Primary color needs a 3:1 contrast ratio against the event surfaces.',
-    );
+    errors['overrides.primaryColor'] = 'Primary color needs a 3:1 contrast ratio against the event surfaces.';
   }
   if (
     theme.config.overrides.accentColor
     && !clearsSurfaces(theme.tokens.accent, theme.tokens, SURFACE_NON_TEXT_CONTRAST)
   ) {
-    throw new EventThemeResolutionError(
-      'overrides.accentColor',
-      'Accent color needs a 3:1 contrast ratio against the event surfaces.',
-    );
+    errors['overrides.accentColor'] = 'Accent color needs a 3:1 contrast ratio against the event surfaces.';
+  }
+  return errors;
+}
+
+export function assertOverridesLegible(theme: ResolvedEventTheme): void {
+  const errors = overrideLegibilityErrors(theme);
+  for (const field of ['overrides.primaryColor', 'overrides.accentColor'] as const) {
+    const message = errors[field];
+    if (message) throw new EventThemeResolutionError(field, message);
   }
 }
 

@@ -9,10 +9,10 @@ import type {
   ResolvedEventTheme,
 } from '../../shared/contracts';
 import {
-  assertOverridesLegible,
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_VERSION,
   EventThemeResolutionError,
+  overrideLegibilityErrors,
   resolveEventTheme,
   serializeEventThemeConfig,
 } from '../../shared/event-theme';
@@ -77,18 +77,15 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
      possible. Only stored colors can reach that state — both floors run on every write — which is
      exactly the case the floors were written to tolerate rather than retire. */
   function applyResolved(resolved: ResolvedEventTheme, field: ThemeField) {
-    let refusal: EventThemeResolutionError | null = null;
-    try {
-      assertOverridesLegible(resolved);
-    } catch (caught) {
-      if (!(caught instanceof EventThemeResolutionError)) throw caught;
-      refusal = caught;
-    }
-    if (!refusal || refusal.field !== field) adoptDraft(resolved);
+    const refusals = overrideLegibilityErrors(resolved);
+    if (!refusals[field]) adoptDraft(resolved);
     setErrors((current) => {
       const next = { ...current };
       delete next[field];
-      if (refusal) next[refusal.field] = refusal.message;
+      for (const [refusedField, message] of Object.entries(refusals)) {
+        const target = refusedField as ThemeField;
+        if (target === field || !next[target]) next[target] = message;
+      }
       return next;
     });
   }
@@ -324,6 +321,8 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                   type="color"
                   value={primaryPickerValue}
                   disabled={locked}
+                  aria-invalid={Boolean(primaryError)}
+                  aria-describedby={primaryError ? 'event-theme-primary-error' : undefined}
                   onChange={(changeEvent) => changeColor('primaryColor', changeEvent.target.value)}
                 />
               </label>
@@ -358,6 +357,8 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
                   type="color"
                   value={accentPickerValue}
                   disabled={locked}
+                  aria-invalid={Boolean(accentError)}
+                  aria-describedby={accentError ? 'event-theme-accent-error' : undefined}
                   onChange={(changeEvent) => changeColor('accentColor', changeEvent.target.value)}
                 />
               </label>

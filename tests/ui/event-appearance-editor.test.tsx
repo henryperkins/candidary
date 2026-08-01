@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -213,6 +213,54 @@ describe('event appearance editor', () => {
     expect(screen.getByRole('button', { name: 'Save appearance' })).toBeEnabled();
   });
 
+  it('keeps a newly refused accent out of the preview when a legacy primary also fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    const user = userEvent.setup();
+    render(<EventAppearanceEditor
+      event={{ ...event, theme: resolveEventTheme({
+        version: 1,
+        presetId: 'candidary-default',
+        overrides: { primaryColor: '#ffffff' },
+      }) }}
+      onEventSaved={vi.fn()}
+    />);
+
+    const preview = screen.getByTestId('event-appearance-preview');
+    const accent = screen.getByRole('textbox', { name: 'Accent color' });
+
+    await user.clear(accent);
+    await user.type(accent, '#f5efe6');
+
+    expect(accent).toHaveAccessibleDescription('Accent color needs a 3:1 contrast ratio against the event surfaces.');
+    expect(preview).toHaveStyle({ '--event-accent': '#3f6d95' });
+  });
+
+  it('preserves an untouched raw syntax error while another color is edited', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    const user = userEvent.setup();
+    render(<EventAppearanceEditor
+      event={{ ...event, theme: resolveEventTheme({
+        version: 1,
+        presetId: 'candidary-default',
+        overrides: { primaryColor: '#ffffff' },
+      }) }}
+      onEventSaved={vi.fn()}
+    />);
+
+    const preview = screen.getByTestId('event-appearance-preview');
+    const primary = screen.getByRole('textbox', { name: 'Primary color' });
+    const accent = screen.getByRole('textbox', { name: 'Accent color' });
+
+    await user.clear(primary);
+    await user.type(primary, '#abc');
+    await user.clear(accent);
+    await user.type(accent, '#123456');
+
+    expect(primary).toHaveValue('#abc');
+    expect(primary).toHaveAccessibleDescription('Enter a six-digit hex color, such as #245c46.');
+    expect(preview).toHaveStyle({ '--event-accent': '#123456' });
+  });
+
   it('reports a primary that dissolves into the event surfaces on its own field', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
@@ -231,6 +279,28 @@ describe('event appearance editor', () => {
     await user.click(screen.getByRole('button', { name: 'Use preset primary' }));
     expect(primary).toHaveValue('#4a2415');
     expect(preview).toHaveStyle({ '--event-primary': '#4a2415' });
+  });
+
+  it('associates a picker-triggered refusal with the picker itself', () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+
+    const picker = screen.getByLabelText('Primary color picker');
+    fireEvent.change(picker, { target: { value: '#ffffff' } });
+
+    expect(picker).toHaveAttribute('aria-invalid', 'true');
+    expect(picker).toHaveAccessibleDescription('Primary color needs a 3:1 contrast ratio against the event surfaces.');
+  });
+
+  it('associates an accent picker refusal with the accent picker', () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+
+    const picker = screen.getByLabelText('Accent color picker');
+    fireEvent.change(picker, { target: { value: '#f5efe6' } });
+
+    expect(picker).toHaveAttribute('aria-invalid', 'true');
+    expect(picker).toHaveAccessibleDescription('Accent color needs a 3:1 contrast ratio against the event surfaces.');
   });
 
   it('resets locally, sends the canonical configuration, and adopts the normalized response', async () => {

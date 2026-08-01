@@ -169,7 +169,8 @@ floor existed keeps resolving for guests and is refused only when that host next
 edits it. `fullscreenBackdrop` is outside both floors: the full-screen brand mark
 is decorative chrome, and no one color clears `3:1` against both near-black and
 the near-white event surfaces. `primaryHover` is derived to always differ from
-`primary`, so a chosen black or white action still answers the pointer.
+`primary` while retaining the `4.5:1` label and `3:1` surface floors for every
+write-eligible primary, so a chosen black or white action still answers the pointer.
 
 Danger/failure red, delivered moss, state labels and glyphs, progress meaning,
 retry behavior, spinner geometry and motion, disabled opacity, focus thickness
