@@ -583,7 +583,9 @@ describe('manager experience', () => {
 
     await user.click(within(navigation).getByRole('button', { name: /settings/i }));
     await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
-    await user.click(screen.getByRole('button', { name: 'Save appearance' }));
+    await waitFor(() => expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some(([input, init]) => (
+      String(input).endsWith('/theme') && String(init?.method).toUpperCase() === 'PUT'
+    ))).toBe(true));
     await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
       .toHaveStyle({ '--event-primary': '#245c46' }));
 

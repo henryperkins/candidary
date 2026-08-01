@@ -658,7 +658,7 @@ export function ManagerPage() {
         <p className="section-label">Event controls</p>
         <h2>Settings</h2>
         <EventSettingsEditor
-          key={event.id}
+          key={'settings-' + event.id}
           ref={settingsAutosave}
           event={event}
           onEventWrite={eventWrite}
@@ -666,11 +666,13 @@ export function ManagerPage() {
           onAutosaveStateChange={recordAutosaveState}
         />
         <EventAppearanceEditor
-          key={event.id}
+          key={'appearance-' + event.id}
+          ref={appearanceAutosave}
           event={event}
           onEventWrite={eventWrite}
           onThemeSaved={(updated) => setEvent((current) => current ? mergeThemeResponse(current, updated) : updated)}
           onCoverSaved={(updated) => setEvent((current) => current ? mergeCoverResponse(current, updated) : updated)}
+          onAutosaveStateChange={recordAutosaveState}
         />
         <EventAccountCard eventId={event.id} />
         <section className="manager-credential" aria-labelledby="manager-credential-title">
