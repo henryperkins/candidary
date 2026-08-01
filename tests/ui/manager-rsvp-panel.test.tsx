@@ -594,6 +594,51 @@ describe('manager RSVP panel', () => {
     });
   });
 
+  it('drops append-only attendance when a responded-household addition becomes a new invitation', async () => {
+    let previewBody: Record<string, unknown> | undefined;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') return success(household);
+      if (url.pathname.endsWith('/roster/preview')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        previewBody = body;
+        return success({
+          canonicalBatch: body.batch, rosterVersion: 7, targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 2, resultingInvitedCapacity: 4 },
+          issues: [], previewDigest: 'converted-create-preview', canCommit: true,
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Jordan Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.type(screen.getByLabelText('Search households'), 'Morgan');
+    const target = await screen.findByLabelText('Existing household target');
+    await screen.findByRole('option', { name: /The Morgan household/ });
+    await user.selectOptions(target, household.id);
+    await waitFor(() => expect(target).toHaveValue(household.id));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.selectOptions(screen.getByLabelText('Attendance for Jordan Morgan'), 'attending');
+
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    await user.selectOptions(screen.getByLabelText('Existing household target'), '');
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+
+    await waitFor(() => expect(previewBody).toBeDefined());
+    const body = previewBody as {
+      batch: { creates: Array<{ namedInvitees: Array<Record<string, unknown>> }> };
+    };
+    expect(body.batch.creates[0]?.namedInvitees[0]).toMatchObject({ displayName: 'Jordan Morgan' });
+    expect(body.batch.creates[0]?.namedInvitees[0]).not.toHaveProperty('attendance');
+  });
+
   it('does not materialize an append while the selected household detail is still loading', async () => {
     let resolveDetail: ((response: Response) => void) | undefined;
     const delayedDetail = new Promise<Response>((resolve) => { resolveDetail = resolve; });

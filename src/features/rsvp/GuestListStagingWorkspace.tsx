@@ -95,7 +95,12 @@ function preservePlainDetailEdits(
           label: previousCreate.label,
           plusOneSlots: previousCreate.plusOneSlots,
         } : {}),
-        namedInvitees: create.namedInvitees.map((invitee) => previousInvitees.get(invitee.clientInviteeId) ?? invitee),
+        namedInvitees: create.namedInvitees.map((invitee) => {
+          const previousInvitee = previousInvitees.get(invitee.clientInviteeId);
+          return previousInvitee
+            ? { ...invitee, displayName: previousInvitee.displayName }
+            : invitee;
+        }),
       };
     }),
     appends: next.appends.map((append) => {

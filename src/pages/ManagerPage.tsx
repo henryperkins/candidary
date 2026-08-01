@@ -210,11 +210,10 @@ export function ManagerPage() {
   const stuckDomains = unconfirmedDomains.filter(
     ({ status }) => status === 'invalid' || status === 'failed',
   );
-  // Read through a ref: the blocker registers once, and re-registering it on
-  // every keystroke would drop the block mid-navigation.
-  const unconfirmedRef = useRef(false);
-  unconfirmedRef.current = unconfirmedDomains.length > 0 || rsvpDraftDirty || rsvpCommitPending;
-  const blocker = useBlocker(useCallback(() => unconfirmedRef.current, []));
+  const shouldBlockNavigation = unconfirmedDomains.length > 0
+    || rsvpDraftDirty
+    || rsvpCommitPending;
+  const blocker = useBlocker(shouldBlockNavigation);
 
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
