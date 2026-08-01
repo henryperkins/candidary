@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
+import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventView } from '../../shared/contracts';
@@ -35,7 +36,15 @@ const EVENT: EventView = {
 
 // The editor is controlled by the manager: a confirmed response goes up, is
 // merged by ownership, and comes back down. Tests need that same loop.
-function Harness({ initial = EVENT, rosterVersion }: { initial?: EventView; rosterVersion?: number }) {
+function Harness({
+  initial = EVENT,
+  rosterVersion,
+  synchronousResponses = false,
+}: {
+  initial?: EventView;
+  rosterVersion?: number;
+  synchronousResponses?: boolean;
+}) {
   const [event, setEvent] = useState(initial);
   const [state, setState] = useState<DomainAutosaveState | null>(null);
   // rosterVersion stands in for an RSVP-destination mutation on the same page:
@@ -46,7 +55,11 @@ function Harness({ initial = EVENT, rosterVersion }: { initial?: EventView; rost
       key={event.id}
       event={applied}
       onEventWrite={(request) => request()}
-      onSettingsSaved={(updated) => setEvent((current) => mergeSettingsResponse(current, updated))}
+      onSettingsSaved={(updated) => {
+        const applyResponse = () => setEvent((current) => mergeSettingsResponse(current, updated));
+        if (synchronousResponses) flushSync(applyResponse);
+        else applyResponse();
+      }}
       onAutosaveStateChange={setState}
     />
     <output data-testid="domain-state">{state ? state.domain + ':' + state.status : 'none'}</output>
@@ -190,6 +203,44 @@ describe('event settings editor', () => {
     expect(settingsWrites()).toHaveLength(2);
     expect(name).toHaveValue('Ceremony');
     expect(settingsWrites()[1]!.name).toBe('Ceremony');
+  });
+
+  it('keeps an explicit baseline reversion made while the older value is in flight', async () => {
+    let releaseFirst: (() => void) | null = null;
+    let attempt = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        attempt += 1;
+        if (attempt === 1) {
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+          return json({ event: { ...EVENT, rsvpEnabled: true } });
+        }
+        return json({ event: { ...EVENT, rsvpEnabled: false } });
+      }
+      throw new Error(`Unexpected request ${String(input)}`);
+    }));
+    // A parent is allowed to commit the response prop before the queue's promise
+    // continuation settles. This schedule is the one that exposes an ABA rebase.
+    render(<Harness synchronousResponses />);
+    const rsvp = screen.getByLabelText('Accept RSVPs');
+
+    fireEvent.click(rsvp);
+    expect(settingsWrites()).toHaveLength(1);
+    expect(rsvp).toBeChecked();
+
+    // This is a new host action even though it equals the pre-request baseline.
+    // The first write may already commit, so false has to follow it to the Worker.
+    fireEvent.click(rsvp);
+    expect(rsvp).not.toBeChecked();
+
+    releaseFirst!();
+    await settleMicrotasks();
+    await settleMicrotasks();
+
+    expect(settingsWrites()).toHaveLength(2);
+    expect(settingsWrites()[1]).toMatchObject({ rsvpEnabled: false });
+    expect(rsvp).not.toBeChecked();
+    expect(screen.getByText('Event settings saved')).toBeInTheDocument();
   });
 
   it('keeps the draft and offers Retry when a save fails for a reason that can pass', async () => {

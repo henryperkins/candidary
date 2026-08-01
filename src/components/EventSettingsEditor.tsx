@@ -45,15 +45,22 @@ interface ServerFieldError {
   rosterVersion: number | null;
 }
 
+type FieldGenerations = Record<EventSettingsField, number>;
+
 interface EditorState {
   confirmed: EventSettingsDraft;
   rosterVersion: number;
   draft: EventSettingsDraft;
-  generations: Record<EventSettingsField, number>;
+  generations: FieldGenerations;
   serverErrors: Partial<Record<EventSettingsField, ServerFieldError>>;
 }
 
-function zeroGenerations(): Record<EventSettingsField, number> {
+interface EventSettingsSave {
+  payload: EventSettingsPayload;
+  generations: FieldGenerations;
+}
+
+function zeroGenerations(): FieldGenerations {
   return {
     name: 0, welcomeMessage: 0, eventTimezone: 0, rsvpDeadlineDate: 0,
     rsvpEnabled: 0, uploadsEnabled: 0, galleryVisible: 0, moderationRequired: 0,
@@ -97,10 +104,17 @@ function baselineKeyOf(state: EditorState): string {
 // Newly confirmed values are adopted wherever the host has not moved on. A
 // dirty field stays theirs until it saves — that is what makes a same-page RSVP
 // mutation safe to absorb without an avoidable stale write.
-function rebaseDraft(state: EditorState, incoming: EventSettingsDraft): EventSettingsDraft {
+function rebaseDraft(
+  state: EditorState,
+  incoming: EventSettingsDraft,
+  confirmedThrough: FieldGenerations | null,
+): EventSettingsDraft {
   const next = { ...state.draft };
   for (const field of EVENT_SETTINGS_FIELDS) {
-    if (state.draft[field] === state.confirmed[field]) {
+    const canAdopt = confirmedThrough
+      ? state.generations[field] === confirmedThrough[field]
+      : state.draft[field] === state.confirmed[field];
+    if (canAdopt) {
       (next as Record<string, unknown>)[field] = incoming[field];
     }
   }
@@ -124,11 +138,15 @@ export function EventSettingsEditor({
   // Everything the queue callbacks read has to be readable synchronously from
   // a promise continuation, so state is mirrored rather than closed over.
   const stateRef = useRef(state);
-  const queueRef = useRef<AutosaveQueue<EventSettingsPayload> | null>(null);
+  const queueRef = useRef<AutosaveQueue<EventSettingsSave> | null>(null);
   // The queue is built once, so anything it closes over has to be read through
   // a ref or it would keep calling the first render props forever.
   const savedRef = useRef(onSettingsSaved);
   savedRef.current = onSettingsSaved;
+  // A settings response confirms the field generations carried by its exact
+  // queued snapshot. The parent may render that response before the queue's
+  // promise continuation settles, so reconciliation reads this synchronously.
+  const confirmedThroughRef = useRef<FieldGenerations | null>(null);
   // One automatic race retry per intent. A roster that keeps moving becomes a
   // visible failure rather than a loop.
   const raceRef = useRef<{ intent: string; races: number } | null>(null);
@@ -140,13 +158,15 @@ export function EventSettingsEditor({
     return eventSettingsKey({ ...payload, rsvpRosterVersion: 0 });
   }
 
-  async function sendSettings(payload: EventSettingsPayload): Promise<AutosaveOutcome> {
+  async function sendSettings(save: EventSettingsSave): Promise<AutosaveOutcome> {
+    const { payload } = save;
     try {
       const result = await onEventWrite(() => api<{ event: EventView }>(
         '/api/manage/events/' + eventId + '/settings',
         { method: 'PATCH', body: JSON.stringify(payload) },
       ));
       raceRef.current = null;
+      confirmedThroughRef.current = save.generations;
       savedRef.current(result.event);
       // The stored form, read back from the Worker: it canonicalizes the time
       // zone and may return a roster version this payload did not carry.
@@ -211,7 +231,7 @@ export function EventSettingsEditor({
   }
 
   if (queueRef.current === null) {
-    queueRef.current = createAutosaveQueue<EventSettingsPayload>({
+    queueRef.current = createAutosaveQueue<EventSettingsSave>({
       baselineKey: baselineKeyOf(stateRef.current),
       save: (snapshot) => sendSettings(snapshot),
       describeFailure: (error) => describeFailure(error),
@@ -235,7 +255,9 @@ export function EventSettingsEditor({
         // Every general setting is a controlled value, so what the host can see
         // is the draft itself plus whichever server errors are still live.
         intent: JSON.stringify([next.draft, Object.entries(errors).sort()]),
-        snapshot: Object.keys(errors).length > 0 ? null : payload,
+        snapshot: Object.keys(errors).length > 0
+          ? null
+          : { payload, generations: { ...next.generations } },
       },
       mode === 'immediate',
     );
@@ -259,10 +281,12 @@ export function EventSettingsEditor({
   useEffect(() => {
     const current = stateRef.current;
     const incoming = draftFromEvent(event);
+    const confirmedThrough = confirmedThroughRef.current;
+    confirmedThroughRef.current = null;
     const next: EditorState = {
       confirmed: incoming,
       rosterVersion: event.rsvpRosterVersion,
-      draft: rebaseDraft(current, incoming),
+      draft: rebaseDraft(current, incoming, confirmedThrough),
       generations: current.generations,
       serverErrors: current.serverErrors,
     };
