@@ -496,6 +496,105 @@ describe('manager experience', () => {
     expect(editor.compareDocumentPosition(danger!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('keeps an unsaved Settings edit while the host visits another destination', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
+
+    await user.click(within(navigation).getByRole('button', { name: /settings/i }));
+    const name = screen.getByLabelText('Event name');
+    await user.clear(name);
+    await user.type(name, 'Maya & Theo — Reception');
+
+    await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    // Mounted but out of the way. `getByLabelText` deliberately still finds a
+    // hidden control, so this has to assert visibility rather than presence.
+    expect(screen.getByLabelText('Event name')).not.toBeVisible();
+    expect(document.querySelector('.manager-panel[hidden]')).toHaveAttribute('inert');
+
+    await user.click(within(navigation).getByRole('button', { name: /settings/i }));
+    expect(screen.getByLabelText('Event name')).toHaveValue('Maya & Theo — Reception');
+  });
+
+  it('adopts the settings response without refreshing the whole manager', async () => {
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    const settingsResponse = {
+      ...MANAGED_EVENT,
+      name: 'Renamed',
+      rsvpRosterVersion: 8,
+      // A settings response is built from whatever the row said when it committed,
+      // so it may carry a theme older than the one already on screen.
+      theme: resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} }),
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        return json({ event: settingsResponse });
+      }
+      return fetchMock(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: /settings/i }));
+
+    const before = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Renamed'));
+    const after = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    // One PATCH, and no five-request manager refresh behind it.
+    expect(after - before).toBe(1);
+    // The stale theme in that response must not travel with the settings it owns.
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+  });
+
+  it('drops a whole-event read that a later write overtook', async () => {
+    const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
+    let releaseRead: (() => void) | null = null;
+    let reads = 0;
+    const fetchMock = managerFetch({ first: { media: makeMedia(1), nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        reads += 1;
+        // Hold the read that a manager action opened, so a theme write can
+        // commit underneath it. It answers with the pre-write row.
+        if (reads === 2) await new Promise<void>((resolve) => { releaseRead = resolve; });
+        return json({ event: MANAGED_EVENT });
+      }
+      if (url.includes('/media/') && method === 'PATCH') return json({ media: {} });
+      if (url.endsWith('/theme') && method === 'PUT') {
+        return json({ event: { ...MANAGED_EVENT, theme: gardenTheme } });
+      }
+      return fetchMock(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
+
+    await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    await user.click(await screen.findByRole('button', { name: /^Publish / }));
+    await waitFor(() => expect(reads).toBe(2));
+
+    await user.click(within(navigation).getByRole('button', { name: /settings/i }));
+    await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
+    await user.click(screen.getByRole('button', { name: 'Save appearance' }));
+    await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
+      .toHaveStyle({ '--event-primary': '#245c46' }));
+
+    releaseRead!();
+    // The overtaken read carries the pre-write theme. Adopting it would put the
+    // old appearance back and then feed it into the next complete write.
+    await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
+      .toHaveStyle({ '--event-primary': '#245c46' }));
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+  });
+
   it('appends the next media page and keeps every row unique', async () => {
     const rows = makeMedia(MANAGER_MEDIA_PAGE_SIZE + 1);
     const mediaRequests: string[] = [];

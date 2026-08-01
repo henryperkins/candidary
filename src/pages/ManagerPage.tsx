@@ -20,6 +20,12 @@ import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
+import {
+  mergeCoverResponse,
+  mergeSettingsResponse,
+  mergeThemeResponse,
+} from '../features/settings/event-merge';
+import { createEventReadGuard } from '../features/settings/event-read-guard';
 
 type Section = 'intake' | 'rsvp' | 'gallery' | 'messages' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
@@ -113,6 +119,9 @@ export function ManagerPage() {
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
+  // Settings stays mounted after its first visit so a debounce timer, an
+  // in-flight write, and an unsaved draft all survive a destination change.
+  const [settingsMounted, setSettingsMounted] = useState(false);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
   const [status, setStatus] = useState<MediaStatus>('all');
@@ -126,6 +135,18 @@ export function ManagerPage() {
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
   const loadMoreOwner = useRef<AbortController | null>(null);
+  // Reads and writes of the event row overlap once autosave can be running
+  // behind another destination. Every write brackets itself here, and every
+  // whole-event read checks whether it was overtaken before it is adopted.
+  const eventReads = useRef(createEventReadGuard());
+  const eventWrite = useCallback(async <T,>(request: () => Promise<T>): Promise<T> => {
+    eventReads.current.beginWrite();
+    try {
+      return await request();
+    } finally {
+      eventReads.current.endWrite();
+    }
+  }, []);
 
   const mediaPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
@@ -170,6 +191,7 @@ export function ManagerPage() {
           }
           throw caught;
         });
+      const readToken = eventReads.current.openRead();
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
@@ -177,7 +199,9 @@ export function ManagerPage() {
         api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`),
         entryLoad,
       ]);
-      setEvent(eventData.event);
+      // Media, notes, exports, and the link are unaffected by a settings or
+      // theme write, so only the event itself is at risk of being put back.
+      if (eventReads.current.adopt(readToken)) setEvent(eventData.event);
       // A load opened under the previous query must not reinstate its rows or its cursor. Polling
       // merges rather than replaces, so a stale list here would sit behind every later poll forever.
       // Only the media half is query-scoped; notes, exports, and links are the same either way.
@@ -203,11 +227,12 @@ export function ManagerPage() {
 
   const refreshIntake = useCallback(async () => {
     try {
+      const readToken = eventReads.current.openRead();
       const [eventData, firstPage] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
       ]);
-      setEvent(eventData.event);
+      if (eventReads.current.adopt(readToken)) setEvent(eventData.event);
       // A poll opened under the previous filter must not merge its rows back over the narrowed list.
       if (latestMediaPath.current !== mediaPath) return;
       setMediaPage((current) => {
@@ -331,6 +356,7 @@ export function ManagerPage() {
 
   function openSection(next: Section) {
     setSection(next);
+    if (next === 'settings') setSettingsMounted(true);
     setSelected([]);
     setActionError(null);
     setEntryAction(null);
@@ -352,24 +378,24 @@ export function ManagerPage() {
       groups.set(item.publicationStatus, [...(groups.get(item.publicationStatus) ?? []), item.id]);
     }
     for (const [expectedStatus, ids] of groups) {
-      await api(`/api/manage/events/${eventId}/media/bulk`, {
+      await eventWrite(() => api(`/api/manage/events/${eventId}/media/bulk`, {
         method: 'POST', body: JSON.stringify({ ids, action, expectedStatus }),
-      });
+      }));
     }
     setSelected([]);
     await refresh();
   }
 
   async function changePublication(item: MediaView, action: 'publish' | 'hide' | 'delete') {
-    await api(`/api/manage/events/${eventId}/media/${item.id}`, {
+    await eventWrite(() => api(`/api/manage/events/${eventId}/media/${item.id}`, {
       method: 'PATCH', body: JSON.stringify({ action, expectedStatus: item.publicationStatus }),
-    });
+    }));
     await refresh();
   }
 
   async function saveSettings(element: HTMLFormElement) {
     const form = new FormData(element);
-    await api(`/api/manage/events/${eventId}/settings`, { method: 'PATCH', body: JSON.stringify({
+    const result = await eventWrite(() => api<{ event: EventView }>(`/api/manage/events/${eventId}/settings`, { method: 'PATCH', body: JSON.stringify({
       name: form.get('name'),
       welcomeMessage: form.get('welcomeMessage'),
       uploadsEnabled: form.get('uploadsEnabled') === 'on',
@@ -381,24 +407,27 @@ export function ManagerPage() {
       // The version this form was built from. The server treats it as a stale-view
       // signal and guards the write on what it reads itself.
       rsvpRosterVersion: event?.rsvpRosterVersion ?? 0,
-    }) });
-    await refresh();
+    }) }));
+    // One settings mutation confirms one settings mutation. Reloading media,
+    // notes, exports, and the entry to learn a new event name was five requests
+    // spent on answers this response already carries.
+    setEvent((current) => current ? mergeSettingsResponse(current, result.event) : result.event);
   }
 
   async function prepareExport() {
-    await api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' });
+    await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' }));
     await refresh();
   }
   async function downloadExport(job: ExportView) {
-    const result = await api<ExportDownloadView>(`/api/manage/events/${eventId}/exports/${job.id}/download`, { method: 'POST', body: '{}' });
+    const result = await eventWrite(() => api<ExportDownloadView>(`/api/manage/events/${eventId}/exports/${job.id}/download`, { method: 'POST', body: '{}' }));
     setExportDownloads((current) => ({ ...current, [job.id]: result }));
   }
   async function retryExport(job: ExportView) {
-    await api(`/api/manage/events/${eventId}/exports/${job.id}/retry`, { method: 'POST', body: '{}' });
+    await eventWrite(() => api(`/api/manage/events/${eventId}/exports/${job.id}/retry`, { method: 'POST', body: '{}' }));
     await refresh();
   }
   async function moderateMessage(message: MessageView, action: 'approve' | 'reject' | 'delete') {
-    await api(`/api/manage/events/${eventId}/messages/${message.id}`, { method: 'PATCH', body: JSON.stringify({ action, expectedStatus: message.moderationStatus }) });
+    await eventWrite(() => api(`/api/manage/events/${eventId}/messages/${message.id}`, { method: 'PATCH', body: JSON.stringify({ action, expectedStatus: message.moderationStatus }) }));
     await refresh();
   }
   async function rotateManagerLink() {
@@ -411,10 +440,10 @@ export function ManagerPage() {
   // apart, because a host cannot undo the second one.
   async function runEntryAction(action: EntryAction) {
     const path = action === 'rotate' ? 'guest-sessions/rotate' : 'entry/disable';
-    await api(`/api/manage/events/${eventId}/${path}`, {
+    await eventWrite(() => api(`/api/manage/events/${eventId}/${path}`, {
       method: 'POST',
       body: JSON.stringify({ confirmName: entryConfirm.trim() }),
-    });
+    }));
     setEntryAction(null);
     setEntryConfirm('');
     await refresh();
@@ -422,8 +451,9 @@ export function ManagerPage() {
   // Roster and activation changes land on the event record, not on the media the
   // whole manager refresh pays for.
   async function refreshEvent() {
+    const readToken = eventReads.current.openRead();
     const loaded = await api<{ event: EventView }>(`/api/manage/events/${eventId}`);
-    setEvent(loaded.event);
+    if (eventReads.current.adopt(readToken)) setEvent(loaded.event);
   }
   async function deleteEvent(element: HTMLFormElement) {
     const form = new FormData(element);
@@ -626,7 +656,50 @@ export function ManagerPage() {
 
       {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
 
-      {section === 'settings' && <section className="manager-panel"><p className="section-label">Event controls</p><h2>Settings</h2><form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => saveSettings(element)); }}><label>Event name<input name="name" defaultValue={event.name} /></label><label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label><label>Event time zone<input name="eventTimezone" defaultValue={event.eventTimezone} required autoComplete="off" spellCheck={false} /></label><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" defaultValue={event.rsvpDeadlineDate ?? ''} required /></label><label className="toggle"><input type="checkbox" name="rsvpEnabled" defaultChecked={event.rsvpEnabled} /><span>Accept RSVPs</span></label><label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label><label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label><label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label><button className="button button--primary">Save settings</button></form><EventAppearanceEditor key={event.id} event={event} onEventSaved={(updated) => setEvent(updated)} /><EventAccountCard eventId={event.id} /><section className="manager-credential" aria-labelledby="manager-credential-title"><h3 id="manager-credential-title">Manager access</h3><p>Rotating issues a new management link and stops this one immediately. It does not change the printed event QR.</p><button type="button" className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></section><div className="danger-zone"><h3>Delete this event</h3><p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p><form onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => deleteEvent(element)); }}><input name="confirmation" aria-label="Confirm event name" autoComplete="off" /><button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button></form></div></section>}
+      {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
+        <p className="section-label">Event controls</p>
+        <h2>Settings</h2>
+        <form className="settings-form" onSubmit={(formEvent) => {
+          formEvent.preventDefault();
+          const element = formEvent.currentTarget;
+          void runManagerAction(() => saveSettings(element));
+        }}>
+          <label>Event name<input name="name" defaultValue={event.name} /></label>
+          <label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label>
+          <label>Event time zone<input name="eventTimezone" defaultValue={event.eventTimezone} required autoComplete="off" spellCheck={false} /></label>
+          <label>RSVP deadline<input name="rsvpDeadlineDate" type="date" defaultValue={event.rsvpDeadlineDate ?? ''} required /></label>
+          <label className="toggle"><input type="checkbox" name="rsvpEnabled" defaultChecked={event.rsvpEnabled} /><span>Accept RSVPs</span></label>
+          <label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label>
+          <label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label>
+          <label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label>
+          <button className="button button--primary">Save settings</button>
+        </form>
+        <EventAppearanceEditor
+          key={event.id}
+          event={event}
+          onEventWrite={eventWrite}
+          onThemeSaved={(updated) => setEvent((current) => current ? mergeThemeResponse(current, updated) : updated)}
+          onCoverSaved={(updated) => setEvent((current) => current ? mergeCoverResponse(current, updated) : updated)}
+        />
+        <EventAccountCard eventId={event.id} />
+        <section className="manager-credential" aria-labelledby="manager-credential-title">
+          <h3 id="manager-credential-title">Manager access</h3>
+          <p>Rotating issues a new management link and stops this one immediately. It does not change the printed event QR.</p>
+          <button type="button" className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button>
+        </section>
+        <div className="danger-zone">
+          <h3>Delete this event</h3>
+          <p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p>
+          <form onSubmit={(formEvent) => {
+            formEvent.preventDefault();
+            const element = formEvent.currentTarget;
+            void runManagerAction(() => deleteEvent(element));
+          }}>
+            <input name="confirmation" aria-label="Confirm event name" autoComplete="off" />
+            <button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button>
+          </form>
+        </div>
+      </section>}
     </main>
 
     <aside className="manager-utility">

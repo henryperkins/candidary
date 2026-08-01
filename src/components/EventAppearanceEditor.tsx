@@ -22,7 +22,12 @@ import { EventThemePresetSelector } from './EventThemePresetSelector';
 
 interface EventAppearanceEditorProps {
   event: EventView;
-  onEventSaved(event: EventView): void;
+  // Theme and cover writes are independent event domains, so their whole-event
+  // responses must be merged by ownership rather than adopted wholesale.
+  onThemeSaved(event: EventView): void;
+  onCoverSaved(event: EventView): void;
+  // Brackets a write so an older whole-event read cannot rebase this editor.
+  onEventWrite<T>(request: () => Promise<T>): Promise<T>;
 }
 
 type ThemeField = 'overrides.primaryColor' | 'overrides.accentColor';
@@ -45,7 +50,12 @@ function fieldFor(kind: ColorKind): ThemeField {
   return `overrides.${kind}`;
 }
 
-export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEditorProps) {
+export function EventAppearanceEditor({
+  event,
+  onThemeSaved,
+  onCoverSaved,
+  onEventWrite,
+}: EventAppearanceEditorProps) {
   const initialRaw = rawColors(event.theme);
   const [savedTheme, setSavedTheme] = useState<EventThemeConfigV1>(() => event.theme.config);
   const [draftTheme, setDraftTheme] = useState<EventThemeConfigV1>(() => event.theme.config);
@@ -155,10 +165,10 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
     setBusy(true);
     setSaveError(null);
     try {
-      const result = await api<{ event: EventView }>(`/api/manage/events/${event.id}/theme`, {
+      const result = await onEventWrite(() => api<{ event: EventView }>(`/api/manage/events/${event.id}/theme`, {
         method: 'PUT',
         body: serializeEventThemeConfig(draftTheme),
-      });
+      }));
       const normalized = result.event.theme;
       const raw = rawColors(normalized);
       setSavedTheme(normalized.config);
@@ -166,7 +176,7 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
       setRawPrimary(raw.primary);
       setRawAccent(raw.accent);
       setErrors({});
-      onEventSaved(result.event);
+      onThemeSaved(result.event);
     } catch (caught) {
       if (caught instanceof ClientApiError) {
         setSaveError(caught.message);
@@ -196,21 +206,23 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
     setCoverBusy(true);
     setCoverError(null);
     try {
-      const upload = await api<{ objectKey: string; url: string }>(`/api/manage/events/${event.id}/cover`, {
-        method: 'POST',
-        body: JSON.stringify({ filename: file.name, mimeType: file.type, byteSize: file.size }),
+      const result = await onEventWrite(async () => {
+        const upload = await api<{ objectKey: string; url: string }>(`/api/manage/events/${event.id}/cover`, {
+          method: 'POST',
+          body: JSON.stringify({ filename: file.name, mimeType: file.type, byteSize: file.size }),
+        });
+        const transferred = await fetch(upload.url, {
+          method: 'PUT',
+          headers: { 'content-type': file.type },
+          body: file,
+        });
+        if (!transferred.ok) throw new Error('Cover transfer failed.');
+        return api<{ event: EventView }>(`/api/manage/events/${event.id}/cover/finalize`, {
+          method: 'POST',
+          body: JSON.stringify({ objectKey: upload.objectKey, mimeType: file.type }),
+        });
       });
-      const transferred = await fetch(upload.url, {
-        method: 'PUT',
-        headers: { 'content-type': file.type },
-        body: file,
-      });
-      if (!transferred.ok) throw new Error('Cover transfer failed.');
-      const result = await api<{ event: EventView }>(`/api/manage/events/${event.id}/cover/finalize`, {
-        method: 'POST',
-        body: JSON.stringify({ objectKey: upload.objectKey, mimeType: file.type }),
-      });
-      onEventSaved(result.event);
+      onCoverSaved(result.event);
     } catch (caught) {
       setCoverError(caught instanceof ClientApiError
         ? caught.message
@@ -226,10 +238,10 @@ export function EventAppearanceEditor({ event, onEventSaved }: EventAppearanceEd
     setCoverBusy(true);
     setCoverError(null);
     try {
-      const result = await api<{ event: EventView }>(`/api/manage/events/${event.id}/cover`, {
+      const result = await onEventWrite(() => api<{ event: EventView }>(`/api/manage/events/${event.id}/cover`, {
         method: 'DELETE',
-      });
-      onEventSaved(result.event);
+      }));
+      onCoverSaved(result.event);
     } catch (caught) {
       setCoverError(caught instanceof ClientApiError
         ? caught.message

@@ -61,6 +61,23 @@ function themeMutationCalls(fetchMock: ReturnType<typeof vi.fn>) {
   ));
 }
 
+function AppearanceEditor({
+  event: appearanceEvent = event,
+  onThemeSaved = vi.fn(),
+  onCoverSaved = vi.fn(),
+}: {
+  event?: EventView;
+  onThemeSaved?: (updated: EventView) => void;
+  onCoverSaved?: (updated: EventView) => void;
+}) {
+  return <EventAppearanceEditor
+    event={appearanceEvent}
+    onThemeSaved={onThemeSaved}
+    onCoverSaved={onCoverSaved}
+    onEventWrite={(request) => request()}
+  />;
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -71,7 +88,7 @@ describe('event appearance editor', () => {
   it('marks pristine invalid raw input as unsaved while preserving the saved draft', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     expect(screen.getByText('Saved')).toBeVisible();
     const primary = screen.getByRole('textbox', { name: 'Primary color' });
@@ -92,7 +109,7 @@ describe('event appearance editor', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const preview = screen.getByTestId('event-appearance-preview');
     expect(preview).toHaveStyle({ '--event-primary': '#4a2415' });
@@ -111,7 +128,7 @@ describe('event appearance editor', () => {
   it('keeps the last valid preview while reporting strict syntax and contrast errors', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const preview = screen.getByTestId('event-appearance-preview');
     const primary = screen.getByRole('textbox', { name: 'Primary color' });
@@ -161,7 +178,7 @@ describe('event appearance editor', () => {
   it('reports an accent that disappears into the event surfaces', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const preview = screen.getByTestId('event-appearance-preview');
     const accent = screen.getByRole('textbox', { name: 'Accent color' });
@@ -185,13 +202,12 @@ describe('event appearance editor', () => {
   it('keeps an edit that a floor refuses on the other saved color, and names that color', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor
+    render(<AppearanceEditor
       event={{ ...event, theme: resolveEventTheme({
         version: 1,
         presetId: 'candidary-default',
         overrides: { accentColor: '#f5efe6' },
       }) }}
-      onEventSaved={vi.fn()}
     />);
 
     const preview = screen.getByTestId('event-appearance-preview');
@@ -216,13 +232,12 @@ describe('event appearance editor', () => {
   it('keeps a newly refused accent out of the preview when a legacy primary also fails', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor
+    render(<AppearanceEditor
       event={{ ...event, theme: resolveEventTheme({
         version: 1,
         presetId: 'candidary-default',
         overrides: { primaryColor: '#ffffff' },
       }) }}
-      onEventSaved={vi.fn()}
     />);
 
     const preview = screen.getByTestId('event-appearance-preview');
@@ -238,13 +253,12 @@ describe('event appearance editor', () => {
   it('preserves an untouched raw syntax error while another color is edited', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor
+    render(<AppearanceEditor
       event={{ ...event, theme: resolveEventTheme({
         version: 1,
         presetId: 'candidary-default',
         overrides: { primaryColor: '#ffffff' },
       }) }}
-      onEventSaved={vi.fn()}
     />);
 
     const preview = screen.getByTestId('event-appearance-preview');
@@ -264,7 +278,7 @@ describe('event appearance editor', () => {
   it('reports a primary that dissolves into the event surfaces on its own field', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const preview = screen.getByTestId('event-appearance-preview');
     const primary = screen.getByRole('textbox', { name: 'Primary color' });
@@ -283,7 +297,7 @@ describe('event appearance editor', () => {
 
   it('associates a picker-triggered refusal with the picker itself', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const picker = screen.getByLabelText('Primary color picker');
     fireEvent.change(picker, { target: { value: '#ffffff' } });
@@ -294,7 +308,7 @@ describe('event appearance editor', () => {
 
   it('associates an accent picker refusal with the accent picker', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const picker = screen.getByLabelText('Accent color picker');
     fireEvent.change(picker, { target: { value: '#f5efe6' } });
@@ -316,15 +330,15 @@ describe('event appearance editor', () => {
       throw new Error(`Unexpected request ${String(input)}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    const onEventSaved = vi.fn();
+    const onThemeSaved = vi.fn();
     const user = userEvent.setup();
-    render(<EventAppearanceEditor
+    render(<AppearanceEditor
       event={{ ...event, theme: resolveEventTheme({
         version: 1,
         presetId: 'coastal-light',
         overrides: { accentColor: '#b7693f' },
       }) }}
-      onEventSaved={onEventSaved}
+      onThemeSaved={onThemeSaved}
     />);
 
     const reset = screen.getByRole('button', { name: 'Reset to Candidary default' });
@@ -340,7 +354,7 @@ describe('event appearance editor', () => {
     await user.type(primary, '#123456');
     await user.click(screen.getByRole('button', { name: 'Save appearance' }));
 
-    await waitFor(() => expect(onEventSaved).toHaveBeenCalledWith(normalizedEvent));
+    await waitFor(() => expect(onThemeSaved).toHaveBeenCalledWith(normalizedEvent));
     const [, request] = themeMutationCalls(fetchMock)[0]!;
     expect(request?.body).toBe('{"version":1,"presetId":"garden-party","overrides":{"primaryColor":"#123456"}}');
     expect(primary).toHaveValue('#234567');
@@ -371,7 +385,7 @@ describe('event appearance editor', () => {
     const scrollTo = vi.spyOn(window, 'scrollTo');
     Object.defineProperty(window, 'scrollY', { configurable: true, value: 640 });
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
     const primary = screen.getByRole('textbox', { name: 'Primary color' });
@@ -411,7 +425,7 @@ describe('event appearance editor', () => {
       throw new Error(`Unexpected request ${String(input)}`);
     }));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     const save = screen.getByRole('button', { name: 'Save appearance' });
     expect(save).toBeDisabled();
@@ -433,7 +447,7 @@ describe('event appearance editor', () => {
   });
 
   it('uploads and removes the cover immediately without a theme write', async () => {
-    const onEventSaved = vi.fn();
+    const onCoverSaved = vi.fn();
     const covered = { ...event, coverObjectKey: 'events/event-a/cover/new.png' };
     const cleared = { ...event, coverObjectKey: null };
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -458,16 +472,16 @@ describe('event appearance editor', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
-    const view = render(<EventAppearanceEditor event={event} onEventSaved={onEventSaved} />);
+    const view = render(<AppearanceEditor event={event} onCoverSaved={onCoverSaved} />);
 
     const file = new File([new Uint8Array([1, 2, 3])], 'cover.png', { type: 'image/png' });
     await user.upload(screen.getByLabelText(/Add cover|Change cover/i), file);
-    await waitFor(() => expect(onEventSaved).toHaveBeenCalledWith(covered));
+    await waitFor(() => expect(onCoverSaved).toHaveBeenCalledWith(covered));
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
 
-    view.rerender(<EventAppearanceEditor event={covered} onEventSaved={onEventSaved} />);
+    view.rerender(<AppearanceEditor event={covered} onCoverSaved={onCoverSaved} />);
     await user.click(screen.getByRole('button', { name: 'Remove cover' }));
-    await waitFor(() => expect(onEventSaved).toHaveBeenLastCalledWith(cleared));
+    await waitFor(() => expect(onCoverSaved).toHaveBeenLastCalledWith(cleared));
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
   });
 
@@ -485,7 +499,7 @@ describe('event appearance editor', () => {
       throw new Error(`Unexpected request ${String(input)}`);
     }));
     const user = userEvent.setup();
-    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+    render(<AppearanceEditor />);
 
     await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
     await user.click(screen.getByRole('button', { name: 'Save appearance' }));
