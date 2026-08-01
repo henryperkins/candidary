@@ -486,7 +486,7 @@ describe('manager experience', () => {
     expect(within(navigation).getAllByRole('button')).toHaveLength(6);
     await userEvent.setup().click(within(navigation).getByRole('button', { name: /settings/i }));
 
-    const settingsForm = screen.getByRole('button', { name: 'Save settings' }).closest('form');
+    const settingsForm = document.querySelector('form.settings-form');
     const editor = screen.getByRole('region', { name: 'Event appearance editor' });
     const account = document.querySelector('.account-card');
     const danger = document.querySelector('.danger-zone');
@@ -541,7 +541,7 @@ describe('manager experience', () => {
       .getByRole('button', { name: /settings/i }));
 
     const before = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
-    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await user.click(screen.getByLabelText('Show the optional shared gallery'));
 
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Renamed'));
     const after = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;

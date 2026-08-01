@@ -15,6 +15,7 @@ import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
+import { EventSettingsEditor } from '../components/EventSettingsEditor';
 import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
@@ -26,6 +27,7 @@ import {
   mergeThemeResponse,
 } from '../features/settings/event-merge';
 import { createEventReadGuard } from '../features/settings/event-read-guard';
+import type { AutosaveHandle, DomainAutosaveState } from '../features/settings/autosave-queue';
 
 type Section = 'intake' | 'rsvp' | 'gallery' | 'messages' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
@@ -146,6 +148,17 @@ export function ManagerPage() {
     } finally {
       eventReads.current.endWrite();
     }
+  }, []);
+  // Leaving Settings flushes a valid scheduled write without waiting for its
+  // response. The subtree remains mounted, so an in-flight request finishes.
+  const settingsAutosave = useRef<AutosaveHandle>(null);
+  // Appearance becomes an autosave domain in the next task; keeping its handle
+  // alongside Settings makes the destination boundary one place.
+  const appearanceAutosave = useRef<AutosaveHandle>(null);
+  const recordAutosaveState = useCallback((next: DomainAutosaveState) => {
+    // A credential or lifecycle failure is the manager's existing recovery
+    // problem, not a local Retry the host could ever win.
+    if (next.failure?.escalation) setActionError({ type: 'load', failure: next.failure.escalation });
   }, []);
 
   const mediaPath = useCallback((cursor?: string) => {
@@ -355,6 +368,12 @@ export function ManagerPage() {
   }, [eventLink]);
 
   function openSection(next: Section) {
+    if (section === 'settings' && next !== 'settings') {
+      // Leaving flushes the newest valid drafts. It deliberately does not wait
+      // for their responses: the subtree stays mounted, so they finish anyway.
+      settingsAutosave.current?.flush();
+      appearanceAutosave.current?.flush();
+    }
     setSection(next);
     if (next === 'settings') setSettingsMounted(true);
     setSelected([]);
@@ -391,27 +410,6 @@ export function ManagerPage() {
       method: 'PATCH', body: JSON.stringify({ action, expectedStatus: item.publicationStatus }),
     }));
     await refresh();
-  }
-
-  async function saveSettings(element: HTMLFormElement) {
-    const form = new FormData(element);
-    const result = await eventWrite(() => api<{ event: EventView }>(`/api/manage/events/${eventId}/settings`, { method: 'PATCH', body: JSON.stringify({
-      name: form.get('name'),
-      welcomeMessage: form.get('welcomeMessage'),
-      uploadsEnabled: form.get('uploadsEnabled') === 'on',
-      galleryVisible: form.get('galleryVisible') === 'on',
-      moderationRequired: form.get('moderationRequired') === 'on',
-      eventTimezone: form.get('eventTimezone'),
-      rsvpDeadlineDate: form.get('rsvpDeadlineDate'),
-      rsvpEnabled: form.get('rsvpEnabled') === 'on',
-      // The version this form was built from. The server treats it as a stale-view
-      // signal and guards the write on what it reads itself.
-      rsvpRosterVersion: event?.rsvpRosterVersion ?? 0,
-    }) }));
-    // One settings mutation confirms one settings mutation. Reloading media,
-    // notes, exports, and the entry to learn a new event name was five requests
-    // spent on answers this response already carries.
-    setEvent((current) => current ? mergeSettingsResponse(current, result.event) : result.event);
   }
 
   async function prepareExport() {
@@ -659,21 +657,14 @@ export function ManagerPage() {
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
         <p className="section-label">Event controls</p>
         <h2>Settings</h2>
-        <form className="settings-form" onSubmit={(formEvent) => {
-          formEvent.preventDefault();
-          const element = formEvent.currentTarget;
-          void runManagerAction(() => saveSettings(element));
-        }}>
-          <label>Event name<input name="name" defaultValue={event.name} /></label>
-          <label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label>
-          <label>Event time zone<input name="eventTimezone" defaultValue={event.eventTimezone} required autoComplete="off" spellCheck={false} /></label>
-          <label>RSVP deadline<input name="rsvpDeadlineDate" type="date" defaultValue={event.rsvpDeadlineDate ?? ''} required /></label>
-          <label className="toggle"><input type="checkbox" name="rsvpEnabled" defaultChecked={event.rsvpEnabled} /><span>Accept RSVPs</span></label>
-          <label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label>
-          <label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label>
-          <label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label>
-          <button className="button button--primary">Save settings</button>
-        </form>
+        <EventSettingsEditor
+          key={event.id}
+          ref={settingsAutosave}
+          event={event}
+          onEventWrite={eventWrite}
+          onSettingsSaved={(updated) => setEvent((current) => current ? mergeSettingsResponse(current, updated) : updated)}
+          onAutosaveStateChange={recordAutosaveState}
+        />
         <EventAppearanceEditor
           key={event.id}
           event={event}

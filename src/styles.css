@@ -184,6 +184,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* A hidden destination keeps its DOM so drafts and timers survive, but it must
    take no layout space or tab stop while another manager section is active. */
 .manager-panel[hidden] { display: none; }
+.event-settings-editor__heading { margin-top: 30px; }
+.settings-form .field-error { display: block; margin-top: 5px; color: var(--danger); font-size: .8rem; font-weight: 500; }
+.settings-form .toggle { flex-wrap: wrap; }
+.settings-form .toggle .field-error { flex-basis: 100%; }
 .event-appearance-editor { min-width: 0; margin-top: 50px; padding-top: 30px; border-top: 1px solid var(--border); }
 .event-appearance-editor__heading { display: grid; gap: 12px; margin-bottom: 24px; }
 .event-appearance-editor__heading h3 { margin: 4px 0 8px; font-family: 'Manrope', sans-serif; font-size: 1.6rem; }
