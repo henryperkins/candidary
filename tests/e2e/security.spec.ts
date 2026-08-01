@@ -156,7 +156,7 @@ test('a refused staged guest list forgets its private source after discard', asy
     mimeType: 'text/csv',
     buffer: Buffer.from(csv),
   });
-  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.getByRole('button', { name: 'Review guests' }).click();
 
   const issues = page.getByRole('region', { name: 'Guest list review issues' });
