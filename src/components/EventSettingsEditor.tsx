@@ -90,11 +90,18 @@ function liveServerErrors(state: EditorState): Partial<Record<EventSettingsField
   return live;
 }
 
+function draftMatchesConfirmed(state: EditorState): boolean {
+  return EVENT_SETTINGS_FIELDS.every((field) => state.draft[field] === state.confirmed[field]);
+}
+
 function editorErrors(
   state: EditorState,
   eventDate: string,
 ): Partial<Record<EventSettingsField, string>> {
-  return { ...validateEventSettings(state.draft, eventDate), ...liveServerErrors(state) };
+  const clientErrors = draftMatchesConfirmed(state)
+    ? {}
+    : validateEventSettings(state.draft, eventDate);
+  return { ...clientErrors, ...liveServerErrors(state) };
 }
 
 function baselineKeyOf(state: EditorState): string {

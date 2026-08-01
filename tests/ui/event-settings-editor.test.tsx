@@ -105,6 +105,32 @@ describe('event settings editor', () => {
     expect(screen.getByText('Event settings saved')).toBeInTheDocument();
   });
 
+  it('treats a legacy null deadline as a clean confirmed baseline', async () => {
+    const legacyEvent = { ...EVENT, rsvpDeadlineAt: null, rsvpDeadlineDate: null };
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: legacyEvent })));
+    render(<Harness initial={legacyEvent} />);
+
+    await settleMicrotasks();
+
+    expect(screen.getByLabelText(/^RSVP deadline/)).toHaveValue('');
+    expect(screen.getByLabelText(/^RSVP deadline/)).toHaveAttribute('aria-invalid', 'false');
+    expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saved');
+    expect(settingsWrites()).toHaveLength(0);
+  });
+
+  it('requires a deadline before changing another setting on a legacy event', async () => {
+    const legacyEvent = { ...EVENT, rsvpDeadlineAt: null, rsvpDeadlineDate: null };
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: legacyEvent })));
+    render(<Harness initial={legacyEvent} />);
+
+    fireEvent.click(screen.getByLabelText('Review notes before sharing'));
+    await settleMicrotasks();
+
+    expect(screen.getByLabelText(/^RSVP deadline/)).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:invalid');
+    expect(settingsWrites()).toHaveLength(0);
+  });
+
   it('saves a toggle immediately and sends the complete payload', async () => {
     vi.stubGlobal('fetch', vi.fn(() => json({ event: { ...EVENT, galleryVisible: false } })));
     render(<Harness />);
