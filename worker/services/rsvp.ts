@@ -1,5 +1,14 @@
 import type {
   RsvpAttendance,
+  RsvpRosterBatchCommitRequest,
+  RsvpRosterBatchCommitResponse,
+  RsvpRosterBatchIssue,
+  RsvpRosterBatchPreviewResponse,
+  RsvpRosterBatchReceipt,
+  RsvpRosterBatchTargetVersion,
+  RsvpRosterBatchTotals,
+  RsvpRosterCanonicalBatch,
+  RsvpRosterBatchDraft,
   RsvpHouseholdCreateRequest,
   RsvpHouseholdDetail,
   RsvpHouseholdFilter,
@@ -31,12 +40,14 @@ import { EventsRepository } from '../db/events';
 import type { AuthenticatedHousehold } from '../auth/rsvp';
 import {
   ADVANCE_ROSTER_SQL,
+  ADVANCE_BATCH_HOUSEHOLDS_SQL,
   ARCHIVE_HOUSEHOLD_SQL,
   buildManagedInviteeInsertStatements,
   buildRosterStatements,
   COMMIT_HOUSEHOLD_SQL,
   HOST_SUBMIT_INVITEES_SQL,
   RsvpRepository,
+  REQUIRE_BATCH_TARGET_WRITES_SQL,
   SUBMIT_INVITEES_SQL,
   UPDATE_HOUSEHOLD_ROSTER_SQL,
   type ManagedInviteeInput,
@@ -71,6 +82,43 @@ function managerConflict(): ApiError {
 
 function rosterValidation(message: string): ApiError {
   return new ApiError('VALIDATION_FAILED', message, 422);
+}
+
+function rosterBatchConflict(details: {
+  currentRosterVersion: number;
+  targets: Array<{
+    clientHouseholdId: string;
+    householdId: string;
+    currentHouseholdVersion: number | null;
+    state: 'changed' | 'archived' | 'missing';
+  }>;
+}): ApiError {
+  return new ApiError(
+    'RSVP_ROSTER_BATCH_CONFLICT',
+    'This guest list changed since it was checked. Preview it again before saving.',
+    409,
+    undefined,
+    details,
+  );
+}
+
+function isExpectedRosterBatchAbort(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('NOT NULL constraint failed: events.rsvp_roster_version')
+    || message.includes('NOT NULL constraint failed: rsvp_households.version')
+    || message.includes('UNIQUE constraint failed: rsvp_roster_batch_receipts')
+    || message.includes('UNIQUE constraint failed: rsvp_households');
+}
+
+interface RosterBatchEvaluation {
+  canonicalBatch: RsvpRosterCanonicalBatch;
+  issues: RsvpRosterBatchIssue[];
+  targetVersions: RsvpRosterBatchTargetVersion[];
+  totals: RsvpRosterBatchTotals;
+  targets: Map<string, {
+    household: RsvpHouseholdRecord;
+    invitees: RsvpInviteeRecord[];
+  }>;
 }
 
 const RSVP_EXPORT_HEADER = [
@@ -1200,6 +1248,795 @@ export class RsvpService {
     return {
       household: await this.managerHousehold(event.id, householdId),
       rosterVersion: input.expectedRosterVersion + 1,
+    };
+  }
+
+  private batchIssue(
+    issues: RsvpRosterBatchIssue[],
+    issue: Omit<RsvpRosterBatchIssue, 'severity'>,
+  ): void {
+    issues.push({ ...issue, severity: 'blocking' });
+  }
+
+  private batchText(
+    value: string,
+    issues: RsvpRosterBatchIssue[],
+    input: {
+      clientHouseholdId: string;
+      clientInviteeId?: string;
+      field: string;
+      code: 'household_label_invalid' | 'invitee_name_invalid';
+    },
+  ): string {
+    const parsed = parsePersonText(value);
+    if (parsed.ok) return parsed.value;
+    this.batchIssue(issues, {
+      ...input,
+      code: input.code,
+      message: input.code === 'household_label_invalid'
+        ? 'Enter a household label from 1 to 80 characters.'
+        : 'Enter each named guest from 1 to 80 characters.',
+    });
+    return value;
+  }
+
+  private generatedHouseholdKey(label: string): string {
+    const normalized = label.normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/gu, '-')
+      .replace(/^[^a-z0-9]+|[^a-z0-9]+$/gu, '');
+    return (normalized || 'household').slice(0, 64);
+  }
+
+  private availableGeneratedHouseholdKey(base: string, used: ReadonlySet<string>): string {
+    if (!used.has(base)) return base;
+    for (let suffix = 2; ; suffix += 1) {
+      const ending = `-${suffix}`;
+      const candidate = `${base.slice(0, 64 - ending.length)}${ending}`;
+      if (!used.has(candidate)) return candidate;
+    }
+  }
+
+  private async rosterBatchDigest(
+    eventId: string,
+    canonicalBatch: RsvpRosterCanonicalBatch,
+    expectedRosterVersion: number,
+  ): Promise<string> {
+    const batch = {
+      creates: canonicalBatch.creates.map((create) => ({
+        clientHouseholdId: create.clientHouseholdId,
+        householdKey: {
+          value: create.householdKey.value,
+          provenance: create.householdKey.provenance,
+        },
+        label: create.label,
+        namedInvitees: create.namedInvitees.map((invitee) => ({
+          clientInviteeId: invitee.clientInviteeId,
+          displayName: invitee.displayName,
+        })),
+        plusOneSlots: create.plusOneSlots,
+      })),
+      appends: canonicalBatch.appends.map((append) => ({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: append.householdId,
+        expectedHouseholdVersion: append.expectedHouseholdVersion,
+        namedInvitees: append.namedInvitees.map((invitee) => ({
+          clientInviteeId: invitee.clientInviteeId,
+          displayName: invitee.displayName,
+          ...(invitee.attendance ? { attendance: invitee.attendance } : {}),
+        })),
+        plusOneSlotsToAdd: append.plusOneSlotsToAdd,
+        ...(append.newPlusOneResponses ? {
+          newPlusOneResponses: append.newPlusOneResponses.map((response) => ({
+            clientInviteeId: response.clientInviteeId,
+            attendance: response.attendance,
+            displayName: response.displayName,
+          })),
+        } : {}),
+      })),
+    };
+    return sha256Hex(JSON.stringify({
+      eventId,
+      canonicalBatch: batch,
+      expectedRosterVersion,
+      targetVersions: canonicalBatch.appends.map((append) => ({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: append.householdId,
+        expectedHouseholdVersion: append.expectedHouseholdVersion,
+      })),
+    }));
+  }
+
+  private async rosterBatchConflictDetails(
+    eventId: string,
+    canonicalBatch: RsvpRosterCanonicalBatch,
+  ): Promise<{
+    currentRosterVersion: number;
+    targets: Array<{
+      clientHouseholdId: string;
+      householdId: string;
+      currentHouseholdVersion: number | null;
+      state: 'changed' | 'archived' | 'missing';
+    }>;
+  }> {
+    const event = await this.events.getById(eventId);
+    const targets = [];
+    for (const append of canonicalBatch.appends) {
+      const household = await this.rsvp.getHousehold(eventId, append.householdId);
+      if (!household) {
+        targets.push({
+          clientHouseholdId: append.clientHouseholdId,
+          householdId: append.householdId,
+          currentHouseholdVersion: null,
+          state: 'missing' as const,
+        });
+      } else if (household.archivedAt !== null) {
+        targets.push({
+          clientHouseholdId: append.clientHouseholdId,
+          householdId: append.householdId,
+          currentHouseholdVersion: household.version,
+          state: 'archived' as const,
+        });
+      } else if (household.version !== append.expectedHouseholdVersion) {
+        targets.push({
+          clientHouseholdId: append.clientHouseholdId,
+          householdId: append.householdId,
+          currentHouseholdVersion: household.version,
+          state: 'changed' as const,
+        });
+      }
+    }
+    return {
+      currentRosterVersion: event?.rsvpRosterVersion ?? 0,
+      targets,
+    };
+  }
+
+  private async evaluateRosterBatch(
+    event: EventRecord,
+    batch: RsvpRosterBatchDraft | RsvpRosterCanonicalBatch,
+    mode: 'preview' | 'commit',
+  ): Promise<RosterBatchEvaluation> {
+    const issues: RsvpRosterBatchIssue[] = [];
+    const households = await this.rsvp.listHouseholds(event.id);
+    const eventInvitees = await this.rsvp.listEventInvitees(event.id);
+    const inviteesByHousehold = new Map<string, RsvpInviteeRecord[]>();
+    for (const invitee of eventInvitees) {
+      const rows = inviteesByHousehold.get(invitee.householdId);
+      if (rows) rows.push(invitee);
+      else inviteesByHousehold.set(invitee.householdId, [invitee]);
+    }
+    const householdById = new Map(households.map((household) => [household.id, household]));
+    const occupiedKeys = new Set(households.map((household) => household.householdKey));
+    const suppliedKeys = new Map<string, string[]>();
+    for (const create of batch.creates) {
+      const sourceKey = create.householdKey;
+      if (!sourceKey || sourceKey.provenance !== 'supplied') continue;
+      if (!RSVP_HOUSEHOLD_KEY_PATTERN.test(sourceKey.value)) {
+        this.batchIssue(issues, {
+          clientHouseholdId: create.clientHouseholdId,
+          field: 'householdKey.value',
+          code: 'household_key_invalid',
+          message: 'Household keys use lowercase letters, numbers, hyphens, and underscores.',
+        });
+        continue;
+      }
+      const claims = suppliedKeys.get(sourceKey.value);
+      if (claims) claims.push(create.clientHouseholdId);
+      else suppliedKeys.set(sourceKey.value, [create.clientHouseholdId]);
+    }
+    for (const [value, claimants] of suppliedKeys) {
+      const inUse = occupiedKeys.has(value);
+      if (inUse || claimants.length > 1) {
+        for (const clientHouseholdId of claimants) {
+          this.batchIssue(issues, {
+            clientHouseholdId,
+            field: 'householdKey.value',
+            code: 'household_key_in_use',
+            message: 'That household key is already in use.',
+          });
+        }
+      }
+      // All valid supplied keys reserve their exact value before any generated
+      // key is derived, irrespective of source order.
+      occupiedKeys.add(value);
+    }
+    const creates: RsvpRosterCanonicalBatch['creates'] = [];
+
+    for (const create of batch.creates) {
+      const label = this.batchText(create.label, issues, {
+        clientHouseholdId: create.clientHouseholdId,
+        field: 'label',
+        code: 'household_label_invalid',
+      });
+      const namedInvitees = create.namedInvitees.map((invitee) => ({
+        clientInviteeId: invitee.clientInviteeId,
+        displayName: this.batchText(invitee.displayName, issues, {
+          clientHouseholdId: create.clientHouseholdId,
+          clientInviteeId: invitee.clientInviteeId,
+          field: 'namedInvitees.displayName',
+          code: 'invitee_name_invalid',
+        }),
+      }));
+      const sourceKey = create.householdKey;
+      let householdKey: RsvpRosterCanonicalBatch['creates'][number]['householdKey'];
+      if (!sourceKey && mode === 'preview') {
+        const generated = this.availableGeneratedHouseholdKey(
+          this.generatedHouseholdKey(label),
+          occupiedKeys,
+        );
+        occupiedKeys.add(generated);
+        householdKey = { value: generated, provenance: 'generated' };
+      } else if (sourceKey?.provenance === 'supplied') {
+        householdKey = { value: sourceKey.value, provenance: 'supplied' };
+      } else {
+        const generated = this.availableGeneratedHouseholdKey(
+          this.generatedHouseholdKey(label),
+          occupiedKeys,
+        );
+        householdKey = { value: generated, provenance: 'generated' };
+        if (sourceKey?.value !== generated) {
+          this.batchIssue(issues, {
+            clientHouseholdId: create.clientHouseholdId,
+            field: 'householdKey.value',
+            code: 'household_key_mapping_inconsistent',
+            message: 'This generated household key changed. Preview the batch again.',
+          });
+        }
+        occupiedKeys.add(generated);
+      }
+      if (create.plusOneSlots > 10) {
+        this.batchIssue(issues, {
+          clientHouseholdId: create.clientHouseholdId,
+          field: 'plusOneSlots',
+          code: 'plus_one_slots_invalid',
+          message: 'A household can have at most 10 plus-one slots.',
+        });
+      }
+      creates.push({
+        clientHouseholdId: create.clientHouseholdId,
+        householdKey,
+        label,
+        namedInvitees,
+        plusOneSlots: create.plusOneSlots,
+      });
+    }
+
+    const targets = new Map<string, {
+      household: RsvpHouseholdRecord;
+      invitees: RsvpInviteeRecord[];
+    }>();
+    const targetVersions: RsvpRosterBatchTargetVersion[] = [];
+    const appends: RsvpRosterCanonicalBatch['appends'] = [];
+    const targetIds = new Set<string>();
+
+    for (const append of batch.appends) {
+      const household = householdById.get(append.householdId);
+      if (!household) {
+        this.batchIssue(issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          field: 'householdId',
+          code: 'target_household_missing',
+          message: 'Choose an existing household before adding guests.',
+        });
+      } else if (household.archivedAt !== null) {
+        this.batchIssue(issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          field: 'householdId',
+          code: 'target_household_archived',
+          message: 'This household is archived and cannot receive new guests.',
+        });
+      } else {
+        targetVersions.push({
+          clientHouseholdId: append.clientHouseholdId,
+          householdId: household.id,
+          version: household.version,
+        });
+        targets.set(append.clientHouseholdId, {
+          household,
+          invitees: inviteesByHousehold.get(household.id) ?? [],
+        });
+        if (household.version !== append.expectedHouseholdVersion) {
+          this.batchIssue(issues, {
+            clientHouseholdId: append.clientHouseholdId,
+            field: 'expectedHouseholdVersion',
+            code: 'target_household_version_changed',
+            message: 'This household changed since it was selected.',
+          });
+        }
+      }
+      if (targetIds.has(append.householdId)) {
+        this.batchIssue(issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          field: 'householdId',
+          code: 'target_household_version_changed',
+          message: 'Add guests to an existing household in one staged change.',
+        });
+      }
+      targetIds.add(append.householdId);
+      if (append.namedInvitees.length === 0 && append.plusOneSlotsToAdd === 0) {
+        this.batchIssue(issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          field: 'appends',
+          code: 'append_empty',
+          message: 'Add a guest or a plus-one slot before saving.',
+        });
+      }
+      if (append.plusOneSlotsToAdd > 10) {
+        this.batchIssue(issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          field: 'plusOneSlotsToAdd',
+          code: 'plus_one_slots_invalid',
+          message: 'A household can have at most 10 plus-one slots.',
+        });
+      }
+
+      const responded = household?.firstRespondedAt !== null && household !== undefined;
+      const namedInvitees = append.namedInvitees.map((invitee) => {
+        const displayName = this.batchText(invitee.displayName, issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          clientInviteeId: invitee.clientInviteeId,
+          field: 'namedInvitees.displayName',
+          code: 'invitee_name_invalid',
+        });
+        if (responded && invitee.attendance === undefined) {
+          this.batchIssue(issues, {
+            clientHouseholdId: append.clientHouseholdId,
+            clientInviteeId: invitee.clientInviteeId,
+            field: 'namedInvitees.attendance',
+            code: 'attendance_required',
+            message: 'Choose attending or declined for every added guest.',
+          });
+        }
+        return {
+          clientInviteeId: invitee.clientInviteeId,
+          displayName,
+          ...(responded && invitee.attendance ? { attendance: invitee.attendance } : {}),
+        };
+      });
+
+      const sourceResponses = append.newPlusOneResponses ?? [];
+      if (responded && sourceResponses.length !== append.plusOneSlotsToAdd) {
+        this.batchIssue(issues, {
+          clientHouseholdId: append.clientHouseholdId,
+          field: 'newPlusOneResponses',
+          code: 'attendance_required',
+          message: 'Choose attending or declined for every added plus-one slot.',
+        });
+      }
+      const newPlusOneResponses = responded
+        ? sourceResponses.map((response) => {
+          let displayName: string | null = null;
+          if (response.attendance === 'attending') {
+            const parsed = parsePersonText(response.displayName ?? '');
+            if (parsed.ok) {
+              displayName = parsed.value;
+            } else {
+              this.batchIssue(issues, {
+                clientHouseholdId: append.clientHouseholdId,
+                clientInviteeId: response.clientInviteeId,
+                field: 'newPlusOneResponses.displayName',
+                code: 'plus_one_name_required',
+                message: 'Enter a name for each attending plus-one.',
+              });
+            }
+          }
+          return {
+            clientInviteeId: response.clientInviteeId,
+            attendance: response.attendance,
+            displayName,
+          };
+        })
+        : undefined;
+      appends.push({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: append.householdId,
+        expectedHouseholdVersion: append.expectedHouseholdVersion,
+        namedInvitees,
+        plusOneSlotsToAdd: append.plusOneSlotsToAdd,
+        ...(newPlusOneResponses ? { newPlusOneResponses } : {}),
+      });
+    }
+
+    const compositions = new Map<string, {
+      namedCount: number;
+      plusOneCount: number;
+      clientHouseholdId?: string;
+    }>();
+    for (const household of households) {
+      if (household.archivedAt !== null) continue;
+      const invitees = inviteesByHousehold.get(household.id) ?? [];
+      compositions.set(household.id, {
+        namedCount: invitees.filter((invitee) => invitee.kind === 'named').length,
+        plusOneCount: invitees.filter((invitee) => invitee.kind === 'plus_one').length,
+      });
+    }
+    for (const append of appends) {
+      const composition = compositions.get(append.householdId);
+      if (!composition) continue;
+      composition.namedCount += append.namedInvitees.length;
+      composition.plusOneCount += append.plusOneSlotsToAdd;
+      composition.clientHouseholdId = append.clientHouseholdId;
+    }
+    for (const create of creates) {
+      compositions.set(create.clientHouseholdId, {
+        namedCount: create.namedInvitees.length,
+        plusOneCount: create.plusOneSlots,
+        clientHouseholdId: create.clientHouseholdId,
+      });
+    }
+    for (const composition of compositions.values()) {
+      const capacity = checkHouseholdCapacity({
+        namedCount: composition.namedCount,
+        plusOneSlots: composition.plusOneCount,
+      });
+      if (!capacity) continue;
+      this.batchIssue(issues, {
+        ...(composition.clientHouseholdId
+          ? { clientHouseholdId: composition.clientHouseholdId }
+          : {}),
+        field: capacity === 'plus_one_slots_invalid' ? 'plusOneSlots' : 'namedInvitees',
+        code: capacity === 'plus_one_slots_invalid'
+          ? 'plus_one_slots_invalid'
+          : capacity === 'household_named_required'
+            ? 'household_named_required'
+          : capacity === 'household_named_limit'
+            ? 'household_named_limit'
+            : 'household_capacity_limit',
+        message: 'This household is over its size limit.',
+      });
+    }
+
+    const invitedCapacity = [...compositions.values()].reduce(
+      (total, composition) => total + composition.namedCount + composition.plusOneCount,
+      0,
+    );
+    const rosterCapacity = checkRosterCapacity({
+      households: compositions.size,
+      invitedCapacity,
+    });
+    if (rosterCapacity) {
+      this.batchIssue(issues, {
+        field: 'batch',
+        code: rosterCapacity,
+        message: rosterCapacity === 'event_household_limit'
+          ? 'This event can hold at most 500 households.'
+          : 'This event can invite at most 500 people including plus-one slots.',
+      });
+    }
+
+    const lookupKeys = new Map<string, string[]>();
+    const lookupClientIds = new Map<string, Map<string, string[]>>();
+    for (const household of households) {
+      if (household.archivedAt !== null) continue;
+      lookupKeys.set(household.id, (inviteesByHousehold.get(household.id) ?? [])
+        .filter((invitee) => invitee.kind === 'named' && invitee.lookupDigest !== null)
+        .map((invitee) => invitee.lookupDigest!));
+    }
+    for (const append of appends) {
+      const household = targets.get(append.clientHouseholdId)?.household;
+      if (!household || household.archivedAt !== null) continue;
+      const keys = lookupKeys.get(household.id) ?? [];
+      const clientIds = lookupClientIds.get(household.id) ?? new Map<string, string[]>();
+      for (const invitee of append.namedInvitees) {
+        const parsed = parsePersonText(invitee.displayName);
+        if (!parsed.ok) continue;
+        const digest = await this.lookupDigest(event.id, normalizeInvitedName(parsed.value));
+        keys.push(digest);
+        const ids = clientIds.get(digest);
+        if (ids) ids.push(invitee.clientInviteeId);
+        else clientIds.set(digest, [invitee.clientInviteeId]);
+      }
+      lookupKeys.set(household.id, keys);
+      lookupClientIds.set(household.id, clientIds);
+    }
+    for (const create of creates) {
+      const keys: string[] = [];
+      const clientIds = new Map<string, string[]>();
+      for (const invitee of create.namedInvitees) {
+        const parsed = parsePersonText(invitee.displayName);
+        if (!parsed.ok) continue;
+        const digest = await this.lookupDigest(event.id, normalizeInvitedName(parsed.value));
+        keys.push(digest);
+        const ids = clientIds.get(digest);
+        if (ids) ids.push(invitee.clientInviteeId);
+        else clientIds.set(digest, [invitee.clientInviteeId]);
+      }
+      lookupKeys.set(create.clientHouseholdId, keys);
+      lookupClientIds.set(create.clientHouseholdId, clientIds);
+    }
+    for (const collision of findLookupCollisions([...lookupKeys.entries()].map(
+      ([householdId, nameKeys]) => ({ householdId, nameKeys }),
+    ))) {
+      const clientIds = lookupClientIds.get(collision.householdId)?.get(collision.nameKey);
+      if (clientIds?.length) {
+        for (const clientInviteeId of clientIds) {
+          this.batchIssue(issues, {
+            clientHouseholdId: collision.householdId,
+            clientInviteeId,
+            field: 'namedInvitees.displayName',
+            code: collision.code,
+            message: 'These names would make this household impossible to identify.',
+          });
+        }
+      } else {
+        this.batchIssue(issues, {
+          field: 'batch',
+          code: collision.code,
+          message: 'The resulting guest list contains households that cannot be identified.',
+        });
+      }
+    }
+
+    const namedInviteesAdded = creates.reduce(
+      (total, create) => total + create.namedInvitees.length,
+      0,
+    ) + appends.reduce((total, append) => total + append.namedInvitees.length, 0);
+    const plusOneCapacityAdded = creates.reduce(
+      (total, create) => total + create.plusOneSlots,
+      0,
+    ) + appends.reduce((total, append) => total + append.plusOneSlotsToAdd, 0);
+    return {
+      canonicalBatch: { creates, appends },
+      issues,
+      targetVersions,
+      totals: {
+        householdsCreated: creates.length,
+        householdsUpdated: appends.length,
+        namedInviteesAdded,
+        plusOneCapacityAdded,
+        invitedCapacityAdded: namedInviteesAdded + plusOneCapacityAdded,
+        resultingHouseholds: compositions.size,
+        resultingInvitedCapacity: invitedCapacity,
+      },
+      targets,
+    };
+  }
+
+  async previewRosterBatch(
+    event: EventRecord,
+    input: { batch: RsvpRosterBatchDraft; expectedRosterVersion: number },
+  ): Promise<RsvpRosterBatchPreviewResponse> {
+    const current = await this.events.getById(event.id);
+    if (!current) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
+    const evaluated = await this.evaluateRosterBatch(current, input.batch, 'preview');
+    if (input.expectedRosterVersion !== current.rsvpRosterVersion) {
+      this.batchIssue(evaluated.issues, {
+        field: 'expectedRosterVersion',
+        code: 'target_household_version_changed',
+        message: 'The guest list changed since this batch was started.',
+      });
+    }
+    const previewDigest = await this.rosterBatchDigest(
+      current.id,
+      evaluated.canonicalBatch,
+      input.expectedRosterVersion,
+    );
+    return {
+      canonicalBatch: evaluated.canonicalBatch,
+      rosterVersion: current.rsvpRosterVersion,
+      targetVersions: evaluated.targetVersions,
+      totals: evaluated.totals,
+      issues: evaluated.issues,
+      previewDigest,
+      canCommit: !evaluated.issues.some((issue) => issue.severity === 'blocking'),
+    };
+  }
+
+  private async settleRosterBatchReceipt(
+    eventId: string,
+    idempotencyKey: string,
+    digest: string,
+  ): Promise<RsvpRosterBatchCommitResponse | null> {
+    const stored = await this.rsvp.getRosterBatchReceipt(eventId, idempotencyKey);
+    if (!stored) return null;
+    if (stored.requestDigest !== digest) {
+      throw new ApiError(
+        'RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT',
+        'This save key was already used for a different guest list.',
+        409,
+      );
+    }
+    const current = await this.events.getById(eventId);
+    return {
+      ...stored.receipt,
+      currentRosterVersion: current?.rsvpRosterVersion ?? stored.receipt.committedRosterVersion,
+      replayed: true,
+    };
+  }
+
+  async commitRosterBatch(
+    event: EventRecord,
+    input: RsvpRosterBatchCommitRequest,
+    now = new Date(),
+  ): Promise<RsvpRosterBatchCommitResponse> {
+    const digest = await this.rosterBatchDigest(
+      event.id,
+      input.canonicalBatch,
+      input.expectedRosterVersion,
+    );
+    if (digest !== input.previewDigest) {
+      throw rosterBatchConflict(await this.rosterBatchConflictDetails(
+        event.id,
+        input.canonicalBatch,
+      ));
+    }
+    const replayed = await this.settleRosterBatchReceipt(
+      event.id,
+      input.idempotencyKey,
+      digest,
+    );
+    if (replayed) return replayed;
+
+    const current = await this.events.getById(event.id);
+    if (!current || current.rsvpRosterVersion !== input.expectedRosterVersion) {
+      throw rosterBatchConflict(await this.rosterBatchConflictDetails(
+        event.id,
+        input.canonicalBatch,
+      ));
+    }
+    const evaluated = await this.evaluateRosterBatch(current, input.canonicalBatch, 'commit');
+    if (evaluated.issues.some((issue) => issue.severity === 'blocking')) {
+      throw rosterBatchConflict(await this.rosterBatchConflictDetails(
+        event.id,
+        input.canonicalBatch,
+      ));
+    }
+
+    const createdAt = now.toISOString();
+    const createdHouseholds = evaluated.canonicalBatch.creates.map((create) => ({
+      clientHouseholdId: create.clientHouseholdId,
+      householdId: crypto.randomUUID(),
+    }));
+    const createdIds = new Map(createdHouseholds.map((created) => [
+      created.clientHouseholdId,
+      created.householdId,
+    ]));
+    const createdRosterHouseholds = evaluated.canonicalBatch.creates.map((create) => ({
+      id: createdIds.get(create.clientHouseholdId)!,
+      householdKey: create.householdKey.value,
+      label: create.label,
+    }));
+    const createdInvitees: RosterInviteeInput[] = [];
+    for (const create of evaluated.canonicalBatch.creates) {
+      const householdId = createdIds.get(create.clientHouseholdId)!;
+      for (const [sortOrder, invitee] of create.namedInvitees.entries()) {
+        createdInvitees.push({
+          id: crypto.randomUUID(),
+          householdId,
+          kind: 'named',
+          displayName: invitee.displayName,
+          lookupDigest: await this.lookupDigest(
+            event.id,
+            normalizeInvitedName(invitee.displayName),
+          ),
+          sortOrder,
+        });
+      }
+      for (let slot = 0; slot < create.plusOneSlots; slot += 1) {
+        createdInvitees.push({
+          id: crypto.randomUUID(),
+          householdId,
+          kind: 'plus_one',
+          displayName: null,
+          lookupDigest: null,
+          sortOrder: create.namedInvitees.length + slot,
+        });
+      }
+    }
+
+    const appendedInvitees: ManagedInviteeInput[] = [];
+    const updatedHouseholds: RsvpRosterBatchReceipt['updatedHouseholds'] = [];
+    for (const append of evaluated.canonicalBatch.appends) {
+      const target = evaluated.targets.get(append.clientHouseholdId)!;
+      let sortOrder = target.invitees.reduce(
+        (highest, invitee) => Math.max(highest, invitee.sortOrder),
+        -1,
+      ) + 1;
+      const plusOneResponses = append.newPlusOneResponses ?? [];
+      for (const invitee of append.namedInvitees) {
+        appendedInvitees.push({
+          id: crypto.randomUUID(),
+          householdId: target.household.id,
+          kind: 'named',
+          displayName: invitee.displayName,
+          lookupDigest: await this.lookupDigest(
+            event.id,
+            normalizeInvitedName(invitee.displayName),
+          ),
+          attendance: target.household.firstRespondedAt === null
+            ? 'pending'
+            : invitee.attendance!,
+          sortOrder: sortOrder++,
+        });
+      }
+      for (let slot = 0; slot < append.plusOneSlotsToAdd; slot += 1) {
+        const response = plusOneResponses[slot];
+        appendedInvitees.push({
+          id: crypto.randomUUID(),
+          householdId: target.household.id,
+          kind: 'plus_one',
+          displayName: target.household.firstRespondedAt === null
+            ? null
+            : response?.displayName ?? null,
+          lookupDigest: null,
+          attendance: target.household.firstRespondedAt === null
+            ? 'pending'
+            : response!.attendance,
+          sortOrder: sortOrder++,
+        });
+      }
+      updatedHouseholds.push({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: target.household.id,
+        committedVersion: target.household.version + 1,
+      });
+    }
+
+    const receipt: RsvpRosterBatchReceipt = {
+      createdHouseholds,
+      updatedHouseholds,
+      totals: evaluated.totals,
+      committedRosterVersion: input.expectedRosterVersion + 1,
+    };
+    const statements = buildRosterStatements({
+      eventId: event.id,
+      households: createdRosterHouseholds,
+      invitees: createdInvitees,
+      createdAt,
+    });
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(ADVANCE_ROSTER_SQL).bind(input.expectedRosterVersion, event.id),
+        ...this.rsvp.toStatements(statements),
+        ...this.rsvp.toStatements(buildManagedInviteeInsertStatements({
+          eventId: event.id,
+          invitees: appendedInvitees,
+          createdAt,
+        })),
+        ...(evaluated.canonicalBatch.appends.length > 0
+          ? [
+            this.env.DB.prepare(ADVANCE_BATCH_HOUSEHOLDS_SQL).bind(
+              JSON.stringify(evaluated.canonicalBatch.appends.map((append) => ({
+                id: append.householdId,
+                expectedVersion: append.expectedHouseholdVersion,
+              }))),
+              createdAt,
+              event.id,
+            ),
+            this.env.DB.prepare(REQUIRE_BATCH_TARGET_WRITES_SQL).bind(
+              evaluated.canonicalBatch.appends.length,
+              event.id,
+            ),
+          ]
+          : []),
+        this.rsvp.rosterBatchReceiptStatement({
+          eventId: event.id,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: digest,
+          receipt,
+          createdAt,
+        }),
+      ]);
+    } catch (error) {
+      const settled = await this.settleRosterBatchReceipt(
+        event.id,
+        input.idempotencyKey,
+        digest,
+      );
+      if (settled) return settled;
+      if (!isExpectedRosterBatchAbort(error)) throw error;
+      throw rosterBatchConflict(await this.rosterBatchConflictDetails(
+        event.id,
+        input.canonicalBatch,
+      ));
+    }
+    const fresh = await this.events.getById(event.id);
+    return {
+      ...receipt,
+      currentRosterVersion: fresh?.rsvpRosterVersion ?? receipt.committedRosterVersion,
+      replayed: false,
     };
   }
 

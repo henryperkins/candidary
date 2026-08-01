@@ -1,4 +1,4 @@
-import type { ApiErrorBody, ApiErrorCode } from '../../shared/errors';
+import type { ApiErrorBody, ApiErrorCode, ApiErrorDetails } from '../../shared/errors';
 
 interface Envelope<T> { data: T; requestId: string }
 
@@ -7,6 +7,7 @@ export class ClientApiError extends Error {
     public readonly code: ApiErrorCode,
     message: string,
     public readonly fieldErrors?: Record<string, string>,
+    public readonly details?: ApiErrorDetails,
   ) {
     super(message);
   }
@@ -33,7 +34,14 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   const payload = await response.json() as Envelope<T> & Partial<ApiErrorBody>;
-  if (!response.ok) throw new ClientApiError(payload.code ?? 'INTERNAL_ERROR', payload.message ?? 'Something went wrong.', payload.fieldErrors);
+  if (!response.ok) {
+    throw new ClientApiError(
+      payload.code ?? 'INTERNAL_ERROR',
+      payload.message ?? 'Something went wrong.',
+      payload.fieldErrors,
+      payload.details,
+    );
+  }
   return payload.data;
 }
 

@@ -294,6 +294,160 @@ export interface RsvpImportCommitResponse {
   rosterVersion: number;
 }
 
+export type RsvpRosterBatchKeyProvenance = 'supplied' | 'generated';
+
+export interface RsvpRosterBatchHouseholdKey {
+  value: string;
+  provenance: RsvpRosterBatchKeyProvenance;
+}
+
+export interface RsvpRosterBatchSuppliedHouseholdKey
+  extends RsvpRosterBatchHouseholdKey {
+  provenance: 'supplied';
+}
+
+export interface RsvpRosterBatchCreateInvitee {
+  clientInviteeId: string;
+  displayName: string;
+}
+
+export interface RsvpRosterBatchAppendInvitee extends RsvpRosterBatchCreateInvitee {
+  attendance?: Exclude<RsvpAttendance, 'pending'>;
+}
+
+export interface RsvpRosterBatchPlusOneResponse {
+  clientInviteeId: string;
+  attendance: Exclude<RsvpAttendance, 'pending'>;
+  displayName: string | null;
+}
+
+export interface RsvpRosterBatchCreate {
+  clientHouseholdId: string;
+  // Preview input may preserve a host-supplied key or omit it. Only the Worker
+  // adds generated provenance to the canonical preview returned for commit.
+  householdKey?: RsvpRosterBatchSuppliedHouseholdKey;
+  label: string;
+  namedInvitees: RsvpRosterBatchCreateInvitee[];
+  plusOneSlots: number;
+}
+
+export interface RsvpRosterBatchCanonicalCreate extends Omit<RsvpRosterBatchCreate, 'householdKey'> {
+  householdKey: RsvpRosterBatchHouseholdKey;
+}
+
+export interface RsvpRosterBatchAppend {
+  clientHouseholdId: string;
+  householdId: string;
+  expectedHouseholdVersion: number;
+  namedInvitees: RsvpRosterBatchAppendInvitee[];
+  plusOneSlotsToAdd: number;
+  newPlusOneResponses?: RsvpRosterBatchPlusOneResponse[];
+}
+
+export interface RsvpRosterBatchDraft {
+  creates: RsvpRosterBatchCreate[];
+  appends: RsvpRosterBatchAppend[];
+}
+
+export interface RsvpRosterCanonicalBatch {
+  creates: RsvpRosterBatchCanonicalCreate[];
+  appends: RsvpRosterBatchAppend[];
+}
+
+export type RsvpRosterBatchIssueSeverity = 'blocking' | 'advisory';
+
+export type RsvpRosterBatchIssueCode =
+  | 'household_key_invalid'
+  | 'household_key_mapping_inconsistent'
+  | 'household_key_in_use'
+  | 'possible_existing_household_match'
+  | 'household_label_invalid'
+  | 'invitee_name_invalid'
+  | 'plus_one_slots_invalid'
+  | 'household_named_required'
+  | 'household_duplicate_name'
+  | 'household_lookup_unresolvable'
+  | 'household_named_limit'
+  | 'household_capacity_limit'
+  | 'event_household_limit'
+  | 'event_capacity_limit'
+  | 'append_empty'
+  | 'target_household_archived'
+  | 'target_household_missing'
+  | 'target_household_version_changed'
+  | 'attendance_required'
+  | 'plus_one_name_required';
+
+export interface RsvpRosterBatchIssue {
+  clientHouseholdId?: string;
+  clientInviteeId?: string;
+  field: string;
+  code: RsvpRosterBatchIssueCode;
+  message: string;
+  severity: RsvpRosterBatchIssueSeverity;
+}
+
+export interface RsvpRosterBatchTotals {
+  householdsCreated: number;
+  householdsUpdated: number;
+  namedInviteesAdded: number;
+  plusOneCapacityAdded: number;
+  invitedCapacityAdded: number;
+  resultingHouseholds: number;
+  resultingInvitedCapacity: number;
+}
+
+export interface RsvpRosterBatchTargetVersion {
+  clientHouseholdId: string;
+  householdId: string;
+  version: number;
+}
+
+export interface RsvpRosterBatchPreviewRequest {
+  batch: RsvpRosterBatchDraft;
+  expectedRosterVersion: number;
+}
+
+export interface RsvpRosterBatchPreviewResponse {
+  canonicalBatch: RsvpRosterCanonicalBatch;
+  rosterVersion: number;
+  targetVersions: RsvpRosterBatchTargetVersion[];
+  totals: RsvpRosterBatchTotals;
+  issues: RsvpRosterBatchIssue[];
+  previewDigest: string;
+  canCommit: boolean;
+}
+
+export interface RsvpRosterBatchCommitRequest {
+  canonicalBatch: RsvpRosterCanonicalBatch;
+  previewDigest: string;
+  expectedRosterVersion: number;
+  idempotencyKey: string;
+}
+
+export interface RsvpRosterBatchCreatedHousehold {
+  clientHouseholdId: string;
+  householdId: string;
+}
+
+export interface RsvpRosterBatchUpdatedHousehold {
+  clientHouseholdId: string;
+  householdId: string;
+  committedVersion: number;
+}
+
+export interface RsvpRosterBatchReceipt {
+  createdHouseholds: RsvpRosterBatchCreatedHousehold[];
+  updatedHouseholds: RsvpRosterBatchUpdatedHousehold[];
+  totals: RsvpRosterBatchTotals;
+  committedRosterVersion: number;
+}
+
+export interface RsvpRosterBatchCommitResponse extends RsvpRosterBatchReceipt {
+  currentRosterVersion: number;
+  replayed: boolean;
+}
+
 export type RsvpHouseholdFilter = 'all' | 'responded' | 'awaiting' | 'archived';
 
 export interface RsvpHouseholdListItem {

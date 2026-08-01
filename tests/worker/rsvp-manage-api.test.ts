@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { MAX_RSVP_BATCH_BYTES } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import {
   applySettings,
@@ -230,6 +231,7 @@ describe('manager household roster operations', () => {
       namedInvitees: ['Ana O’Neil', 'Bea O’Neil'],
       expectedRosterVersion: 0,
     });
+
     const createdBody = await created.json<any>();
 
     expect(created.status).toBe(201);
@@ -1084,5 +1086,760 @@ describe('manager archive and CSV export', () => {
       expect(response.status).toBe(403);
       expect((await response.json<any>()).code).toBe('CSRF_INVALID');
     }
+  });
+});
+
+describe('manager roster batch intake', () => {
+  function clientId() {
+    return crypto.randomUUID();
+  }
+
+  function batchPreview(
+    access: Access,
+    batch: Record<string, unknown>,
+    expectedRosterVersion = 0,
+  ) {
+    return manage(access, '/roster/preview', {
+      method: 'POST',
+      body: JSON.stringify({ batch, expectedRosterVersion }),
+    });
+  }
+
+  function batchCommit(access: Access, input: Record<string, unknown>) {
+    return manage(access, '/roster/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  function createDraft(label = 'Rivera household', name = 'Sam Rivera'): {
+    creates: Array<{
+      clientHouseholdId: string;
+      householdKey?: { value: string; provenance: 'supplied' };
+      label: string;
+      namedInvitees: Array<{ clientInviteeId: string; displayName: string }>;
+      plusOneSlots: number;
+    }>;
+    appends: [];
+  } {
+    return {
+      creates: [{
+        clientHouseholdId: clientId(),
+        label,
+        namedInvitees: [{ clientInviteeId: clientId(), displayName: name }],
+        plusOneSlots: 1,
+      }],
+      appends: [],
+    };
+  }
+
+  async function publicBatchDigest(
+    eventId: string,
+    canonicalBatch: any,
+    expectedRosterVersion: number,
+  ): Promise<string> {
+    const canonical = {
+      creates: canonicalBatch.creates.map((create: any) => ({
+        clientHouseholdId: create.clientHouseholdId,
+        householdKey: {
+          value: create.householdKey.value,
+          provenance: create.householdKey.provenance,
+        },
+        label: create.label,
+        namedInvitees: create.namedInvitees.map((invitee: any) => ({
+          clientInviteeId: invitee.clientInviteeId,
+          displayName: invitee.displayName,
+        })),
+        plusOneSlots: create.plusOneSlots,
+      })),
+      appends: canonicalBatch.appends.map((append: any) => ({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: append.householdId,
+        expectedHouseholdVersion: append.expectedHouseholdVersion,
+        namedInvitees: append.namedInvitees.map((invitee: any) => ({
+          clientInviteeId: invitee.clientInviteeId,
+          displayName: invitee.displayName,
+          ...(invitee.attendance ? { attendance: invitee.attendance } : {}),
+        })),
+        plusOneSlotsToAdd: append.plusOneSlotsToAdd,
+        ...(append.newPlusOneResponses ? {
+          newPlusOneResponses: append.newPlusOneResponses,
+        } : {}),
+      })),
+    };
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({
+      eventId,
+      canonicalBatch: canonical,
+      expectedRosterVersion,
+      targetVersions: canonicalBatch.appends.map((append: any) => ({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: append.householdId,
+        expectedHouseholdVersion: append.expectedHouseholdVersion,
+      })),
+    })));
+    return [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  it('previews without writing, canonicalizes generated and supplied keys, and commits once', async () => {
+    const access = await eventAccess();
+    const rosterVersion = await testEnv.DB.prepare(`
+      SELECT rsvp_roster_version FROM events WHERE id = ?
+    `).bind(access.event.id).first<number>('rsvp_roster_version');
+    const receiptCount = await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM rsvp_roster_batch_receipts WHERE event_id = ?
+    `).bind(access.event.id).first<number>('count');
+    const generated = createDraft();
+    const preview = await batchPreview(access, generated);
+    const previewed = (await preview.json<any>()).data;
+
+    expect(preview.status).toBe(200);
+    expect(previewed.canCommit).toBe(true);
+    expect(previewed.canonicalBatch.creates[0].householdKey).toEqual({
+      value: 'rivera-household',
+      provenance: 'generated',
+    });
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_households')
+      .first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT rsvp_roster_version FROM events WHERE id = ?
+    `).bind(access.event.id).first<number>('rsvp_roster_version')).toBe(rosterVersion);
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM rsvp_roster_batch_receipts WHERE event_id = ?
+    `).bind(access.event.id).first<number>('count')).toBe(receiptCount);
+
+    const committed = await batchCommit(access, {
+      canonicalBatch: previewed.canonicalBatch,
+      previewDigest: previewed.previewDigest,
+      expectedRosterVersion: previewed.rosterVersion,
+      idempotencyKey: 'first-batch',
+    });
+    const receipt = (await committed.json<any>()).data;
+    expect(committed.status).toBe(201);
+    expect(receipt.committedRosterVersion).toBe(1);
+    expect(receipt.createdHouseholds).toHaveLength(1);
+
+    const supplied = createDraft('Other household', 'Other Guest');
+    supplied.creates[0]!.householdKey = { value: 'preserve-me', provenance: 'supplied' };
+    const secondPreview = await batchPreview(access, supplied, 1);
+    const second = (await secondPreview.json<any>()).data;
+    expect(second.canonicalBatch.creates[0].householdKey).toEqual({
+      value: 'preserve-me',
+      provenance: 'supplied',
+    });
+  });
+
+  it('requires explicit append targets and atomically applies additions and versions', async () => {
+    const access = await eventAccess();
+    const initial = createDraft('First household', 'First Guest');
+    const initialPreview = (await (await batchPreview(access, initial)).json<any>()).data;
+    const firstCommit = await batchCommit(access, {
+      canonicalBatch: initialPreview.canonicalBatch,
+      previewDigest: initialPreview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'initial',
+    });
+    const householdId = (await firstCommit.json<any>()).data.createdHouseholds[0]!.householdId;
+
+    const append = {
+      creates: [],
+      appends: [{
+        clientHouseholdId: clientId(),
+        householdId,
+        expectedHouseholdVersion: 1,
+        namedInvitees: [{
+          clientInviteeId: clientId(),
+          displayName: 'Added Guest',
+        }],
+        plusOneSlotsToAdd: 0,
+      }],
+    };
+    const preview = await batchPreview(access, append, 1);
+    const previewed = (await preview.json<any>()).data;
+    expect(previewed.canCommit).toBe(true);
+    const committed = await batchCommit(access, {
+      canonicalBatch: previewed.canonicalBatch,
+      previewDigest: previewed.previewDigest,
+      expectedRosterVersion: 1,
+      idempotencyKey: 'append',
+    });
+    const result = (await committed.json<any>()).data;
+    expect(committed.status).toBe(201);
+    expect(result.updatedHouseholds).toEqual([{
+      clientHouseholdId: append.appends[0]!.clientHouseholdId,
+      householdId,
+      committedVersion: 2,
+    }]);
+    expect((await getDetail(access, householdId)).invitees).toHaveLength(3);
+  });
+
+  it('rejects strict and oversized batches while accepting escaped quotes and Unicode', async () => {
+    const access = await eventAccess();
+    const unknown = await batchPreview(access, {
+      ...createDraft(),
+      unexpected: true,
+    });
+    expect(unknown.status).toBe(422);
+
+    const quoted = createDraft('Kō "quoted" 家庭', '李 "Kai"');
+    const quotedResponse = await manage(access, '/roster/preview', {
+      method: 'POST',
+      body: new TextEncoder().encode(JSON.stringify({
+        batch: quoted,
+        expectedRosterVersion: 0,
+      })),
+    });
+    expect(quotedResponse.status).toBe(200);
+    expect((await quotedResponse.json<any>()).data.canonicalBatch.creates[0].label)
+      .toBe('Kō "quoted" 家庭');
+
+    const exactlyMax = JSON.stringify({
+      batch: createDraft(),
+      expectedRosterVersion: 0,
+      padding: 'x'.repeat(512 * 1024),
+    });
+    const tooLarge = await manage(access, '/roster/preview', {
+      method: 'POST',
+      body: exactlyMax,
+    });
+    expect(tooLarge.status).toBe(413);
+    expect((await tooLarge.json<any>()).code).toBe('RSVP_ROSTER_BATCH_TOO_LARGE');
+
+    const staleAppend = {
+      creates: [],
+      appends: [{
+        clientHouseholdId: clientId(),
+        householdId: clientId(),
+        expectedHouseholdVersion: 1,
+        namedInvitees: [],
+        plusOneSlotsToAdd: 0,
+      }],
+    };
+    const stale = await batchPreview(access, staleAppend);
+    expect((await stale.json<any>()).data.canCommit).toBe(false);
+  });
+
+  it('replays matching receipts before checking later versions and refuses changed digests', async () => {
+    const access = await eventAccess();
+    const draft = createDraft();
+    const preview = (await (await batchPreview(access, draft)).json<any>()).data;
+    const request = {
+      canonicalBatch: preview.canonicalBatch,
+      previewDigest: preview.previewDigest,
+      expectedRosterVersion: preview.rosterVersion,
+      idempotencyKey: 'lost-response',
+    };
+    const first = await batchCommit(access, request);
+    const firstReceipt = (await first.json<any>()).data;
+    const householdId = firstReceipt.createdHouseholds[0]!.householdId;
+    await updateHousehold(access, householdId, {
+      label: 'Later edit',
+      plusOneSlots: 1,
+      namedInvitees: [{
+        id: (await getDetail(access, householdId)).invitees[0]!.id,
+        displayName: 'Sam Rivera',
+      }],
+      expectedVersion: 1,
+      expectedRosterVersion: 1,
+    });
+
+    const replay = await batchCommit(access, request);
+    const replayed = (await replay.json<any>()).data;
+    expect(replay.status).toBe(200);
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.committedRosterVersion).toBe(1);
+    expect(replayed.currentRosterVersion).toBe(2);
+
+    const changed = createDraft('Changed household', 'Changed Guest');
+    const changedPreviewResponse = await batchPreview(access, changed, 2);
+    expect(changedPreviewResponse.status).toBe(200);
+    const changedPreview = (await changedPreviewResponse.json<any>()).data;
+    const conflict = await batchCommit(access, {
+      canonicalBatch: changedPreview.canonicalBatch,
+      previewDigest: changedPreview.previewDigest,
+      expectedRosterVersion: 2,
+      idempotencyKey: request.idempotencyKey,
+    });
+    expect(conflict.status).toBe(409);
+    expect((await conflict.json<any>()).code).toBe('RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT');
+  });
+
+  it('blocks supplied key collisions and generated-key suffixes without matching a household implicitly', async () => {
+    const access = await eventAccess();
+    const first = createDraft('Smith household', 'Sam Smith');
+    first.creates[0]!.householdKey = { value: 'smith-household', provenance: 'supplied' };
+    const firstPreview = (await (await batchPreview(access, first)).json<any>()).data;
+    await batchCommit(access, {
+      canonicalBatch: firstPreview.canonicalBatch,
+      previewDigest: firstPreview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'smith-first',
+    });
+
+    const generated = createDraft('Smith household', 'Taylor Smith');
+    const generatedPreview = (await (await batchPreview(access, generated, 1)).json<any>()).data;
+    expect(generatedPreview.canonicalBatch.creates[0].householdKey).toEqual({
+      value: 'smith-household-2',
+      provenance: 'generated',
+    });
+
+    const colliding = createDraft('Different label', 'Other Smith');
+    colliding.creates[0]!.householdKey = { value: 'smith-household', provenance: 'supplied' };
+    const collisionPreview = (await (await batchPreview(access, colliding, 1)).json<any>()).data;
+    expect(collisionPreview.canCommit).toBe(false);
+    expect(collisionPreview.issues).toContainEqual(expect.objectContaining({
+      code: 'household_key_in_use',
+      field: 'householdKey.value',
+    }));
+  });
+
+  it('returns field-addressable lookup, capacity, and responded-household attendance issues', async () => {
+    const access = await eventAccess();
+    const noNamedInvitee = {
+      creates: [{
+        clientHouseholdId: clientId(),
+        label: 'Incomplete household',
+        namedInvitees: [],
+        plusOneSlots: 1,
+      }],
+      appends: [],
+    };
+    const noNamedPreview = await batchPreview(access, noNamedInvitee);
+    expect(noNamedPreview.status).toBe(200);
+    expect((await noNamedPreview.json<any>()).data.issues).toContainEqual(expect.objectContaining({
+      code: 'household_named_required',
+      field: 'namedInvitees',
+    }));
+
+    const tooManyNames = {
+      creates: [{
+        clientHouseholdId: clientId(),
+        label: 'Large household',
+        namedInvitees: Array.from({ length: 21 }, (_, index) => ({
+          clientInviteeId: clientId(),
+          displayName: `Guest ${index + 1}`,
+        })),
+        plusOneSlots: 0,
+      }],
+      appends: [],
+    };
+    const tooManyPreview = (await (await batchPreview(access, tooManyNames)).json<any>()).data;
+    expect(tooManyPreview.issues).toContainEqual(expect.objectContaining({
+      code: 'household_named_limit',
+    }));
+
+    const first = createDraft('Lee one', 'Alex Lee');
+    first.creates[0]!.namedInvitees.push({
+      clientInviteeId: clientId(),
+      displayName: 'Dana One',
+    });
+    const firstPreview = (await (await batchPreview(access, first)).json<any>()).data;
+    const firstCommit = await batchCommit(access, {
+      canonicalBatch: firstPreview.canonicalBatch,
+      previewDigest: firstPreview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'lee-first',
+    });
+    const householdId = (await firstCommit.json<any>()).data.createdHouseholds[0]!.householdId;
+    const household = await getDetail(access, householdId);
+    await correctHousehold(access, householdId, {
+      expectedVersion: household.version,
+      expectedRosterVersion: 1,
+      invitees: hostAnswers(household, 'attending'),
+    });
+
+    const lookup = createDraft('Lee two', 'Alex Lee');
+    const lookupPreview = (await (await batchPreview(access, lookup, 2)).json<any>()).data;
+    expect(lookupPreview.issues).toContainEqual(expect.objectContaining({
+      code: 'household_lookup_unresolvable',
+    }));
+
+    const append = {
+      creates: [],
+      appends: [{
+        clientHouseholdId: clientId(),
+        householdId,
+        expectedHouseholdVersion: 2,
+        namedInvitees: [{
+          clientInviteeId: clientId(),
+          displayName: 'Added after response',
+        }],
+        plusOneSlotsToAdd: 1,
+      }],
+    };
+    const appendPreview = (await (await batchPreview(access, append, 2)).json<any>()).data;
+    expect(appendPreview.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'attendance_required' }),
+    ]));
+  });
+
+  it('enforces exact request limits and reports stale target details before writing', async () => {
+    const access = await eventAccess();
+    const draft = createDraft();
+    const serialized = JSON.stringify({ batch: draft, expectedRosterVersion: 0 });
+    const exactMaximum = `${serialized}${' '.repeat(512 * 1024 - new TextEncoder().encode(serialized).byteLength)}`;
+    expect(new TextEncoder().encode(exactMaximum).byteLength).toBe(512 * 1024);
+    const exact = await manage(access, '/roster/preview', {
+      method: 'POST',
+      body: new TextEncoder().encode(exactMaximum),
+    });
+    expect(exact.status).toBe(200);
+    const preview = (await exact.json<any>()).data;
+    const committed = await batchCommit(access, {
+      canonicalBatch: preview.canonicalBatch,
+      previewDigest: preview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'stale-target',
+    });
+    const householdId = (await committed.json<any>()).data.createdHouseholds[0]!.householdId;
+    const append = {
+      creates: [],
+      appends: [{
+        clientHouseholdId: clientId(),
+        householdId,
+        expectedHouseholdVersion: 1,
+        namedInvitees: [{ clientInviteeId: clientId(), displayName: 'Later Guest' }],
+        plusOneSlotsToAdd: 0,
+      }],
+    };
+    const appendPreview = (await (await batchPreview(access, append, 1)).json<any>()).data;
+    const current = await getDetail(access, householdId);
+    await updateHousehold(access, householdId, {
+      label: 'Winner',
+      plusOneSlots: 1,
+      namedInvitees: [{ id: current.invitees[0]!.id, displayName: 'Sam Rivera' }],
+      expectedVersion: 1,
+      expectedRosterVersion: 1,
+    });
+    const stale = await batchCommit(access, {
+      canonicalBatch: appendPreview.canonicalBatch,
+      previewDigest: appendPreview.previewDigest,
+      expectedRosterVersion: 1,
+      idempotencyKey: 'stale-append',
+    });
+    const staleBody = await stale.json<any>();
+    expect(stale.status).toBe(409);
+    expect(staleBody).toMatchObject({
+      code: 'RSVP_ROSTER_BATCH_CONFLICT',
+      details: {
+        currentRosterVersion: 2,
+        targets: [{
+          clientHouseholdId: append.appends[0]!.clientHouseholdId,
+          householdId,
+          currentHouseholdVersion: 2,
+          state: 'changed',
+        }],
+      },
+    });
+    expect((await getDetail(access, householdId)).invitees).toHaveLength(2);
+  });
+
+  it('replays one concurrent same-key commit and leaves one committed roster', async () => {
+    const access = await eventAccess();
+    const preview = (await (await batchPreview(access, createDraft())).json<any>()).data;
+    const request = {
+      canonicalBatch: preview.canonicalBatch,
+      previewDigest: preview.previewDigest,
+      expectedRosterVersion: preview.rosterVersion,
+      idempotencyKey: 'same-key-race',
+    };
+    const [left, right] = await Promise.all([
+      batchCommit(access, request),
+      batchCommit(access, request),
+    ]);
+    expect([left.status, right.status].sort()).toEqual([200, 201]);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_households')
+      .first<number>('count')).toBe(1);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_roster_batch_receipts')
+      .first<number>('count')).toBe(1);
+  });
+
+  it('blocks empty batches without changing the roster or creating a receipt', async () => {
+    const access = await eventAccess();
+    const response = await batchPreview(access, { creates: [], appends: [] });
+
+    expect(response.status).toBe(422);
+    expect(await testEnv.DB.prepare(`
+      SELECT rsvp_roster_version FROM events WHERE id = ?
+    `).bind(access.event.id).first<number>('rsvp_roster_version')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM rsvp_roster_batch_receipts WHERE event_id = ?
+    `).bind(access.event.id).first<number>('count')).toBe(0);
+  });
+
+  it('rejects unknown fields at every batch layer while legacy household creation remains permissive', async () => {
+    const access = await eventAccess();
+    const envelope = await manage(access, '/roster/preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        batch: createDraft(),
+        expectedRosterVersion: 0,
+        unknown: true,
+      }),
+    });
+    expect(envelope.status).toBe(422);
+    const append = {
+      clientHouseholdId: clientId(),
+      householdId: clientId(),
+      expectedHouseholdVersion: 1,
+      namedInvitees: [{ clientInviteeId: clientId(), displayName: 'Append guest' }],
+      plusOneSlotsToAdd: 1,
+      newPlusOneResponses: [{
+        clientInviteeId: clientId(),
+        attendance: 'declined',
+        displayName: null,
+      }],
+    };
+    const invalidBatches: Record<string, unknown>[] = [
+      {
+        creates: [{ ...createDraft().creates[0]!, unknown: true }],
+        appends: [],
+      },
+      { creates: [], appends: [{ ...append, unknown: true }] },
+      {
+        creates: [{
+          ...createDraft().creates[0]!,
+          householdKey: { value: 'known-key', provenance: 'supplied', unknown: true },
+        }],
+        appends: [],
+      },
+      {
+        creates: [{
+          ...createDraft().creates[0]!,
+          namedInvitees: [{
+            ...createDraft().creates[0]!.namedInvitees[0]!,
+            unknown: true,
+          }],
+        }],
+        appends: [],
+      },
+      {
+        creates: [],
+        appends: [{
+          ...append,
+          newPlusOneResponses: [{ ...append.newPlusOneResponses[0]!, unknown: true }],
+        }],
+      },
+    ];
+    for (const batch of invalidBatches) {
+      const response = await batchPreview(access, batch);
+      expect(response.status).toBe(422);
+    }
+
+    const legacy = await manage(access, '/households', {
+      method: 'POST',
+      body: JSON.stringify({
+        householdKey: 'legacy-extra',
+        label: 'Legacy household',
+        namedInvitees: ['Legacy Guest'],
+        plusOneSlots: 0,
+        expectedRosterVersion: 0,
+        unknown: true,
+      }),
+    });
+    expect(legacy.status).toBe(201);
+  });
+
+  it('reserves supplied keys before generation and reports active, archived, and duplicate collisions', async () => {
+    const sourceOrder = await eventAccess();
+    const generated = createDraft('Shared household', 'Generated Guest');
+    const supplied = createDraft('Different household', 'Supplied Guest');
+    supplied.creates[0]!.householdKey = { value: 'shared-household', provenance: 'supplied' };
+    const ordered = await batchPreview(sourceOrder, {
+      creates: [generated.creates[0]!, supplied.creates[0]!],
+      appends: [],
+    });
+    const orderedData = (await ordered.json<any>()).data;
+    expect(orderedData.canonicalBatch.creates.map((create: any) => create.householdKey)).toEqual([
+      { value: 'shared-household-2', provenance: 'generated' },
+      { value: 'shared-household', provenance: 'supplied' },
+    ]);
+
+    const duplicate = createDraft('Duplicate one', 'Duplicate Guest One');
+    const duplicateTwo = createDraft('Duplicate two', 'Duplicate Guest Two');
+    duplicate.creates[0]!.householdKey = { value: 'duplicate-key', provenance: 'supplied' };
+    duplicateTwo.creates[0]!.householdKey = { value: 'duplicate-key', provenance: 'supplied' };
+    const duplicateData = (await (await batchPreview(sourceOrder, {
+      creates: [duplicate.creates[0]!, duplicateTwo.creates[0]!],
+      appends: [],
+    })).json<any>()).data;
+    expect(duplicateData.issues.filter((issue: any) => (
+      issue.code === 'household_key_in_use' && issue.field === 'householdKey.value'
+    ))).toHaveLength(2);
+
+    const active = await eventAccess();
+    await createHousehold(active, {
+      householdKey: 'occupied-key',
+      label: 'Occupied household',
+      namedInvitees: ['Occupied Guest'],
+      plusOneSlots: 0,
+      expectedRosterVersion: 0,
+    });
+    const activeCollision = createDraft();
+    activeCollision.creates[0]!.householdKey = { value: 'occupied-key', provenance: 'supplied' };
+    const activeData = (await (await batchPreview(active, activeCollision, 1)).json<any>()).data;
+    expect(activeData.issues).toContainEqual(expect.objectContaining({
+      code: 'household_key_in_use',
+      field: 'householdKey.value',
+    }));
+
+    const archived = await eventAccess();
+    const archivedCreated = await createHousehold(archived, {
+      householdKey: 'archived-key',
+      label: 'Archived household',
+      namedInvitees: ['Archived Guest'],
+      plusOneSlots: 0,
+      expectedRosterVersion: 0,
+    });
+    const archivedHousehold = (await archivedCreated.json<any>()).data.household as HouseholdDetail;
+    await archiveHousehold(archived, archivedHousehold.id, 1, 1);
+    const archivedCollision = createDraft();
+    archivedCollision.creates[0]!.householdKey = { value: 'archived-key', provenance: 'supplied' };
+    const archivedData = (await (await batchPreview(archived, archivedCollision, 2)).json<any>()).data;
+    expect(archivedData.issues).toContainEqual(expect.objectContaining({
+      code: 'household_key_in_use',
+      field: 'householdKey.value',
+    }));
+
+    const invalid = createDraft();
+    invalid.creates[0]!.householdKey = { value: 'INVALID KEY!', provenance: 'supplied' };
+    const invalidResponse = await batchPreview(sourceOrder, invalid);
+    expect(invalidResponse.status).toBe(200);
+    expect((await invalidResponse.json<any>()).data.issues).toContainEqual(expect.objectContaining({
+      code: 'household_key_invalid',
+      field: 'householdKey.value',
+    }));
+  });
+
+  it('rejects forged generated provenance even with a matching public digest and writes nothing', async () => {
+    const access = await eventAccess();
+    const canonicalBatch = {
+      creates: [{
+        clientHouseholdId: clientId(),
+        householdKey: { value: 'attacker-key', provenance: 'generated' },
+        label: 'Forged household',
+        namedInvitees: [{ clientInviteeId: clientId(), displayName: 'Forged Guest' }],
+        plusOneSlots: 0,
+      }],
+      appends: [],
+    };
+    const previewDigest = await publicBatchDigest(access.event.id, canonicalBatch, 0);
+    const response = await batchCommit(access, {
+      canonicalBatch,
+      previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'forged-generated-key',
+    });
+
+    expect(response.status).toBe(409);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_households')
+      .first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT rsvp_roster_version FROM events WHERE id = ?
+    `).bind(access.event.id).first<number>('rsvp_roster_version')).toBe(0);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_roster_batch_receipts')
+      .first<number>('count')).toBe(0);
+  });
+
+  it('keeps batch commits ordered with Settings writes', async () => {
+    const settingsFirst = await eventAccess();
+    const settings = await applySettings(settingsFirst, {
+      galleryVisible: !settingsFirst.event.galleryVisible,
+    });
+    expect(settings.status).toBe(200);
+    expect((await settings.json<any>()).data.event.rsvpRosterVersion).toBe(0);
+    const settingsPreview = (await (await batchPreview(settingsFirst, createDraft())).json<any>()).data;
+    const settingsCommit = await batchCommit(settingsFirst, {
+      canonicalBatch: settingsPreview.canonicalBatch,
+      previewDigest: settingsPreview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'settings-first',
+    });
+    expect(settingsCommit.status).toBe(201);
+
+    const batchFirst = await eventAccess();
+    const batchPreviewData = (await (await batchPreview(batchFirst, createDraft())).json<any>()).data;
+    const batchCommitResponse = await batchCommit(batchFirst, {
+      canonicalBatch: batchPreviewData.canonicalBatch,
+      previewDigest: batchPreviewData.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'batch-first',
+    });
+    expect(batchCommitResponse.status).toBe(201);
+    const staleSettings = await applySettings(batchFirst, {
+      galleryVisible: !batchFirst.event.galleryVisible,
+    });
+    expect(staleSettings.status).toBe(409);
+    expect((await staleSettings.json<any>()).code).toBe('RSVP_ROSTER_INVALID');
+  });
+
+  it('keeps production maximum preview and commit envelopes within the batch byte cap', async () => {
+    const access = await eventAccess();
+    const label = '家'.repeat(80);
+    const batch = {
+      creates: Array.from({ length: 500 }, (_unused, index) => ({
+        clientHouseholdId: clientId(),
+        householdKey: {
+          value: `k${index.toString(36).padStart(63, 'z')}`,
+          provenance: 'supplied' as const,
+        },
+        label,
+        namedInvitees: [{
+          clientInviteeId: clientId(),
+          displayName: `${'名'.repeat(76)}${String(index).padStart(4, '0')}`,
+        }],
+        plusOneSlots: 0,
+      })),
+      appends: [],
+    };
+    const previewRequest = JSON.stringify({ batch, expectedRosterVersion: 0 });
+    expect(new TextEncoder().encode(previewRequest).byteLength).toBeLessThanOrEqual(
+      MAX_RSVP_BATCH_BYTES,
+    );
+    const previewResponse = await batchPreview(access, batch);
+    expect(previewResponse.status).toBe(200);
+    const preview = (await previewResponse.json<any>()).data;
+    expect(preview.canCommit).toBe(true);
+    const commitRequest = JSON.stringify({
+      canonicalBatch: preview.canonicalBatch,
+      previewDigest: preview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'i'.repeat(128),
+    });
+    expect(new TextEncoder().encode(commitRequest).byteLength).toBeLessThanOrEqual(
+      MAX_RSVP_BATCH_BYTES,
+    );
+  });
+
+  it('commits the maximum five-hundred additions through parameter-bounded statements', async () => {
+    const access = await eventAccess();
+    const batch = {
+      creates: Array.from({ length: 25 }, (_unused, householdIndex) => ({
+        clientHouseholdId: clientId(),
+        label: `Maximum household ${householdIndex + 1}`,
+        namedInvitees: Array.from({ length: 20 }, (_member, inviteeIndex) => ({
+          clientInviteeId: clientId(),
+          displayName: `Guest ${householdIndex + 1}-${inviteeIndex + 1}`,
+        })),
+        plusOneSlots: 0,
+      })),
+      appends: [],
+    };
+    const previewResponse = await batchPreview(access, batch);
+    const preview = (await previewResponse.json<any>()).data;
+    expect(previewResponse.status).toBe(200);
+    expect(preview.canCommit).toBe(true);
+    const committed = await batchCommit(access, {
+      canonicalBatch: preview.canonicalBatch,
+      previewDigest: preview.previewDigest,
+      expectedRosterVersion: 0,
+      idempotencyKey: 'maximum-batch',
+    });
+    expect(committed.status).toBe(201);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_households')
+      .first<number>('count')).toBe(25);
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_invitees')
+      .first<number>('count')).toBe(500);
   });
 });

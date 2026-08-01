@@ -42,13 +42,31 @@ export type ApiErrorCode =
   | 'RSVP_SUBMISSION_CONFLICT'
   | 'RSVP_ROSTER_INVALID'
   | 'RSVP_IMPORT_CONFLICT'
+  | 'RSVP_ROSTER_BATCH_TOO_LARGE'
+  | 'RSVP_ROSTER_BATCH_CONFLICT'
+  | 'RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT'
   | 'INTERNAL_ERROR';
+
+export interface RsvpRosterBatchConflictTarget {
+  clientHouseholdId: string;
+  householdId: string;
+  currentHouseholdVersion: number | null;
+  state: 'changed' | 'archived' | 'missing';
+}
+
+export interface RsvpRosterBatchConflictDetails {
+  currentRosterVersion: number;
+  targets: RsvpRosterBatchConflictTarget[];
+}
+
+export type ApiErrorDetails = RsvpRosterBatchConflictDetails;
 
 export interface ApiErrorBody {
   code: ApiErrorCode;
   message: string;
   requestId: string;
   fieldErrors?: Record<string, string>;
+  details?: ApiErrorDetails;
 }
 
 export class ApiError extends Error {
@@ -57,6 +75,7 @@ export class ApiError extends Error {
     message: string,
     public readonly status = 400,
     public readonly fieldErrors?: Record<string, string>,
+    public readonly details?: ApiErrorDetails,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -71,6 +90,7 @@ export function toErrorResponse(error: unknown, requestId: string): { status: nu
         code: error.code,
         message: error.message,
         ...(error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}),
+        ...(error.details ? { details: error.details } : {}),
         requestId,
       },
     };

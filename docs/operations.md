@@ -13,7 +13,7 @@ The daily `17 3 * * *` handler performs five idempotent jobs:
 2. Sweep expired or revoked RSVP sessions and lookup rate windows older than one 15-minute bucket, in the same bounded 100-row passes capped at 50 per run. Both statements report counts only; neither can name a household, a guest, or a scope.
 3. Delete objects for upload reservations older than fifteen minutes and release event counters.
 4. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
-5. Retire retention-due events. This selects rows that are already soft-deleted as well as rows that have reached `purge_after`, so a purge whose object deletion failed is retried instead of stranding objects. Each purge revokes every credential and disables the printed entry, sweeps the R2 event prefix, then deletes `media` and `guest_messages` before the event row — those two tables reference event sessions with `ON DELETE RESTRICT`, so the event cascade alone cannot remove a populated event. The final delete lets the remaining cascades clear the entry credential, households, invitees, receipts, RSVP sessions, and rate windows.
+5. Retire retention-due events. This selects rows that are already soft-deleted as well as rows that have reached `purge_after`, so a purge whose object deletion failed is retried instead of stranding objects. Each purge revokes every credential and disables the printed entry, sweeps the R2 event prefix, then deletes `media` and `guest_messages` before the event row — those two tables reference event sessions with `ON DELETE RESTRICT`, so the event cascade alone cannot remove a populated event. The final delete lets the remaining cascades clear the entry credential, households, invitees, guest-submission and manager-batch receipts, RSVP sessions, and rate windows.
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 
@@ -62,9 +62,15 @@ millisecond of that local day. Shortening a deadline takes effect immediately fo
 issued; extending one requires each household to look itself up again before it regains write
 authority. A host may correct any household after the deadline.
 
-The first CSV import can commit only while RSVP is disabled and the event has no household rows,
-active or archived. Every later change is an explicit manager edit. The contract, limits, and export
-columns are in [rsvp-csv.md](rsvp-csv.md).
+The manager's **Add guests** workspace is additive at both initial setup and later use. It stages file,
+paste, and direct-entry sources locally, previews a normalized batch without writes, and commits every
+new household or explicit existing-household append in one transaction. An unchanged retry reuses its
+idempotency key and replays the durable manager receipt instead of adding the guests twice.
+
+The original strict CSV preview/commit API remains available for compatibility only. It can commit
+once, while RSVP is disabled and the event has no active or archived household rows. The universal
+workspace recognizes that exact header but still uses the additive batch endpoints. Source formats,
+limits, key behavior, and export columns are in [rsvp-csv.md](rsvp-csv.md).
 
 ## Load harnesses
 
@@ -95,18 +101,19 @@ $env:CANDIDARY_RSVP_CONFIRM='I_UNDERSTAND'
 npm run test:load:rsvp
 ```
 
-The RSVP harness imports a 500-capacity roster (250 households of one named guest and one plus-one
-slot), reconciles the fully pending summary against the server's own totals, then uses the same entry
-link for exactly 20 lookup and submission attempts from the harness address and requires the
-twenty-first to return a generic `429` with `Retry-After: 900`. It reconciles those 20 responses plus
-the remaining pending capacity and prints latency percentiles and error counts by code — never a name,
-a cookie, a token, or a URL.
+The RSVP harness previews and commits a 500-capacity additive batch (250 households of one named guest
+and one plus-one slot), asserts both serialized envelopes remain below 512 KiB, replays the same
+idempotency receipt, and reconciles the fully pending summary against the server's own totals. It then
+uses the same entry link for exactly 20 lookup and submission attempts from the harness address and
+requires the twenty-first to return a generic `429` with `Retry-After: 900`. It reconciles those 20
+responses plus the remaining pending capacity and prints payload sizes, latency percentiles, and error
+counts by code — never a name, a cookie, a token, or a URL.
 
 This is not a 500-household concurrency test and must not be reported as one. Every request comes from
 one address, which is the only way to exercise the durable per-IP boundary without weakening a
-production abuse control. The 500-row import and D1 parameter bounds are proved by Worker integration
-tests; a true distributed lookup test needs separately provisioned source addresses and its own
-authorized rehearsal.
+production abuse control. Maximum-household payload sizing and D1 parameter bounds are proved by
+Worker integration tests; a true distributed lookup test needs separately provisioned source
+addresses and its own authorized rehearsal.
 
 ## Support signals
 
@@ -127,6 +134,9 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `RSVP_SUBMISSION_CONFLICT` — a previously successful idempotency key was reused with different content. Use a new key rather than editing the old payload.
 - `RSVP_ROSTER_INVALID` — the roster cannot be opened or edited into this shape: a collision no second name can resolve, an active household with no named guest, a capacity limit, or a plus-one reduction that would remove an attending slot.
 - `RSVP_IMPORT_CONFLICT` — the file, the roster version, or the event's emptiness changed since preview. Preview the same file again.
+- `RSVP_ROSTER_BATCH_TOO_LARGE` — the serialized additive preview or commit envelope exceeded 512 KiB. Keep the staged list and split it into smaller Add guests batches.
+- `RSVP_ROSTER_BATCH_CONFLICT` — the event roster or an explicitly targeted household changed after preview, and nothing was written. The typed details identify changed, archived, or missing targets; refresh them and preview the preserved draft again.
+- `RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT` — a committed manager batch key was reused for different canonical content. Keep the original key only for an unchanged retry; changed staged work needs a fresh preview and key.
 - `RATE_LIMITED` on a lookup — the edge budget (30/IP/minute, `Retry-After: 60`) or a D1 budget (20/event/IP or 8/event/name per 15 minutes, `Retry-After: 900`) is spent. The body is deliberately generic.
 - `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED` — inspect the active job and its persisted parts.
 

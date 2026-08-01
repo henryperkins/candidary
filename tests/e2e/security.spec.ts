@@ -8,6 +8,7 @@ import {
   stubEntryExchange,
   stubGuestRoutes,
   stubManagerRoutes,
+  stubRsvpRosterBatchRoutes,
 } from './fixtures/routes';
 import { makeMedia } from './fixtures/ui-data';
 import { settleRendering } from './helpers/rendering';
@@ -60,6 +61,23 @@ test('a scanned entry leaves no credential in the URL, the page, or the console'
     household: RSVP_HOUSEHOLD_FIXTURE,
     rsvpSession: false,
   });
+  const lookupPath = `**/api/event/${EVENT_FIXTURE.slug}/rsvp/lookup`;
+  await page.unroute(lookupPath);
+  await page.route(lookupPath, (route) => {
+    const body = route.request().postDataJSON() as { firstName?: string };
+    const matched = body.firstName?.trim() === 'Taylor Morgan';
+    return route.fulfill({
+      json: {
+        data: matched
+          ? { status: 'matched', household: RSVP_HOUSEHOLD_FIXTURE }
+          : {
+              status: 'not_available',
+              message: 'We could not open an invitation with those details.',
+            },
+        requestId: 'request-a',
+      },
+    });
+  });
   await stubEntryExchange(page);
   await page.goto(`/join#${EVENT_ENTRY_FIXTURE_TOKEN}`);
   await expect(page.getByRole('heading', { name: 'Find your household invitation' })).toBeVisible();
@@ -81,6 +99,22 @@ test('a scanned entry leaves no credential in the URL, the page, or the console'
 
   await page.getByLabel('Full name').fill('Nobody At All');
   await page.getByRole('button', { name: 'Find my invitation' }).click();
+  await expect(page.getByText('We could not open an invitation with those details.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toHaveCount(0);
+  const refused = await page.locator('body').innerText();
+  expect(refused).not.toContain(RSVP_HOUSEHOLD_FIXTURE.id);
+  expect(refused).not.toContain(RSVP_HOUSEHOLD_FIXTURE.label);
+  for (const invitee of RSVP_HOUSEHOLD_FIXTURE.invitees) {
+    expect(refused).not.toContain(invitee.id);
+    if (invitee.displayName) expect(refused).not.toContain(invitee.displayName);
+  }
+  expect(
+    consoleMessages.every((message) => !message.includes(RSVP_HOUSEHOLD_FIXTURE.label)),
+    'a failed lookup never logs roster details',
+  ).toBe(true);
+
+  await page.getByLabel('Full name').fill('Taylor Morgan');
+  await page.getByRole('button', { name: 'Find my invitation' }).click();
   await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
   expect(
     consoleMessages.every((message) => !message.includes(EVENT_ENTRY_FIXTURE_TOKEN)),
@@ -88,7 +122,7 @@ test('a scanned entry leaves no credential in the URL, the page, or the console'
   ).toBe(true);
 });
 
-test('a refused guest list keeps the uploaded rows out of the rendered page', async ({ page }) => {
+test('a refused staged guest list forgets its private source after discard', async ({ page }) => {
   const secretRow = 'perkins,Perkins household,Henry Perkins,1';
   const csv = `household_key,household_label,invitee_name,plus_one_slots\n${secretRow}\n`;
   const consoleMessages: string[] = [];
@@ -96,36 +130,54 @@ test('a refused guest list keeps the uploaded rows out of the rendered page', as
 
   await stubManagerRoutes(page, {
     mediaPages: { first: { media: [], nextCursor: null } },
-    rsvp: {
-      preview: {
+  });
+  await stubRsvpRosterBatchRoutes(page, EVENT_FIXTURE.id, {
+    preview: ({ request, defaultResponse }) => {
+      const firstHousehold = request.batch.creates[0]!;
+      const firstInvitee = firstHousehold.namedInvitees[0]!;
+      return {
+        ...defaultResponse,
         issues: [{
-          row: 2,
-          field: 'invitee_name',
+          clientHouseholdId: firstHousehold.clientHouseholdId,
+          clientInviteeId: firstInvitee.clientInviteeId,
+          field: 'namedInvitees.displayName',
           code: 'invitee_name_invalid',
           message: 'Enter each named guest from 1 to 80 characters.',
-          blocking: true,
+          severity: 'blocking',
         }],
-        totals: { households: 0, namedInvitees: 0, plusOneCapacity: 0, invitedCapacity: 0 },
-        sourceDigest: 'a'.repeat(64),
-        rosterVersion: 0,
-      },
+        canCommit: false,
+      };
     },
   });
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}?section=rsvp`);
-  await page.getByLabel('Guest list CSV').setInputFiles({
+  await page.getByRole('button', { name: 'Add guests' }).click();
+  await page.getByLabel('Choose guest-list file').setInputFiles({
     name: 'guests.csv',
     mimeType: 'text/csv',
     buffer: Buffer.from(csv),
   });
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Review guests' }).click();
 
-  await expect(page.getByRole('region', { name: 'CSV issues' })).toBeVisible();
-  const rendered = await page.content();
-  expect(rendered, 'the refused file is reported by row, never echoed').not.toContain(secretRow);
-  expect(rendered).not.toContain('Henry Perkins');
+  const issues = page.getByRole('region', { name: 'Guest list review issues' });
+  await expect(issues).toBeVisible();
+  await expect(issues, 'server issue copy does not independently echo the private row')
+    .not.toContainText(secretRow);
+  await expect(issues).not.toContainText('Henry Perkins');
   expect(
     consoleMessages.every((message) => !message.includes('Henry Perkins')),
-    'a parse failure never logs the file',
+    'a refused preview never logs the file',
   ).toBe(true);
+
+  await page.getByRole('button', { name: 'Close' }).click();
+  const prompt = page.getByRole('region', { name: 'Your pending work is not saved' });
+  await expect(prompt).toBeFocused();
+  await prompt.getByRole('button', { name: 'Discard draft' }).click();
+
+  await expect(page.getByRole('button', { name: 'Add guests' })).toBeVisible();
+  await expect(page.getByLabel('Guest names or spreadsheet data')).toHaveCount(0);
+  expect(await page.content(), 'discard removes the private source from the rendered DOM')
+    .not.toContain('Henry Perkins');
 });
 
 test('production preview enforces the shipped CSP while themed cover images render', async ({ page }) => {
