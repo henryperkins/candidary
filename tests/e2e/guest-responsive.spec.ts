@@ -29,7 +29,7 @@ test('RSVP lookup keeps identity, deadline, privacy, and its complete action in 
 
   await page.goto('/event/maya-theo');
   await expect(page.getByRole('heading', { name: 'Find your household invitation' })).toBeVisible();
-  await expect(page.getByText('Maya & Theo', { exact: true })).toBeVisible();
+  await expect(page.locator('.photo-drop__event')).toHaveText('Maya & Theo · Sep 19');
   await expect(page.getByText('Please RSVP by Sep 5, 2026.')).toBeVisible();
   const name = page.getByLabel('Full name');
   await expect(name).toHaveAttribute('autocomplete', 'name');

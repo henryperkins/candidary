@@ -375,7 +375,7 @@ test('the saved RSVP receipt is announced, contained, and axe-clean', async ({ p
   });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
 
-  const receipt = page.locator('.rsvp-flow--receipt');
+  const receipt = page.locator('.rsvp-flow--receipt .rsvp-receipt');
   await expect(receipt).toHaveAttribute('aria-live', 'polite');
   await expect(page.getByRole('heading', { name: "You're all set" })).toBeVisible();
   await expect(page.getByText('2 attending · 1 not attending')).toBeVisible();

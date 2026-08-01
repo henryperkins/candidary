@@ -58,7 +58,7 @@ export function RsvpLookup({
 
   const withHero = presentation === 'primary' || presentation === 'read-only';
 
-  return <RsvpShell event={event} presentation={presentation}>
+  return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--lookup">
     <header className="rsvp-identity">
       {!withHero && <p className="rsvp-identity__event">{event.name}</p>}
       <h1>Find your household invitation</h1>
