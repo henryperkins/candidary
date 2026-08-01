@@ -106,7 +106,7 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .create-intro { position: sticky; top: 55px; padding-top: 36px; }.create-intro h1 { font-size: clamp(2.8rem, 5vw, 4.8rem); }.create-intro > p:not(.section-label) { color: var(--muted); font-size: 1.1rem; }
 .trust-list { margin: 34px 0; padding: 27px 0 0; border-top: 1px solid var(--border); display: grid; gap: 14px; list-style: none; }.trust-list li { display: flex; gap: 10px; align-items: center; }.trust-list svg { color: var(--moss); }
 .create-form { max-width: 680px; padding: 40px; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 50px rgb(74 36 21 / 5%); }
-.create-form h2 { font-size: 2rem; margin-bottom: 30px; }.create-form > label, .settings-form > label:not(.toggle) { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
+.create-form h2 { font-size: 2rem; margin-bottom: 30px; }.create-form > label { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
 /* The field wrapper owns the stack so the error can sit beside the label rather than inside its name. */
 .create-field { display: grid; gap: 8px; margin-bottom: 23px; }
 .create-field > label { display: grid; gap: 8px; font-weight: 600; }
@@ -184,10 +184,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* A hidden destination keeps its DOM so drafts and timers survive, but it must
    take no layout space or tab stop while another manager section is active. */
 .manager-panel[hidden] { display: none; }
+.manager-panel > h2[tabindex='-1']:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .event-settings-editor__heading { margin-top: 30px; }
+.settings-field { display: grid; gap: 8px; margin-bottom: 23px; }
+.settings-field > label { font-weight: 600; }
 .settings-form .field-error { display: block; margin-top: 5px; color: var(--danger); font-size: .8rem; font-weight: 500; }
-.settings-form .toggle { flex-wrap: wrap; }
-.settings-form .toggle .field-error { flex-basis: 100%; }
+.settings-toggle-field { display: grid; }
+.settings-toggle-field > .field-error { margin: 5px 4px 10px 40px; }
 .event-appearance-editor { min-width: 0; margin-top: 50px; padding-top: 30px; border-top: 1px solid var(--border); }
 .event-appearance-editor__heading { display: grid; gap: 12px; margin-bottom: 24px; }
 .event-appearance-editor__heading h3 { margin: 4px 0 8px; font-family: 'Manrope', sans-serif; font-size: 1.6rem; }

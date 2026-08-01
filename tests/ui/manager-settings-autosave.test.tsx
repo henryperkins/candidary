@@ -115,14 +115,14 @@ describe('manager settings autosave guards', () => {
     await user.click(screen.getByLabelText('Review notes before sharing'));
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
 
-    const prompt = await screen.findByRole('alertdialog');
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     expect(within(prompt).getByRole('button', { name: 'Leave now' })).toBeVisible();
     expect(within(prompt).queryByRole('button', { name: 'Stay and fix settings' })).not.toBeInTheDocument();
     expect(prompt).toHaveFocus();
 
     expect(release).not.toBeNull();
     release!();
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('region', { name: /not saved yet/i })).not.toBeInTheDocument());
     await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Manager sections' })).not.toBeInTheDocument());
   });
 
@@ -140,7 +140,7 @@ describe('manager settings autosave guards', () => {
 
     await user.click(screen.getByLabelText('Review notes before sharing'));
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
-    const prompt = await screen.findByRole('alertdialog');
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     expect(within(prompt).getByText(/may still finish saving after you leave/u)).toBeVisible();
 
     await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
@@ -156,11 +156,12 @@ describe('manager settings autosave guards', () => {
     await user.clear(screen.getByLabelText('Event name'));
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
 
-    const prompt = await screen.findByRole('alertdialog');
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     await user.click(within(prompt).getByRole('button', { name: 'Stay and fix settings' }));
 
+    expect(screen.getByRole('heading', { name: 'Settings' })).toHaveFocus();
     expect(screen.getByRole('textbox', { name: /Event name/u })).toBeVisible();
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: /not saved yet/i })).not.toBeInTheDocument();
   });
 
   it('raises a manager notice when a hidden Settings draft cannot save, and routes back', async () => {
@@ -178,6 +179,7 @@ describe('manager settings autosave guards', () => {
       'Event settings has a change that cannot be saved yet.',
     );
     await user.click(within(notice).getByRole('button', { name: 'Open settings' }));
+    expect(screen.getByRole('heading', { name: 'Settings' })).toHaveFocus();
     expect(screen.getByRole('textbox', { name: /Event name/u })).toBeVisible();
   });
 

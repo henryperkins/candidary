@@ -18,7 +18,7 @@ export function UnsavedSettingsPrompt({ domains, onLeave, onStay }: UnsavedSetti
   const names = domains.map((domain) => domain.label).join(' and ');
   return <div
     className="unsaved-settings-prompt"
-    role="alertdialog"
+    role="region"
     aria-labelledby="unsaved-settings-title"
     aria-describedby="unsaved-settings-body"
     tabIndex={-1}

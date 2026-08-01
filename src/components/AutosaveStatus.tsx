@@ -27,7 +27,7 @@ export function autosaveStatusText(
   }
   if (state.status === 'failed') {
     return {
-      visible: 'Couldn’t save.',
+      visible: 'Couldn’t save.' + (state.failure ? ' ' + state.failure.message : ''),
       announcement: label + ' couldn’t save.' + (state.failure ? ' ' + state.failure.message : ''),
     };
   }
@@ -67,6 +67,7 @@ export function AutosaveStatus({
     {retryable && <button
       type="button"
       className="autosave-status__retry"
+      aria-label={'Retry ' + label.toLocaleLowerCase()}
       onClick={onRetry}
     >Retry</button>}
   </div>;

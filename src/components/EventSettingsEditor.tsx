@@ -391,66 +391,88 @@ export function EventSettingsEditor({
       />
     </div>
     <form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); queue.flush(); }}>
-      <label>Event name<input
-        name="name"
-        value={state.draft.name}
-        aria-invalid={Boolean(errors.name)}
-        aria-describedby={describedBy('name')}
-        onChange={(change) => edit('name', change.target.value, 'enqueue')}
-        onBlur={() => settleField('name', state.draft.name.trim())}
-        onKeyDown={flushOnEnter}
-      />{fieldError('name')}</label>
-      <label>Welcome message<textarea
-        name="welcomeMessage"
-        rows={4}
-        value={state.draft.welcomeMessage}
-        aria-invalid={Boolean(errors.welcomeMessage)}
-        aria-describedby={describedBy('welcomeMessage')}
-        onChange={(change) => edit('welcomeMessage', change.target.value, 'enqueue')}
-        onBlur={() => settleField('welcomeMessage', state.draft.welcomeMessage.trim())}
-      />{fieldError('welcomeMessage')}</label>
-      <label>Event time zone<input
-        name="eventTimezone"
-        value={state.draft.eventTimezone}
-        required
-        autoComplete="off"
-        spellCheck={false}
-        aria-invalid={Boolean(errors.eventTimezone)}
-        aria-describedby={describedBy('eventTimezone')}
-        onChange={(change) => edit('eventTimezone', change.target.value, 'enqueue')}
-        onBlur={() => settleField(
-          'eventTimezone',
-          canonicalEventSettings(state.draft, state.rosterVersion).eventTimezone,
-        )}
-        onKeyDown={flushOnEnter}
-      />{fieldError('eventTimezone')}</label>
-      <label>RSVP deadline<input
-        name="rsvpDeadlineDate"
-        type="date"
-        value={state.draft.rsvpDeadlineDate}
-        required
-        aria-invalid={Boolean(errors.rsvpDeadlineDate)}
-        aria-describedby={describedBy('rsvpDeadlineDate')}
-        onChange={(change) => edit('rsvpDeadlineDate', change.target.value, 'immediate')}
-        onKeyDown={flushOnEnter}
-      />{fieldError('rsvpDeadlineDate')}</label>
+      <div className="settings-field">
+        <label htmlFor="settings-name">Event name</label>
+        <input
+          id="settings-name"
+          name="name"
+          value={state.draft.name}
+          aria-invalid={Boolean(errors.name)}
+          aria-describedby={describedBy('name')}
+          onChange={(change) => edit('name', change.target.value, 'enqueue')}
+          onBlur={() => settleField('name', state.draft.name.trim())}
+          onKeyDown={flushOnEnter}
+        />
+        {fieldError('name')}
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-welcome-message">Welcome message</label>
+        <textarea
+          id="settings-welcome-message"
+          name="welcomeMessage"
+          rows={4}
+          value={state.draft.welcomeMessage}
+          aria-invalid={Boolean(errors.welcomeMessage)}
+          aria-describedby={describedBy('welcomeMessage')}
+          onChange={(change) => edit('welcomeMessage', change.target.value, 'enqueue')}
+          onBlur={() => settleField('welcomeMessage', state.draft.welcomeMessage.trim())}
+        />
+        {fieldError('welcomeMessage')}
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-event-timezone">Event time zone</label>
+        <input
+          id="settings-event-timezone"
+          name="eventTimezone"
+          value={state.draft.eventTimezone}
+          required
+          autoComplete="off"
+          spellCheck={false}
+          aria-invalid={Boolean(errors.eventTimezone)}
+          aria-describedby={describedBy('eventTimezone')}
+          onChange={(change) => edit('eventTimezone', change.target.value, 'enqueue')}
+          onBlur={() => settleField(
+            'eventTimezone',
+            canonicalEventSettings(state.draft, state.rosterVersion).eventTimezone,
+          )}
+          onKeyDown={flushOnEnter}
+        />
+        {fieldError('eventTimezone')}
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-rsvp-deadline">RSVP deadline</label>
+        <input
+          id="settings-rsvp-deadline"
+          name="rsvpDeadlineDate"
+          type="date"
+          value={state.draft.rsvpDeadlineDate}
+          required
+          aria-invalid={Boolean(errors.rsvpDeadlineDate)}
+          aria-describedby={describedBy('rsvpDeadlineDate')}
+          onChange={(change) => edit('rsvpDeadlineDate', change.target.value, 'immediate')}
+          onKeyDown={flushOnEnter}
+        />
+        {fieldError('rsvpDeadlineDate')}
+      </div>
       {([
         ['rsvpEnabled', 'Accept RSVPs'],
         ['uploadsEnabled', 'Accept private photo deliveries'],
         ['galleryVisible', 'Show the optional shared gallery'],
         ['moderationRequired', 'Review notes before sharing'],
-      ] as const).map(([field, label]) => <label className="toggle" key={field}>
-        <input
-          type="checkbox"
-          name={field}
-          checked={state.draft[field]}
-          aria-invalid={Boolean(errors[field])}
-          aria-describedby={describedBy(field)}
-          onChange={(change) => edit(field, change.target.checked, 'immediate')}
-        />
-        <span>{label}</span>
+      ] as const).map(([field, label]) => <div className="settings-toggle-field" key={field}>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            name={field}
+            checked={state.draft[field]}
+            aria-invalid={Boolean(errors[field])}
+            aria-describedby={describedBy(field)}
+            onChange={(change) => edit(field, change.target.checked, 'immediate')}
+          />
+          <span>{label}</span>
+        </label>
         {fieldError(field)}
-      </label>)}
+      </div>)}
     </form>
   </section>;
 }

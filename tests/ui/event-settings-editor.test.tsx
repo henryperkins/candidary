@@ -195,6 +195,7 @@ describe('event settings editor', () => {
 
     expect(settingsWrites()).toHaveLength(0);
     expect(screen.getByLabelText(/^Event name/)).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText(/^Event name/)).toHaveAccessibleName('Event name');
     expect(screen.getByLabelText(/^Event name/)).toHaveAccessibleDescription('Enter an event name.');
     expect(screen.getByText('Event settings can’t save. Event name: Enter an event name.')).toBeInTheDocument();
 
@@ -281,12 +282,13 @@ describe('event settings editor', () => {
     fireEvent.blur(name);
 
     await settleMicrotasks();
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible();
+    expect(screen.getByText('Couldn’t save. Failed to fetch')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Retry event settings' })).toBeVisible();
     expect(screen.getByLabelText('Event name')).toHaveValue('Reception');
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:failed');
 
     vi.stubGlobal('fetch', vi.fn(() => json({ event: { ...EVENT, name: 'Reception' } })));
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry event settings' }));
     await settleMicrotasks();
     expect(screen.getByText('Event settings saved')).toBeInTheDocument();
   });
@@ -309,7 +311,7 @@ describe('event settings editor', () => {
     // A background refusal announces itself; it does not take the caret away
     // from whatever the host is typing in.
     expect(screen.getByLabelText('Event name')).toHaveFocus();
-    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:invalid');
     // Editing an unrelated field cannot clear a refusal about this one.
     fireEvent.click(screen.getByLabelText('Review notes before sharing'));
@@ -478,7 +480,7 @@ describe('event settings editor', () => {
       .toHaveAccessibleDescription('Add a guest list before accepting RSVPs.');
     // No version moved, so repeating the write would be refused identically.
     expect(settingsWrites()).toHaveLength(1);
-    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
     expect(screen.getByLabelText(/^Accept RSVPs/)).toBeChecked();
   });
 
@@ -523,7 +525,7 @@ describe('event settings editor', () => {
 
     await settleMicrotasks();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:failed');
-    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
   });
 
   it('flushes on Enter in a single-line field without submitting the page', async () => {

@@ -38,7 +38,7 @@ describe('autosave status text', () => {
       { status: 'failed', failure: { message: 'The network dropped.', retryable: true } },
       null,
     )).toEqual({
-      visible: 'Couldn’t save.',
+      visible: 'Couldn’t save. The network dropped.',
       announcement: 'Event settings couldn’t save. The network dropped.',
     });
   });

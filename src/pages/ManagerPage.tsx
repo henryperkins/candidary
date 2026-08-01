@@ -129,6 +129,8 @@ export function ManagerPage() {
   // Settings stays mounted after its first visit so a debounce timer, an
   // in-flight write, and an unsaved draft all survive a destination change.
   const [settingsMounted, setSettingsMounted] = useState(false);
+  const [settingsFocusRequest, setSettingsFocusRequest] = useState(0);
+  const settingsHeading = useRef<HTMLHeadingElement>(null);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
   const [status, setStatus] = useState<MediaStatus>('all');
@@ -454,6 +456,16 @@ export function ManagerPage() {
     });
   }
 
+  function openSettingsForRepair() {
+    setSettingsFocusRequest((current) => current + 1);
+    openSection('settings');
+  }
+
+  useEffect(() => {
+    if (settingsFocusRequest === 0 || section !== 'settings') return;
+    settingsHeading.current?.focus();
+  }, [section, settingsFocusRequest]);
+
   async function bulk(action: 'publish' | 'hide') {
     const groups = new Map<MediaView['publicationStatus'], string[]>();
     for (const item of media.filter(({ id }) => selected.includes(id))) {
@@ -668,7 +680,7 @@ export function ManagerPage() {
           <p role="alert">{stuckDomains.map((domain) => domain.status === 'invalid'
             ? `${domain.label} has a change that cannot be saved yet.`
             : `${domain.label} could not save a change.`).join(' ')}</p>
-          <button type="button" className="button button--secondary" onClick={() => openSection('settings')}>
+          <button type="button" className="button button--secondary" onClick={openSettingsForRepair}>
             Open settings
           </button>
         </section>
@@ -746,7 +758,7 @@ export function ManagerPage() {
 
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
         <p className="section-label">Event controls</p>
-        <h2>Settings</h2>
+        <h2 ref={settingsHeading} tabIndex={-1}>Settings</h2>
         <EventSettingsEditor
           key={'settings-' + event.id}
           ref={settingsAutosave}
@@ -791,7 +803,7 @@ export function ManagerPage() {
         domains={unconfirmedDomains}
         onLeave={() => blocker.proceed()}
         onStay={stuckDomains.length > 0
-          ? () => { blocker.reset(); openSection('settings'); }
+          ? () => { blocker.reset(); openSettingsForRepair(); }
           : undefined}
       />}
     </main>

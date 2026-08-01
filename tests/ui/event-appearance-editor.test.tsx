@@ -375,13 +375,14 @@ describe('event appearance editor', () => {
     render(<Harness />);
 
     fireEvent.click(screen.getByRole('radio', { name: 'Garden Party' }));
-    expect(await screen.findByRole('button', { name: 'Retry' })).toBeVisible();
+    expect(await screen.findByText('Couldn’t save. Failed to fetch')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Retry event appearance' })).toBeVisible();
     expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
 
     const saved = { ...eventWithoutCover, theme: resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} }) };
     const fetchMock = vi.fn(() => json({ event: saved }));
     vi.stubGlobal('fetch', fetchMock);
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry event appearance' }));
     await waitFor(() => expect(themeMutationCalls(fetchMock)).toHaveLength(1));
     await waitFor(() => expect(screen.getByTestId('appearance-confirmed')).toHaveTextContent('garden-party'));
   });
@@ -401,7 +402,7 @@ describe('event appearance editor', () => {
     const accent = screen.getByRole('textbox', { name: /Accent color/ });
     expect(accent).toHaveAttribute('aria-invalid', 'true');
     expect(accent).toHaveAccessibleDescription('Accent needs another color.');
-    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
     expect(screen.getByTestId('appearance-state')).toHaveTextContent('appearance:invalid');
   });
 
