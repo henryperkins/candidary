@@ -134,11 +134,14 @@ interface EventSettingsEditorProps {
   onAutosaveStateChange(state: DomainAutosaveState): void;
   // Brackets a write so a whole-event read cannot be adopted across it.
   onEventWrite<T>(request: () => Promise<T>): Promise<T>;
+  // Repeats an explicit conflict-recovery read if another manager write made
+  // its whole-event answer stale while it was open.
+  onEventRead<T>(request: () => Promise<T>): Promise<T>;
   ref?: Ref<AutosaveHandle>;
 }
 
 export function EventSettingsEditor({
-  event, onSettingsSaved, onAutosaveStateChange, onEventWrite, ref,
+  event, onSettingsSaved, onAutosaveStateChange, onEventWrite, onEventRead, ref,
 }: EventSettingsEditorProps) {
   const [state, setState] = useState<EditorState>(() => initialState(event));
   const [autosave, setAutosave] = useState<AutosaveState>({ status: 'saved', failure: null });
@@ -189,7 +192,9 @@ export function EventSettingsEditor({
       // One read decides which kind of refusal this is. A version that moved is
       // a race worth rebasing; the same version is a roster that cannot open at
       // all, and repeating the write would be refused identically.
-      const refreshed = await api<{ event: EventView }>('/api/manage/events/' + eventId);
+      const refreshed = await onEventRead(() => (
+        api<{ event: EventView }>('/api/manage/events/' + eventId)
+      ));
       savedRef.current(refreshed.event);
       if (refreshed.event.rsvpRosterVersion === payload.rsvpRosterVersion) throw caught;
       const intent = intentKeyOf(payload);

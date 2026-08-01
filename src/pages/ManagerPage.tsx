@@ -161,6 +161,9 @@ export function ManagerPage() {
       eventReads.current.endWrite();
     }
   }, []);
+  const eventRead = useCallback(<T,>(request: () => Promise<T>): Promise<T> => (
+    eventReads.current.readFresh(request)
+  ), []);
   // Leaving Settings flushes a valid scheduled write without waiting for its
   // response. The subtree remains mounted, so an in-flight request finishes.
   const settingsAutosave = useRef<AutosaveHandle>(null);
@@ -749,6 +752,7 @@ export function ManagerPage() {
           ref={settingsAutosave}
           event={event}
           onEventWrite={eventWrite}
+          onEventRead={eventRead}
           onSettingsSaved={(updated) => setEvent((current) => current
             ? mergeSettingsResponse(current, updated, { entryDisabled: entryDisabled.current })
             : updated)}

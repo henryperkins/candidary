@@ -40,10 +40,12 @@ function Harness({
   initial = EVENT,
   rosterVersion,
   synchronousResponses = false,
+  onEventRead = (request) => request(),
 }: {
   initial?: EventView;
   rosterVersion?: number;
   synchronousResponses?: boolean;
+  onEventRead?: <T>(request: () => Promise<T>) => Promise<T>;
 }) {
   const [event, setEvent] = useState(initial);
   const [state, setState] = useState<DomainAutosaveState | null>(null);
@@ -55,6 +57,7 @@ function Harness({
       key={event.id}
       event={applied}
       onEventWrite={(request) => request()}
+      onEventRead={onEventRead}
       onSettingsSaved={(updated) => {
         const applyResponse = () => setEvent((current) => mergeSettingsResponse(current, updated));
         if (synchronousResponses) flushSync(applyResponse);
@@ -345,6 +348,44 @@ describe('event settings editor', () => {
     expect(settingsWrites()[1]).toMatchObject({ rsvpRosterVersion: 9, rsvpEnabled: true });
     expect(screen.getByText('Event settings saved')).toBeInTheDocument();
     expect(screen.getByLabelText('Accept RSVPs')).toBeChecked();
+  });
+
+  it('routes a roster-conflict refresh through the owner read guard', async () => {
+    let writeAttempt = 0;
+    let readAttempt = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        writeAttempt += 1;
+        return writeAttempt === 1
+          ? errorJson({
+            code: 'RSVP_ROSTER_INVALID',
+            message: 'The guest list changed since this page loaded. Reload and try again.',
+            fieldErrors: { rsvpEnabled: 'The guest list changed since this page loaded.' },
+            requestId: 'request-a',
+          }, 409)
+          : json({ event: { ...EVENT, rsvpEnabled: true, rsvpRosterVersion: 9 } });
+      }
+      readAttempt += 1;
+      return json({ event: { ...EVENT, rsvpRosterVersion: readAttempt === 1 ? 8 : 9 } });
+    }));
+    const guardedReadSpy = vi.fn();
+    const guardedRead = async <T,>(request: () => Promise<T>) => {
+      guardedReadSpy();
+      await request(); // Simulates the guard dropping an answer overtaken by a write.
+      return request();
+    };
+    render(<Harness onEventRead={guardedRead} />);
+
+    fireEvent.click(screen.getByLabelText('Accept RSVPs'));
+    await settleMicrotasks();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS);
+    await settleMicrotasks();
+
+    expect(guardedReadSpy).toHaveBeenCalledTimes(1);
+    expect(readAttempt).toBe(2);
+    expect(settingsWrites()).toHaveLength(2);
+    expect(settingsWrites()[1]).toMatchObject({ rsvpEnabled: true, rsvpRosterVersion: 9 });
   });
 
   it('stops after one automatic retry when the roster keeps moving', async () => {

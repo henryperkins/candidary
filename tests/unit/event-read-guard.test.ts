@@ -42,4 +42,21 @@ describe('event read guard', () => {
     guard.beginWrite();
     expect(guard.adopt(second)).toBe(false);
   });
+
+  it('retries an explicit read until no write overlaps it', async () => {
+    const guard = createEventReadGuard();
+    let attempts = 0;
+
+    const result = await guard.readFresh(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        guard.beginWrite();
+        guard.endWrite();
+      }
+      return attempts === 1 ? 8 : 9;
+    });
+
+    expect(result).toBe(9);
+    expect(attempts).toBe(2);
+  });
 });

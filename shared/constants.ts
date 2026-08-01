@@ -18,6 +18,9 @@ export const MAX_EXPORT_PART_SOURCE_BYTES = 2 * 1024 * 1024 * 1024;
 export const MANAGER_MEDIA_PAGE_SIZE = 24;
 export const MANAGER_MEDIA_MAX_PAGE_SIZE = 50;
 export const MANAGER_BULK_SELECTION_MAX = 50;
+// Four date digits are not enough to make an event date plausible. In
+// particular, a partially typed year such as 0202 must never become durable.
+export const MIN_EVENT_CALENDAR_YEAR = 1900;
 export const UPLOAD_URL_TTL_SECONDS = 10 * 60;
 export const UPLOAD_RESERVATION_TTL_SECONDS = 15 * 60;
 // The security notes name this file as the single source of truth for limits, so

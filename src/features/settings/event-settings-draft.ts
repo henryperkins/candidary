@@ -1,4 +1,5 @@
 import type { EventView } from '../../../shared/contracts';
+import { MIN_EVENT_CALENDAR_YEAR } from '../../../shared/constants';
 import { canonicalTimeZone, isIanaTimeZone } from '../../../shared/event-time';
 
 /**
@@ -64,6 +65,7 @@ function isRealCalendarDate(value: string): boolean {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
+  if (year < MIN_EVENT_CALENDAR_YEAR) return false;
   const rebuilt = new Date(Date.UTC(year, month - 1, day));
   return rebuilt.getUTCFullYear() === year
     && rebuilt.getUTCMonth() + 1 === month

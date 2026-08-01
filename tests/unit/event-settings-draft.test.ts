@@ -88,6 +88,8 @@ describe('event settings draft', () => {
       .toEqual({ rsvpDeadlineDate: 'Choose a valid RSVP deadline.' });
     expect(validateEventSettings({ ...base, rsvpDeadlineDate: '2026-13-01' }, event.eventDate))
       .toEqual({ rsvpDeadlineDate: 'Choose a valid RSVP deadline.' });
+    expect(validateEventSettings({ ...base, rsvpDeadlineDate: '0202-09-19' }, event.eventDate))
+      .toEqual({ rsvpDeadlineDate: 'Choose a valid RSVP deadline.' });
     // A leap day that does exist is not rejected with them.
     expect(validateEventSettings(
       { ...base, rsvpDeadlineDate: '2028-02-29' },

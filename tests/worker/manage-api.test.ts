@@ -284,6 +284,19 @@ describe('manager media pagination', () => {
 });
 
 describe('manager settings and private photo intake', () => {
+  it('rejects an implausible RSVP deadline year before storing it', async () => {
+    const access = await eventAccess();
+
+    const response = await applySettings(access, { rsvpDeadlineDate: '0202-09-19' });
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors).toMatchObject({
+      rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
+    });
+  });
+
   it('classifies a guarded settings refusal as the entry stop, not a roster race', async () => {
     const access = await eventAccess();
     const entries = new EventEntriesRepository(env.DB);

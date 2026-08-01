@@ -17,15 +17,28 @@ export interface EventReadGuard {
   endWrite(): void;
   openRead(): number;
   adopt(token: number): boolean;
+  readFresh<T>(request: () => Promise<T>): Promise<T>;
 }
 
 export function createEventReadGuard(): EventReadGuard {
   let epoch = 0;
   const move = () => { epoch += 1; };
+  const openRead = () => epoch;
+  const adopt = (token: number) => token === epoch;
   return {
     beginWrite: move,
     endWrite: move,
-    openRead: () => epoch,
-    adopt: (token) => token === epoch,
+    openRead,
+    adopt,
+    async readFresh<T>(request: () => Promise<T>): Promise<T> {
+      // A conflict-recovery read has to return a usable current row, unlike a
+      // poll that can simply be dropped until the next interval. Retry only
+      // the read that a concurrent write proved stale.
+      for (;;) {
+        const token = openRead();
+        const result = await request();
+        if (adopt(token)) return result;
+      }
+    },
   };
 }
