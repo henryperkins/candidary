@@ -60,6 +60,9 @@ const LOAD_FAILURE_DECISION = {
   RSVP_SUBMISSION_CONFLICT: decision('retry'),
   RSVP_ROSTER_INVALID: decision('retry'),
   RSVP_IMPORT_CONFLICT: decision('retry'),
+  RSVP_ROSTER_BATCH_TOO_LARGE: decision('retry'),
+  RSVP_ROSTER_BATCH_CONFLICT: decision('retry'),
+  RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT: decision('retry'),
   INTERNAL_ERROR: decision('retry'),
 } as const satisfies Record<ApiErrorCode, LoadFailureDecision>;
 

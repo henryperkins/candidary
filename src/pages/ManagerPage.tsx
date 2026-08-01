@@ -147,6 +147,15 @@ export function ManagerPage() {
   const [autosaveStates, setAutosaveStates] = useState<Partial<Record<
     DomainAutosaveState['domain'], DomainAutosaveState
   >>>({});
+  // The roster intake is intentionally browser-only. It participates in this
+  // shell's one pending-work boundary, but is never an autosave domain.
+  const [rsvpDraftDirty, setRsvpDraftDirty] = useState(false);
+  const [rsvpCommitPending, setRsvpCommitPending] = useState(false);
+  const [rsvpDiscardEpoch, setRsvpDiscardEpoch] = useState(0);
+  const [pendingSection, setPendingSection] = useState<Section | null>(null);
+  const [pendingRsvpClose, setPendingRsvpClose] = useState(false);
+  const [pendingSettingsRepair, setPendingSettingsRepair] = useState(false);
+  const pendingWorkPrompt = useRef<HTMLElement>(null);
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
   // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
@@ -201,11 +210,10 @@ export function ManagerPage() {
   const stuckDomains = unconfirmedDomains.filter(
     ({ status }) => status === 'invalid' || status === 'failed',
   );
-  // Read through a ref: the blocker registers once, and re-registering it on
-  // every keystroke would drop the block mid-navigation.
-  const unconfirmedRef = useRef(false);
-  unconfirmedRef.current = unconfirmedDomains.length > 0;
-  const blocker = useBlocker(useCallback(() => unconfirmedRef.current, []));
+  const shouldBlockNavigation = unconfirmedDomains.length > 0
+    || rsvpDraftDirty
+    || rsvpCommitPending;
+  const blocker = useBlocker(shouldBlockNavigation);
 
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
@@ -215,16 +223,21 @@ export function ManagerPage() {
   useEffect(() => {
     // The requested navigation happens by itself the moment both domains
     // confirm; the host never has to answer the prompt twice.
-    if (blocker.state === 'blocked' && unconfirmedDomains.length === 0) blocker.proceed();
-  }, [blocker, unconfirmedDomains.length]);
+    if (blocker.state === 'blocked' && unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) blocker.proceed();
+  }, [blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
   useEffect(() => {
-    if (unconfirmedDomains.length === 0) return;
+    if (unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) return;
     // A browser may cancel background requests during unload, so this warns
     // rather than pretending a last-millisecond save is guaranteed.
     const warn = (unloadEvent: BeforeUnloadEvent) => { unloadEvent.preventDefault(); };
     window.addEventListener('beforeunload', warn);
     return () => { window.removeEventListener('beforeunload', warn); };
-  }, [unconfirmedDomains.length]);
+  }, [rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
+  useEffect(() => {
+    if (rsvpDraftDirty && (blocker.state === 'blocked' || pendingSection !== null || pendingRsvpClose)) {
+      pendingWorkPrompt.current?.focus();
+    }
+  }, [blocker.state, pendingRsvpClose, pendingSection, rsvpDraftDirty]);
 
   const mediaPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
@@ -433,7 +446,7 @@ export function ManagerPage() {
     return () => { current = false; };
   }, [eventLink]);
 
-  function openSection(next: Section) {
+  function transitionToSection(next: Section) {
     if (section === 'settings' && next !== 'settings') {
       // Leaving flushes the newest valid drafts. It deliberately does not wait
       // for their responses: the subtree stays mounted, so they finish anyway.
@@ -457,7 +470,22 @@ export function ManagerPage() {
     });
   }
 
+  function openSection(next: Section) {
+    if (rsvpCommitPending && next !== 'rsvp') return;
+    if (rsvpDraftDirty && next !== 'rsvp') {
+      setPendingSection(next);
+      return;
+    }
+    transitionToSection(next);
+  }
+
   function openSettingsForRepair() {
+    if (rsvpCommitPending) return;
+    if (rsvpDraftDirty) {
+      setPendingSection('settings');
+      setPendingSettingsRepair(true);
+      return;
+    }
     settingsFocusRequested.current = true;
     setSettingsFocusEpoch((current) => current + 1);
     openSection('settings');
@@ -647,12 +675,12 @@ export function ManagerPage() {
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
         `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
     <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
-      <button aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
       <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => openSection('rsvp')}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
-      <button aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
-      <button aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <span className="manager-nav__count">{messages.length}</span>}</button>
-      <button aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
-      <button aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => openSection('settings')}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <span className="manager-nav__count">{messages.length}</span>}</button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => openSection('settings')}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
     </nav></header>
 
     <main className="manager-main">
@@ -678,14 +706,16 @@ export function ManagerPage() {
         )}
       </section>}
 
-      {section !== 'settings' && stuckDomains.length > 0 && (
+      {stuckDomains.length > 0 && (
         <section className="manager-autosave-notice" aria-label="Unsaved settings">
           <p role="alert">{stuckDomains.map((domain) => domain.status === 'invalid'
             ? `${domain.label} has a change that cannot be saved yet.`
             : `${domain.label} could not save a change.`).join(' ')}</p>
-          <button type="button" className="button button--secondary" onClick={openSettingsForRepair}>
-            Open settings
-          </button>
+          {section !== 'settings' && (
+            <button type="button" className="button button--secondary" disabled={rsvpCommitPending} onClick={openSettingsForRepair}>
+              Open settings
+            </button>
+          )}
         </section>
       )}
 
@@ -705,6 +735,13 @@ export function ManagerPage() {
         event={event}
         onEventWrite={eventWrite}
         onEventChanged={() => void runManagerAction(refreshEvent)}
+        onRosterVersionObserved={(currentRosterVersion) => setEvent((current) => current
+          ? { ...current, rsvpRosterVersion: Math.max(current.rsvpRosterVersion, currentRosterVersion) }
+          : current)}
+        onDraftDirtyChange={setRsvpDraftDirty}
+        onDraftCloseRequested={() => setPendingRsvpClose(true)}
+        onDraftCommitPendingChange={setRsvpCommitPending}
+        discardDraftEpoch={rsvpDiscardEpoch}
       />}
 
       {section === 'gallery' && <section aria-labelledby="gallery-publishing-title">
@@ -802,7 +839,58 @@ export function ManagerPage() {
         </div>
       </section>}
 
-      {blocker.state === 'blocked' && <UnsavedSettingsPrompt
+      {rsvpCommitPending && blocker.state === 'blocked' && <section
+        className="unsaved-settings-prompt"
+        role="region"
+        aria-labelledby="saving-guest-list-title"
+        tabIndex={-1}
+        ref={pendingWorkPrompt}
+      >
+        <h2 id="saving-guest-list-title">Your guest list is being saved</h2>
+        <p>Stay on this page until Candidary confirms whether the guest-list changes were saved.</p>
+        <button type="button" className="button button--primary" onClick={() => blocker.reset()}>Stay</button>
+      </section>}
+      {!rsvpCommitPending && rsvpDraftDirty && (blocker.state === 'blocked' || pendingSection !== null || pendingRsvpClose) && <section
+        className="unsaved-settings-prompt"
+        role="region"
+        aria-labelledby="unsaved-guest-list-title"
+        tabIndex={-1}
+        ref={pendingWorkPrompt}
+      >
+        <h2 id="unsaved-guest-list-title">Your pending work is not saved</h2>
+        <p>Your guest-list draft will be discarded and cannot be recovered. {unconfirmedDomains.length > 0
+          ? 'Settings or appearance changes are also unconfirmed. Requests already sent may still finish saving after you leave; unsent or invalid changes will be left behind.'
+          : 'No guest-list changes have been sent yet.'}</p>
+        <div className="button-row">
+          <button type="button" className="button button--secondary" onClick={() => {
+            setRsvpDraftDirty(false);
+            setRsvpDiscardEpoch((current) => current + 1);
+            if (blocker.state === 'blocked') {
+              blocker.proceed();
+            } else if (pendingSection) {
+              const next = pendingSection;
+              setPendingSection(null);
+              setPendingRsvpClose(false);
+              if (next === 'settings' && pendingSettingsRepair) {
+                settingsFocusRequested.current = true;
+                setSettingsFocusEpoch((current) => current + 1);
+              }
+              setPendingSettingsRepair(false);
+              transitionToSection(next);
+            } else {
+              setPendingRsvpClose(false);
+              setPendingSettingsRepair(false);
+            }
+          }}>Discard draft</button>
+          <button type="button" className="button button--primary" onClick={() => {
+            setPendingSection(null);
+            setPendingRsvpClose(false);
+            setPendingSettingsRepair(false);
+            if (blocker.state === 'blocked') blocker.reset();
+          }}>Stay</button>
+        </div>
+      </section>}
+      {!rsvpDraftDirty && blocker.state === 'blocked' && <UnsavedSettingsPrompt
         domains={unconfirmedDomains}
         onLeave={() => blocker.proceed()}
         onStay={stuckDomains.length > 0

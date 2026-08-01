@@ -5,12 +5,17 @@ import {
   MAX_NAMED_INVITEES_PER_HOUSEHOLD,
   MAX_PLUS_ONES_PER_HOUSEHOLD,
 } from '../../shared/constants';
-import type { GuestEventView, RsvpHouseholdView, RsvpInviteeView } from '../../shared/contracts';
+import type {
+  GuestEventView,
+  RsvpHouseholdView,
+  RsvpInviteeView,
+} from '../../shared/contracts';
 import {
   EVENT_FIXTURE,
   RSVP_HOUSEHOLD_FIXTURE,
   stubGuestRoutes,
   stubManagerRoutes,
+  stubRsvpRosterBatchRoutes,
 } from './fixtures/routes';
 import { LONG_RSVP_NAME, makeMedia } from './fixtures/ui-data';
 import {
@@ -225,7 +230,7 @@ test('six manager destinations and the RSVP panel stay contained at 320, 390, an
   }
 });
 
-test('the household editor and CSV issues scroll only inside their own regions', async ({ page }) => {
+test('the household editor and staged intake issues scroll only inside their own regions', async ({ page }) => {
   await openManagerRsvp(page);
   await page.getByRole('button', { name: new RegExp(LONG_RSVP_NAME, 'u') }).click();
   await expect(page.getByRole('heading', { name: 'The Morgan household' })).toBeVisible();
@@ -236,33 +241,35 @@ test('the household editor and CSV issues scroll only inside their own regions',
     await expectContained(page, page.locator('.rsvp-household-editor'), `household editor at ${width}`);
   }
 
-  // A long, blocking issue list is the one region allowed its own scrollbar.
-  await page.unroute(`**/api/manage/events/${EVENT_FIXTURE.id}/rsvp/import/preview`);
-  await page.route(`**/api/manage/events/${EVENT_FIXTURE.id}/rsvp/import/preview`, (route) => route.fulfill({
-    json: {
-      data: {
-        issues: Array.from({ length: 24 }, (_, index) => ({
-          row: index + 2,
-          field: 'invitee_name',
-          code: 'invitee_name_invalid',
-          message: `Row ${index + 2} needs a guest name between 1 and 80 characters, and this one is ${LONG_RSVP_NAME}.`,
-          blocking: true,
-        })),
-        totals: { households: 0, namedInvitees: 0, plusOneCapacity: 0, invitedCapacity: 0 },
-        sourceDigest: 'a'.repeat(64),
-        rosterVersion: 0,
-      },
-      requestId: 'request-a',
-    },
-  }));
-  await page.setViewportSize({ width: 320, height: 900 });
-  await page.getByLabel('Guest list CSV').setInputFiles({
-    name: 'guests.csv',
-    mimeType: 'text/csv',
-    buffer: Buffer.from('household_key,household_label,invitee_name,plus_one_slots\n'),
-  });
+  await page.getByRole('button', { name: 'Close household' }).click();
 
-  const issues = page.getByRole('region', { name: 'CSV issues' });
+  // A long, blocking issue list is the one region allowed its own scrollbar.
+  await stubRsvpRosterBatchRoutes(page, EVENT_FIXTURE.id, {
+    preview: ({ request, defaultResponse }) => {
+      const firstHousehold = request.batch.creates[0]!;
+      const firstInvitee = firstHousehold.namedInvitees[0]!;
+      return {
+        ...defaultResponse,
+        issues: Array.from({ length: 24 }, (_, index) => ({
+          clientHouseholdId: firstHousehold.clientHouseholdId,
+          clientInviteeId: firstInvitee.clientInviteeId,
+          field: 'namedInvitees.displayName' as const,
+          code: 'invitee_name_invalid' as const,
+          message: `Staged invitation ${index + 1} needs a guest name between 1 and 80 characters, and this explanation stays deliberately long.`,
+          severity: 'blocking' as const,
+        })),
+        canCommit: false,
+      };
+    },
+  });
+  await page.setViewportSize({ width: 320, height: 900 });
+  await page.getByRole('button', { name: 'Add guests' }).click();
+  await page.getByLabel('Guest names or spreadsheet data').fill('Taylor Morgan');
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByRole('button', { name: 'Continue to details', exact: true }).click();
+  await page.getByRole('button', { name: 'Review guests' }).click();
+
+  const issues = page.getByRole('region', { name: 'Guest list review issues' });
   await expect(issues).toBeVisible();
   const scroll = await issues.evaluate((element) => ({
     clientWidth: element.clientWidth,
@@ -270,10 +277,10 @@ test('the household editor and CSV issues scroll only inside their own regions',
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,
   }));
-  expect(scroll.scrollWidth, 'CSV issues never scroll sideways')
+  expect(scroll.scrollWidth, 'staged intake issues never scroll sideways')
     .toBeLessThanOrEqual(scroll.clientWidth + 1);
   expect(scroll.scrollHeight, 'a long issue list scrolls inside its own region')
     .toBeGreaterThan(scroll.clientHeight);
-  expect(await page.getByRole('button', { name: 'Commit guest list' }).count()).toBe(0);
-  await expectContained(page, page.locator('.manager-shell--intake'), 'CSV issues at 320');
+  expect(await page.getByRole('button', { name: /^Add \d+ guests across/u }).count()).toBe(0);
+  await expectContained(page, page.locator('.manager-shell--intake'), 'staged intake issues at 320');
 });

@@ -41,6 +41,9 @@ export interface ManagerRsvpCreateInput {
 interface ManagerRsvpHouseholdEditorProps {
   detail: RsvpHouseholdDetail | null;
   creating: boolean;
+  // The unified staging workspace owns new invitations. Keep the legacy create
+  // callbacks for callers that still need them, without surfacing both flows.
+  allowCreate?: boolean;
   busy: boolean;
   // Set only when a refused write replaced the view with the winning version, so
   // the host reads the newer roster from the top before editing it again.
@@ -77,6 +80,7 @@ function plusOneLabels(detail: RsvpHouseholdDetail): Map<string, string> {
 export function ManagerRsvpHouseholdEditor({
   detail,
   creating,
+  allowCreate = true,
   busy,
   autoFocusHeading,
   onStartCreate,
@@ -89,13 +93,13 @@ export function ManagerRsvpHouseholdEditor({
 }: ManagerRsvpHouseholdEditorProps) {
   return <div className="rsvp-manager__editor">
     {!creating && !detail && <div className="rsvp-manager__editor-empty">
-      <p>Open a household to edit it, or add one by hand.</p>
-      <button type="button" className="button button--secondary" onClick={onStartCreate}>
+      <p>{allowCreate ? 'Open a household to edit it, or add one by hand.' : 'Open a household to edit, correct, or archive it.'}</p>
+      {allowCreate && <button type="button" className="button button--secondary" onClick={onStartCreate}>
         Add household
-      </button>
+      </button>}
     </div>}
 
-    {!creating && detail && <div className="rsvp-manager__editor-actions">
+    {!creating && detail && allowCreate && <div className="rsvp-manager__editor-actions">
       <button type="button" className="button button--secondary" onClick={onStartCreate}>
         Add household
       </button>

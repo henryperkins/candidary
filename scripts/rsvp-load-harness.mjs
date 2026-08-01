@@ -1,15 +1,16 @@
-/* global console, fetch, performance, process, URL */
+/* global console, fetch, performance, process, TextEncoder, URL */
 
 // A guarded rehearsal for the RSVP half of the wedding-day contract.
 //
-// It proves two things a unit test cannot: that a 500-capacity roster imports and
-// reconciles against the server's own totals, and that the durable D1 lookup
-// boundary actually refuses the twenty-first attempt from one address with a
-// generic 429. It is deliberately NOT a concurrency test — every request comes
-// from one IP, and pretending otherwise would either mean weakening a production
-// abuse control or reporting a number that means nothing. A true distributed
-// lookup test needs separately provisioned source addresses and its own
-// authorized rehearsal.
+// It proves three things a unit test cannot: that a 500-capacity additive batch
+// stays inside the production JSON envelope, commits and replays its durable
+// manager receipt, and reconciles against the server's own totals; and that the
+// durable D1 lookup boundary actually refuses the twenty-first attempt from one
+// address with a generic 429. It is deliberately NOT a concurrency test — every
+// request comes from one IP, and pretending otherwise would either mean
+// weakening a production abuse control or reporting a number that means
+// nothing. A true distributed lookup test needs separately provisioned source
+// addresses and its own authorized rehearsal.
 
 const baseUrl = process.env.CANDIDARY_RSVP_BASE_URL?.replace(/\/$/u, '');
 const eventLink = process.env.CANDIDARY_RSVP_EVENT_LINK;
@@ -21,6 +22,9 @@ const live = process.env.CANDIDARY_RSVP_CONFIRM === 'I_UNDERSTAND';
 // plus-one slot per household, which is the largest capacity the contract allows.
 const HOUSEHOLDS = 250;
 const CAPACITY = HOUSEHOLDS * 2;
+// Keep in sync with MAX_RSVP_BATCH_BYTES in shared/constants.ts. This standalone
+// Node harness does not load the application's TypeScript modules.
+const MAX_BATCH_BYTES = 512 * 1024;
 // The D1 per-event/IP budget. The attempt after it must be refused.
 const IP_ATTEMPT_BUDGET = 20;
 const D1_RETRY_AFTER = '900';
@@ -48,16 +52,58 @@ function guestName(index) {
   return `Rehearsal Guest ${String(index + 1).padStart(3, '0')}`;
 }
 
-function roster() {
-  const rows = ['household_key,household_label,invitee_name,plus_one_slots'];
-  for (let index = 0; index < HOUSEHOLDS; index += 1) {
-    rows.push(`${householdKey(index)},Rehearsal household ${index + 1},${guestName(index)},1`);
-  }
-  return `${rows.join('\n')}\n`;
+function fixtureUuid(prefix, index) {
+  return `${prefix}000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+}
+
+function rosterBatch() {
+  return {
+    creates: Array.from({ length: HOUSEHOLDS }, (_, index) => ({
+      clientHouseholdId: fixtureUuid('10', index),
+      householdKey: {
+        value: householdKey(index),
+        provenance: 'supplied',
+      },
+      label: `Rehearsal household ${index + 1}`,
+      namedInvitees: [{
+        clientInviteeId: fixtureUuid('20', index),
+        displayName: guestName(index),
+      }],
+      plusOneSlots: 1,
+    })),
+    appends: [],
+  };
+}
+
+function serializedBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+const candidateBatch = rosterBatch();
+const modeledPreview = {
+  batch: candidateBatch,
+  expectedRosterVersion: 0,
+};
+const modeledCommit = {
+  canonicalBatch: candidateBatch,
+  previewDigest: 'a'.repeat(64),
+  expectedRosterVersion: 0,
+  idempotencyKey: 'rsvp-load-capacity-v1',
+};
+const previewBytes = serializedBytes(modeledPreview);
+const commitBytes = serializedBytes(modeledCommit);
+if (previewBytes > MAX_BATCH_BYTES || commitBytes > MAX_BATCH_BYTES) {
+  throw new Error('The modeled maximum-capacity roster no longer fits the RSVP batch envelope.');
 }
 
 if (!live) {
-  console.log(JSON.stringify({ mode: 'dry-run', ...plan, csvBytes: roster().length }, null, 2));
+  console.log(JSON.stringify({
+    mode: 'dry-run',
+    ...plan,
+    maxBatchBytes: MAX_BATCH_BYTES,
+    previewBytes,
+    modeledCommitBytes: commitBytes,
+  }, null, 2));
   console.log('Set CANDIDARY_RSVP_BASE_URL, CANDIDARY_RSVP_EVENT_LINK, CANDIDARY_RSVP_MANAGER_COOKIE, CANDIDARY_RSVP_MANAGER_CSRF, and CANDIDARY_RSVP_CONFIRM=I_UNDERSTAND to run against a dedicated, disposable rehearsal event.');
   process.exit(0);
 }
@@ -115,24 +161,59 @@ const eventId = process.env.CANDIDARY_RSVP_EVENT_ID;
 if (!eventId) throw new Error('CANDIDARY_RSVP_EVENT_ID is required so the harness never guesses which event it is loading.');
 
 const startedAt = performance.now();
-const csv = roster();
 
-// 1. Import the full 500-capacity roster through the real preview/commit pair.
-const preview = await json(await call(`/api/manage/events/${eventId}/rsvp/import/preview`, {
-  method: 'POST', headers: manageHeaders(), body: JSON.stringify({ csv }),
+// 1. Commit the full 500-capacity roster through the additive batch path, then
+// replay the exact request to prove a lost manager response is recoverable.
+const current = await json(await call(`/api/manage/events/${eventId}`, {
+  headers: manageHeaders(),
 }));
-if (preview.issues.length > 0) {
-  throw new Error(`The rehearsal roster did not validate: ${preview.issues.length} blocking issues.`);
+if (current.event.rsvpRosterVersion !== 0) {
+  throw new Error('The RSVP rehearsal requires a pristine disposable event.');
 }
-await json(await call(`/api/manage/events/${eventId}/rsvp/import/commit`, {
+
+const previewRequest = {
+  batch: candidateBatch,
+  expectedRosterVersion: current.event.rsvpRosterVersion,
+};
+const preview = await json(await call(`/api/manage/events/${eventId}/rsvp/roster/preview`, {
   method: 'POST',
   headers: manageHeaders(),
-  body: JSON.stringify({
-    csv,
-    sourceDigest: preview.sourceDigest,
-    expectedRosterVersion: preview.rosterVersion,
-  }),
+  body: JSON.stringify(previewRequest),
 }));
+if (!preview.canCommit) {
+  throw new Error(`The rehearsal roster did not validate: ${preview.issues.length} issues.`);
+}
+const commitRequest = {
+  canonicalBatch: preview.canonicalBatch,
+  previewDigest: preview.previewDigest,
+  expectedRosterVersion: preview.rosterVersion,
+  idempotencyKey: 'rsvp-load-capacity-v1',
+};
+const liveCommitBytes = serializedBytes(commitRequest);
+if (liveCommitBytes > MAX_BATCH_BYTES) {
+  throw new Error('The canonical rehearsal commit exceeds the RSVP batch envelope.');
+}
+
+const committed = await json(await call(`/api/manage/events/${eventId}/rsvp/roster/commit`, {
+  method: 'POST',
+  headers: manageHeaders(),
+  body: JSON.stringify(commitRequest),
+}));
+if (committed.replayed) {
+  throw new Error('A pristine rehearsal event unexpectedly replayed its first batch commit.');
+}
+const replayed = await json(await call(`/api/manage/events/${eventId}/rsvp/roster/commit`, {
+  method: 'POST',
+  headers: manageHeaders(),
+  body: JSON.stringify(commitRequest),
+}));
+if (
+  !replayed.replayed
+  || replayed.committedRosterVersion !== committed.committedRosterVersion
+  || replayed.currentRosterVersion !== committed.currentRosterVersion
+) {
+  throw new Error('The additive roster receipt did not replay the original commit.');
+}
 
 const imported = await json(await call(`/api/manage/events/${eventId}/rsvp/summary`, {
   headers: manageHeaders(),
@@ -218,6 +299,9 @@ const reconciliation = {
 console.log(JSON.stringify({
   mode: 'live',
   ...plan,
+  previewBytes,
+  commitBytes: liveCommitBytes,
+  receiptReplayed: replayed.replayed,
   matched,
   submitted,
   summaryAfterImport: imported,

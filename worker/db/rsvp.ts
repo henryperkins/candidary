@@ -1,6 +1,7 @@
 import type {
   RsvpActor,
   RsvpAttendance,
+  RsvpRosterBatchReceipt,
   RsvpHouseholdFilter,
   RsvpInviteeKind,
 } from '../../shared/contracts';
@@ -168,6 +169,36 @@ export interface RosterInviteeInput {
 export interface ManagedInviteeInput extends RosterInviteeInput {
   attendance: RsvpAttendance;
 }
+
+export const ADVANCE_BATCH_HOUSEHOLDS_SQL = `
+  WITH targets AS (
+    SELECT
+      json_extract(value, '$.id') AS id,
+      json_extract(value, '$.expectedVersion') AS expected_version
+    FROM json_each(?)
+  )
+  UPDATE rsvp_households
+  SET version = CASE
+        WHEN version = (
+          SELECT expected_version FROM targets WHERE targets.id = rsvp_households.id
+        ) AND archived_at IS NULL THEN version + 1
+        ELSE NULL
+      END,
+      updated_at = ?
+  WHERE event_id = ? AND id IN (SELECT id FROM targets)
+`;
+
+// Missing targets otherwise make the update above a partial no-op. This
+// statement turns that result into a NOT NULL failure, rolling the event guard
+// and every insert in the batch back together.
+export const REQUIRE_BATCH_TARGET_WRITES_SQL = `
+  UPDATE events
+  SET rsvp_roster_version = CASE
+        WHEN changes() = ? THEN rsvp_roster_version
+        ELSE NULL
+      END
+  WHERE id = ?
+`;
 
 /**
  * Turns a validated roster into parameter-bounded insert statements.
@@ -592,6 +623,45 @@ export class RsvpRepository {
     `).bind(householdId, idempotencyKey)
       .first<{ request_digest: string; result_version: number }>();
     return row ? { requestDigest: row.request_digest, resultVersion: row.result_version } : null;
+  }
+
+  async getRosterBatchReceipt(
+    eventId: string,
+    idempotencyKey: string,
+  ): Promise<{ requestDigest: string; receipt: RsvpRosterBatchReceipt } | null> {
+    const row = await this.db.prepare(`
+      SELECT request_digest, receipt_json
+      FROM rsvp_roster_batch_receipts
+      WHERE event_id = ? AND idempotency_key = ?
+    `).bind(eventId, idempotencyKey).first<{
+      request_digest: string;
+      receipt_json: string;
+    }>();
+    if (!row) return null;
+    return {
+      requestDigest: row.request_digest,
+      receipt: JSON.parse(row.receipt_json) as RsvpRosterBatchReceipt,
+    };
+  }
+
+  rosterBatchReceiptStatement(input: {
+    eventId: string;
+    idempotencyKey: string;
+    requestDigest: string;
+    receipt: RsvpRosterBatchReceipt;
+    createdAt: string;
+  }): D1PreparedStatement {
+    return this.db.prepare(`
+      INSERT INTO rsvp_roster_batch_receipts (
+        event_id, idempotency_key, request_digest, receipt_json, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      input.eventId,
+      input.idempotencyKey,
+      input.requestDigest,
+      JSON.stringify(input.receipt),
+      input.createdAt,
+    );
   }
 
   receiptStatement(input: {

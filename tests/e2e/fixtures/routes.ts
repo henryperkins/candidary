@@ -11,6 +11,13 @@ import type {
   RsvpHouseholdView,
   RsvpImportPreview,
   RsvpLookupResponse,
+  RsvpRosterBatchCommitRequest,
+  RsvpRosterBatchCommitResponse,
+  RsvpRosterBatchDraft,
+  RsvpRosterBatchPreviewRequest,
+  RsvpRosterBatchPreviewResponse,
+  RsvpRosterBatchTotals,
+  RsvpRosterCanonicalBatch,
   RsvpSubmissionRequest,
   RsvpSubmissionResponse,
   RsvpSummary,
@@ -206,6 +213,55 @@ interface ManagerRouteOptions {
   };
 }
 
+export interface RsvpRosterBatchRouteError {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export interface RsvpRosterBatchRouteReply<T> {
+  status?: number;
+  data?: T;
+  error?: RsvpRosterBatchRouteError;
+}
+
+export interface RsvpRosterBatchPreviewContext {
+  attempt: number;
+  request: RsvpRosterBatchPreviewRequest;
+  defaultResponse: RsvpRosterBatchPreviewResponse;
+}
+
+export interface RsvpRosterBatchCommitContext {
+  attempt: number;
+  request: RsvpRosterBatchCommitRequest;
+  defaultResponse: RsvpRosterBatchCommitResponse;
+}
+
+type RsvpRosterBatchResolverResult<T> =
+  | T
+  | RsvpRosterBatchRouteReply<T>
+  | undefined;
+
+export interface RsvpRosterBatchRouteOptions {
+  initialHouseholds?: number;
+  initialInvitedCapacity?: number;
+  occupiedHouseholdKeys?: readonly string[];
+  preview?(
+    context: RsvpRosterBatchPreviewContext,
+  ): RsvpRosterBatchResolverResult<RsvpRosterBatchPreviewResponse>
+    | Promise<RsvpRosterBatchResolverResult<RsvpRosterBatchPreviewResponse>>;
+  commit?(
+    context: RsvpRosterBatchCommitContext,
+  ): RsvpRosterBatchResolverResult<RsvpRosterBatchCommitResponse>
+    | Promise<RsvpRosterBatchResolverResult<RsvpRosterBatchCommitResponse>>;
+}
+
+export interface RsvpRosterBatchRequestLog {
+  previews: RsvpRosterBatchPreviewRequest[];
+  previewResponses: RsvpRosterBatchPreviewResponse[];
+  commits: RsvpRosterBatchCommitRequest[];
+}
+
 // The one durable entry URL every browser test scans. It is a fixture string, not
 // a credential: the real exchange is proved in `tests/worker/event-entry-api`.
 export const EVENT_ENTRY_FIXTURE_TOKEN = `entry-fixture-id.${'entry-fixture-secret'.repeat(2)}`;
@@ -322,6 +378,242 @@ export async function stubEntryExchange(page: Page, slug = GUEST_EVENT_FIXTURE.s
     });
   });
   return submitted;
+}
+
+function generatedHouseholdKey(label: string): string {
+  const normalized = label.normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gu, '-')
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/gu, '');
+  return (normalized || 'household').slice(0, 64);
+}
+
+function availableGeneratedHouseholdKey(base: string, used: ReadonlySet<string>): string {
+  if (!used.has(base)) return base;
+  for (let suffix = 2; ; suffix += 1) {
+    const ending = `-${suffix}`;
+    const candidate = `${base.slice(0, 64 - ending.length)}${ending}`;
+    if (!used.has(candidate)) return candidate;
+  }
+}
+
+function canonicalizeRosterBatch(
+  batch: RsvpRosterBatchDraft,
+  occupiedHouseholdKeys: readonly string[],
+): RsvpRosterCanonicalBatch {
+  const used = new Set(occupiedHouseholdKeys);
+  for (const create of batch.creates) {
+    if (create.householdKey?.provenance === 'supplied') {
+      used.add(create.householdKey.value);
+    }
+  }
+
+  return {
+    creates: batch.creates.map((create) => {
+      const supplied = create.householdKey?.provenance === 'supplied'
+        ? { ...create.householdKey }
+        : null;
+      const generated = supplied
+        ? null
+        : availableGeneratedHouseholdKey(generatedHouseholdKey(create.label), used);
+      if (generated) used.add(generated);
+      return {
+        ...create,
+        householdKey: supplied ?? { value: generated!, provenance: 'generated' },
+        namedInvitees: create.namedInvitees.map((invitee) => ({ ...invitee })),
+      };
+    }),
+    appends: batch.appends.map((append) => ({
+      ...append,
+      namedInvitees: append.namedInvitees.map((invitee) => ({ ...invitee })),
+      ...(append.newPlusOneResponses
+        ? { newPlusOneResponses: append.newPlusOneResponses.map((response) => ({ ...response })) }
+        : {}),
+    })),
+  };
+}
+
+function rosterBatchTotals(
+  batch: RsvpRosterBatchDraft | RsvpRosterCanonicalBatch,
+  options: RsvpRosterBatchRouteOptions,
+): RsvpRosterBatchTotals {
+  const namedInviteesAdded = [...batch.creates, ...batch.appends]
+    .reduce((total, household) => total + household.namedInvitees.length, 0);
+  const plusOneCapacityAdded = batch.creates
+    .reduce((total, household) => total + household.plusOneSlots, 0)
+    + batch.appends.reduce((total, household) => total + household.plusOneSlotsToAdd, 0);
+  const invitedCapacityAdded = namedInviteesAdded + plusOneCapacityAdded;
+  return {
+    householdsCreated: batch.creates.length,
+    householdsUpdated: batch.appends.length,
+    namedInviteesAdded,
+    plusOneCapacityAdded,
+    invitedCapacityAdded,
+    resultingHouseholds: (options.initialHouseholds ?? 0) + batch.creates.length,
+    resultingInvitedCapacity: (options.initialInvitedCapacity ?? 0) + invitedCapacityAdded,
+  };
+}
+
+function rosterBatchDigest(value: unknown): string {
+  const source = JSON.stringify(value);
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0').repeat(8);
+}
+
+function deterministicHouseholdId(index: number): string {
+  return `90000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+}
+
+function isRosterBatchRouteReply<T extends object>(
+  result: T | RsvpRosterBatchRouteReply<T>,
+): result is RsvpRosterBatchRouteReply<T> {
+  return 'status' in result || 'data' in result || 'error' in result;
+}
+
+async function fulfillRosterBatchRoute<T extends object>(
+  route: Route,
+  defaultResponse: T,
+  result: RsvpRosterBatchResolverResult<T>,
+  successStatus: number,
+): Promise<T | null> {
+  const response = result ?? defaultResponse;
+  if (isRosterBatchRouteReply(response)) {
+    if (response.error) {
+      await route.fulfill({
+        status: response.status ?? 409,
+        json: { ...response.error, requestId: 'request-a' },
+      });
+      return null;
+    }
+    const data = response.data ?? defaultResponse;
+    const status = response.status ?? successStatus;
+    await route.fulfill({ json: { data, requestId: 'request-a' }, status });
+    return status < 400 ? data : null;
+  }
+  await route.fulfill({
+    status: successStatus,
+    json: { data: response, requestId: 'request-a' },
+  });
+  return response;
+}
+
+export async function stubRsvpRosterBatchRoutes(
+  page: Page,
+  eventId = EVENT_FIXTURE.id,
+  options: RsvpRosterBatchRouteOptions = {},
+): Promise<RsvpRosterBatchRequestLog> {
+  const requests: RsvpRosterBatchRequestLog = { previews: [], previewResponses: [], commits: [] };
+  const previewsByDigest = new Map<string, RsvpRosterBatchPreviewResponse>();
+  const committedByIdempotencyKey = new Map<string, {
+    request: RsvpRosterBatchCommitRequest;
+    response: RsvpRosterBatchCommitResponse;
+  }>();
+  let previewAttempt = 0;
+  let commitAttempt = 0;
+  const base = `**/api/manage/events/${eventId}/rsvp/roster`;
+
+  await page.route(`${base}/preview`, async (route) => {
+    const request = route.request().postDataJSON() as RsvpRosterBatchPreviewRequest;
+    requests.previews.push(request);
+    previewAttempt += 1;
+    const canonicalBatch = canonicalizeRosterBatch(
+      request.batch,
+      options.occupiedHouseholdKeys ?? [],
+    );
+    const defaultResponse: RsvpRosterBatchPreviewResponse = {
+      canonicalBatch,
+      rosterVersion: request.expectedRosterVersion,
+      targetVersions: canonicalBatch.appends.map((append) => ({
+        clientHouseholdId: append.clientHouseholdId,
+        householdId: append.householdId,
+        version: append.expectedHouseholdVersion,
+      })),
+      totals: rosterBatchTotals(canonicalBatch, options),
+      issues: [],
+      previewDigest: rosterBatchDigest({
+        eventId,
+        canonicalBatch,
+        expectedRosterVersion: request.expectedRosterVersion,
+      }),
+      canCommit: true,
+    };
+    const result = await options.preview?.({
+      attempt: previewAttempt,
+      request,
+      defaultResponse,
+    });
+    const preview = await fulfillRosterBatchRoute(route, defaultResponse, result, 200);
+    if (preview) {
+      requests.previewResponses.push(preview);
+      if (preview.canCommit) previewsByDigest.set(preview.previewDigest, preview);
+    }
+  });
+
+  await page.route(`${base}/commit`, async (route) => {
+    const request = route.request().postDataJSON() as RsvpRosterBatchCommitRequest;
+    requests.commits.push(request);
+    commitAttempt += 1;
+    const reviewed = previewsByDigest.get(request.previewDigest);
+    const priorCommit = committedByIdempotencyKey.get(request.idempotencyKey);
+    const matchesPreview = reviewed !== undefined
+      && request.expectedRosterVersion === reviewed.rosterVersion
+      && JSON.stringify(request.canonicalBatch) === JSON.stringify(reviewed.canonicalBatch);
+    const matchesReplay = priorCommit === undefined
+      || JSON.stringify(request) === JSON.stringify(priorCommit.request);
+    if (!matchesPreview || !matchesReplay) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'RSVP_ROSTER_BATCH_CONFLICT',
+          message: 'The committed roster batch no longer matches its reviewed preview.',
+          requestId: 'request-a',
+        },
+      });
+      return;
+    }
+    const replay = priorCommit?.response;
+    const defaultResponse: RsvpRosterBatchCommitResponse = replay
+      ? { ...replay, replayed: true }
+      : {
+          createdHouseholds: request.canonicalBatch.creates.map((create, index) => ({
+            clientHouseholdId: create.clientHouseholdId,
+            householdId: deterministicHouseholdId(index),
+          })),
+          updatedHouseholds: request.canonicalBatch.appends.map((append) => ({
+            clientHouseholdId: append.clientHouseholdId,
+            householdId: append.householdId,
+            committedVersion: append.expectedHouseholdVersion + 1,
+          })),
+          totals: rosterBatchTotals(request.canonicalBatch, options),
+          committedRosterVersion: request.expectedRosterVersion + 1,
+          currentRosterVersion: request.expectedRosterVersion + 1,
+          replayed: false,
+        };
+    const result = await options.commit?.({
+      attempt: commitAttempt,
+      request,
+      defaultResponse,
+    });
+    const committed = await fulfillRosterBatchRoute(
+      route,
+      defaultResponse,
+      result,
+      replay ? 200 : 201,
+    );
+    if (!replay && committed) {
+      committedByIdempotencyKey.set(request.idempotencyKey, {
+        request,
+        response: { ...committed, replayed: false },
+      });
+    }
+  });
+
+  return requests;
 }
 
 export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions) {

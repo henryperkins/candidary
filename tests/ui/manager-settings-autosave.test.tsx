@@ -69,6 +69,142 @@ afterEach(() => {
 });
 
 describe('manager settings autosave guards', () => {
+  it('keeps a guest draft through a combined internal-destination prompt until the host discards it', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+
+    const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(nav.getByRole('button', { name: 'Gallery' }));
+
+    const prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
+    expect(prompt).toHaveFocus();
+    await user.click(within(prompt).getByRole('button', { name: 'Stay' }));
+    expect(screen.getByRole('heading', { name: 'Add guests' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Gallery publishing' })).not.toBeInTheDocument();
+
+    await user.click(nav.getByRole('button', { name: 'Gallery' }));
+    await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
+      .getByRole('button', { name: 'Discard draft' }));
+    expect(await screen.findByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    expect(within(screen.getByRole('group', { name: 'Publication status' }))
+      .getByRole('button', { name: 'unpublished' })).toHaveClass('active');
+  });
+
+  it('keeps manager destinations unavailable while a guest-list commit is in flight', async () => {
+    let resolveCommit: ((response: Response) => void) | null = null;
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/rsvp/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        return json({
+          canonicalBatch: body.batch,
+          rosterVersion: 7,
+          targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          issues: [],
+          previewDigest: 'pending-commit-preview',
+          canCommit: true,
+        });
+      }
+      if (url.endsWith('/rsvp/roster/commit')) {
+        return new Promise<Response>((resolve) => { resolveCommit = resolve; });
+      }
+      return fallback(input);
+    }));
+
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+
+    expect(nav.getByRole('button', { name: 'Gallery' })).toBeDisabled();
+    expect(screen.queryByRole('region', { name: 'Your pending work is not saved' })).not.toBeInTheDocument();
+
+    resolveCommit!(await json({
+      createdHouseholds: [],
+      updatedHouseholds: [],
+      totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+      committedRosterVersion: 8,
+      currentRosterVersion: 8,
+      replayed: false,
+    }, 201));
+    expect(await screen.findByRole('heading', { name: 'Guests added' })).toBeVisible();
+  });
+
+  it('does not auto-proceed a blocked route when Settings saves but a guest draft remains dirty', async () => {
+    let releaseSettings: (() => void) | null = null;
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          releaseSettings = () => resolve(json({ event: { ...MANAGED_EVENT, moderationRequired: false } }));
+        });
+      }
+      return fetchMock(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await waitFor(() => expect(releaseSettings).not.toBeNull());
+
+    const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('link', { name: 'Candidary home' }));
+
+    const prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
+    expect(within(prompt).getByText(/Settings or appearance changes are also unconfirmed/u)).toBeVisible();
+    releaseSettings!();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Add guests' })).toBeVisible());
+    expect(screen.getByRole('region', { name: 'Your pending work is not saved' })).toBeVisible();
+  });
+
+  it('guards Settings repair behind guest-draft discard and clears the repair intent on Stay', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+    await user.clear(screen.getByLabelText('Event name'));
+
+    const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    const notice = await screen.findByRole('region', { name: 'Unsaved settings' });
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+
+    await user.click(within(notice).getByRole('button', { name: 'Open settings' }));
+    let prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
+    expect(within(prompt).getByText(/unsent or invalid changes will be left behind/u)).toBeVisible();
+    await user.click(within(prompt).getByRole('button', { name: 'Stay' }));
+    expect(screen.getByRole('heading', { name: 'Add guests' })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'Unsaved settings' })).toBeVisible();
+
+    await user.click(within(screen.getByRole('region', { name: 'Unsaved settings' }))
+      .getByRole('button', { name: 'Open settings' }));
+    prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
+    await user.click(within(prompt).getByRole('button', { name: 'Discard draft' }));
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toHaveFocus();
+    const settingsNotice = screen.getByRole('region', { name: 'Unsaved settings' });
+    expect(settingsNotice).toBeVisible();
+    expect(within(settingsNotice).queryByRole('button', { name: 'Open settings' })).not.toBeInTheDocument();
+  });
+
   it('flushes a scheduled edit when the host leaves Settings', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
@@ -253,6 +389,28 @@ describe('manager settings autosave guards', () => {
       .toBeGreaterThan(0));
   });
 
+  it('registers and removes beforeunload for a browser-only guest-list draft', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+
+    const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await waitFor(() => expect(added.mock.calls.filter(([type]) => type === 'beforeunload').length)
+      .toBeGreaterThan(0));
+
+    await user.click(nav.getByRole('button', { name: 'Gallery' }));
+    await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
+      .getByRole('button', { name: 'Discard draft' }));
+    await waitFor(() => expect(removed.mock.calls.filter(([type]) => type === 'beforeunload').length)
+      .toBeGreaterThan(0));
+  });
+
   it('does not let an intake read opened before an RSVP write restore an older event', async () => {
     const staleEvent = { ...MANAGED_EVENT, name: 'Stale intake event', rsvpRosterVersion: 7 };
     const freshEvent = { ...MANAGED_EVENT, name: 'Fresh RSVP event', rsvpRosterVersion: 8 };
@@ -274,8 +432,20 @@ describe('manager settings autosave guards', () => {
         }
         return json({ event: freshEvent });
       }
-      if (url.endsWith('/rsvp/households') && method === 'POST') {
-        return json({ household: { label: 'The Morgan household' }, rosterVersion: 8 }, 201);
+      if (url.endsWith('/rsvp/roster/preview') && method === 'POST') {
+        const body = JSON.parse(String(init?.body));
+        return json({
+          canonicalBatch: body.batch, rosterVersion: 7, targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          issues: [], previewDigest: 'preview', canCommit: true,
+        });
+      }
+      if (url.endsWith('/rsvp/roster/commit') && method === 'POST') {
+        return json({
+          createdHouseholds: [], updatedHouseholds: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          committedRosterVersion: 8, currentRosterVersion: 8, replayed: false,
+        }, 201);
       }
       return fetchMock(input);
     }));
@@ -289,11 +459,13 @@ describe('manager settings autosave guards', () => {
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: 'RSVP' }));
-    await user.click(await screen.findByRole('button', { name: 'Add household' }));
-    await user.type(screen.getByLabelText('Household key'), 'morgan');
-    await user.type(screen.getByLabelText('Household label'), 'The Morgan household');
-    await user.type(screen.getByLabelText('Named guests'), 'Taylor Morgan');
-    await user.click(screen.getByRole('button', { name: 'Create household' }));
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await screen.findByRole('heading', { name: 'Add guests' });
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
     await waitFor(() => expect(eventReads).toBe(3));
 
     releaseStaleRead!();

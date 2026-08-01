@@ -7,18 +7,14 @@ import type {
   RsvpHouseholdListItem,
   RsvpHouseholdListPage,
   RsvpHouseholdUpdateRequest,
-  RsvpImportCommitResponse,
-  RsvpImportPreview,
   RsvpSubmissionInvitee,
   RsvpSummary,
 } from '../../shared/contracts';
 import { api, ClientApiError } from '../app/api';
-import {
-  ManagerRsvpHouseholdEditor,
-  type ManagerRsvpCreateInput,
-} from '../features/rsvp/ManagerRsvpHouseholdEditor';
+import { ManagerRsvpHouseholdEditor } from '../features/rsvp/ManagerRsvpHouseholdEditor';
 import { ManagerRsvpDashboard } from '../features/rsvp/ManagerRsvpDashboard';
-import { ManagerRsvpImport } from '../features/rsvp/ManagerRsvpImport';
+import { GuestListIntakeLauncher } from '../features/rsvp/GuestListIntakeLauncher';
+import { GuestListStagingWorkspace } from '../features/rsvp/GuestListStagingWorkspace';
 
 interface HouseholdPage {
   households: RsvpHouseholdListItem[];
@@ -46,22 +42,35 @@ export function ManagerRsvpPanel({
   event,
   onEventChanged,
   onEventWrite = passthroughEventWrite,
+  onRosterVersionObserved,
+  onDraftDirtyChange,
+  onDraftCloseRequested,
+  onDraftCommitPendingChange,
+  discardDraftEpoch = 0,
 }: {
   event: EventView;
   onEventChanged: () => void;
   // ManagerPage brackets writes so an intake read that began earlier cannot
   // restore the event row after this RSVP mutation commits.
   onEventWrite?: EventWrite;
+  onRosterVersionObserved?: (currentRosterVersion: number) => void;
+  onDraftDirtyChange?: (dirty: boolean) => void;
+  onDraftCloseRequested?: () => void;
+  onDraftCommitPendingChange?: (pending: boolean) => void;
+  discardDraftEpoch?: number;
 }) {
   const eventId = event.id;
   const [summary, setSummary] = useState<RsvpSummary | null>(null);
+  const [summaryState, setSummaryState] = useState<'loading' | 'known' | 'failed'>('loading');
   const [page, setPage] = useState<HouseholdPage>({ households: [], nextCursor: null });
+  const [hasHistoricalHouseholds, setHasHistoricalHouseholds] = useState(false);
+  const [historicalRosterState, setHistoricalRosterState] = useState<'loading' | 'known' | 'failed'>('loading');
+  const [activeRosterState, setActiveRosterState] = useState<'loading' | 'known' | 'failed'>('loading');
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [state, setState] = useState<RsvpHouseholdFilter>('all');
   const [listing, setListing] = useState(true);
   const [detail, setDetail] = useState<RsvpHouseholdDetail | null>(null);
-  const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const [notice, setNotice] = useState('');
@@ -69,17 +78,21 @@ export function ManagerRsvpPanel({
   // The roster version the next write is guarded on. It starts from the event the
   // manager loaded and then follows whatever the server actually committed.
   const [rosterVersion, setRosterVersion] = useState(event.rsvpRosterVersion);
-  const [csv, setCsv] = useState('');
-  const [fileName, setFileName] = useState('');
-  const [preview, setPreview] = useState<RsvpImportPreview | null>(null);
-  const [importError, setImportError] = useState('');
-  const [importStale, setImportStale] = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
+  const [intakeOpen, setIntakeOpen] = useState(false);
+  const [intakeDirty, setIntakeDirty] = useState(false);
+  const handledDiscardEpoch = useRef(0);
   // Pages, filters, and refreshes all write the same list. Only the newest
   // intent may land, or a slow earlier answer would replace a narrower one.
   const listTicket = useRef(0);
 
-  useEffect(() => { setRosterVersion(event.rsvpRosterVersion); }, [event.rsvpRosterVersion]);
+  useEffect(() => { setRosterVersion((current) => Math.max(current, event.rsvpRosterVersion)); }, [event.rsvpRosterVersion]);
+  useEffect(() => {
+    if (!discardDraftEpoch || handledDiscardEpoch.current === discardDraftEpoch) return;
+    handledDiscardEpoch.current = discardDraftEpoch;
+    setIntakeDirty(false);
+    setIntakeOpen(false);
+    onDraftDirtyChange?.(false);
+  }, [discardDraftEpoch, onDraftDirtyChange]);
 
   const basePath = `/api/manage/events/${eventId}/rsvp`;
 
@@ -95,7 +108,13 @@ export function ManagerRsvpPanel({
   }, [eventId, query, state]);
 
   const loadSummary = useCallback(async () => {
-    setSummary(await api<RsvpSummary>(`/api/manage/events/${eventId}/rsvp/summary`));
+    try {
+      setSummary(await api<RsvpSummary>(`/api/manage/events/${eventId}/rsvp/summary`));
+      setSummaryState('known');
+    } catch (caught) {
+      setSummaryState('failed');
+      throw caught;
+    }
   }, [eventId]);
 
   const loadList = useCallback(async () => {
@@ -106,6 +125,10 @@ export function ManagerRsvpPanel({
       const data = await api<RsvpHouseholdListPage>(listPath());
       if (listTicket.current !== ticket) return;
       setPage({ households: data.households, nextCursor: data.nextCursor });
+      if (state === 'all' && !query) setActiveRosterState('known');
+    } catch (caught) {
+      if (state === 'all' && !query) setActiveRosterState('failed');
+      throw caught;
     } finally {
       if (listTicket.current === ticket) setListing(false);
     }
@@ -127,6 +150,18 @@ export function ManagerRsvpPanel({
       setNotice(failureMessage(caught, 'The guest list could not be loaded.'));
     });
   }, [loadList]);
+
+  // The normal "all" roster deliberately excludes archived households. A
+  // single archived page is enough to distinguish a genuinely new roster from
+  // one whose only invitations were archived.
+  useEffect(() => {
+    void api<RsvpHouseholdListPage>(`/api/manage/events/${eventId}/rsvp/households?state=archived`)
+      .then((archived) => {
+        setHasHistoricalHouseholds(archived.households.length > 0);
+        setHistoricalRosterState('known');
+      })
+      .catch(() => setHistoricalRosterState('failed'));
+  }, [eventId]);
 
   async function loadMore() {
     const cursor = page.nextCursor;
@@ -213,7 +248,6 @@ export function ManagerRsvpPanel({
   }
 
   async function openHousehold(householdId: string) {
-    setCreating(false);
     setConflictRefreshed(false);
     setNotice('');
     setBusy(true);
@@ -221,32 +255,6 @@ export function ManagerRsvpPanel({
       setDetail(await api<RsvpHouseholdDetail>(`${basePath}/households/${householdId}`));
     } catch (caught) {
       setNotice(failureMessage(caught, 'That household could not be opened.'));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function createHousehold(input: ManagerRsvpCreateInput) {
-    setBusy(true);
-    setNotice('');
-    try {
-      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households`, {
-        method: 'POST',
-        body: JSON.stringify({ ...input, expectedRosterVersion: rosterVersion }),
-      }));
-      setCreating(false);
-      setRosterVersion(result.rosterVersion);
-      setAnnouncement(`${result.household.label} created.`);
-      onEventChanged();
-      await refreshRoster();
-    } catch (caught) {
-      setNotice(failureMessage(caught, 'That household could not be created.'));
-      // Creation is the one mutation guarded on the roster version alone, so a
-      // refusal has to reload the event that carries it. Without this the typed
-      // household is retried against the same stale version forever.
-      if (caught instanceof ClientApiError && caught.code === 'RSVP_HOUSEHOLD_CONFLICT') {
-        onEventChanged();
-      }
     } finally {
       setBusy(false);
     }
@@ -300,65 +308,22 @@ export function ManagerRsvpPanel({
         }),
       }));
       applyMutation(result, `${result.household.label} archived.`);
+      setHasHistoricalHouseholds(true);
       await refreshRoster();
     });
   }
 
-  async function previewCsv(source: string) {
-    setImportBusy(true);
-    setImportError('');
-    setImportStale(false);
-    try {
-      setPreview(await api<RsvpImportPreview>(`${basePath}/import/preview`, {
-        method: 'POST',
-        body: JSON.stringify({ csv: source }),
-      }));
-    } catch (caught) {
-      setPreview(null);
-      setImportError(failureMessage(caught, 'That guest list file could not be checked.'));
-    } finally {
-      setImportBusy(false);
-    }
-  }
-
-  async function commitCsv() {
-    if (!preview || preview.issues.length > 0) return;
-    setImportBusy(true);
-    setImportError('');
-    try {
-      const result = await onEventWrite(() => api<RsvpImportCommitResponse>(`${basePath}/import/commit`, {
-        method: 'POST',
-        body: JSON.stringify({
-          csv,
-          sourceDigest: preview.sourceDigest,
-          expectedRosterVersion: preview.rosterVersion,
-        }),
-      }));
-      setRosterVersion(result.rosterVersion);
-      setPreview(null);
-      setAnnouncement('Guest list committed.');
-      onEventChanged();
-      await refreshRoster();
-    } catch (caught) {
-      // The chosen file is still the right file. Only the server's verdict about
-      // it expired, so the preview is discarded and the file is kept.
-      setPreview(null);
-      setImportStale(true);
-      setImportError(failureMessage(caught, 'That guest list could not be imported.'));
-    } finally {
-      setImportBusy(false);
-    }
-  }
-
-  function chooseFile(file: File) {
-    setFileName(file.name);
-    void file.text().then((text) => {
-      setCsv(text);
-      return previewCsv(text);
-    }).catch(() => {
-      setImportError('That file could not be read.');
-    });
-  }
+  const pristine = activeRosterState === 'known'
+    && historicalRosterState === 'known'
+    && page.households.length === 0
+    && page.nextCursor === null
+    && !hasHistoricalHouseholds
+    && summary !== null
+    && summary.namedInvitees === 0
+    && !listing;
+  const rosterProbesComplete = activeRosterState !== 'loading'
+    && historicalRosterState !== 'loading'
+    && summaryState !== 'loading';
 
   return <section className="rsvp-manager" aria-labelledby="rsvp-manager-title">
     <p className="section-label">Guest list</p>
@@ -366,8 +331,49 @@ export function ManagerRsvpPanel({
 
     {announcement && <p className="rsvp-manager__status" role="status">{announcement}</p>}
     {notice && <p className="rsvp-manager__notice" role="alert">{notice}</p>}
+    {historicalRosterState === 'failed' && <p className="rsvp-manager__notice" role="alert">Guest-list history could not be checked. The existing guest list remains available.</p>}
 
-    <ManagerRsvpDashboard
+    {!intakeOpen && rosterProbesComplete && <GuestListIntakeLauncher
+      // A zero-capacity summary can also mean every historical household was
+      // archived. The loaded all-households page is the available manager data
+      // that keeps that roster out of the introductory state.
+      pristine={pristine}
+      onOpen={() => setIntakeOpen(true)}
+    />}
+
+    {intakeOpen && <GuestListStagingWorkspace
+      eventId={eventId}
+      rosterVersion={rosterVersion}
+      hasHouseholds={page.households.length > 0 || (summary?.namedInvitees ?? 0) > 0}
+      discardEpoch={discardDraftEpoch}
+      onEventWrite={onEventWrite}
+      onDirtyChange={(dirty) => { setIntakeDirty(dirty); onDraftDirtyChange?.(dirty); }}
+      onClose={() => {
+        if (intakeDirty) onDraftCloseRequested?.();
+        else { setIntakeOpen(false); onDraftDirtyChange?.(false); }
+      }}
+      onCommitted={() => {
+        setIntakeDirty(false);
+        onDraftDirtyChange?.(false);
+        // The version transfer above is authoritative; this is only a
+        // best-effort refresh of the rest of the event after the local receipt.
+        onEventChanged();
+        void refreshRoster();
+      }}
+      onOpenHousehold={(householdId) => {
+        setIntakeOpen(false);
+        setIntakeDirty(false);
+        onDraftDirtyChange?.(false);
+        void openHousehold(householdId);
+      }}
+      onRosterVersionObserved={(currentRosterVersion) => {
+        setRosterVersion((current) => Math.max(current, currentRosterVersion));
+        onRosterVersionObserved?.(currentRosterVersion);
+      }}
+      onCommitPendingChange={onDraftCommitPendingChange}
+    />}
+
+    {!intakeOpen && rosterProbesComplete && !pristine && <ManagerRsvpDashboard
       summary={summary}
       households={page.households}
       nextCursor={page.nextCursor}
@@ -383,20 +389,17 @@ export function ManagerRsvpPanel({
       }}
       onOpenHousehold={(householdId) => void openHousehold(householdId)}
       onLoadMore={() => void loadMore()}
-    />
+    />}
 
     <ManagerRsvpHouseholdEditor
       detail={detail}
-      creating={creating}
+      creating={false}
+      allowCreate={false}
       busy={busy}
       autoFocusHeading={conflictRefreshed}
-      onStartCreate={() => {
-        setCreating(true);
-        setDetail(null);
-        setConflictRefreshed(false);
-      }}
-      onCancelCreate={() => setCreating(false)}
-      onCreate={(input) => void createHousehold(input)}
+      onStartCreate={() => undefined}
+      onCancelCreate={() => undefined}
+      onCreate={() => undefined}
       onSaveRoster={(input) => void saveRoster(input)}
       onSaveCorrection={(invitees) => void saveCorrection(invitees)}
       onArchive={() => void archiveHousehold()}
@@ -406,16 +409,5 @@ export function ManagerRsvpPanel({
       }}
     />
 
-    <ManagerRsvpImport
-      fileName={fileName}
-      preview={preview}
-      busy={importBusy}
-      error={importError}
-      stale={importStale}
-      disabled={busy}
-      onFileChosen={chooseFile}
-      onPreviewAgain={() => void previewCsv(csv)}
-      onCommit={() => void commitCsv()}
-    />
   </section>;
 }

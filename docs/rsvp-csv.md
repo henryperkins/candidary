@@ -1,11 +1,18 @@
-# The RSVP guest list file
+# RSVP guest-list intake and CSV
 
-Candidary imports a guest list once, from a CSV you prepare. After that import,
-every change is an explicit edit in the event manager — there is no second
-import and no synchronization. This page is the exact contract that file has to
-meet.
+Candidary's manager **Add guests** workspace accepts mapped CSV or tabular data,
+one name per line, spreadsheet paste, and direct typing. It is additive: a batch
+may create households or append guests and plus-one capacity to a household the
+host explicitly selects, but it never synchronizes, overwrites, removes, merges,
+or moves committed roster data.
 
-## The file
+The exact CSV format below remains accepted by that workspace without a mapping
+step. The original strict import API also remains available for compatibility;
+that API may commit only once on a pristine event while RSVP is disabled. The
+manager workspace always uses the newer additive preview/commit contract, even
+for this exact header, so an unchanged retry can replay a durable receipt.
+
+## The strict CSV format
 
 - UTF-8, with or without a byte order mark.
 - At most **256 KB**. A 500-person list is far under this.
@@ -39,7 +46,7 @@ That file invites five people: three named guests and two plus-one slots.
 
 | Column | Rule |
 | --- | --- |
-| `household_key` | Your own stable identifier. Lowercase letters, digits, `-`, and `_`; must start with a letter or digit; 1–64 characters. It is never shown to guests. |
+| `household_key` | An optional advanced stable identifier in mapped intake, and required by the strict compatibility format. Lowercase letters, digits, `-`, and `_`; must start with a letter or digit; 1–64 characters. It is never shown to guests. |
 | `household_label` | What the household is called on your list. 1–80 characters. Repeated rows must use the same label. |
 | `invitee_name` | One named guest, as they would type it. 1–80 characters. |
 | `plus_one_slots` | A whole number from 0 to 10. Repeated rows must use the same number. |
@@ -94,7 +101,33 @@ including us. Add a distinguishing name to one of them.
 A name repeated inside a single household is refused too — each row is a
 different person.
 
-## Preview, then commit
+## Universal additive preview and commit
+
+The manager workspace keeps the selected file or pasted text only in the active
+browser draft. It maps or groups the source, turns every remaining ungrouped
+name into a visible individual invitation, and sends only the normalized
+candidate batch to the Worker.
+
+Preview writes nothing. The Worker owns name normalization, household-key
+generation, capacity, public-lookup reachability, target versions, and every
+authoritative issue. Commit revalidates the exact canonical preview and applies
+all creates and explicit appends in one transaction or none. A serialized batch
+request may be at most **512 KiB**, separate from the **256 KiB** source-file
+limit.
+
+When no key is supplied for a new household, Candidary generates one and may
+suffix that generated value to avoid a collision. A supplied or mapped key is
+preserved exactly when valid and unused. It blocks when invalid or already held
+by an active household, archived household, or another new household in the
+same batch; it is never silently rewritten and never selects an existing
+household. Appending requires the host to choose the committed household
+explicitly.
+
+Changing staged content after preview requires another preview and a new
+idempotency key. Retrying an unchanged commit uses the same key, so a lost
+response returns the original receipt rather than adding guests twice.
+
+## Strict API preview, then commit
 
 Uploading a file previews it. The preview reports how many households, named
 guests, plus-one slots, and people the file would create, and lists every
@@ -110,16 +143,18 @@ changed, if the guest list changed underneath it, if the event already has a
 guest list, or if RSVP is already open. The whole roster lands in one
 transaction or none of it does.
 
-The first import can only run on an event that has never had a guest list.
-Archiving a household does not undo that: archived households are kept.
+The strict compatibility import can only run on an event that has never had a
+guest list. Archiving a household does not undo that: archived households are
+kept. A file used through the manager workspace after setup is instead an
+additive batch.
 
-## What import never does
+## What intake never does
 
 - It never touches a response. A guest who has already answered keeps their
-  answer through every later edit.
-- It never removes anyone. Removing a named guest is a manual edit, and is only
-  possible before that household's first response.
-- It never runs twice.
+  answer unless the host explicitly supplies attendance for newly appended
+  capacity in that responded household.
+- It never removes, merges, or moves anyone. Those are not Add guests actions.
+- It never picks an existing household from a matching label or key.
 
 ## Exports
 
@@ -142,7 +177,7 @@ against the invited capacity rather than against whoever happened to reply.
 
 | Column | Meaning |
 | --- | --- |
-| `household_key` | Your own stable identifier, exactly as imported or entered. |
+| `household_key` | The stable identifier, preserved exactly when supplied or generated by Candidary when omitted. |
 | `household_label` | The household's current label. |
 | `household_archived_at` | Empty for an active household; an ISO UTC timestamp for an archived one. |
 | `member_kind` | `named` or `plus_one`. |
@@ -164,6 +199,6 @@ with a leading apostrophe so a spreadsheet reads it as text rather than a formul
 Every other cell is exported unchanged, byte for byte. The same encoder is used
 for the photo export's CSV and manifest.
 
-Submission receipts are never exported. They exist so a lost response can be
-safely retried, not as a revision history, and they are not visible to a host in
-any surface.
+Guest submission receipts and manager batch receipts are never exported. They
+exist so a lost response can be safely retried, not as a revision history, and
+they are not visible as roster data.

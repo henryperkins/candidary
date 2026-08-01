@@ -660,6 +660,37 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .rsvp-import__issue-field { color: var(--muted); font-size: .78rem; }
 .rsvp-import__actions { margin-top: 16px; display: grid; grid-template-columns: minmax(0, 1fr); }
 .rsvp-import__actions .button { min-height: 44px; }
+.guest-list-launcher { margin: 20px 0 0; }
+.guest-list-launcher--pristine { padding: 20px; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--paper); }
+.guest-list-launcher h3, .guest-list-workspace h3, .guest-list-workspace h4 { margin: 0; font-family: Manrope, sans-serif; overflow-wrap: anywhere; }
+.guest-list-launcher p { margin: 0; color: var(--muted); }
+.guest-list-launcher .button { justify-self: start; min-height: 44px; }
+.guest-list-workspace { min-width: 0; margin: 22px 0; padding: 18px 16px; display: grid; gap: 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--paper); }
+.guest-list-workspace__heading { display: flex; gap: 12px; align-items: start; justify-content: space-between; }
+.guest-list-workspace__heading .text-button { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.guest-list-workspace__heading h3:focus-visible { outline: 3px solid var(--denim); outline-offset: 3px; }
+.guest-list-workspace__error { margin: 0; padding: 11px 13px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); overflow-wrap: anywhere; }
+.guest-list-capture, .guest-list-mapper, .guest-list-grouping, .guest-list-details, .guest-list-review, .guest-list-receipt { min-width: 0; display: grid; gap: 14px; }
+.guest-list-workspace label, .guest-list-workspace fieldset { min-width: 0; display: grid; gap: 6px; color: var(--ink); font-size: .88rem; font-weight: 700; }
+.guest-list-workspace fieldset { padding: 12px; border: 1px solid var(--border); }
+.guest-list-workspace fieldset > label { min-height: 44px; display: flex; align-items: center; font-weight: 500; }
+.guest-list-workspace textarea, .guest-list-workspace input, .guest-list-workspace select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--ink); font: inherit; }
+.guest-list-workspace textarea { min-height: 132px; resize: vertical; }
+.guest-list-workspace input[type="checkbox"], .guest-list-workspace input[type="radio"] { width: 20px; min-height: 20px; padding: 0; }
+.guest-list-drop-zone { min-width: 0; padding: 14px; display: grid; gap: 8px; border: 1px dashed var(--border); border-radius: 7px; }
+.guest-list-drop-zone p { margin: 0; color: var(--muted); }
+.guest-list-workspace__actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.guest-list-workspace__actions .button { min-height: 44px; }
+.guest-list-sample, .guest-list-issues { max-height: 240px; min-width: 0; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; }
+.guest-list-sample p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.guest-list-grouping ul, .guest-list-issues ul, .guest-list-receipt ul { min-width: 0; margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.guest-list-grouping li, .guest-list-issues li { overflow-wrap: anywhere; }
+.guest-list-grouping .text-button { margin-left: 8px; min-height: 44px; }
+.guest-list-review .text-button, .guest-list-receipt .text-button { min-height: 44px; max-width: 100%; display: inline-flex; align-items: center; text-align: left; overflow-wrap: anywhere; }
+.guest-list-card { min-width: 0; padding: 13px; display: grid; gap: 11px; border: 1px solid var(--border); border-radius: 8px; }
+.guest-list-card--conflict { border-width: 2px; border-color: var(--danger); }
+.guest-list-card p { margin: 0; overflow-wrap: anywhere; }
+.guest-list-target select { min-width: 0; }
 
 /* The printed entry's own controls. One signs guest devices out and changes
    nothing a guest can see on paper; the other ends the printed QR for good. */

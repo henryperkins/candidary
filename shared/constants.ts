@@ -46,4 +46,7 @@ export const MAX_RSVP_TEXT_LENGTH = 80;
 export const MAX_RSVP_HOUSEHOLD_KEY_LENGTH = 64;
 // UTF-8 bytes, not code units. A 500-household roster is far under this.
 export const MAX_RSVP_CSV_BYTES = 256 * 1024;
+// Serialized JSON bytes for the universal additive roster preview/commit
+// envelopes. This is separate from the source-file limit above.
+export const MAX_RSVP_BATCH_BYTES = 512 * 1024;
 export const MANAGER_RSVP_PAGE_SIZE = 50;
