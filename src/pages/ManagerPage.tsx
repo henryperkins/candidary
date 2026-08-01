@@ -129,7 +129,8 @@ export function ManagerPage() {
   // Settings stays mounted after its first visit so a debounce timer, an
   // in-flight write, and an unsaved draft all survive a destination change.
   const [settingsMounted, setSettingsMounted] = useState(false);
-  const [settingsFocusRequest, setSettingsFocusRequest] = useState(0);
+  const [settingsFocusEpoch, setSettingsFocusEpoch] = useState(0);
+  const settingsFocusRequested = useRef(false);
   const settingsHeading = useRef<HTMLHeadingElement>(null);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
@@ -457,14 +458,16 @@ export function ManagerPage() {
   }
 
   function openSettingsForRepair() {
-    setSettingsFocusRequest((current) => current + 1);
+    settingsFocusRequested.current = true;
+    setSettingsFocusEpoch((current) => current + 1);
     openSection('settings');
   }
 
   useEffect(() => {
-    if (settingsFocusRequest === 0 || section !== 'settings') return;
+    if (!settingsFocusRequested.current || section !== 'settings') return;
+    settingsFocusRequested.current = false;
     settingsHeading.current?.focus();
-  }, [section, settingsFocusRequest]);
+  }, [section, settingsFocusEpoch]);
 
   async function bulk(action: 'publish' | 'hide') {
     const groups = new Map<MediaView['publicationStatus'], string[]>();

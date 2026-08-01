@@ -181,6 +181,14 @@ describe('manager settings autosave guards', () => {
     await user.click(within(notice).getByRole('button', { name: 'Open settings' }));
     expect(screen.getByRole('heading', { name: 'Settings' })).toHaveFocus();
     expect(screen.getByRole('textbox', { name: /Event name/u })).toBeVisible();
+
+    const managerNav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(managerNav.getByRole('button', { name: /gallery/i }));
+    const settingsButton = managerNav.getByRole('button', { name: /settings/i });
+    await user.click(settingsButton);
+    // The repair transfer is one-shot. Ordinary section navigation keeps
+    // focus on the navigation control the host used.
+    expect(settingsButton).toHaveFocus();
   });
 
   it('keeps autosave access recovery visible when opening Settings and clears it on recovery', async () => {
