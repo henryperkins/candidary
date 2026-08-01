@@ -139,7 +139,10 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     inFlight = null;
     // A response describes the snapshot it was sent for. If anything newer is
     // queued or on screen, its verdict is about intent that no longer exists.
-    const superseded = pending !== null || latest === null || latest.key !== sent.key;
+    const superseded = pending !== null
+      || latest === null
+      || latest.key !== sent.key
+      || latest.intent !== sent.intent;
     if (error !== null) {
       rebasing = false;
       if (!superseded && !disposed) failure = options.describeFailure(error, sent.key);

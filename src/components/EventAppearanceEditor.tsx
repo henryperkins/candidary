@@ -452,6 +452,7 @@ export function EventAppearanceEditor({
                   aria-invalid={Boolean(primaryError)}
                   aria-describedby={primaryError ? 'event-theme-primary-error' : undefined}
                   onChange={(changeEvent) => changeColor('primaryColor', changeEvent.target.value)}
+                  onBlur={() => queue.flush()}
                 />
               </label>
               <label>
@@ -488,6 +489,7 @@ export function EventAppearanceEditor({
                   aria-invalid={Boolean(accentError)}
                   aria-describedby={accentError ? 'event-theme-accent-error' : undefined}
                   onChange={(changeEvent) => changeColor('accentColor', changeEvent.target.value)}
+                  onBlur={() => queue.flush()}
                 />
               </label>
               <label>

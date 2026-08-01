@@ -244,6 +244,19 @@ describe('autosave queue', () => {
     expect(intents).toEqual(['v1-raw']);
   });
 
+  it('suppresses a same-key failure after raw input becomes invalid', async () => {
+    const { queue, gates, draft } = harness('v0');
+    queue.submit(draft('v1', 'v1-valid'), true);
+    // The canonical color is still v1, but the host is now looking at raw text
+    // that cannot be sent. A refusal for the former intent must not overwrite
+    // the syntax error for the latter.
+    queue.submit({ key: 'v1', intent: 'v1-invalid', snapshot: null });
+
+    gates[0]!.reject(new Error('The old request was refused.'));
+    await expect(gates[0]!.promise).rejects.toThrow('The old request was refused.');
+    expect(queue.state()).toEqual({ status: 'invalid', failure: null });
+  });
+
   it('adopts a baseline confirmed elsewhere without sending', () => {
     const { queue, sent, draft } = harness('v0');
     queue.adoptBaseline('v9');

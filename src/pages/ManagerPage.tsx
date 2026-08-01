@@ -653,6 +653,7 @@ export function ManagerPage() {
           requests never join the manager's initial load. */}
       {section === 'rsvp' && <ManagerRsvpPanel
         event={event}
+        onEventWrite={eventWrite}
         onEventChanged={() => void runManagerAction(refreshEvent)}
       />}
 

@@ -276,6 +276,20 @@ describe('event appearance editor', () => {
     expect(submitted).not.toHaveBeenCalled();
   });
 
+  it('flushes a color-picker change when the picker blurs', () => {
+    const fetchMock = vi.fn(() => json({ event: { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#123456' },
+    }) } }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness />);
+
+    const picker = screen.getByLabelText('Primary color picker');
+    fireEvent.change(picker, { target: { value: '#123456' } });
+    fireEvent.blur(picker);
+
+    expect(themeMutationCalls(fetchMock)).toHaveLength(1);
+  });
+
   it('uploads and removes a cover immediately without creating a theme write', async () => {
     const covered = { ...event, coverObjectKey: 'events/event-a/cover/new.png' };
     const cleared = { ...event, coverObjectKey: null };

@@ -193,6 +193,55 @@ describe('manager settings autosave guards', () => {
       .toBeGreaterThan(0));
   });
 
+  it('does not let an intake read opened before an RSVP write restore an older event', async () => {
+    const staleEvent = { ...MANAGED_EVENT, name: 'Stale intake event', rsvpRosterVersion: 7 };
+    const freshEvent = { ...MANAGED_EVENT, name: 'Fresh RSVP event', rsvpRosterVersion: 8 };
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    let eventReads = 0;
+    let releaseStaleRead: (() => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        eventReads += 1;
+        if (eventReads === 1) return json({ event: MANAGED_EVENT });
+        if (eventReads === 2) {
+          return new Promise<Response>((resolve) => {
+            releaseStaleRead = () => resolve(new Response(JSON.stringify({
+              data: { event: staleEvent }, requestId: 'request-a',
+            }), { headers: { 'content-type': 'application/json' } }));
+          });
+        }
+        return json({ event: freshEvent });
+      }
+      if (url.endsWith('/rsvp/households') && method === 'POST') {
+        return json({ household: { label: 'The Morgan household' }, rosterVersion: 8 }, 201);
+      }
+      return fetchMock(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+
+    await user.type(screen.getByLabelText('Filter by guest name'), 'Morgan');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await waitFor(() => expect(releaseStaleRead).not.toBeNull());
+
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: 'RSVP' }));
+    await user.click(await screen.findByRole('button', { name: 'Add household' }));
+    await user.type(screen.getByLabelText('Household key'), 'morgan');
+    await user.type(screen.getByLabelText('Household label'), 'The Morgan household');
+    await user.type(screen.getByLabelText('Named guests'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Create household' }));
+    await waitFor(() => expect(eventReads).toBe(3));
+
+    releaseStaleRead!();
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: /settings/i }));
+    await waitFor(() => expect(screen.getByLabelText('Event name')).toHaveValue('Fresh RSVP event'));
+  });
+
   it('keeps three deferred mutation responses from restoring each other’s stale state', async () => {
     const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
     const releases: Array<() => void> = [];

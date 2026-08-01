@@ -30,6 +30,10 @@ interface ManagerMutation {
   rosterVersion: number;
 }
 
+type EventWrite = <T>(request: () => Promise<T>) => Promise<T>;
+
+const passthroughEventWrite: EventWrite = <T,>(request: () => Promise<T>) => request();
+
 // Long enough that a host typing a household name issues one query rather than
 // one per keystroke, short enough that the list still feels answered.
 const QUERY_DEBOUNCE_MS = 250;
@@ -41,9 +45,13 @@ function failureMessage(caught: unknown, fallback: string): string {
 export function ManagerRsvpPanel({
   event,
   onEventChanged,
+  onEventWrite = passthroughEventWrite,
 }: {
   event: EventView;
   onEventChanged: () => void;
+  // ManagerPage brackets writes so an intake read that began earlier cannot
+  // restore the event row after this RSVP mutation commits.
+  onEventWrite?: EventWrite;
 }) {
   const eventId = event.id;
   const [summary, setSummary] = useState<RsvpSummary | null>(null);
@@ -222,10 +230,10 @@ export function ManagerRsvpPanel({
     setBusy(true);
     setNotice('');
     try {
-      const result = await api<ManagerMutation>(`${basePath}/households`, {
+      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households`, {
         method: 'POST',
         body: JSON.stringify({ ...input, expectedRosterVersion: rosterVersion }),
-      });
+      }));
       setCreating(false);
       setRosterVersion(result.rosterVersion);
       setAnnouncement(`${result.household.label} created.`);
@@ -250,14 +258,14 @@ export function ManagerRsvpPanel({
     const current = detail;
     if (!current) return;
     await runHouseholdWrite(current.id, async () => {
-      const result = await api<ManagerMutation>(`${basePath}/households/${current.id}`, {
+      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}`, {
         method: 'PUT',
         body: JSON.stringify({
           ...input,
           expectedVersion: current.version,
           expectedRosterVersion: rosterVersion,
         }),
-      });
+      }));
       applyMutation(result, `${result.household.label} saved.`);
       await refreshRoster();
     });
@@ -267,14 +275,14 @@ export function ManagerRsvpPanel({
     const current = detail;
     if (!current) return;
     await runHouseholdWrite(current.id, async () => {
-      const result = await api<ManagerMutation>(`${basePath}/households/${current.id}/response`, {
+      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}/response`, {
         method: 'PUT',
         body: JSON.stringify({
           invitees,
           expectedVersion: current.version,
           expectedRosterVersion: rosterVersion,
         }),
-      });
+      }));
       applyMutation(result, 'Response correction saved.');
       await refreshRoster();
     });
@@ -284,13 +292,13 @@ export function ManagerRsvpPanel({
     const current = detail;
     if (!current) return;
     await runHouseholdWrite(current.id, async () => {
-      const result = await api<ManagerMutation>(`${basePath}/households/${current.id}/archive`, {
+      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}/archive`, {
         method: 'POST',
         body: JSON.stringify({
           expectedVersion: current.version,
           expectedRosterVersion: rosterVersion,
         }),
-      });
+      }));
       applyMutation(result, `${result.household.label} archived.`);
       await refreshRoster();
     });
@@ -318,14 +326,14 @@ export function ManagerRsvpPanel({
     setImportBusy(true);
     setImportError('');
     try {
-      const result = await api<RsvpImportCommitResponse>(`${basePath}/import/commit`, {
+      const result = await onEventWrite(() => api<RsvpImportCommitResponse>(`${basePath}/import/commit`, {
         method: 'POST',
         body: JSON.stringify({
           csv,
           sourceDigest: preview.sourceDigest,
           expectedRosterVersion: preview.rosterVersion,
         }),
-      });
+      }));
       setRosterVersion(result.rosterVersion);
       setPreview(null);
       setAnnouncement('Guest list committed.');
