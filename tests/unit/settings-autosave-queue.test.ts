@@ -35,6 +35,7 @@ const RETRYABLE: AutosaveFailure = { message: 'That change could not be saved.',
 function harness(baselineKey = 'v0') {
   const sent: string[] = [];
   const intents: string[] = [];
+  const snapshots: string[] = [];
   const gates: Deferred[] = [];
   const states: AutosaveState[] = [];
   const queue = createAutosaveQueue<string>({
@@ -42,7 +43,7 @@ function harness(baselineKey = 'v0') {
     save(snapshot, draft) {
       sent.push(draft.key);
       intents.push(draft.intent);
-      void snapshot;
+      snapshots.push(snapshot);
       const gate = deferred(draft.key);
       gates.push(gate);
       return gate.promise;
@@ -52,8 +53,8 @@ function harness(baselineKey = 'v0') {
   });
   // Intent defaults to the key: most drafts move both together, and the tests
   // that care about them diverging pass it explicitly.
-  const draft = (key: string, intent = key) => ({ key, intent, snapshot: key });
-  return { queue, sent, intents, gates, states, draft };
+  const draft = (key: string, intent = key, snapshot = key) => ({ key, intent, snapshot });
+  return { queue, sent, intents, snapshots, gates, states, draft };
 }
 
 // Vitest's fake timers must be installed before the queue schedules anything.
@@ -255,6 +256,46 @@ describe('autosave queue', () => {
     gates[0]!.reject(new Error('The old request was refused.'));
     await expect(gates[0]!.promise).rejects.toThrow('The old request was refused.');
     expect(queue.state()).toEqual({ status: 'invalid', failure: null });
+  });
+
+  it('reports an in-flight failure when the latest valid intent has the same key', async () => {
+    const { queue, gates, draft } = harness('v0');
+    queue.submit(draft('v1', 'v1-raw'), true);
+    // Blur can normalize the visible draft without changing the complete
+    // payload. No replacement write is needed, so this request still owns any
+    // failure for the semantic value on screen.
+    queue.submit(draft('v1', 'v1-normalized'), true);
+
+    gates[0]!.reject(new Error('offline'));
+
+    await vi.waitFor(() => expect(queue.state()).toEqual({ status: 'failed', failure: RETRYABLE }));
+  });
+
+  it('keeps the debounce deadline but sends the newest same-key scheduled metadata', () => {
+    const { queue, sent, intents, snapshots, draft } = harness('v0');
+    queue.submit(draft('v1', 'v1-raw', 'snapshot-before-normalization'));
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS / 2);
+    queue.submit(draft('v1', 'v1-normalized', 'snapshot-after-normalization'));
+
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS / 2 - 1);
+    expect(sent).toEqual([]);
+    vi.advanceTimersByTime(1);
+
+    expect(intents).toEqual(['v1-normalized']);
+    expect(snapshots).toEqual(['snapshot-after-normalization']);
+  });
+
+  it('sends the newest same-key metadata when replacing a pending snapshot', async () => {
+    const { queue, sent, intents, snapshots, gates, draft } = harness('v0');
+    queue.submit(draft('v1'), true);
+    queue.submit(draft('v2', 'v2-first', 'snapshot-v2-first'), true);
+    queue.submit(draft('v2', 'v2-latest', 'snapshot-v2-latest'), true);
+
+    gates[0]!.confirm();
+
+    await vi.waitFor(() => expect(sent).toEqual(['v1', 'v2']));
+    expect(intents).toEqual(['v1', 'v2-latest']);
+    expect(snapshots).toEqual(['v1', 'snapshot-v2-latest']);
   });
 
   it('adopts a baseline confirmed elsewhere without sending', () => {

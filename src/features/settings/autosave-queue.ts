@@ -141,8 +141,8 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     // queued or on screen, its verdict is about intent that no longer exists.
     const superseded = pending !== null
       || latest === null
-      || latest.key !== sent.key
-      || latest.intent !== sent.intent;
+      || latest.snapshot === null
+      || latest.key !== sent.key;
     if (error !== null) {
       rebasing = false;
       if (!superseded && !disposed) failure = options.describeFailure(error, sent.key);
@@ -215,6 +215,7 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     if (pending?.key === next.key) {
       cancelTimer();
       scheduled = null;
+      pending = next;
       emit();
       return;
     }
@@ -226,6 +227,9 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     }
     if (scheduled?.key === next.key) {
       // Resubmitting the same value must not keep pushing the deadline out.
+      // Its visible intent and request metadata may still have moved, so the
+      // already-owned deadline sends the newest equivalent draft.
+      scheduled = next;
       emit();
       return;
     }
