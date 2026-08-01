@@ -137,6 +137,10 @@ export function ManagerPage() {
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
+  const [autosaveRecovery, setAutosaveRecovery] = useState<{
+    domain: DomainAutosaveState['domain'];
+    failure: LoadFailure;
+  } | null>(null);
   const [autosaveStates, setAutosaveStates] = useState<Partial<Record<
     DomainAutosaveState['domain'], DomainAutosaveState
   >>>({});
@@ -176,7 +180,15 @@ export function ManagerPage() {
     });
     // A credential or lifecycle failure is the manager's existing recovery
     // problem, not a local Retry the host could ever win.
-    if (next.failure?.escalation) setActionError({ type: 'load', failure: next.failure.escalation });
+    if (next.failure?.escalation) {
+      setAutosaveRecovery({
+        domain: next.domain,
+        failure: next.failure.escalation,
+      });
+      setActionError(null);
+    } else if (next.status === 'saved') {
+      setAutosaveRecovery((current) => current?.domain === next.domain ? null : current);
+    }
   }, []);
   const unconfirmedDomains = Object.values(autosaveStates)
     .filter((domain): domain is DomainAutosaveState => Boolean(domain) && domain.status !== 'saved');
@@ -609,6 +621,9 @@ export function ManagerPage() {
     onDownload={(job) => runManagerAction(() => downloadExport(job))}
     onRetry={(job) => runManagerAction(() => retryExport(job))}
   />;
+  const visibleNotice: ManagerNotice | null = autosaveRecovery
+    ? { type: 'load', failure: autosaveRecovery.failure }
+    : actionError;
   return <div className="manager-shell manager-shell--intake">
     {/* The brand and the section navigation, which is a banner rather than complementary content. As
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
@@ -626,17 +641,22 @@ export function ManagerPage() {
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
-      {actionError && <section className="manager-action-error" aria-label="Manager notice">
+      {visibleNotice && <section className="manager-action-error" aria-label="Manager notice">
         <div className="manager-action-error__summary">
           <div className="manager-action-error__alert" role="alert">
-            {actionError.type === 'load'
-              ? <span>{actionError.failure.message}<span className="manager-action-error__recovery">{actionError.failure.recoveryHint}</span></span>
-              : <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>}
+            {visibleNotice.type === 'load'
+              ? <span>{visibleNotice.failure.message}<span className="manager-action-error__recovery">{visibleNotice.failure.recoveryHint}</span></span>
+              : <span>{visibleNotice.message}{visibleNotice.recoveryHint && <span className="manager-action-error__recovery">{visibleNotice.recoveryHint}</span>}</span>}
           </div>
-          <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
+          <button
+            type="button"
+            className="manager-action-error__dismiss"
+            aria-label="Dismiss error"
+            onClick={() => autosaveRecovery ? setAutosaveRecovery(null) : setActionError(null)}
+          ><X aria-hidden="true" /></button>
         </div>
-        {actionError.type === 'load' && (
-          <ManagerAccessRecovery failure={actionError.failure} eventId={eventId} />
+        {visibleNotice.type === 'load' && (
+          <ManagerAccessRecovery failure={visibleNotice.failure} eventId={eventId} />
         )}
       </section>}
 

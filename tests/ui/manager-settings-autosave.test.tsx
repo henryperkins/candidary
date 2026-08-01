@@ -14,6 +14,12 @@ function json(data: unknown, status = 200) {
   }));
 }
 
+function errorJson(body: Record<string, unknown>, status: number) {
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  }));
+}
+
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.', coverObjectKey: null,
@@ -169,6 +175,46 @@ describe('manager settings autosave guards', () => {
     );
     await user.click(within(notice).getByRole('button', { name: 'Open settings' }));
     expect(screen.getByRole('textbox', { name: /Event name/u })).toBeVisible();
+  });
+
+  it('keeps autosave access recovery visible when opening Settings and clears it on recovery', async () => {
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    let releaseFailure: (() => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        await new Promise<void>((resolve) => { releaseFailure = resolve; });
+        return errorJson({
+          code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a',
+        }, 401);
+      }
+      return fetchMock(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await waitFor(() => expect(releaseFailure).not.toBeNull());
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: /gallery/i }));
+    releaseFailure!();
+
+    const autosaveNotice = await screen.findByRole('region', { name: 'Unsaved settings' });
+    expect(await screen.findByRole('region', { name: 'Manager notice' }))
+      .toHaveTextContent('This session has expired.');
+    expect(screen.getByRole('region', { name: 'Recover manager access' })).toBeVisible();
+
+    await user.click(within(autosaveNotice).getByRole('button', { name: 'Open settings' }));
+
+    expect(screen.getByRole('region', { name: 'Manager notice' }))
+      .toHaveTextContent('This session has expired.');
+    expect(screen.getByRole('region', { name: 'Recover manager access' })).toBeVisible();
+
+    // Returning to the confirmed value resolves the failed domain without a
+    // request. Recovery—not section navigation—is what retires the notice.
+    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Manager notice' }))
+      .not.toBeInTheDocument());
   });
 
   it('registers beforeunload only while something is unconfirmed', async () => {
