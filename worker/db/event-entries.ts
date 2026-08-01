@@ -49,6 +49,50 @@ export class EventEntriesRepository {
     );
   }
 
+  /**
+   * Adopts a pre-0008 guest token only if that exact token is still active when
+   * the INSERT executes. Secret conversion happens before this statement is
+   * built, so the predicate is what closes the read/crypto/disable race.
+   */
+  createLegacyAdoptionStatement(input: CreateEventEntryRecord): D1PreparedStatement {
+    return this.db.prepare(`
+      INSERT INTO event_entry_credentials (
+        id, event_id, secret_digest, secret_ciphertext, created_at
+      )
+      SELECT ?, event_id, ?, ?, ?
+      FROM event_access_tokens
+      WHERE id = ? AND event_id = ? AND role = 'guest' AND revoked_at IS NULL
+    `).bind(
+      input.id,
+      input.secretDigest,
+      input.secretCiphertext,
+      input.createdAt,
+      input.id,
+      input.eventId,
+    );
+  }
+
+  /**
+   * Gives a legacy event the same durable disabled row as a migrated event.
+   * The copied digest and ciphertext are deliberately never usable as an entry
+   * credential: this row is born disabled inside the same batch that revokes
+   * the source token. They only satisfy the historical table shape so recovery
+   * and repeated disable calls can observe the irreversible tombstone.
+   */
+  createDisabledLegacyStatement(eventId: string, disabledAt: string): D1PreparedStatement {
+    return this.db.prepare(`
+      INSERT OR IGNORE INTO event_entry_credentials (
+        id, event_id, secret_digest, secret_ciphertext, created_at, disabled_at
+      )
+      SELECT id, event_id, secret_digest, secret_ciphertext, created_at,
+        COALESCE(revoked_at, ?)
+      FROM event_access_tokens
+      WHERE event_id = ? AND role = 'guest' AND secret_ciphertext IS NOT NULL
+      ORDER BY (revoked_at IS NULL) DESC, created_at DESC
+      LIMIT 1
+    `).bind(disabledAt, eventId);
+  }
+
   async getById(id: string): Promise<EventEntryRecord | null> {
     const row = await this.db
       .prepare('SELECT * FROM event_entry_credentials WHERE id = ?')

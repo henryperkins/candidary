@@ -69,7 +69,7 @@ export class EventEntryService {
     }
 
     try {
-      await this.entries.createStatement({
+      await this.entries.createLegacyAdoptionStatement({
         id: token.id,
         eventId,
         secretDigest: await digestSecret(secret, this.env.ENTRY_HMAC_KEY),
@@ -181,6 +181,10 @@ export class EventEntryService {
   async disable(event: EventRecord, now = new Date()): Promise<{ disabledAt: string }> {
     const timestamp = now.toISOString();
     await this.env.DB.batch([
+      // A pre-0008 event has no entry row yet. Materialize its disabled
+      // tombstone before revoking the source token so a delayed adopter can
+      // neither recreate active entry nor erase the original stop time.
+      this.entries.createDisabledLegacyStatement(event.id, timestamp),
       this.env.DB.prepare(`
         UPDATE event_entry_credentials SET disabled_at = ?
         WHERE event_id = ? AND disabled_at IS NULL
