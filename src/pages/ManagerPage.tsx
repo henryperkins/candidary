@@ -1,7 +1,7 @@
 import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import { hostSignInHref } from '../app/recovery';
@@ -20,6 +20,7 @@ import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
+import { UnsavedSettingsPrompt } from '../components/UnsavedSettingsPrompt';
 import type { LoadFailure } from '../components/States';
 import {
   mergeCoverResponse,
@@ -132,6 +133,9 @@ export function ManagerPage() {
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
+  const [autosaveStates, setAutosaveStates] = useState<Partial<Record<
+    DomainAutosaveState['domain'], DomainAutosaveState
+  >>>({});
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
   // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
@@ -156,10 +160,49 @@ export function ManagerPage() {
   // alongside Settings makes the destination boundary one place.
   const appearanceAutosave = useRef<AutosaveHandle>(null);
   const recordAutosaveState = useCallback((next: DomainAutosaveState) => {
+    setAutosaveStates((current) => {
+      const previous = current[next.domain];
+      if (
+        previous?.status === next.status
+        && previous?.failure === next.failure
+        && previous?.blockingField?.label === next.blockingField?.label
+        && previous?.blockingField?.message === next.blockingField?.message
+      ) return current;
+      return { ...current, [next.domain]: next };
+    });
     // A credential or lifecycle failure is the manager's existing recovery
     // problem, not a local Retry the host could ever win.
     if (next.failure?.escalation) setActionError({ type: 'load', failure: next.failure.escalation });
   }, []);
+  const unconfirmedDomains = Object.values(autosaveStates)
+    .filter((domain): domain is DomainAutosaveState => Boolean(domain) && domain.status !== 'saved');
+  const stuckDomains = unconfirmedDomains.filter(
+    ({ status }) => status === 'invalid' || status === 'failed',
+  );
+  // Read through a ref: the blocker registers once, and re-registering it on
+  // every keystroke would drop the block mid-navigation.
+  const unconfirmedRef = useRef(false);
+  unconfirmedRef.current = unconfirmedDomains.length > 0;
+  const blocker = useBlocker(useCallback(() => unconfirmedRef.current, []));
+
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return;
+    settingsAutosave.current?.flush();
+    appearanceAutosave.current?.flush();
+  }, [blocker.state]);
+  useEffect(() => {
+    // The requested navigation happens by itself the moment both domains
+    // confirm; the host never has to answer the prompt twice.
+    if (blocker.state === 'blocked' && unconfirmedDomains.length === 0) blocker.proceed();
+  }, [blocker, unconfirmedDomains.length]);
+  useEffect(() => {
+    if (unconfirmedDomains.length === 0) return;
+    // A browser may cancel background requests during unload, so this warns
+    // rather than pretending a last-millisecond save is guaranteed.
+    const warn = (unloadEvent: BeforeUnloadEvent) => { unloadEvent.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => { window.removeEventListener('beforeunload', warn); };
+  }, [unconfirmedDomains.length]);
 
   const mediaPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
@@ -585,6 +628,17 @@ export function ManagerPage() {
         )}
       </section>}
 
+      {section !== 'settings' && stuckDomains.length > 0 && (
+        <section className="manager-autosave-notice" aria-label="Unsaved settings">
+          <p role="alert">{stuckDomains.map((domain) => domain.status === 'invalid'
+            ? `${domain.label} has a change that cannot be saved yet.`
+            : `${domain.label} could not save a change.`).join(' ')}</p>
+          <button type="button" className="button button--secondary" onClick={() => openSection('settings')}>
+            Open settings
+          </button>
+        </section>
+      )}
+
       {section === 'intake' && <section aria-labelledby="intake-title">
         <div className="workspace-heading"><div><p className="section-label">Private collection</p><h2 id="intake-title">Live intake</h2></div></div>
         <form className="intake-search" onSubmit={(formEvent) => { formEvent.preventDefault(); setGuestFilter(searchInput.trim()); }}>
@@ -693,6 +747,14 @@ export function ManagerPage() {
           </form>
         </div>
       </section>}
+
+      {blocker.state === 'blocked' && <UnsavedSettingsPrompt
+        domains={unconfirmedDomains}
+        onLeave={() => blocker.proceed()}
+        onStay={stuckDomains.length > 0
+          ? () => { blocker.reset(); openSection('settings'); }
+          : undefined}
+      />}
     </main>
 
     <aside className="manager-utility">

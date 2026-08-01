@@ -214,6 +214,14 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .event-appearance-editor__preview h4 { margin: 0; font-family: 'Manrope', sans-serif; font-size: 1.1rem; }
 .event-appearance-editor__actions { display: grid; gap: 10px; }
 .event-appearance-editor__actions .button { width: 100%; min-height: 44px; }
+.manager-autosave-notice { margin: 20px 0; padding: 15px 17px; display: grid; gap: 12px; border-left: 3px solid var(--denim); background: var(--denim-soft); }
+.manager-autosave-notice p { margin: 0; }
+.manager-autosave-notice .button { min-height: 44px; justify-self: start; }
+.unsaved-settings-prompt { margin: 20px 0; padding: 17px; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
+.unsaved-settings-prompt h2 { margin: 0; font-size: 1.25rem; }
+.unsaved-settings-prompt p { margin: 0; color: var(--muted); }
+.unsaved-settings-prompt:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.unsaved-settings-prompt .button { min-height: 44px; }
 .autosave-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .autosave-status__chip { display: inline-block; width: fit-content; padding: 6px 10px; border-radius: 999px; background: var(--moss-soft); color: #4e5b28; font-size: .75rem; font-weight: 700; }
 .autosave-status__chip--scheduled, .autosave-status__chip--saving { background: var(--denim-soft); color: var(--chestnut); }
