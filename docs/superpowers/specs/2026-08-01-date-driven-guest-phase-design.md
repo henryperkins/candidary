@@ -4,18 +4,25 @@
 
 **Status:** Approved for implementation
 
+This document amends the lifecycle, guest-surface, and host-control portions of
+`2026-07-30-event-rsvp-and-photo-entry-design.md`. The earlier design remains
+authoritative for RSVP roster rules, privacy budgets, durable entry, uploads,
+manager correction, and every requirement this document does not replace.
+
 ## 1. Decision
 
 The one printed event QR will change what it opens on its own, driven by the
 event's own schedule rather than by a host remembering to flip a checkbox on the
 morning of the event.
 
-A guest who scans before the RSVP deadline gets the RSVP as the whole page. A
-guest who scans after the deadline but before the event begins gets a page that
-says the event has not started, thanks the household for responding if it did,
-and lets a guest on a new device find their saved response. A guest who scans
-once the event has begun gets the photo drop. The printed credential, the URL it
-encodes, and the exchange that redeems it are all unchanged.
+Before the start, an open RSVP is the whole page unless the host has opened
+photos early; in that early-open case photos become primary and RSVP remains a
+secondary action until its deadline. Once RSVP is shut and photos are still on
+their schedule, the page says the event has not started, thanks the household
+for responding if it did, and lets a guest on a new device find a saved response.
+At the start, photo delivery opens automatically; if the host pauses it after
+that, the guest gets the designed waiting surface. The printed credential, the
+URL it encodes, and the exchange that redeems it are all unchanged.
 
 Two host intents that today share one boolean are separated into three concepts:
 whether photo delivery is *permitted*, when it is *scheduled* to open, and
@@ -24,14 +31,16 @@ be authoritative while still leaving the host an override.
 
 ## 2. Goals
 
-- Move the guest between RSVP, waiting, and photo delivery with no host action on
-  the day of the event.
+- Move the guest between RSVP, before-start, photo delivery, and paused waiting
+  with no required host action on the day of the event.
 - Give the post-deadline, pre-event window a designed surface of its own rather
   than a fallback that talks about a deadline the guest can no longer act on.
 - Recognize a household that has already responded, including one arriving on a
   device that never held an RSVP session.
 - Keep the server the sole authority on what phase an event is in. The browser
   never compares a clock.
+- Require no cron or scheduled mutation; reads resolve the current phase from
+  stored intent and server time.
 - Leave the printed QR, `/join#<id.secret>`, `POST /api/entry/exchange`, and the
   guest event session untouched.
 - Keep every existing RSVP privacy property: the enumeration budgets, the single
@@ -118,7 +127,7 @@ accidentally defeat it.
 
 | When | Action | Effect |
 | --- | --- | --- |
-| Before start | Open photos early | `photos_open_from = <server now>` |
+| Before start | Open photos early | `photos_open_from = serverNow.toISOString()` |
 | Before start | Pause until event start | `photos_open_from = NULL` |
 | At or after start | Pause photo delivery | `uploads_enabled = 0` |
 | At or after start | Reopen photo delivery | `uploads_enabled = 1` |
@@ -133,7 +142,20 @@ There is deliberately no pre-start control that revokes capability. A host who
 wants photo delivery off for the event does it after the start, when the effect
 is visible to them.
 
-### 5.4 `instantForLocalDateTime`
+### 5.4 Host input
+
+The create form shows a local start-time field prefilled to `12:00 AM`. The host
+may accept that default, so start time is not a new completion hurdle, but it is
+never an invisible server assumption: the field is visible, and the create
+receipt and manager summary render the resulting date, time, and time zone.
+
+Settings expose the same editable local time beside the existing read-only event
+date and editable time zone; this design does not add event-date editing. The
+browser submits wall-clock date and time values, not an instant. For compatibility
+during rollout, an omitted start time is interpreted as `00:00` local, but every
+current client sends the field explicitly.
+
+### 5.5 `instantForLocalDateTime`
 
 A new helper joins `endOfLocalDate` in `shared/event-time.ts`, using the same
 probe-and-bisect search so it inherits the existing DST reasoning. Its contract
@@ -144,7 +166,7 @@ is explicit at both discontinuities:
 - A local time that occurs twice (fall back) resolves to the **earlier**
   occurrence, deterministically.
 
-### 5.5 Validation
+### 5.6 Validation
 
 `rsvpDeadlineAt < eventStartAt`, strictly, enforced identically on create
 (`worker/routes/public.ts`) and settings (`worker/routes/manage.ts`). This
@@ -156,14 +178,17 @@ that is simultaneously RSVP-open and event-started — a state no phase can
 describe and every guest RSVP route would refuse.
 
 Because `rsvp_deadline_at` is the last millisecond of the host's chosen local
-day, a host who sets the RSVP deadline to the event date must also set a start
-time later than midnight, or the deadline will not precede the start. The
-validation says so in the `rsvpDeadlineDate` field error.
+day, a date-only RSVP deadline on the event date is always after every possible
+start time on that date. Under this model the deadline date must therefore be
+earlier than the event date. The server still validates the resolved instants,
+and reports the failure on `rsvpDeadlineDate` as "RSVP deadline must be before
+the event starts."
 
-Any edit to the event date, the start time, the RSVP deadline date, or the time
-zone recomputes **both** absolute instants from the same tuple, in the same
-guarded write. Recomputing one without the other would let a time-zone change
-move the deadline past the start.
+Any edit to the start time, the RSVP deadline date, or the time zone recomputes
+**both** absolute instants from the same tuple, in the same guarded write.
+Recomputing one without the other would let a time-zone change move the deadline
+past the start. If event-date editing is added later, it has the same invariant;
+it is not added by this feature.
 
 ## 6. Phase contract
 
@@ -221,11 +246,27 @@ RSVP routes enforce, so the interface and the boundary derive from one value.
 Phase says *where* RSVP appears; `rsvpAccess` says *whether and how*; `rsvpState`
 continues to supply the paused/closed wording.
 
-Lookup is unavailable during `before-start` when the event has no valid RSVP
-deadline at all — `rsvpState` of `disabled`, which is the shape a pre-0008 event
-carries — or when the printed entry has been disabled. In both cases there is no
-household surface to reach, and `GuestBeforeStart` renders the event and its
-start without any RSVP affordance.
+The phase resolver also receives a server-only `rsvpConfigured` input, derived as
+`event.rsvpRosterVersion > 0` with a valid deadline. It is not sent to guests;
+only the resulting `rsvpAccess` is. This matters because every new event has a
+deadline but starts with RSVP paused while the host builds a roster. An event
+that never adopted RSVP must not advertise a household lookup that can only miss.
+
+The server derives access in this order:
+
+1. At or after the start, access is `unavailable` without exception.
+2. Before the start, `rsvpConfigured === false` or an RSVP state of `disabled`
+   makes access `unavailable`.
+3. Before the start, an RSVP state of `open` makes access `editable`.
+4. Every other pre-start RSVP state is `read-only`.
+
+The read-only lookup searches only households with a saved response. An
+unresponded invited name therefore receives the same uniform `not_available`
+result as a miss; the read-only window does not become a roster-enumeration
+surface. When access is unavailable, `GuestBeforeStart` renders the event and
+its start without any RSVP affordance. A disabled printed entry never reaches
+this resolver: disabling it revokes the guest and household sessions at the
+authentication boundary.
 
 ### 6.3 `lifecycleRecheckAfterMs`
 
@@ -241,13 +282,19 @@ It schedules the next **guest-view boundary**, not merely the next phase change.
 During an early-open `photos-primary` period the phase does not change at the
 RSVP deadline or at the event start, but the RSVP disclosure changes from
 editable to read-only and then disappears. The delay is therefore the shortest
-interval to any of `scheduledOpenAt`, `eventStartAt`, or `rsvpDeadlineAt` that is
+interval to any of `scheduledOpenAt`, `eventStartAt`, or `rsvpClosesAt` that is
 still in the future at the resolving instant; `null` once none are.
+
+`rsvpClosesAt` is one millisecond after `rsvpDeadlineAt`. The existing RSVP
+contract keeps the exact deadline millisecond open (`now > deadline` closes it),
+so refetching at the deadline itself would return the same view and could leave
+the tab editable until another wake-up. Scheduling the first closed millisecond
+preserves the current deadline semantics without a spin.
 
 ### 6.4 Event views
 
 `EventView` (manager) gains `eventStartAt`, a host-editable local
-`eventStartTime`, `photosOpen`, and:
+`eventStartTime`, `photosOpen`, `photoIntakeRecheckAfterMs`, and:
 
 ```ts
 photoIntakeState: 'scheduled' | 'open-early' | 'open' | 'paused';
@@ -263,6 +310,16 @@ photoIntakeState: 'scheduled' | 'open-early' | 'open' | 'paused';
 `paused` is checked first, so a paused event never reports itself as scheduled to
 open. The manager control set in §5.3 is chosen from this value, not from a
 comparison the browser performs.
+
+`photoIntakeRecheckAfterMs` is the server-computed relative delay to the next
+future `scheduledOpenAt` or `eventStartAt`, or `null`. The manager uses the same
+quiet boundary-refetch behavior as the guest, so a page left open across the
+start updates its status and action without consulting the browser clock.
+
+The normal pre-start control never creates `paused`; before the start it can only
+set or clear `photos_open_from`. A pre-start `paused` value can exist only on a
+legacy row or after an irreversible entry disable, and the manager explains that
+exception rather than offering `reopen` early.
 
 `GuestEventView` gains `eventStartAt`, so the before-start surface can render a
 correctly zoned start using the event's own time zone.
@@ -285,6 +342,13 @@ not mounting a component is not the security boundary.
 A household session minted during the read-only window is already write-dead: it
 captures `writeAuthorityDeadline: event.rsvpDeadlineAt` at creation.
 
+Before the start, a `PUT` carrying an idempotency key for an already committed,
+identical response may still replay that durable receipt; it may not perform a
+new mutation. This preserves the existing retry contract when a response was
+accepted immediately before the deadline. At and after the start, every guest
+RSVP route is unavailable, including replay, because RSVP has left the guest
+experience entirely.
+
 ### 7.2 Manager RSVP routes
 
 Manager correction, roster management, import, and export remain available after
@@ -304,12 +368,14 @@ SQL in this codebase, and this is one of them.
 
 ### 7.4 Photo intake actions
 
-A dedicated manager endpoint accepts server-interpreted intents —
-`open_early`, `return_to_schedule`, `pause`, `reopen` — and never a client
-timestamp. `open_early` stamps the server's own clock. The endpoint returns the
-refreshed `EventView` and rejects an action that became invalid across the start
-boundary, so a page that loaded before the start cannot send a pre-start action
-after it.
+`POST /api/manage/events/:eventId/photo-intake` accepts
+`{ action: 'open_early' | 'return_to_schedule' | 'pause' | 'reopen' }` and never
+a client timestamp. Only the transition named in §5.3 is legal from the current
+server-derived state. `open_early` stamps the server's own clock. The endpoint
+returns the refreshed `EventView`; an invalid or stale transition returns the
+existing `VALIDATION_FAILED` envelope with HTTP 409 and tells the manager to
+reload. No new `ApiErrorCode` is added. A page that loaded before the start
+therefore cannot send a pre-start action after it.
 
 `uploadsEnabled` leaves the autosaved settings payload and its merge logic
 entirely. Two reasons: the control's meaning depends on the server clock, and a
@@ -339,9 +405,24 @@ mount or call `GuestRsvpFlow` at all.
 
 A household with `firstRespondedAt` set receives the appreciation copy. One
 without receives a neutral line; it must not thank a household that did not
-respond, and must not scold one either. Both strings are approved in the
-`design-system.md` above-the-fold entry (§10) before the component is written —
-guest copy is not invented in a component in this codebase.
+respond, and must not scold one either. `RsvpReceipt` gains a `before-start`
+mode so this distinction is explicit rather than inferred from generic closed
+copy.
+
+The permitted above-the-fold copy is:
+
+- Heading: **The event hasn't started yet**
+- Start line: **{event name} begins {formatted date} at {formatted time}.**
+- Photo line: **Come back when the event begins to take or add photos.**
+- Responded household: **We appreciate your RSVP. Your saved household response
+  is below.**
+- Household lookup: **Find your household to view a saved response.**
+- Located household without a saved response: **There isn't a saved RSVP for
+  this household.**
+
+Dynamic date and time fragments follow Candidary's established `en-US` display
+format and are always formatted with `eventTimezone`. No other deadline,
+waiting, or gratitude sentence appears above the fold on this surface.
 
 ### 8.2 Presentation is layout only
 
@@ -359,9 +440,10 @@ accessibility defect the existing e2e pass would catch.
 
 ### 8.3 The RSVP disclosure under `photos-primary`
 
-During an early-open period the disclosure at `EventPage.tsx:153` may still
-appear — editable before the deadline, read-only after it. At the event start it
-disappears completely. It is driven by `rsvpAccess`, not by a date comparison.
+During an early-open period the disclosure at `EventPage.tsx:153` appears when
+`rsvpAccess` is `editable` or `read-only` and is omitted when it is
+`unavailable`. At the event start it disappears completely. It is driven by
+`rsvpAccess`, not by a date comparison.
 
 ### 8.4 `useLifecycleRecheck`
 
@@ -379,6 +461,13 @@ A hook taking `lifecycleRecheckAfterMs` and a reload callback.
 
 The timer only triggers a refetch. The server remains authoritative about whether
 anything changed.
+
+### 8.5 `waiting`
+
+At or after the start, when photo capability is paused, the complete primary
+copy is **Photo delivery is paused** and **The host has paused photo delivery for
+now. Please try again later.** The existing event hero still names the event;
+RSVP lookup, receipt, and disclosure do not mount.
 
 ## 9. Migration
 
@@ -425,7 +514,8 @@ manager section:
 | Manager photo intake | scheduled / open-early / open / paused |
 
 It also gains one above-the-fold paragraph naming the permitted before-start copy
-exactly, alongside the existing `Guest RSVP` entry.
+exactly as listed in §8.1, alongside the existing `Guest RSVP` entry. The waiting
+row uses the exact two sentences in §8.5.
 
 `design-qa.md` and `design/fidelity-ledger.md` record the new surfaces at 320 and
 390 px.
@@ -443,40 +533,72 @@ and the four explicit actions.
 
 Before start-time enforcement is enabled, release must either:
 
-1. prove there are no active legacy events — the precedent `0008` set for the
-   printed entry credential; or
-2. perform a data-aware backfill that resolves each event's start through its own
-   IANA zone.
+1. prove there are no non-deleted legacy events; or
+2. perform a data-aware backfill that resolves each non-deleted event's start
+   through its own IANA zone.
 
-A second condition applies to option 1's proof: an existing event whose RSVP
-deadline date equals its event date cannot satisfy `rsvpDeadlineAt <
-eventStartAt` with a midnight start, so any settings edit on it would fail
-validation. Legacy events must be checked for that shape too, not only for the
-backfill's zone error.
+A second condition applies to either path: an existing event whose RSVP deadline
+date equals its event date cannot satisfy `rsvpDeadlineAt < eventStartAt` at any
+start time on that date. Those rows require an explicit host correction or a
+reviewed data correction before the new validation is enforced; checking only
+for the backfill's zone error is insufficient.
+
+The deterministic rollout order is:
+
+1. Before applying `0010`, inventory every non-deleted event ID and calculate its
+   expected local-midnight start through `instantForLocalDateTime`. Resolve any
+   same-day deadline rows before continuing.
+2. Apply `0010` while the old Worker is still serving. Its UTC-midnight values are
+   not yet interpreted as lifecycle starts.
+3. Data-aware backfill and verify every inventoried ID against its expected IANA
+   instant. The new Worker is not deployed while any inventoried row still holds
+   the approximate value.
+4. Deploy the compatible Worker. An event created by the old Worker after the
+   migration has the epoch default; the new Worker recognizes that sentinel and
+   temporarily retains the old boolean/deadline phase rules and RSVP route
+   availability for that row.
+5. Run a final epoch-sentinel scan. Validate each gap row's deadline, data-aware
+   backfill rows that satisfy the invariant, and stop for host or reviewed data
+   correction if one does not. Verify that no non-deleted event retains the
+   sentinel before closing the release gate.
+
+The epoch value is therefore an intermediate migration sentinel, never a live
+start. Corrected legacy rows and events created by the new Worker use the new
+lifecycle immediately; a deploy-gap row remains safely on the old behavior only
+until step 5.
 
 ## 12. Testing
 
 **`tests/unit`** — `resolveGuestEventPhase` table-driven across all four phases;
 the exact-instant boundaries at `eventStartAt`, `scheduledOpenAt`, and
-`rsvpDeadlineAt`; the `rsvpAccess` invariants of §6.2; `lifecycleRecheckAfterMs`
-selection including the early-open case where the boundary is not a phase change;
+`rsvpDeadlineAt`, including closure at `rsvpDeadlineAt + 1ms`; the `rsvpAccess`
+invariants of §6.2, including an event that never configured RSVP;
+`lifecycleRecheckAfterMs` selection including the early-open case where the
+boundary is not a phase change;
 `instantForLocalDateTime` rejecting a nonexistent spring-forward time and
 resolving a repeated fall-back time to the earlier occurrence.
 
 **`tests/worker`** — guest RSVP lookup, read, and write all refuse at and after
 the start, lookup with the same uniform body it uses for a miss; the submission
 `DB.batch()` itself refuses at the boundary, proving the guard is in SQL rather
-than only at the route; lookup's edge-then-D1 ordering and budgets are unchanged
-during the read-only window; manager correction, roster, and export routes still
-answer after the start; `rsvpDeadlineAt < eventStartAt` rejected on both create
-and settings; a date, time, or zone edit recomputes both instants atomically; all
-four photo-intake actions, a stale-boundary action refused, and the entry disable
-winning over a reopen; the migration backfill.
+than only at the route; an already committed identical idempotency key replays
+before the start without mutation but is unavailable at or after the start;
+lookup's edge-then-D1 ordering and budgets are unchanged during the read-only
+window; manager correction, roster, and export routes still answer after the
+start; `rsvpDeadlineAt < eventStartAt` rejected on both create and settings,
+including every same-day deadline; a deadline-date, start-time, or zone edit
+recomputes both instants atomically; all four photo-intake actions, a
+stale-boundary action refused, and the entry disable winning over a reopen; the
+migration backfill, inventoried IANA correction, and epoch-sentinel deploy-gap
+path.
 
 **`tests/ui`** — `GuestBeforeStart` for a responded household, an unresponded
 one, and an unrecognized device; no RSVP request issued at all when `rsvpAccess`
 is `unavailable`; the embedded heading hierarchy holding one `<h1>` and `<h2>`
-beneath it; the disclosure present during early-open and gone after the start.
+beneath it; the visible midnight default on create and its zoned summary; the
+disclosure present during early-open and gone after the start, with no guest
+RSVP request issued after that boundary; the manager status and available action
+refetching across the start from `photoIntakeRecheckAfterMs`.
 
 **`tests/e2e`** — the stubbed phase sequence asserting the page moves itself from
 `before-start` to `photos-primary` with no user action; a quiet refresh failure
