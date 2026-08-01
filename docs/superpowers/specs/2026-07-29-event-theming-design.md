@@ -799,6 +799,8 @@ is now part of the form.
 
 ## 15. Manager Event appearance editor
 
+> **Superseded (2026-08-01):** The manual **Save appearance** workflow below is superseded by [Candidary Settings Autosave Design](2026-08-01-settings-autosave-design.md); this section remains as historical context.
+
 Settings remains one of exactly five manager destinations. Inside Settings,
 **Event appearance** is a separate form between general event settings and the
 account/danger sections.

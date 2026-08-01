@@ -106,7 +106,7 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .create-intro { position: sticky; top: 55px; padding-top: 36px; }.create-intro h1 { font-size: clamp(2.8rem, 5vw, 4.8rem); }.create-intro > p:not(.section-label) { color: var(--muted); font-size: 1.1rem; }
 .trust-list { margin: 34px 0; padding: 27px 0 0; border-top: 1px solid var(--border); display: grid; gap: 14px; list-style: none; }.trust-list li { display: flex; gap: 10px; align-items: center; }.trust-list svg { color: var(--moss); }
 .create-form { max-width: 680px; padding: 40px; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 50px rgb(74 36 21 / 5%); }
-.create-form h2 { font-size: 2rem; margin-bottom: 30px; }.create-form > label, .settings-form > label:not(.toggle) { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
+.create-form h2 { font-size: 2rem; margin-bottom: 30px; }.create-form > label { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
 /* The field wrapper owns the stack so the error can sit beside the label rather than inside its name. */
 .create-field { display: grid; gap: 8px; margin-bottom: 23px; }
 .create-field > label { display: grid; gap: 8px; font-weight: 600; }
@@ -181,12 +181,20 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .moderation-grid strong { display: -webkit-box; overflow: hidden; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .manager-utility { min-width: 0; background: var(--paper); }.manager-utility section { padding: 28px 20px; border-bottom: 1px solid var(--border); }.manager-utility__guest-entry, .manager-utility__capacity { display: none; }.manager-utility h2 { font-size: 1.55rem; }.manager-utility p { color: var(--muted); font-size: .9rem; }.stat { display: flex; align-items: baseline; gap: 9px; }.stat strong { font-family: 'Manrope'; font-size: 2.7rem; }.stat span { color: var(--muted); }.meter { height: 5px; margin: 19px 0 8px; background: #e8dfd5; border-radius: 5px; overflow: hidden; }.meter span { height: 100%; display: block; background: var(--denim); }.manager-utility small { color: var(--muted); }.export-state { display: grid; gap: 10px; }.export-state strong { text-transform: capitalize; color: var(--chestnut); }.export-state span { color: var(--muted); font-size: .85rem; }
 .manager-panel { max-width: 800px; }.share-layout { margin-top: 30px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }.manager-qr { padding: 15px; border: 1px solid var(--border); background: var(--paper); text-align: center; }.manager-qr img { margin-bottom: 13px; }.manager-messages { margin: 30px 0; padding: 0; list-style: none; }.manager-messages li { padding: 17px 0; border-top: 1px solid var(--border); }.manager-messages p { min-width: 0; margin-bottom: 4px; overflow-wrap: anywhere; }.manager-messages small { color: var(--muted); }.manager-messages .button-row { margin-top: 12px; }.manager-messages .button { min-width: 44px; min-height: 44px; padding: 7px 11px; font-size: .8rem; }.settings-form { margin-top: 30px; max-width: 590px; }.toggle { min-height: 52px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }.toggle input { width: 24px; min-width: 24px; height: 24px; min-height: 24px; margin-inline: 4px; accent-color: var(--moss); }.settings-form .button { margin-top: 24px; }.danger-zone { margin-top: 50px; padding-top: 30px; border-top: 1px solid #e2b9b4; }.danger-zone h3 { color: var(--danger); font-size: 1.35rem; }.danger-zone p { color: var(--muted); }.danger-zone form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+/* A hidden destination keeps its DOM so drafts and timers survive, but it must
+   take no layout space or tab stop while another manager section is active. */
+.manager-panel[hidden] { display: none; }
+.manager-panel > h2[tabindex='-1']:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.event-settings-editor__heading { margin-top: 30px; }
+.settings-field { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
+.settings-form .field-error { display: block; margin-top: 5px; color: var(--danger); font-size: .8rem; font-weight: 500; }
+.settings-toggle-field { display: grid; }
+.settings-toggle-field > .field-error { margin: 5px 4px 10px 40px; }
 .event-appearance-editor { min-width: 0; margin-top: 50px; padding-top: 30px; border-top: 1px solid var(--border); }
 .event-appearance-editor__heading { display: grid; gap: 12px; margin-bottom: 24px; }
 .event-appearance-editor__heading h3 { margin: 4px 0 8px; font-family: 'Manrope', sans-serif; font-size: 1.6rem; }
 .event-appearance-editor__heading p:last-child { max-width: 58ch; margin: 0; color: var(--muted); }
-.event-appearance-editor__status { width: fit-content; padding: 6px 10px; border-radius: 999px; background: var(--moss-soft); color: #4e5b28; font-size: .75rem; font-weight: 700; }
-.event-appearance-editor__status--dirty { background: var(--denim-soft); color: var(--chestnut); }
+.event-appearance-editor__status { width: fit-content; }
 .event-appearance-editor form, .event-appearance-editor__controls, .event-appearance-editor__color-list { min-width: 0; display: grid; gap: 24px; }
 .event-appearance-editor__color { min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
 .event-appearance-editor__color-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; margin-bottom: 12px; }
@@ -208,6 +216,20 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .event-appearance-editor__preview h4 { margin: 0; font-family: 'Manrope', sans-serif; font-size: 1.1rem; }
 .event-appearance-editor__actions { display: grid; gap: 10px; }
 .event-appearance-editor__actions .button { width: 100%; min-height: 44px; }
+.manager-autosave-notice { margin: 20px 0; padding: 15px 17px; display: grid; gap: 12px; border-left: 3px solid var(--denim); background: var(--denim-soft); }
+.manager-autosave-notice p { margin: 0; }
+.manager-autosave-notice .button { min-height: 44px; justify-self: start; }
+.unsaved-settings-prompt { margin: 20px 0; padding: 17px; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
+.unsaved-settings-prompt h2 { margin: 0; font-size: 1.25rem; }
+.unsaved-settings-prompt p { margin: 0; color: var(--muted); }
+.unsaved-settings-prompt:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.unsaved-settings-prompt .button { min-height: 44px; }
+.autosave-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.autosave-status__chip { display: inline-block; width: fit-content; padding: 6px 10px; border-radius: 999px; background: var(--moss-soft); color: #4e5b28; font-size: .75rem; font-weight: 700; }
+.autosave-status__chip--scheduled, .autosave-status__chip--saving { background: var(--denim-soft); color: var(--chestnut); }
+.autosave-status__chip--invalid, .autosave-status__chip--failed { background: #fff1ee; color: var(--danger); }
+.autosave-status__retry { min-width: 44px; min-height: 44px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font: inherit; font-size: .8rem; font-weight: 700; cursor: pointer; }
+.autosave-status__retry:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .event-appearance-editor button:focus-visible, .event-appearance-editor input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 @media (max-width: 760px) {
   h1 { font-size: 2.8rem; }.page-header { min-height: 70px; padding: 0 20px; }

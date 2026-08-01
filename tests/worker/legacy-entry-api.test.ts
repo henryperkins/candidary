@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import { EventEntriesRepository } from '../../worker/db/event-entries';
@@ -98,6 +98,66 @@ describe('printed entry codes from before the RSVP migration', () => {
 
     expect(exchanged.status).toBe(200);
     expect((await exchanged.json<any>()).data.location).toBe(`/event/${access.event.slug}`);
+  });
+
+  it('keeps a delayed legacy adoption from reopening a concurrently disabled entry', async () => {
+    const access = await eventAccess();
+    const printed = await asLegacyEvent(access);
+    let enteredDecrypt!: () => void;
+    let releaseDecrypt!: () => void;
+    const decryptEntered = new Promise<void>((resolve) => { enteredDecrypt = resolve; });
+    const decryptReleased = new Promise<void>((resolve) => { releaseDecrypt = resolve; });
+    const realDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+    const decryptSpy = vi.spyOn(crypto.subtle, 'decrypt').mockImplementation(async (
+      algorithm,
+      key,
+      data,
+    ) => {
+      enteredDecrypt();
+      await decryptReleased;
+      return realDecrypt(algorithm, key, data);
+    });
+
+    try {
+      // The scan has read the still-active token and is now paused in the async
+      // crypto work that used to separate that read from an unconditional insert.
+      const delayedScan = scanPrinted(printed);
+      await decryptEntered;
+
+      const disabled = await createApp().request(
+        `/api/manage/events/${access.event.id}/entry/disable`,
+        {
+          method: 'POST',
+          headers: writeHeaders(access.manager),
+          body: JSON.stringify({ confirmName: access.event.name }),
+        },
+        testEnv,
+      );
+
+      releaseDecrypt();
+      const scanned = await delayedScan;
+      const entry = await new EventEntriesRepository(testEnv.DB).getForEvent(access.event.id);
+
+      expect(disabled.status).toBe(200);
+      expect(entry?.disabledAt).toEqual(expect.any(String));
+      expect(scanned.headers.get('location')).toBe('/recover/event-entry?kind=unavailable');
+      expect(scanned.headers.get('set-cookie')).toBeNull();
+
+      const reopened = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
+        method: 'PATCH',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({
+          uploadsEnabled: true, galleryVisible: true, moderationRequired: false,
+          eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+          rsvpEnabled: false, rsvpRosterVersion: 0,
+        }),
+      }, testEnv);
+      expect(reopened.status).toBe(410);
+      expect((await reopened.json<any>()).code).toBe('EVENT_ENTRY_UNAVAILABLE');
+    } finally {
+      releaseDecrypt();
+      decryptSpy.mockRestore();
+    }
   });
 
   it('stops with the entry, and never adopts on a wrong or revoked secret', async () => {

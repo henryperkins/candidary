@@ -1,10 +1,13 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
 import { createApp } from '../../worker/app';
+import { EventEntriesRepository } from '../../worker/db/event-entries';
+import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
 import {
+  applySettings,
   cookiesFrom,
   eventAccess,
   png,
@@ -281,6 +284,42 @@ describe('manager media pagination', () => {
 });
 
 describe('manager settings and private photo intake', () => {
+  it('rejects an implausible RSVP deadline year before storing it', async () => {
+    const access = await eventAccess();
+
+    const response = await applySettings(access, { rsvpDeadlineDate: '0202-09-19' });
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors).toMatchObject({
+      rsvpDeadlineDate: 'Choose a valid RSVP deadline.',
+    });
+  });
+
+  it('classifies a guarded settings refusal as the entry stop, not a roster race', async () => {
+    const access = await eventAccess();
+    const entries = new EventEntriesRepository(env.DB);
+    const guardedUpdate = vi.spyOn(EventsRepository.prototype, 'updateSettings').mockImplementationOnce(
+      async (eventId) => {
+        // The route's first entry read succeeded. The irreversible stop lands in
+        // the narrow window before the atomic settings statement decides whether
+        // it can reopen intake, so the route receives the guarded null result.
+        await entries.disableForEvent(eventId, '2026-07-21T12:00:00.000Z');
+        return null;
+      },
+    );
+
+    try {
+      const response = await applySettings(access, { uploadsEnabled: true });
+
+      expect(response.status).toBe(410);
+      expect((await response.json<any>()).code).toBe('EVENT_ENTRY_UNAVAILABLE');
+    } finally {
+      guardedUpdate.mockRestore();
+    }
+  });
+
   it('uploads and serves an event cover only to event sessions', async () => {
     const access = await eventAccess();
     const initiated = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {

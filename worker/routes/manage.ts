@@ -24,6 +24,7 @@ import {
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_IMAGE_BYTES,
+  MIN_EVENT_CALENDAR_YEAR,
   SUPPORTED_IMAGE_TYPES,
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
@@ -43,7 +44,12 @@ const settingsSchema = z.object({
   galleryVisible: z.boolean(),
   moderationRequired: z.boolean(),
   eventTimezone: z.string().min(1).max(64).refine(isIanaTimeZone, 'Choose a valid time zone.'),
-  rsvpDeadlineDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.'),
+  rsvpDeadlineDate: z.string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.')
+    .refine(
+      (value) => Number(value.slice(0, 4)) >= MIN_EVENT_CALENDAR_YEAR,
+      'Choose a valid RSVP deadline.',
+    ),
   rsvpEnabled: z.boolean(),
   // Only an early stale-view signal. The write is guarded on the version the
   // server itself read while validating, never on this number.
@@ -269,6 +275,13 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
     { ...parsed.data, eventTimezone, rsvpDeadlineAt, expectedRosterVersion: rosterVersion },
   );
   if (!event) {
+    // The update now refuses an intake reopen itself, so a lost row is no longer
+    // proof of a roster race. Re-read the entry before naming the reason: the
+    // irreversible stop and a moving guest list are different problems with
+    // different ways out.
+    if (parsed.data.uploadsEnabled || parsed.data.rsvpEnabled) {
+      await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+    }
     throw new ApiError(
       'RSVP_ROSTER_INVALID',
       'The guest list changed while these settings were saving. Review it and try again.',

@@ -1,7 +1,7 @@
 import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import { hostSignInHref } from '../app/recovery';
@@ -15,11 +15,20 @@ import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
+import { EventSettingsEditor } from '../components/EventSettingsEditor';
 import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
+import { UnsavedSettingsPrompt } from '../components/UnsavedSettingsPrompt';
 import type { LoadFailure } from '../components/States';
+import {
+  mergeCoverResponse,
+  mergeSettingsResponse,
+  mergeThemeResponse,
+} from '../features/settings/event-merge';
+import { createEventReadGuard } from '../features/settings/event-read-guard';
+import type { AutosaveHandle, DomainAutosaveState } from '../features/settings/autosave-queue';
 
 type Section = 'intake' | 'rsvp' | 'gallery' | 'messages' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
@@ -110,9 +119,19 @@ export function ManagerPage() {
   const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
   const [eventLink, setEventLink] = useState('');
   const [entryDisabledAt, setEntryDisabledAt] = useState<string | null>(null);
+  // Updated synchronously when disable confirms so an already-resolving
+  // settings response cannot slip through before React commits the new entry
+  // state. The full refresh later supplies the server's canonical timestamp.
+  const entryDisabled = useRef(false);
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
+  // Settings stays mounted after its first visit so a debounce timer, an
+  // in-flight write, and an unsaved draft all survive a destination change.
+  const [settingsMounted, setSettingsMounted] = useState(false);
+  const [settingsFocusEpoch, setSettingsFocusEpoch] = useState(0);
+  const settingsFocusRequested = useRef(false);
+  const settingsHeading = useRef<HTMLHeadingElement>(null);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
   const [status, setStatus] = useState<MediaStatus>('all');
@@ -121,11 +140,91 @@ export function ManagerPage() {
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
+  const [autosaveRecovery, setAutosaveRecovery] = useState<{
+    domain: DomainAutosaveState['domain'];
+    failure: LoadFailure;
+  } | null>(null);
+  const [autosaveStates, setAutosaveStates] = useState<Partial<Record<
+    DomainAutosaveState['domain'], DomainAutosaveState
+  >>>({});
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
   // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
   const loadMoreOwner = useRef<AbortController | null>(null);
+  // Reads and writes of the event row overlap once autosave can be running
+  // behind another destination. Every write brackets itself here, and every
+  // whole-event read checks whether it was overtaken before it is adopted.
+  const eventReads = useRef(createEventReadGuard());
+  const eventWrite = useCallback(async <T,>(request: () => Promise<T>): Promise<T> => {
+    eventReads.current.beginWrite();
+    try {
+      return await request();
+    } finally {
+      eventReads.current.endWrite();
+    }
+  }, []);
+  const eventRead = useCallback(<T,>(request: () => Promise<T>): Promise<T> => (
+    eventReads.current.readFresh(request)
+  ), []);
+  // Leaving Settings flushes a valid scheduled write without waiting for its
+  // response. The subtree remains mounted, so an in-flight request finishes.
+  const settingsAutosave = useRef<AutosaveHandle>(null);
+  // Appearance becomes an autosave domain in the next task; keeping its handle
+  // alongside Settings makes the destination boundary one place.
+  const appearanceAutosave = useRef<AutosaveHandle>(null);
+  const recordAutosaveState = useCallback((next: DomainAutosaveState) => {
+    setAutosaveStates((current) => {
+      const previous = current[next.domain];
+      if (
+        previous?.status === next.status
+        && previous?.failure === next.failure
+        && previous?.blockingField?.label === next.blockingField?.label
+        && previous?.blockingField?.message === next.blockingField?.message
+      ) return current;
+      return { ...current, [next.domain]: next };
+    });
+    // A credential or lifecycle failure is the manager's existing recovery
+    // problem, not a local Retry the host could ever win.
+    if (next.failure?.escalation) {
+      setAutosaveRecovery({
+        domain: next.domain,
+        failure: next.failure.escalation,
+      });
+      setActionError(null);
+    } else if (next.status === 'saved') {
+      setAutosaveRecovery((current) => current?.domain === next.domain ? null : current);
+    }
+  }, []);
+  const unconfirmedDomains = Object.values(autosaveStates)
+    .filter((domain): domain is DomainAutosaveState => Boolean(domain) && domain.status !== 'saved');
+  const stuckDomains = unconfirmedDomains.filter(
+    ({ status }) => status === 'invalid' || status === 'failed',
+  );
+  // Read through a ref: the blocker registers once, and re-registering it on
+  // every keystroke would drop the block mid-navigation.
+  const unconfirmedRef = useRef(false);
+  unconfirmedRef.current = unconfirmedDomains.length > 0;
+  const blocker = useBlocker(useCallback(() => unconfirmedRef.current, []));
+
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return;
+    settingsAutosave.current?.flush();
+    appearanceAutosave.current?.flush();
+  }, [blocker.state]);
+  useEffect(() => {
+    // The requested navigation happens by itself the moment both domains
+    // confirm; the host never has to answer the prompt twice.
+    if (blocker.state === 'blocked' && unconfirmedDomains.length === 0) blocker.proceed();
+  }, [blocker, unconfirmedDomains.length]);
+  useEffect(() => {
+    if (unconfirmedDomains.length === 0) return;
+    // A browser may cancel background requests during unload, so this warns
+    // rather than pretending a last-millisecond save is guaranteed.
+    const warn = (unloadEvent: BeforeUnloadEvent) => { unloadEvent.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => { window.removeEventListener('beforeunload', warn); };
+  }, [unconfirmedDomains.length]);
 
   const mediaPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
@@ -170,6 +269,7 @@ export function ManagerPage() {
           }
           throw caught;
         });
+      const readToken = eventReads.current.openRead();
       const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
@@ -177,7 +277,9 @@ export function ManagerPage() {
         api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`),
         entryLoad,
       ]);
-      setEvent(eventData.event);
+      // Media, notes, exports, and the link are unaffected by a settings or
+      // theme write, so only the event itself is at risk of being put back.
+      if (eventReads.current.adopt(readToken)) setEvent(eventData.event);
       // A load opened under the previous query must not reinstate its rows or its cursor. Polling
       // merges rather than replaces, so a stale list here would sit behind every later poll forever.
       // Only the media half is query-scoped; notes, exports, and links are the same either way.
@@ -187,6 +289,7 @@ export function ManagerPage() {
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setEventLink(linkData.eventLink ?? '');
+      entryDisabled.current = linkData.disabledAt !== null;
       setEntryDisabledAt(linkData.disabledAt);
       loadedOnce.current = true;
     } catch (caught) {
@@ -203,11 +306,12 @@ export function ManagerPage() {
 
   const refreshIntake = useCallback(async () => {
     try {
+      const readToken = eventReads.current.openRead();
       const [eventData, firstPage] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
       ]);
-      setEvent(eventData.event);
+      if (eventReads.current.adopt(readToken)) setEvent(eventData.event);
       // A poll opened under the previous filter must not merge its rows back over the narrowed list.
       if (latestMediaPath.current !== mediaPath) return;
       setMediaPage((current) => {
@@ -330,7 +434,14 @@ export function ManagerPage() {
   }, [eventLink]);
 
   function openSection(next: Section) {
+    if (section === 'settings' && next !== 'settings') {
+      // Leaving flushes the newest valid drafts. It deliberately does not wait
+      // for their responses: the subtree stays mounted, so they finish anyway.
+      settingsAutosave.current?.flush();
+      appearanceAutosave.current?.flush();
+    }
     setSection(next);
+    if (next === 'settings') setSettingsMounted(true);
     setSelected([]);
     setActionError(null);
     setEntryAction(null);
@@ -346,59 +457,53 @@ export function ManagerPage() {
     });
   }
 
+  function openSettingsForRepair() {
+    settingsFocusRequested.current = true;
+    setSettingsFocusEpoch((current) => current + 1);
+    openSection('settings');
+  }
+
+  useEffect(() => {
+    if (!settingsFocusRequested.current || section !== 'settings') return;
+    settingsFocusRequested.current = false;
+    settingsHeading.current?.focus();
+  }, [section, settingsFocusEpoch]);
+
   async function bulk(action: 'publish' | 'hide') {
     const groups = new Map<MediaView['publicationStatus'], string[]>();
     for (const item of media.filter(({ id }) => selected.includes(id))) {
       groups.set(item.publicationStatus, [...(groups.get(item.publicationStatus) ?? []), item.id]);
     }
     for (const [expectedStatus, ids] of groups) {
-      await api(`/api/manage/events/${eventId}/media/bulk`, {
+      await eventWrite(() => api(`/api/manage/events/${eventId}/media/bulk`, {
         method: 'POST', body: JSON.stringify({ ids, action, expectedStatus }),
-      });
+      }));
     }
     setSelected([]);
     await refresh();
   }
 
   async function changePublication(item: MediaView, action: 'publish' | 'hide' | 'delete') {
-    await api(`/api/manage/events/${eventId}/media/${item.id}`, {
+    await eventWrite(() => api(`/api/manage/events/${eventId}/media/${item.id}`, {
       method: 'PATCH', body: JSON.stringify({ action, expectedStatus: item.publicationStatus }),
-    });
-    await refresh();
-  }
-
-  async function saveSettings(element: HTMLFormElement) {
-    const form = new FormData(element);
-    await api(`/api/manage/events/${eventId}/settings`, { method: 'PATCH', body: JSON.stringify({
-      name: form.get('name'),
-      welcomeMessage: form.get('welcomeMessage'),
-      uploadsEnabled: form.get('uploadsEnabled') === 'on',
-      galleryVisible: form.get('galleryVisible') === 'on',
-      moderationRequired: form.get('moderationRequired') === 'on',
-      eventTimezone: form.get('eventTimezone'),
-      rsvpDeadlineDate: form.get('rsvpDeadlineDate'),
-      rsvpEnabled: form.get('rsvpEnabled') === 'on',
-      // The version this form was built from. The server treats it as a stale-view
-      // signal and guards the write on what it reads itself.
-      rsvpRosterVersion: event?.rsvpRosterVersion ?? 0,
-    }) });
+    }));
     await refresh();
   }
 
   async function prepareExport() {
-    await api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' });
+    await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' }));
     await refresh();
   }
   async function downloadExport(job: ExportView) {
-    const result = await api<ExportDownloadView>(`/api/manage/events/${eventId}/exports/${job.id}/download`, { method: 'POST', body: '{}' });
+    const result = await eventWrite(() => api<ExportDownloadView>(`/api/manage/events/${eventId}/exports/${job.id}/download`, { method: 'POST', body: '{}' }));
     setExportDownloads((current) => ({ ...current, [job.id]: result }));
   }
   async function retryExport(job: ExportView) {
-    await api(`/api/manage/events/${eventId}/exports/${job.id}/retry`, { method: 'POST', body: '{}' });
+    await eventWrite(() => api(`/api/manage/events/${eventId}/exports/${job.id}/retry`, { method: 'POST', body: '{}' }));
     await refresh();
   }
   async function moderateMessage(message: MessageView, action: 'approve' | 'reject' | 'delete') {
-    await api(`/api/manage/events/${eventId}/messages/${message.id}`, { method: 'PATCH', body: JSON.stringify({ action, expectedStatus: message.moderationStatus }) });
+    await eventWrite(() => api(`/api/manage/events/${eventId}/messages/${message.id}`, { method: 'PATCH', body: JSON.stringify({ action, expectedStatus: message.moderationStatus }) }));
     await refresh();
   }
   async function rotateManagerLink() {
@@ -411,10 +516,17 @@ export function ManagerPage() {
   // apart, because a host cannot undo the second one.
   async function runEntryAction(action: EntryAction) {
     const path = action === 'rotate' ? 'guest-sessions/rotate' : 'entry/disable';
-    await api(`/api/manage/events/${eventId}/${path}`, {
+    const result = await eventWrite(() => api<{ disabledAt?: string }>(`/api/manage/events/${eventId}/${path}`, {
       method: 'POST',
       body: JSON.stringify({ confirmName: entryConfirm.trim() }),
-    });
+    }));
+    if (action === 'disable') {
+      entryDisabled.current = true;
+      setEntryDisabledAt(result.disabledAt ?? null);
+      setEvent((current) => current
+        ? { ...current, uploadsEnabled: false, rsvpEnabled: false }
+        : current);
+    }
     setEntryAction(null);
     setEntryConfirm('');
     await refresh();
@@ -422,8 +534,9 @@ export function ManagerPage() {
   // Roster and activation changes land on the event record, not on the media the
   // whole manager refresh pays for.
   async function refreshEvent() {
+    const readToken = eventReads.current.openRead();
     const loaded = await api<{ event: EventView }>(`/api/manage/events/${eventId}`);
-    setEvent(loaded.event);
+    if (eventReads.current.adopt(readToken)) setEvent(loaded.event);
   }
   async function deleteEvent(element: HTMLFormElement) {
     const form = new FormData(element);
@@ -526,6 +639,9 @@ export function ManagerPage() {
     onDownload={(job) => runManagerAction(() => downloadExport(job))}
     onRetry={(job) => runManagerAction(() => retryExport(job))}
   />;
+  const visibleNotice: ManagerNotice | null = autosaveRecovery
+    ? { type: 'load', failure: autosaveRecovery.failure }
+    : actionError;
   return <div className="manager-shell manager-shell--intake">
     {/* The brand and the section navigation, which is a banner rather than complementary content. As
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
@@ -543,19 +659,35 @@ export function ManagerPage() {
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${event.uploadsEnabled ? 'approved' : 'pending'}`}>{event.uploadsEnabled ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} Guest uploads {event.uploadsEnabled ? 'open' : 'paused'}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
-      {actionError && <section className="manager-action-error" aria-label="Manager notice">
+      {visibleNotice && <section className="manager-action-error" aria-label="Manager notice">
         <div className="manager-action-error__summary">
           <div className="manager-action-error__alert" role="alert">
-            {actionError.type === 'load'
-              ? <span>{actionError.failure.message}<span className="manager-action-error__recovery">{actionError.failure.recoveryHint}</span></span>
-              : <span>{actionError.message}{actionError.recoveryHint && <span className="manager-action-error__recovery">{actionError.recoveryHint}</span>}</span>}
+            {visibleNotice.type === 'load'
+              ? <span>{visibleNotice.failure.message}<span className="manager-action-error__recovery">{visibleNotice.failure.recoveryHint}</span></span>
+              : <span>{visibleNotice.message}{visibleNotice.recoveryHint && <span className="manager-action-error__recovery">{visibleNotice.recoveryHint}</span>}</span>}
           </div>
-          <button type="button" className="manager-action-error__dismiss" aria-label="Dismiss error" onClick={() => setActionError(null)}><X aria-hidden="true" /></button>
+          <button
+            type="button"
+            className="manager-action-error__dismiss"
+            aria-label="Dismiss error"
+            onClick={() => autosaveRecovery ? setAutosaveRecovery(null) : setActionError(null)}
+          ><X aria-hidden="true" /></button>
         </div>
-        {actionError.type === 'load' && (
-          <ManagerAccessRecovery failure={actionError.failure} eventId={eventId} />
+        {visibleNotice.type === 'load' && (
+          <ManagerAccessRecovery failure={visibleNotice.failure} eventId={eventId} />
         )}
       </section>}
+
+      {section !== 'settings' && stuckDomains.length > 0 && (
+        <section className="manager-autosave-notice" aria-label="Unsaved settings">
+          <p role="alert">{stuckDomains.map((domain) => domain.status === 'invalid'
+            ? `${domain.label} has a change that cannot be saved yet.`
+            : `${domain.label} could not save a change.`).join(' ')}</p>
+          <button type="button" className="button button--secondary" onClick={openSettingsForRepair}>
+            Open settings
+          </button>
+        </section>
+      )}
 
       {section === 'intake' && <section aria-labelledby="intake-title">
         <div className="workspace-heading"><div><p className="section-label">Private collection</p><h2 id="intake-title">Live intake</h2></div></div>
@@ -571,6 +703,7 @@ export function ManagerPage() {
           requests never join the manager's initial load. */}
       {section === 'rsvp' && <ManagerRsvpPanel
         event={event}
+        onEventWrite={eventWrite}
         onEventChanged={() => void runManagerAction(refreshEvent)}
       />}
 
@@ -626,7 +759,56 @@ export function ManagerPage() {
 
       {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
 
-      {section === 'settings' && <section className="manager-panel"><p className="section-label">Event controls</p><h2>Settings</h2><form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => saveSettings(element)); }}><label>Event name<input name="name" defaultValue={event.name} /></label><label>Welcome message<textarea name="welcomeMessage" rows={4} defaultValue={event.welcomeMessage} /></label><label>Event time zone<input name="eventTimezone" defaultValue={event.eventTimezone} required autoComplete="off" spellCheck={false} /></label><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" defaultValue={event.rsvpDeadlineDate ?? ''} required /></label><label className="toggle"><input type="checkbox" name="rsvpEnabled" defaultChecked={event.rsvpEnabled} /><span>Accept RSVPs</span></label><label className="toggle"><input type="checkbox" name="uploadsEnabled" defaultChecked={event.uploadsEnabled} /><span>Accept private photo deliveries</span></label><label className="toggle"><input type="checkbox" name="galleryVisible" defaultChecked={event.galleryVisible} /><span>Show the optional shared gallery</span></label><label className="toggle"><input type="checkbox" name="moderationRequired" defaultChecked={event.moderationRequired} /><span>Review notes before sharing</span></label><button className="button button--primary">Save settings</button></form><EventAppearanceEditor key={event.id} event={event} onEventSaved={(updated) => setEvent(updated)} /><EventAccountCard eventId={event.id} /><section className="manager-credential" aria-labelledby="manager-credential-title"><h3 id="manager-credential-title">Manager access</h3><p>Rotating issues a new management link and stops this one immediately. It does not change the printed event QR.</p><button type="button" className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button></section><div className="danger-zone"><h3>Delete this event</h3><p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p><form onSubmit={(formEvent) => { formEvent.preventDefault(); const element = formEvent.currentTarget; void runManagerAction(() => deleteEvent(element)); }}><input name="confirmation" aria-label="Confirm event name" autoComplete="off" /><button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button></form></div></section>}
+      {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
+        <p className="section-label">Event controls</p>
+        <h2 ref={settingsHeading} tabIndex={-1}>Settings</h2>
+        <EventSettingsEditor
+          key={'settings-' + event.id}
+          ref={settingsAutosave}
+          event={event}
+          onEventWrite={eventWrite}
+          onEventRead={eventRead}
+          onSettingsSaved={(updated) => setEvent((current) => current
+            ? mergeSettingsResponse(current, updated, { entryDisabled: entryDisabled.current })
+            : updated)}
+          onAutosaveStateChange={recordAutosaveState}
+        />
+        <EventAppearanceEditor
+          key={'appearance-' + event.id}
+          ref={appearanceAutosave}
+          event={event}
+          onEventWrite={eventWrite}
+          onThemeSaved={(updated) => setEvent((current) => current ? mergeThemeResponse(current, updated) : updated)}
+          onCoverSaved={(updated) => setEvent((current) => current ? mergeCoverResponse(current, updated) : updated)}
+          onAutosaveStateChange={recordAutosaveState}
+        />
+        <EventAccountCard eventId={event.id} />
+        <section className="manager-credential" aria-labelledby="manager-credential-title">
+          <h3 id="manager-credential-title">Manager access</h3>
+          <p>Rotating issues a new management link and stops this one immediately. It does not change the printed event QR.</p>
+          <button type="button" className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button>
+        </section>
+        <div className="danger-zone">
+          <h3>Delete this event</h3>
+          <p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p>
+          <form onSubmit={(formEvent) => {
+            formEvent.preventDefault();
+            const element = formEvent.currentTarget;
+            void runManagerAction(() => deleteEvent(element));
+          }}>
+            <input name="confirmation" aria-label="Confirm event name" autoComplete="off" />
+            <button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button>
+          </form>
+        </div>
+      </section>}
+
+      {blocker.state === 'blocked' && <UnsavedSettingsPrompt
+        domains={unconfirmedDomains}
+        onLeave={() => blocker.proceed()}
+        onStay={stuckDomains.length > 0
+          ? () => { blocker.reset(); openSettingsForRepair(); }
+          : undefined}
+      />}
     </main>
 
     <aside className="manager-utility">

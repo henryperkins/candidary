@@ -449,7 +449,7 @@ test('reserving, queued, uploading, finalizing, cancel, failure, and retry all r
   await expectContained(page, 'complete upload lifecycle');
 });
 
-test('manager appearance PUT carries the canonical config and adopts the normalized fixture response', async ({ page }, testInfo) => {
+test('manager appearance autosaves the canonical config and adopts the normalized fixture response', async ({ page }, testInfo) => {
   onlyOnce(testInfo);
   await page.setViewportSize({ width: 390, height: 1200 });
   await stubManagerRoutes(page, {
@@ -459,11 +459,10 @@ test('manager appearance PUT carries the canonical config and adopts the normali
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Event appearance' })).toBeVisible();
 
-  await page.getByRole('radio', { name: /Coastal Light/u }).check();
   const themeRequest = page.waitForRequest(
     (request) => request.url().endsWith(`/api/manage/events/${EVENT_FIXTURE.id}/theme`),
   );
-  await page.getByRole('button', { name: 'Save appearance' }).click();
+  await page.getByRole('radio', { name: /Coastal Light/u }).check();
   const request = await themeRequest;
   expect(request.method()).toBe('PUT');
   expect(request.postDataJSON()).toEqual({
@@ -471,8 +470,39 @@ test('manager appearance PUT carries the canonical config and adopts the normali
     presetId: 'coastal-light',
     overrides: {},
   });
-  await expect(page.locator('.event-appearance-editor__status')).toHaveText('Saved');
+  await expect(page.locator('.event-appearance-editor__status .autosave-status__chip')).toHaveText('Saved');
   await expectTheme(page.locator('.event-appearance-preview'), eventTheme('coastal-light'));
+});
+
+test('manager Settings saves without a Save button and stays contained at 320 and 390', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await stubManagerRoutes(page, { mediaPages: { first: { media: [], nextCursor: null } } });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Event appearance' })).toBeVisible();
+
+  await expect(page.getByRole('button', { name: 'Save settings' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Save appearance' })).toHaveCount(0);
+
+  const settingsRequest = page.waitForRequest(
+    (request) => request.url().endsWith(`/api/manage/events/${EVENT_FIXTURE.id}/settings`),
+  );
+  const scrolledTo = await page.evaluate(() => {
+    window.scrollTo({ top: 400, behavior: 'instant' });
+    return window.scrollY;
+  });
+  await page.getByLabel('Show the optional shared gallery').click();
+  expect((await settingsRequest).method()).toBe('PATCH');
+  // Two live regions, each naming its own domain.
+  await expect(page.getByText('Event settings saved')).toBeAttached();
+  await expect(page.getByText('Event appearance saved')).toBeAttached();
+  // Status text arriving must not shift the page under the host's hands.
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrolledTo);
+
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expectContained(page, `manager settings autosave at ${width}`);
+  }
 });
 
 test('Notes placeholder uses the approved themed muted text role', async ({ page }, testInfo) => {
