@@ -208,6 +208,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .event-appearance-editor__preview h4 { margin: 0; font-family: 'Manrope', sans-serif; font-size: 1.1rem; }
 .event-appearance-editor__actions { display: grid; gap: 10px; }
 .event-appearance-editor__actions .button { width: 100%; min-height: 44px; }
+.autosave-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.autosave-status__chip { display: inline-block; width: fit-content; padding: 6px 10px; border-radius: 999px; background: var(--moss-soft); color: #4e5b28; font-size: .75rem; font-weight: 700; }
+.autosave-status__chip--scheduled, .autosave-status__chip--saving { background: var(--denim-soft); color: var(--chestnut); }
+.autosave-status__chip--invalid, .autosave-status__chip--failed { background: #fff1ee; color: var(--danger); }
+.autosave-status__retry { min-width: 44px; min-height: 44px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font: inherit; font-size: .8rem; font-weight: 700; cursor: pointer; }
+.autosave-status__retry:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .event-appearance-editor button:focus-visible, .event-appearance-editor input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 @media (max-width: 760px) {
   h1 { font-size: 2.8rem; }.page-header { min-height: 70px; padding: 0 20px; }
