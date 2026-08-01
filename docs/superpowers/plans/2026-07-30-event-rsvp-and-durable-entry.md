@@ -2125,6 +2125,20 @@ Expected: guest and phase tests pass without changing the photo-flow contract.
 
 ### Task 9: Add the host RSVP dashboard, roster editor, and durable-QR controls
 
+> **Supersession note (2026-08-01):** This task remains the historical record of
+> the first manager RSVP UI. Future roster-intake work is governed by
+> `docs/superpowers/specs/2026-08-01-rsvp-guest-list-intake-design.md` and the
+> manager-shell contracts merged in PR #10. In particular,
+> `ManagerRsvpPanel` now receives `onEventWrite`, and the future batch flow must
+> report `currentRosterVersion` through `onRosterVersionObserved`; a
+> manager-section change that would unmount the RSVP panel must first resolve any
+> registered dirty staging draft through `ManagerPage`'s single pending-work
+> coordinator; and the legacy strict-import and manual-create endpoints remain
+> API-compatible while their separate visible paths are replaced by the ordinary
+> manager UI's universal **Add guests** batch workspace. Exact strict CSV remains
+> an accepted input format. Do not use the original interface or visible setup
+> steps below as instructions for that later work.
+
 **Files:**
 
 - Create: `src/components/ManagerRsvpPanel.tsx`

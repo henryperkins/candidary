@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-01
 
-**Status:** Design approved; written-spec review corrections incorporated
+**Status:** Design approved; written-spec and PR #10 integration corrections incorporated
 
 ## 1. Decision
 
@@ -172,8 +172,14 @@ original source rather than asking for it again.
 The original source remains only in the active browser workspace. Every format,
 including an exact strict CSV, is transformed locally into the candidate batch;
 preview sends that batch rather than the raw file or pasted text. The source is
-not persisted across browser restarts. Closing a dirty workspace requires
-explicit discard confirmation.
+not persisted across browser restarts. Closing a dirty workspace, changing
+manager destinations, opening Settings for repair, or navigating Back or to
+another SPA route must not silently discard it. Explicit close and in-app
+navigation require discard confirmation. While the workspace is dirty, ordinary
+full-page unload invokes a `beforeunload` handler that requests the browser's
+native pending-work warning; abrupt browser or operating-system termination
+remains outside this guarantee because the draft is intentionally browser-only
+and non-persisted.
 
 ### 6.3 Structured-data path
 
@@ -305,12 +311,16 @@ host's earlier filters.
 
 ## 7. Workspace state and component boundaries
 
-`ManagerRsvpPanel` remains the manager RSVP coordinator, but it must not absorb
-the staging state. The new feature is isolated under `src/features/rsvp/`.
+`ManagerPage` remains the shell and owns cross-destination pending-work and
+whole-event read/write coordination. `ManagerRsvpPanel` remains the manager RSVP
+coordinator, but it must not absorb the staging state. The new feature is
+isolated under `src/features/rsvp/`.
 
 ```mermaid
 flowchart TD
-    PANEL[ManagerRsvpPanel]
+    SHELL[ManagerPage shell]
+    SHELL --> PANEL[ManagerRsvpPanel]
+    SHELL --> SETTINGS[Settings autosave domains]
     PANEL --> DASH[ManagerRsvpDashboard]
     PANEL --> LAUNCH[GuestListIntakeLauncher]
     PANEL --> EDITOR[ManagerRsvpHouseholdEditor]
@@ -327,10 +337,14 @@ flowchart TD
 
 Responsibilities are:
 
+- `ManagerPage` owns the single pending-work coordinator, the router blocker,
+  the `beforeunload` warning, manager-destination transitions, and the existing
+  whole-event read/write guard.
 - `GuestListIntakeLauncher` owns the pristine setup card and the persistent Add
   guests action.
 - `GuestListStagingWorkspace` owns step navigation, focus transitions, close
-  confirmation, and the active draft reducer.
+  requests, and the active draft reducer. It reports whether the draft is dirty
+  to `ManagerPage`; it does not install a second router blocker.
 - `GuestListCapture` owns file, paste, typing, advisory detection, and source
   preservation.
 - `GuestListColumnMapper` owns structured sample rows and semantic mapping.
@@ -366,6 +380,32 @@ Any state before `committing` may move backward without losing the active draft.
 Preview issues return to `organize` or `details` while keeping server issue
 references. A candidate or expected-version change clears the prior digest and
 idempotency key. An unchanged retry preserves them.
+
+The manager shell combines two different kinds of pending work without stacking
+prompts: Settings or appearance changes that may still save, and a guest-list
+draft that never autosaves. Settings or appearance work alone preserves PR #10's
+internal-destination behavior: leaving Settings flushes valid scheduled drafts
+and changes the destination immediately while the mounted Settings subtree
+continues saving. A dirty guest-list draft pauses `openSection` destination
+changes and the hidden Settings repair action for discard confirmation. When
+both kinds coexist, one prompt describes both rather than opening stacked
+prompts. While the guest-list draft is dirty, the prompt always offers **Stay**;
+that action cancels the pending transition and keeps the current RSVP destination
+and draft mounted. A Settings autosave becoming confirmed may auto-resume a
+blocked route only when no dirty guest-list draft remains. Proceeding therefore
+requires either an explicit guest-draft discard or a draft that has become
+pristine; autosave completion alone never authorizes its loss.
+
+Confirmed discard clears the guest-list draft before navigation; any Settings
+request already sent may still settle, and the prompt says so. A Settings-repair
+focus intent is armed only after that discard is confirmed and the transition
+will proceed. **Stay** clears the pending repair intent, so a later ordinary
+Settings click does not steal focus. A confirmed repair transition focuses the
+Settings heading once, then retires the intent. Existing autosave-recovery state
+survives the transition and remains visible until the affected domain actually
+recovers or the host explicitly dismisses it. Route or Back navigation remains
+under the shell's single blocker while either kind of work is unconfirmed.
+`beforeunload` is registered on the same condition.
 
 ## 8. Shared batch contract
 
@@ -560,6 +600,40 @@ later replay. Before another write, the workspace uses `currentRosterVersion`
 and refreshes any household whose current version was not part of the immutable
 receipt.
 
+Preview is an ordinary RSVP read. Commit, including an unchanged retry that may
+replay a receipt, runs through the `onEventWrite` callback already supplied by
+`ManagerPage`; this invalidates any whole-event read that began before the roster
+write. After success or replay, the workspace adopts `currentRosterVersion` and
+`ManagerRsvpPanel` calls a dedicated
+`onRosterVersionObserved(currentRosterVersion)` parent callback. `ManagerPage`
+immediately merges that trusted scalar into the parent `EventView` with
+`Math.max`, which also rebases the mounted hidden Settings editor. The existing
+no-argument `onEventChanged` and its droppable whole-event refresh are not used
+for this authoritative version transfer. A roster conflict follows the same
+contract after adopting its reported current version. No batch response replaces
+the whole parent event. RSVP-local household or summary refreshes remain
+separate; their failure is reported without losing the parent version or turning
+a committed receipt into a failure.
+
+A concurrent Settings autosave remains safe according to server-write order,
+not client response-arrival order:
+
+- If the Settings write commits first, it does not advance the roster version,
+  so the batch may still commit. If that Settings response arrives after the
+  batch response, the existing Settings-owned-field merge keeps the greater
+  `rsvpRosterVersion`.
+- If the batch commits first, an older in-flight Settings write receives the
+  existing `RSVP_ROSTER_INVALID` refusal, performs a fresh guarded read, rebases
+  the dirty intent, and uses the existing one-race retry contract.
+- If a dirty Settings draft has not been sent when the batch commits, the
+  parent callback's new roster-version prop rebases the draft and coalesces its
+  scheduled queue snapshot before it is sent, preserving the newer field
+  generations.
+
+Delayed or reversed response arrival does not change those rules. No path may
+regress `rsvpRosterVersion`, discard a newer Settings field, undo the roster
+batch, or make a committed batch appear unsuccessful.
+
 ### 9.3 Compatibility
 
 The existing strict endpoints remain supported for API compatibility:
@@ -751,6 +825,11 @@ Requirements include:
 - field-associated errors and a linked error summary;
 - live regions that distinguish committed success from a failed refresh after
   success;
+- manager-level autosave and recovery notices remain perceivable in the narrow
+  full-screen workspace without obscuring its primary action or stealing focus
+  when they appear in the background;
+- **Open settings** from such a notice uses the shared pending-work coordinator
+  and cannot bypass guest-list discard confirmation;
 - contained scrolling for long source samples, household lists, and issue lists;
 - visible selected state that does not rely on color alone; and
 - long names, labels, and translated messages that wrap without hiding actions.
@@ -790,6 +869,9 @@ change, and independent tasks receive independent commits.
 - responded-household attendance requirements;
 - atomic rollback for a late batch failure;
 - roster and household version conflicts;
+- cross-route server-write ordering: Settings-first leaves the roster version
+  unchanged and permits the batch, while batch-first makes the stale Settings
+  PATCH return `RSVP_ROSTER_INVALID`;
 - same-key/same-digest receipt replay;
 - same-key/changed-digest rejection;
 - concurrent same-key commit race replay;
@@ -825,7 +907,28 @@ change, and independent tasks receive independent commits.
 - unreadable and same-file retry behavior;
 - old-preview invalidation after new source failure;
 - oversized-batch recovery without losing the staged draft;
-- close/discard confirmation;
+- close/discard confirmation from explicit close, manager-section changes,
+  Settings repair, and SPA route or Back navigation, plus `beforeunload`
+  listener registration and removal and a cancellation request while dirty;
+- one combined pending-work prompt when Settings or appearance work and a dirty
+  guest-list draft coexist, with no second router blocker;
+- no route auto-proceed when Settings finishes but a guest-list draft remains
+  dirty, and **Stay** remaining available for that draft;
+- Settings-only internal destination changes preserving PR #10's immediate
+  navigation and background-save behavior;
+- Settings-repair focus arming only after confirmed discard, clearing on
+  **Stay**, remaining one-shot after transition, and ensuring neither **Stay**
+  nor **Open settings** clears the recovery notice;
+- preview remaining outside `onEventWrite` while commit, retry, and replay use
+  it;
+- success, replay, and conflict immediately propagating
+  `currentRosterVersion` through `onRosterVersionObserved` and a monotonic
+  `Math.max` parent merge;
+- both server-write orders between a roster batch and a Settings autosave,
+  delayed response orders, an in-flight refusal/rebase/retry, and an unsent dirty
+  draft rebasing from the parent version;
+- narrow-workspace manager notices that do not move focus, plus guarded **Open
+  settings** recovery;
 - uncertain commit retry and replayed receipt; and
 - direct access from the receipt to newly created or updated households.
 
@@ -836,6 +939,8 @@ change, and independent tasks receive independent commits.
 - 320 px and 390 px layouts;
 - 1280 px at 200% zoom;
 - keyboard-only grouping, mapping, review, and issue navigation;
+- internal destination changes and Settings-repair navigation preserving a dirty
+  draft on **Stay** and discarding it only after confirmation;
 - touch targets and contained internal scrolling;
 - accessibility scans for capture, grouping, errors, review, and receipt;
 - maximum household and long-name/error fixtures;
@@ -878,6 +983,14 @@ The design is ready for release consideration only when all of these are true:
     D1's binding limit and current domain limits.
 11. Public lookup protections, RSVP attendance semantics, the durable QR, and
     the private photo journey remain unchanged.
+12. No manager destination, Settings-repair action, SPA navigation, or Back
+    action can silently discard a dirty staging workspace. While dirty, an
+    ordinary full-page unload requests the browser's native pending-work warning;
+    the browser controls its presentation, and abrupt browser or operating-system
+    termination remains outside the guarantee.
+13. Batch commit participates in the manager event-write guard and propagates
+    the current roster version without regressing or discarding concurrent
+    Settings work.
 
 ## 16. Implementation and release boundaries
 
@@ -895,6 +1008,11 @@ The design is ready for release consideration only when all of these are true:
 - `docs/operations.md` must also replace its one-time-import-only intake and
   legacy load-harness narrative with the new additive-batch and rehearsal
   contracts while retaining the strict API's compatibility boundary.
+- The historical Task 9 section in
+  `docs/superpowers/plans/2026-07-30-event-rsvp-and-durable-entry.md` remains a
+  record of the first manager UI, but must point future intake work to this
+  design and PR #10's shell contracts rather than its original interface and
+  visible setup paths.
 - Do not push without asking first.
 - Do not deploy, apply remote D1 migrations, alter remote D1 or R2 data, or set
   or store secrets without explicit authorization.
@@ -925,6 +1043,19 @@ The written-spec review against the current RSVP source then resolved:
 - strict new schemas and typed conflict metadata;
 - operations and CSV documentation obligations; and
 - maximum-capacity load coverage for the new batch path.
+
+The post-merge review of PR #10 then added:
+
+- one manager-shell pending-work coordinator for Settings autosave and the
+  non-autosaving guest-list draft;
+- explicit protection for internal destinations, Settings repair, and route and
+  Back navigation, plus the native warning for ordinary page unload;
+- `onEventWrite` ownership for roster commit plus an authoritative scalar
+  callback and monotonic parent-event version merge after success, replay, or
+  conflict;
+- deterministic server-write and response-arrival rules for concurrent Settings
+  autosave and roster batch writes; and
+- a supersession boundary for the historical Task 9 implementation record.
 
 This document is the design source for the next implementation-planning phase.
 It does not authorize application changes, pushing, deployment, remote
