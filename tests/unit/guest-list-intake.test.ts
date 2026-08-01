@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  defaultMapping,
   materializePlainGuests,
   materializeStructuredSource,
   parseGuestListSource,
@@ -57,6 +58,25 @@ describe('guest-list intake helpers', () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ field: 'plusOneSlots' })]));
   });
 
+  it('recognizes common Guest, Household, Slots, and Key column labels', () => {
+    const parsed = parseGuestListSource('Guest,Household,Slots,Key\nA,Smith,1,smith\n');
+    expect(defaultMapping(parsed)).toEqual({
+      guestName: 0,
+      household: 1,
+      plusOneSlots: 2,
+      householdKey: 3,
+    });
+  });
+
+  it('validates mapped plus-one values even when Household is not mapped', () => {
+    const parsed = parseGuestListSource('Guest name,Plus-one slots\nA,two\n');
+
+    expect(parsed.firstRowIsHeader).toBe(true);
+    expect(validateMapping(parsed, {
+      guestName: 0, household: null, plusOneSlots: 1, householdKey: null,
+    })).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'plusOneSlots' })]));
+  });
+
   it('parses quoted CSV and tab-delimited rows including embedded newlines', () => {
     expect(parseGuestListSource('name,household\n"A, B","The\nHouse"\n').rows)
       .toEqual([['name', 'household'], ['A, B', 'The\nHouse']]);
@@ -78,6 +98,30 @@ describe('guest-list intake helpers', () => {
     expect(corrected.creates[0]?.clientHouseholdId).toBe(first.creates[0]?.clientHouseholdId);
     expect(corrected.creates[0]?.namedInvitees.map((invitee) => invitee.clientInviteeId))
       .toEqual(first.creates[0]?.namedInvitees.map((invitee) => invitee.clientInviteeId));
+  });
+
+  it('keeps the first guest in headerless structured data', () => {
+    const parsed = parseGuestListSource('Avery Lee,Lee household\nJordan Lee,Lee household\n');
+    const batch = materializeStructuredSource(parsed, {
+      guestName: 0, household: 1, plusOneSlots: null, householdKey: null,
+    });
+
+    expect(batch.creates).toHaveLength(1);
+    expect(batch.creates[0]?.namedInvitees.map((invitee) => invitee.displayName))
+      .toEqual(['Avery Lee', 'Jordan Lee']);
+  });
+
+  it('groups repeated households when only a later row supplies the household key', () => {
+    const parsed = parseGuestListSource('Guest,Household,Key\nAlex,Lee,\nSam,Lee,lee-family\n');
+    const mapping = { guestName: 0, household: 1, plusOneSlots: null, householdKey: 2 };
+
+    expect(validateMapping(parsed, mapping)).toEqual([]);
+    const batch = materializeStructuredSource(parsed, mapping);
+    expect(batch.creates).toHaveLength(1);
+    expect(batch.creates[0]).toMatchObject({
+      householdKey: { value: 'lee-family', provenance: 'supplied' },
+      namedInvitees: [{ displayName: 'Alex' }, { displayName: 'Sam' }],
+    });
   });
 
   it('makes blank structured households stable individual invitations and catches mapping dependencies', () => {

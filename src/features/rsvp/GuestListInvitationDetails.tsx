@@ -3,6 +3,7 @@ import type {
   RsvpRosterBatchDraft,
   RsvpRosterBatchIssue,
 } from '../../../shared/contracts';
+import { MAX_PLUS_ONES_PER_HOUSEHOLD } from '../../../shared/constants';
 
 import { clientId } from './guest-list-intake';
 
@@ -117,10 +118,10 @@ export function GuestListInvitationDetails({
           <input
             type="number"
             min="0"
-            max="10"
+            max={MAX_PLUS_ONES_PER_HOUSEHOLD}
             value={create.plusOneSlots}
             onChange={(event) => onChange(updateCreate(batch, create.clientHouseholdId, {
-              plusOneSlots: Math.min(10, Math.max(0, Number(event.target.value) || 0)),
+              plusOneSlots: Math.min(MAX_PLUS_ONES_PER_HOUSEHOLD, Math.max(0, Number(event.target.value) || 0)),
             }))}
           />
         </label>
@@ -190,10 +191,10 @@ export function GuestListInvitationDetails({
           <input
             type="number"
             min="0"
-            max="10"
+            max={MAX_PLUS_ONES_PER_HOUSEHOLD}
             value={append.plusOneSlotsToAdd}
             onChange={(event) => {
-              const slots = Math.min(10, Math.max(0, Number(event.target.value) || 0));
+              const slots = Math.min(MAX_PLUS_ONES_PER_HOUSEHOLD, Math.max(0, Number(event.target.value) || 0));
               onChange({
                 ...batch,
                 appends: batch.appends.map((current) => current.clientHouseholdId === append.clientHouseholdId

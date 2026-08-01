@@ -1112,6 +1112,17 @@ describe('manager roster batch intake', () => {
     });
   }
 
+  it('requires the manager CSRF pair before evaluating a roster preview', async () => {
+    const access = await eventAccess();
+    const response = await manage(access, '/roster/preview', {
+      method: 'POST',
+      body: JSON.stringify({ batch: createDraft(), expectedRosterVersion: 0 }),
+    }, false);
+
+    expect(response.status).toBe(403);
+    expect((await response.json<any>()).code).toBe('CSRF_INVALID');
+  });
+
   function createDraft(label = 'Rivera household', name = 'Sam Rivera'): {
     creates: Array<{
       clientHouseholdId: string;
@@ -1294,10 +1305,14 @@ describe('manager roster batch intake', () => {
     expect((await quotedResponse.json<any>()).data.canonicalBatch.creates[0].label)
       .toBe('Kō "quoted" 家庭');
 
+    const malformedUnicode = createDraft('Malformed household', `Guest${String.fromCharCode(0xd800)}`);
+    const malformedUnicodeResponse = await batchPreview(access, malformedUnicode);
+    expect(malformedUnicodeResponse.status).toBe(422);
+
     const exactlyMax = JSON.stringify({
       batch: createDraft(),
       expectedRosterVersion: 0,
-      padding: 'x'.repeat(512 * 1024),
+      padding: 'x'.repeat(MAX_RSVP_BATCH_BYTES),
     });
     const tooLarge = await manage(access, '/roster/preview', {
       method: 'POST',
@@ -1474,12 +1489,79 @@ describe('manager roster batch intake', () => {
     ]));
   });
 
+  it('keeps persisted and client household identities separate during batch evaluation', async () => {
+    const access = await eventAccess();
+    const created = await createHousehold(access, {
+      householdKey: 'existing-lee',
+      label: 'Existing Lee household',
+      namedInvitees: ['Alex Lee'],
+      plusOneSlots: 0,
+      expectedRosterVersion: 0,
+    });
+    const household = (await created.json<any>()).data.household as HouseholdDetail;
+
+    const collidingCreate = createDraft('New Lee household', 'Alex Lee');
+    collidingCreate.creates[0]!.clientHouseholdId = household.id;
+    const createPreview = (await (await batchPreview(access, collidingCreate, 1)).json<any>()).data;
+
+    expect(createPreview.canCommit).toBe(false);
+    expect(createPreview.issues).toContainEqual(expect.objectContaining({
+      clientHouseholdId: household.id,
+      code: 'household_lookup_unresolvable',
+    }));
+
+    const appendClientHouseholdId = clientId();
+    const appendedInviteeId = clientId();
+    const appendPreview = (await (await batchPreview(access, {
+      creates: [],
+      appends: [{
+        clientHouseholdId: appendClientHouseholdId,
+        householdId: household.id,
+        expectedHouseholdVersion: household.version,
+        namedInvitees: [{ clientInviteeId: appendedInviteeId, displayName: 'Alex Lee' }],
+        plusOneSlotsToAdd: 0,
+      }],
+    }, 1)).json<any>()).data;
+
+    expect(appendPreview.issues).toContainEqual(expect.objectContaining({
+      clientHouseholdId: appendClientHouseholdId,
+      clientInviteeId: appendedInviteeId,
+      code: 'household_duplicate_name',
+    }));
+
+    const firstAppendId = clientId();
+    const firstInviteeId = clientId();
+    const secondAppendId = clientId();
+    const duplicateTargetPreview = (await (await batchPreview(access, {
+      creates: [],
+      appends: [{
+        clientHouseholdId: firstAppendId,
+        householdId: household.id,
+        expectedHouseholdVersion: household.version,
+        namedInvitees: [{ clientInviteeId: firstInviteeId, displayName: 'Alex Lee' }],
+        plusOneSlotsToAdd: 0,
+      }, {
+        clientHouseholdId: secondAppendId,
+        householdId: household.id,
+        expectedHouseholdVersion: household.version,
+        namedInvitees: [{ clientInviteeId: clientId(), displayName: 'Unique Guest' }],
+        plusOneSlotsToAdd: 0,
+      }],
+    }, 1)).json<any>()).data;
+
+    expect(duplicateTargetPreview.issues).toContainEqual(expect.objectContaining({
+      clientHouseholdId: firstAppendId,
+      clientInviteeId: firstInviteeId,
+      code: 'household_duplicate_name',
+    }));
+  });
+
   it('enforces exact request limits and reports stale target details before writing', async () => {
     const access = await eventAccess();
     const draft = createDraft();
     const serialized = JSON.stringify({ batch: draft, expectedRosterVersion: 0 });
-    const exactMaximum = `${serialized}${' '.repeat(512 * 1024 - new TextEncoder().encode(serialized).byteLength)}`;
-    expect(new TextEncoder().encode(exactMaximum).byteLength).toBe(512 * 1024);
+    const exactMaximum = `${serialized}${' '.repeat(MAX_RSVP_BATCH_BYTES - new TextEncoder().encode(serialized).byteLength)}`;
+    expect(new TextEncoder().encode(exactMaximum).byteLength).toBe(MAX_RSVP_BATCH_BYTES);
     const exact = await manage(access, '/roster/preview', {
       method: 'POST',
       body: new TextEncoder().encode(exactMaximum),
@@ -1836,10 +1918,21 @@ describe('manager roster batch intake', () => {
       expectedRosterVersion: 0,
       idempotencyKey: 'maximum-batch',
     });
+    const receipt = (await committed.json<any>()).data;
     expect(committed.status).toBe(201);
     expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_households')
       .first<number>('count')).toBe(25);
     expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_invitees')
       .first<number>('count')).toBe(500);
+
+    const overCapacity = createDraft('One household too many', 'Unique Overflow Guest');
+    overCapacity.creates[0]!.clientHouseholdId = receipt.createdHouseholds[0]!.householdId;
+    overCapacity.creates[0]!.plusOneSlots = 0;
+    const overCapacityPreview = (await (await batchPreview(access, overCapacity, 1)).json<any>()).data;
+    expect(overCapacityPreview.totals.resultingInvitedCapacity).toBe(501);
+    expect(overCapacityPreview.canCommit).toBe(false);
+    expect(overCapacityPreview.issues).toContainEqual(expect.objectContaining({
+      code: 'event_capacity_limit',
+    }));
   });
 });

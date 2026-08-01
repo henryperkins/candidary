@@ -265,8 +265,8 @@ test('the household editor and staged intake issues scroll only inside their own
   await page.setViewportSize({ width: 320, height: 900 });
   await page.getByRole('button', { name: 'Add guests' }).click();
   await page.getByLabel('Guest names or spreadsheet data').fill('Taylor Morgan');
-  await page.getByRole('button', { name: 'Continue' }).click();
-  await page.getByRole('button', { name: 'Continue to details' }).click();
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByRole('button', { name: 'Continue to details', exact: true }).click();
   await page.getByRole('button', { name: 'Review guests' }).click();
 
   const issues = page.getByRole('region', { name: 'Guest list review issues' });

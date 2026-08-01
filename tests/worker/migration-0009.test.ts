@@ -39,6 +39,18 @@ it('constrains roster batch receipts and removes them with the event', async () 
     ) VALUES (?, ?, ?, ?, ?)
   `).bind(
     access.event.id,
+    'receipt-key',
+    'd'.repeat(64),
+    receipt,
+    new Date().toISOString(),
+  ).run()).rejects.toThrow();
+
+  await expect(testEnv.DB.prepare(`
+    INSERT INTO rsvp_roster_batch_receipts (
+      event_id, idempotency_key, request_digest, receipt_json, created_at
+    ) VALUES (?, ?, ?, ?, ?)
+  `).bind(
+    access.event.id,
     '',
     'b'.repeat(64),
     receipt,

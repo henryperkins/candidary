@@ -1572,7 +1572,7 @@ export class RsvpService {
         });
       }
 
-      const responded = household?.firstRespondedAt !== null && household !== undefined;
+      const responded = household !== undefined && household.firstRespondedAt !== null;
       const namedInvitees = append.namedInvitees.map((invitee) => {
         const displayName = this.batchText(invitee.displayName, issues, {
           clientHouseholdId: append.clientHouseholdId,
@@ -1644,23 +1644,25 @@ export class RsvpService {
       plusOneCount: number;
       clientHouseholdId?: string;
     }>();
+    const existingEvaluationKey = (householdId: string) => `existing:${householdId}`;
+    const createEvaluationKey = (clientHouseholdId: string) => `create:${clientHouseholdId}`;
     for (const household of households) {
       if (household.archivedAt !== null) continue;
       const invitees = inviteesByHousehold.get(household.id) ?? [];
-      compositions.set(household.id, {
+      compositions.set(existingEvaluationKey(household.id), {
         namedCount: invitees.filter((invitee) => invitee.kind === 'named').length,
         plusOneCount: invitees.filter((invitee) => invitee.kind === 'plus_one').length,
       });
     }
     for (const append of appends) {
-      const composition = compositions.get(append.householdId);
+      const composition = compositions.get(existingEvaluationKey(append.householdId));
       if (!composition) continue;
       composition.namedCount += append.namedInvitees.length;
       composition.plusOneCount += append.plusOneSlotsToAdd;
       composition.clientHouseholdId = append.clientHouseholdId;
     }
     for (const create of creates) {
-      compositions.set(create.clientHouseholdId, {
+      compositions.set(createEvaluationKey(create.clientHouseholdId), {
         namedCount: create.namedInvitees.length,
         plusOneCount: create.plusOneSlots,
         clientHouseholdId: create.clientHouseholdId,
@@ -1707,54 +1709,68 @@ export class RsvpService {
     }
 
     const lookupKeys = new Map<string, string[]>();
-    const lookupClientIds = new Map<string, Map<string, string[]>>();
+    const lookupClients = new Map<string, Map<string, Array<{
+      clientHouseholdId: string;
+      clientInviteeId: string;
+    }>>>();
     for (const household of households) {
       if (household.archivedAt !== null) continue;
-      lookupKeys.set(household.id, (inviteesByHousehold.get(household.id) ?? [])
+      lookupKeys.set(existingEvaluationKey(household.id), (inviteesByHousehold.get(household.id) ?? [])
         .filter((invitee) => invitee.kind === 'named' && invitee.lookupDigest !== null)
         .map((invitee) => invitee.lookupDigest!));
     }
     for (const append of appends) {
       const household = targets.get(append.clientHouseholdId)?.household;
       if (!household || household.archivedAt !== null) continue;
-      const keys = lookupKeys.get(household.id) ?? [];
-      const clientIds = lookupClientIds.get(household.id) ?? new Map<string, string[]>();
+      const evaluationKey = existingEvaluationKey(household.id);
+      const keys = lookupKeys.get(evaluationKey) ?? [];
+      const clients = lookupClients.get(evaluationKey) ?? new Map();
       for (const invitee of append.namedInvitees) {
         const parsed = parsePersonText(invitee.displayName);
         if (!parsed.ok) continue;
         const digest = await this.lookupDigest(event.id, normalizeInvitedName(parsed.value));
         keys.push(digest);
-        const ids = clientIds.get(digest);
-        if (ids) ids.push(invitee.clientInviteeId);
-        else clientIds.set(digest, [invitee.clientInviteeId]);
+        const collisionClients = clients.get(digest) ?? [];
+        collisionClients.push({
+          clientHouseholdId: append.clientHouseholdId,
+          clientInviteeId: invitee.clientInviteeId,
+        });
+        clients.set(digest, collisionClients);
       }
-      lookupKeys.set(household.id, keys);
-      lookupClientIds.set(household.id, clientIds);
+      lookupKeys.set(evaluationKey, keys);
+      lookupClients.set(evaluationKey, clients);
     }
     for (const create of creates) {
+      const evaluationKey = createEvaluationKey(create.clientHouseholdId);
       const keys: string[] = [];
-      const clientIds = new Map<string, string[]>();
+      const clients = new Map<string, Array<{
+        clientHouseholdId: string;
+        clientInviteeId: string;
+      }>>();
       for (const invitee of create.namedInvitees) {
         const parsed = parsePersonText(invitee.displayName);
         if (!parsed.ok) continue;
         const digest = await this.lookupDigest(event.id, normalizeInvitedName(parsed.value));
         keys.push(digest);
-        const ids = clientIds.get(digest);
-        if (ids) ids.push(invitee.clientInviteeId);
-        else clientIds.set(digest, [invitee.clientInviteeId]);
+        const collisionClients = clients.get(digest) ?? [];
+        collisionClients.push({
+          clientHouseholdId: create.clientHouseholdId,
+          clientInviteeId: invitee.clientInviteeId,
+        });
+        clients.set(digest, collisionClients);
       }
-      lookupKeys.set(create.clientHouseholdId, keys);
-      lookupClientIds.set(create.clientHouseholdId, clientIds);
+      lookupKeys.set(evaluationKey, keys);
+      lookupClients.set(evaluationKey, clients);
     }
     for (const collision of findLookupCollisions([...lookupKeys.entries()].map(
       ([householdId, nameKeys]) => ({ householdId, nameKeys }),
     ))) {
-      const clientIds = lookupClientIds.get(collision.householdId)?.get(collision.nameKey);
-      if (clientIds?.length) {
-        for (const clientInviteeId of clientIds) {
+      const clients = lookupClients.get(collision.householdId)?.get(collision.nameKey);
+      if (clients?.length) {
+        for (const client of clients) {
           this.batchIssue(issues, {
-            clientHouseholdId: collision.householdId,
-            clientInviteeId,
+            clientHouseholdId: client.clientHouseholdId,
+            clientInviteeId: client.clientInviteeId,
             field: 'namedInvitees.displayName',
             code: collision.code,
             message: 'These names would make this household impossible to identify.',

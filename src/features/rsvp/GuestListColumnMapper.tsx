@@ -7,17 +7,28 @@ const FIELDS: Array<{ value: GuestListColumn; label: string; required?: boolean 
   { value: 'householdKey', label: 'Household key (advanced)' },
 ];
 
-export function GuestListColumnMapper({ parsed, mapping, issues, onMapping }: {
-  parsed: ReturnType<typeof parseGuestListSource>; mapping: GuestListMapping; issues: GuestListLocalIssue[]; onMapping(value: GuestListMapping): void;
+export function GuestListColumnMapper({ parsed, mapping, issues, onMapping, onHeaderChange }: {
+  parsed: ReturnType<typeof parseGuestListSource>; mapping: GuestListMapping; issues: GuestListLocalIssue[]; onMapping(value: GuestListMapping): void; onHeaderChange(value: boolean): void;
 }) {
-  const headers = parsed.rows[0] ?? [];
+  const headers = parsed.firstRowIsHeader
+    ? parsed.rows[0] ?? []
+    : Array.from({ length: parsed.rows[0]?.length ?? 0 }, (_, index) => `Column ${index + 1}`);
   return <div className="guest-list-mapper">
     <p>Map each source column. Guest name is required; household key is available only when Household is mapped.</p>
+    <label>
+      <input
+        type="checkbox"
+        checked={parsed.firstRowIsHeader}
+        onChange={(event) => onHeaderChange(event.target.checked)}
+      /> First row contains column labels
+    </label>
     {FIELDS.map(({ value, label, required }) => <label key={value}>
       {label}{required ? ' (required)' : ''}
-      <select value={mapping[value] ?? ''} onChange={(event) => {
+      <select id={`guest-list-mapping-${value}`} value={mapping[value] ?? ''} onChange={(event) => {
         const index = event.target.value === '' ? null : Number(event.target.value);
-        onMapping({ ...mapping, [value]: index });
+        const next = { ...mapping, [value]: index };
+        if (value === 'household' && index === null) next.householdKey = null;
+        onMapping(next);
       }} disabled={value === 'householdKey' && mapping.household === null}>
         <option value="">Not mapped</option>
         {headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header || `Column ${index + 1}`}</option>)}

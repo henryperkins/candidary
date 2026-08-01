@@ -22,6 +22,8 @@ const live = process.env.CANDIDARY_RSVP_CONFIRM === 'I_UNDERSTAND';
 // plus-one slot per household, which is the largest capacity the contract allows.
 const HOUSEHOLDS = 250;
 const CAPACITY = HOUSEHOLDS * 2;
+// Keep in sync with MAX_RSVP_BATCH_BYTES in shared/constants.ts. This standalone
+// Node harness does not load the application's TypeScript modules.
 const MAX_BATCH_BYTES = 512 * 1024;
 // The D1 per-event/IP budget. The attempt after it must be refused.
 const IP_ATTEMPT_BUDGET = 20;

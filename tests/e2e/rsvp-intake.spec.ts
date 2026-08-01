@@ -263,9 +263,9 @@ test('file quick-add maps columns, recovers a linked issue, and opens the update
     displayName: 'Sam Rivera',
   }]);
 
-  await page.getByRole('button', { name: 'Add 2 guests across 1 households' }).click();
+  await page.getByRole('button', { name: 'Add 2 guests across 1 household' }).click();
   await expect(page.getByRole('heading', { name: 'Guests added' })).toBeVisible();
-  await expect(page.getByText('1 households updated')).toBeVisible();
+  await expect(page.getByText('1 household updated')).toBeVisible();
   await expect.poll(() => requests.commits.length).toBe(1);
   await page.getByRole('button', { name: 'Open The Morgan household' }).click();
   await expect(page.getByRole('heading', { name: 'The Morgan household' })).toBeVisible();

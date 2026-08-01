@@ -27,6 +27,7 @@ import { GuestListBatchReview, GuestListIssueSummary } from './GuestListBatchRev
 import { GuestListCapture } from './GuestListCapture';
 import { GuestListColumnMapper } from './GuestListColumnMapper';
 import { GuestListCommitReceipt, type AffectedHousehold } from './GuestListCommitReceipt';
+import { countLabel } from './guest-list-copy';
 import { GuestListGroupingBoard } from './GuestListGroupingBoard';
 import { GuestListHouseholdTargetPicker } from './GuestListHouseholdTargetPicker';
 import { GuestListInvitationDetails, type PlusOneResponseDraft } from './GuestListInvitationDetails';
@@ -73,6 +74,46 @@ function sameBatch(
   return left !== null && JSON.stringify(left) === JSON.stringify(right);
 }
 
+function preservePlainDetailEdits(
+  next: RsvpRosterBatchDraft,
+  previous: RsvpRosterBatchDraft | null,
+): RsvpRosterBatchDraft {
+  if (!previous) return next;
+  const previousCreates = new Map(previous.creates.map((create) => [create.clientHouseholdId, create]));
+  const previousAppends = new Map(previous.appends.map((append) => [append.clientHouseholdId, append]));
+  const previousInvitees = new Map(
+    [...previous.creates, ...previous.appends]
+      .flatMap((household) => household.namedInvitees)
+      .map((invitee) => [invitee.clientInviteeId, invitee]),
+  );
+  return {
+    creates: next.creates.map((create) => {
+      const previousCreate = previousCreates.get(create.clientHouseholdId);
+      return {
+        ...create,
+        ...(previousCreate ? {
+          label: previousCreate.label,
+          plusOneSlots: previousCreate.plusOneSlots,
+        } : {}),
+        namedInvitees: create.namedInvitees.map((invitee) => previousInvitees.get(invitee.clientInviteeId) ?? invitee),
+      };
+    }),
+    appends: next.appends.map((append) => {
+      const previousAppend = previousAppends.get(append.clientHouseholdId);
+      return {
+        ...append,
+        ...(previousAppend ? {
+          plusOneSlotsToAdd: previousAppend.plusOneSlotsToAdd,
+          ...(previousAppend.newPlusOneResponses
+            ? { newPlusOneResponses: previousAppend.newPlusOneResponses }
+            : {}),
+        } : {}),
+        namedInvitees: append.namedInvitees.map((invitee) => previousInvitees.get(invitee.clientInviteeId) ?? invitee),
+      };
+    }),
+  };
+}
+
 export function GuestListStagingWorkspace({
   eventId,
   rosterVersion,
@@ -84,6 +125,7 @@ export function GuestListStagingWorkspace({
   onCommitted,
   onRosterVersionObserved,
   onOpenHousehold,
+  onCommitPendingChange,
 }: {
   eventId: string;
   rosterVersion: number;
@@ -95,6 +137,7 @@ export function GuestListStagingWorkspace({
   onCommitted(): void;
   onRosterVersionObserved(version: number): void;
   onOpenHousehold(householdId: string): void;
+  onCommitPendingChange?(pending: boolean): void;
 }) {
   const draft = useGuestListDraft();
   const [step, setStep] = useState<Step>('capture');
@@ -108,6 +151,7 @@ export function GuestListStagingWorkspace({
   const [preview, setPreview] = useState<RsvpRosterBatchPreviewResponse | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [committing, setCommitting] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<RsvpRosterBatchCommitResponse | null>(null);
   const [receiptAffected, setReceiptAffected] = useState<AffectedHousehold[]>([]);
@@ -118,11 +162,13 @@ export function GuestListStagingWorkspace({
   const discardedEpoch = useRef(0);
   const observedRosterVersion = useRef(rosterVersion);
   const materializedIds = useRef(new Map<string, string>());
+  const previewTicket = useRef(0);
 
   useEffect(() => { onDirtyChange(draft.dirty); }, [draft.dirty, onDirtyChange]);
   useEffect(() => {
     if (!discardEpoch || discardedEpoch.current === discardEpoch) return;
     discardedEpoch.current = discardEpoch;
+    previewTicket.current += 1;
     draft.reset();
     setPreview(null);
     setReceipt(null);
@@ -130,6 +176,7 @@ export function GuestListStagingWorkspace({
     setIdempotencyKey(null);
     setOrganizationChanged(true);
     setTargetPending(false);
+    setBusy(false);
     onDirtyChange(false);
   }, [discardEpoch, draft.reset, onDirtyChange]);
   useEffect(() => {
@@ -140,9 +187,13 @@ export function GuestListStagingWorkspace({
   useEffect(() => {
     if (observedRosterVersion.current === rosterVersion) return;
     observedRosterVersion.current = rosterVersion;
+    previewTicket.current += 1;
     setPreview(null);
     setIdempotencyKey(null);
+    setBusy(false);
+    setStep((current) => current === 'review' ? 'details' : current);
   }, [rosterVersion]);
+  useEffect(() => () => { previewTicket.current += 1; }, []);
   useEffect(() => {
     if (!issueFocus) return;
     const frame = requestAnimationFrame(() => document.getElementById(issueFocus)?.focus());
@@ -157,12 +208,14 @@ export function GuestListStagingWorkspace({
   }, [draft.groups, draft.people]);
 
   function invalidate() {
+    previewTicket.current += 1;
     setPreview(null);
     setIdempotencyKey(null);
     setReceipt(null);
     setReceiptAffected([]);
     setError('');
     setIssueFocus(null);
+    setBusy(false);
   }
 
   function setSource(source: string) {
@@ -223,6 +276,7 @@ export function GuestListStagingWorkspace({
       ? materializeStructuredSource(parsed, mapping, materializedIds.current)
       : materializePlainGuests(draft.people, draft.groups, materializedIds.current);
     if (target) batch = appendTarget(batch, target, materializedIds.current);
+    if (kind === 'plain') batch = preservePlainDetailEdits(batch, draft.batch);
     const changed = !sameBatch(draft.batch, batch);
     if (changed) draft.setBatch(batch);
     if (target?.firstRespondedAt) ensurePlusOneDraftRows(batch);
@@ -292,6 +346,8 @@ export function GuestListStagingWorkspace({
       setError('This guest-list batch is too large to review. Split it into smaller additions.');
       return;
     }
+    const ticket = previewTicket.current + 1;
+    previewTicket.current = ticket;
     setBusy(true);
     setError('');
     try {
@@ -299,24 +355,64 @@ export function GuestListStagingWorkspace({
         `/api/manage/events/${eventId}/rsvp/roster/preview`,
         { method: 'POST', body: JSON.stringify({ batch: candidate, expectedRosterVersion: rosterVersion }) },
       );
+      if (previewTicket.current !== ticket) return;
+      const changedTargets = result.targetVersions.flatMap((version) => {
+        const append = candidate.appends.find((item) => item.clientHouseholdId === version.clientHouseholdId);
+        return append && append.expectedHouseholdVersion !== version.version
+          ? [{
+              clientHouseholdId: version.clientHouseholdId,
+              householdId: version.householdId,
+              currentHouseholdVersion: version.version,
+              state: 'changed' as const,
+            }]
+          : [];
+      });
+      if (result.rosterVersion !== rosterVersion || changedTargets.length > 0) {
+        setPreview(null);
+        setIdempotencyKey(null);
+        setStep('details');
+        if (changedTargets.length > 0) {
+          const details: RsvpRosterBatchConflictDetails = {
+            currentRosterVersion: result.rosterVersion,
+            targets: changedTargets,
+          };
+          const refreshed = await fetchConflictTargets(details);
+          if (previewTicket.current !== ticket) return;
+          setConflicts(conflictMap(details));
+          adoptConflictTargets(details, refreshed);
+          setError('A selected household changed. Review the highlighted addition before previewing again.');
+          setIssueFocus(`guest-list-card-${changedTargets[0]!.clientHouseholdId}`);
+        } else {
+          setError('The guest list changed since this batch was started. Review this batch again.');
+        }
+        onRosterVersionObserved(result.rosterVersion);
+        return;
+      }
       setPreview(result);
       if (result.canCommit) setIdempotencyKey((current) => current ?? clientId());
       setStep('review');
     } catch (caught) {
+      if (previewTicket.current !== ticket) return;
       setError(caught instanceof Error ? caught.message : 'The guest list could not be reviewed.');
     } finally {
-      setBusy(false);
+      if (previewTicket.current === ticket) setBusy(false);
     }
   }
 
-  async function loadConflictTargets(details: RsvpRosterBatchConflictDetails) {
-    const refreshed = await Promise.all(details.targets.map(async (item) => {
+  async function fetchConflictTargets(details: RsvpRosterBatchConflictDetails) {
+    return Promise.all(details.targets.map(async (item) => {
       try {
         return await api<RsvpHouseholdDetail>(`/api/manage/events/${eventId}/rsvp/households/${item.householdId}`);
       } catch {
         return null;
       }
     }));
+  }
+
+  function adoptConflictTargets(
+    details: RsvpRosterBatchConflictDetails,
+    refreshed: Array<RsvpHouseholdDetail | null>,
+  ) {
     const activeTarget = refreshed.find((detail) => detail?.id === target?.id) ?? null;
     if (activeTarget) {
       setTarget(activeTarget);
@@ -328,6 +424,8 @@ export function GuestListStagingWorkspace({
   async function commit() {
     if (!preview || !preview.canCommit || !idempotencyKey) return;
     setBusy(true);
+    setCommitting(true);
+    onCommitPendingChange?.(true);
     setError('');
     try {
       const result = await onEventWrite(() => api<RsvpRosterBatchCommitResponse>(
@@ -356,7 +454,7 @@ export function GuestListStagingWorkspace({
           setConflicts(conflictMap(details));
           setPreview(null);
           setIdempotencyKey(null);
-          await loadConflictTargets(details);
+          adoptConflictTargets(details, await fetchConflictTargets(details));
           setError(`${caught.message} Review the highlighted household additions again.`);
           const firstTarget = details.targets[0];
           if (firstTarget) setIssueFocus(`guest-list-card-${firstTarget.clientHouseholdId}`);
@@ -373,6 +471,8 @@ export function GuestListStagingWorkspace({
       }
     } finally {
       setBusy(false);
+      setCommitting(false);
+      onCommitPendingChange?.(false);
     }
   }
 
@@ -394,6 +494,16 @@ export function GuestListStagingWorkspace({
   }
 
   function focusIssue(issue: RsvpRosterBatchIssue) {
+    if (issue.field === 'householdKey.value') {
+      setIssueFocus('guest-list-mapping-householdKey');
+      setStep('organize');
+      return;
+    }
+    if (issue.field === 'householdId' || issue.code.startsWith('target_household_')) {
+      setIssueFocus('guest-list-target');
+      setStep('organize');
+      return;
+    }
     const id = issue.clientInviteeId
       ? `guest-list-field-${issue.clientInviteeId}-${issue.field}`
       : issue.clientHouseholdId
@@ -432,7 +542,7 @@ export function GuestListStagingWorkspace({
       <h3 id="guest-list-workspace-title" tabIndex={-1} ref={heading}>
         {step === 'capture' ? 'Add guests' : step === 'organize' ? 'Organize invitations' : step === 'details' ? 'Invitation details' : step === 'review' ? 'Review guest list' : 'Guests added'}
       </h3>
-      {step !== 'receipt' && <button type="button" className="text-button" onClick={onClose}>Close</button>}
+      {step !== 'receipt' && <button type="button" className="text-button" disabled={committing} onClick={onClose}>Close</button>}
     </div>
     {error && <p className="guest-list-workspace__error" role="alert">{error}</p>}
 
@@ -450,7 +560,7 @@ export function GuestListStagingWorkspace({
       onTarget={selectTarget}
       onTargetPending={setTargetPending}
       onContinue={() => {
-        if (parsed.strictHeader && kind === 'structured') materialize();
+        if (parsed.strictHeader && parsed.firstRowIsHeader && kind === 'structured') materialize();
         else setStep('organize');
       }}
     />}
@@ -460,6 +570,15 @@ export function GuestListStagingWorkspace({
         parsed={parsed}
         mapping={mapping}
         issues={mappingIssues}
+        onHeaderChange={(firstRowIsHeader) => {
+          const nextParsed = { ...parsed, firstRowIsHeader };
+          const nextMapping = defaultMapping(nextParsed);
+          setParsed(nextParsed);
+          setMapping(nextMapping);
+          setMappingIssues(validateMapping(nextParsed, nextMapping));
+          setOrganizationChanged(true);
+          invalidate();
+        }}
         onMapping={(next) => {
           setMapping(next);
           setMappingIssues(validateMapping(parsed, next));
@@ -544,6 +663,6 @@ export function GuestListStagingWorkspace({
         setStep('capture');
       }}
     />}
-    {blocking.length > 0 && <p className="sr-only" aria-live="polite">{blocking.length} blocking issues need attention.</p>}
+    {blocking.length > 0 && <p className="sr-only" aria-live="polite">{countLabel(blocking.length, 'blocking issue')} {blocking.length === 1 ? 'needs' : 'need'} attention.</p>}
   </section>;
 }

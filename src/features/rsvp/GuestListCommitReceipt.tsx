@@ -1,5 +1,7 @@
 import type { RsvpRosterBatchCommitResponse } from '../../../shared/contracts';
 
+import { countLabel } from './guest-list-copy';
+
 export interface AffectedHousehold {
   householdId: string;
   label: string;
@@ -22,10 +24,10 @@ export function GuestListCommitReceipt({
     <div role="status" aria-live="polite">
       <p>Guest list updated{receipt.replayed ? ' (retry confirmed)' : ''}.</p>
       <ul>
-        <li>{receipt.totals.householdsCreated} households created</li>
-        <li>{receipt.totals.householdsUpdated} households updated</li>
-        <li>{receipt.totals.namedInviteesAdded} named guests added</li>
-        <li>{receipt.totals.plusOneCapacityAdded} plus-one slots added</li>
+        <li>{countLabel(receipt.totals.householdsCreated, 'household')} created</li>
+        <li>{countLabel(receipt.totals.householdsUpdated, 'household')} updated</li>
+        <li>{countLabel(receipt.totals.namedInviteesAdded, 'named guest')} added</li>
+        <li>{countLabel(receipt.totals.plusOneCapacityAdded, 'plus-one slot')} added</li>
         <li>{receipt.totals.resultingInvitedCapacity} invited capacity</li>
       </ul>
     </div>

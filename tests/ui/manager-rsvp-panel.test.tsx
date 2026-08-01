@@ -145,6 +145,39 @@ afterEach(() => {
 });
 
 describe('manager RSVP panel', () => {
+  it('waits for the roster probes before choosing setup or dashboard UI', async () => {
+    let resolveSummary: ((response: Response) => void) | null = null;
+    let resolveActive: ((response: Response) => void) | null = null;
+    let resolveHistory: ((response: Response) => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) {
+        return new Promise<Response>((resolve) => { resolveSummary = resolve; });
+      }
+      if (url.pathname.endsWith('/households') && url.searchParams.get('state') === 'archived') {
+        return new Promise<Response>((resolve) => { resolveHistory = resolve; });
+      }
+      if (url.pathname.endsWith('/households')) {
+        return new Promise<Response>((resolve) => { resolveActive = resolve; });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'Add guests' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Invited capacity' })).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(resolveSummary).not.toBeNull();
+      expect(resolveActive).not.toBeNull();
+      expect(resolveHistory).not.toBeNull();
+    });
+    resolveSummary!(await success(emptySummary));
+    resolveActive!(await success({ households: [], nextCursor: null }));
+    resolveHistory!(await success({ households: [], nextCursor: null }));
+    expect(await screen.findByRole('heading', { name: 'Start your guest list' })).toBeVisible();
+  });
+
   it('replaces dashboard totals only after active and archived roster checks confirm a pristine event', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = route(input);
@@ -267,13 +300,82 @@ describe('manager RSVP panel', () => {
     await user.click(screen.getByRole('button', { name: 'Group as one invitation' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 2 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 2 guests across 1 household' }));
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[0]?.body).toMatchObject({ expectedRosterVersion: 7 });
     expect(calls[1]?.body).toMatchObject({ previewDigest: 'digest', expectedRosterVersion: 7 });
     expect(onWrite).toHaveBeenCalledTimes(1);
     expect(observed).toHaveBeenCalledWith(8);
     expect(await screen.findByRole('status')).toHaveTextContent('Guest list updated');
+  });
+
+  it('keeps the dashboard mounted while a later roster filter request is pending', async () => {
+    let resolveFiltered: ((response: Response) => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households') && url.searchParams.get('query') === 'rivera') {
+        return new Promise<Response>((resolve) => { resolveFiltered = resolve; });
+      }
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    expect(await screen.findByRole('group', { name: 'Invited capacity' })).toBeVisible();
+    await user.type(screen.getByLabelText('Search guest list'), 'rivera');
+    await waitFor(() => expect(resolveFiltered).not.toBeNull());
+
+    expect(screen.getByRole('group', { name: 'Invited capacity' })).toBeVisible();
+    expect(screen.getByLabelText('Search guest list')).toHaveValue('rivera');
+
+    resolveFiltered!(await success(listPage('The Rivera household')));
+    expect(await screen.findByRole('button', { name: /The Rivera household/ })).toBeVisible();
+  });
+
+  it('does not let a superseded preview replace a newer invitation edit', async () => {
+    let resolvePreview: ((response: Response) => void) | null = null;
+    let previewBatch: any;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success({ households: [], nextCursor: null });
+      if (url.pathname.endsWith('/roster/preview')) {
+        previewBatch = JSON.parse(String(init?.body)).batch;
+        return new Promise<Response>((resolve) => { resolvePreview = resolve; });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await waitFor(() => expect(resolvePreview).not.toBeNull());
+
+    const name = screen.getByLabelText('Guest name');
+    await user.clear(name);
+    await user.type(name, 'Taylor Rose');
+    resolvePreview!(new Response(JSON.stringify({
+      data: {
+        canonicalBatch: previewBatch,
+        rosterVersion: 7,
+        targetVersions: [],
+        totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+        issues: [],
+        previewDigest: 'stale-preview',
+        canCommit: true,
+      },
+      requestId: 'request-a',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Add 1 guest across 1 household/ })).not.toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'Invitation details' })).toBeVisible();
+    expect(screen.getByLabelText('Guest name')).toHaveValue('Taylor Rose');
   });
 
   it('preserves invitation detail edits across backward navigation until organization changes', async () => {
@@ -287,7 +389,7 @@ describe('manager RSVP panel', () => {
     render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Add guests' }));
-    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan\nAlex Morgan');
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan\nAlex Morgan\nJamie Lee');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
 
@@ -308,12 +410,35 @@ describe('manager RSVP panel', () => {
     expect(screen.getAllByLabelText('Plus-one slots')[0]).toHaveValue(2);
 
     await user.click(screen.getByRole('button', { name: 'Back' }));
-    await user.click(screen.getByLabelText('Taylor Morgan'));
     await user.click(screen.getByLabelText('Alex Morgan'));
+    await user.click(screen.getByLabelText('Jamie Lee'));
     await user.click(screen.getByRole('button', { name: 'Group as one invitation' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
-    expect(screen.getAllByLabelText('Invitation label')).toHaveLength(1);
-    expect(screen.getByLabelText('Invitation label')).toHaveValue('Taylor Morgan and Alex Morgan');
+    expect(screen.getAllByLabelText('Invitation label')).toHaveLength(2);
+    expect(screen.getAllByLabelText('Invitation label').map((input) => (input as HTMLInputElement).value))
+      .toContain('Taylor and guests');
+    expect(screen.getAllByLabelText('Guest name').map((input) => (input as HTMLInputElement).value))
+      .toContain('Taylor Rose');
+    const preserved = screen.getByDisplayValue('Taylor and guests').closest('section');
+    expect(preserved).not.toBeNull();
+    expect(within(preserved!).getByLabelText('Plus-one slots')).toHaveValue(2);
+  });
+
+  it('exposes the input format choices as one keyboard radio group', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success({ households: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+
+    const radios = screen.getAllByRole('radio') as HTMLInputElement[];
+    expect(radios).toHaveLength(2);
+    expect(radios[0]?.name).not.toBe('');
+    expect(radios[1]?.name).toBe(radios[0]?.name);
   });
 
   it('keeps affected-household receipt links after adopting the committed roster version', async () => {
@@ -355,7 +480,7 @@ describe('manager RSVP panel', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 1 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
 
     expect(await screen.findByRole('heading', { name: 'Guests added' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open Taylor Morgan' })).toBeVisible();
@@ -393,7 +518,7 @@ describe('manager RSVP panel', () => {
     await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'household_key,household_label,invitee_name,plus_one_slots\nmorgan,The Morgans,Taylor Morgan,1');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(await screen.findByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 2 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 2 guests across 1 household' }));
 
     expect(requests[0]).toMatchObject({
       expectedRosterVersion: 7,
@@ -612,6 +737,51 @@ describe('manager RSVP panel', () => {
     expect(field).toHaveValue('Taylor M. Morgan');
   });
 
+  it('returns supplied-key issues to the structured mapping control that can remove the key', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success({ households: [], nextCursor: null });
+      if (url.pathname.endsWith('/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        return success({
+          canonicalBatch: body.batch,
+          rosterVersion: 7,
+          targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          issues: [{
+            severity: 'blocking',
+            clientHouseholdId: body.batch.creates[0].clientHouseholdId,
+            field: 'householdKey.value',
+            code: 'household_key_invalid',
+            message: 'That household key is not valid.',
+          }],
+          previewDigest: 'key-issue-preview',
+          canCommit: false,
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(
+      screen.getByLabelText('Guest names or spreadsheet data'),
+      'Guest,Household,Key\nAlex Lee,Lee household,INVALID KEY',
+    );
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.selectOptions(screen.getByLabelText(/Guest name \(required\)/), '0');
+    await user.selectOptions(screen.getByLabelText('Household'), '1');
+    await user.selectOptions(screen.getByLabelText('Household key (advanced)'), '2');
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await user.click(await screen.findByRole('link', { name: /household key is not valid/i }));
+
+    expect(screen.getByRole('heading', { name: 'Organize invitations' })).toBeVisible();
+    await waitFor(() => expect(screen.getByLabelText('Household key (advanced)')).toHaveFocus());
+  });
+
   it('keeps an uncertain batch key for an unchanged retry instead of duplicating additions', async () => {
     const keys: string[] = [];
     let commits = 0;
@@ -648,17 +818,58 @@ describe('manager RSVP panel', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    const commit = await screen.findByRole('button', { name: 'Add 1 guests across 1 households' });
+    const commit = await screen.findByRole('button', { name: 'Add 1 guest across 1 household' });
     await user.click(commit);
     expect(await screen.findByRole('alert')).toHaveTextContent('Completion could not be confirmed');
     await user.click(screen.getByRole('button', { name: 'Back to details' }));
     await user.click(screen.getByRole('button', { name: 'Back' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 1 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
     await screen.findByText('Guest list updated (retry confirmed).');
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('blocks closing or editing the reviewed draft while its commit is in flight', async () => {
+    let resolveCommit: ((response: Response) => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success({ households: [], nextCursor: null });
+      if (url.pathname.endsWith('/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        return success({
+          canonicalBatch: body.batch, rosterVersion: 7, targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          issues: [], previewDigest: 'commit-pending-preview', canCommit: true,
+        });
+      }
+      if (url.pathname.endsWith('/roster/commit')) {
+        return new Promise<Response>((resolve) => { resolveCommit = resolve; });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+
+    expect(screen.getByRole('button', { name: 'Back to details' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+
+    resolveCommit!(await success({
+      createdHouseholds: [], updatedHouseholds: [],
+      totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+      committedRosterVersion: 8, currentRosterVersion: 8, replayed: false,
+    }, 201));
+    expect(await screen.findByRole('heading', { name: 'Guests added' })).toBeVisible();
   });
 
   it('adopts a refused batch roster version and re-previews staged additions instead of looping stale', async () => {
@@ -696,10 +907,179 @@ describe('manager RSVP panel', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 1 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('roster changed');
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
     await waitFor(() => expect(versions).toEqual([7, 9]));
+  });
+
+  it('adopts an authoritative preview roster version before asking for another preview', async () => {
+    const versions: number[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success({ households: [], nextCursor: null });
+      if (url.pathname.endsWith('/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        versions.push(body.expectedRosterVersion);
+        return success({
+          canonicalBatch: body.batch,
+          rosterVersion: versions.length === 1 ? 8 : body.expectedRosterVersion,
+          targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          issues: versions.length === 1 ? [{
+            severity: 'blocking',
+            field: 'expectedRosterVersion',
+            code: 'target_household_version_changed',
+            message: 'The guest list changed since this batch was started.',
+          }] : [],
+          previewDigest: `preview-${versions.length}`,
+          canCommit: versions.length > 1,
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('guest list changed');
+    expect(screen.getByRole('heading', { name: 'Invitation details' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await waitFor(() => expect(versions).toEqual([7, 8]));
+  });
+
+  it('refreshes an authoritative preview target version before re-previewing an append', async () => {
+    const rosterVersions: number[] = [];
+    const householdVersions: number[] = [];
+    let previewCount = 0;
+    let detailLoads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') {
+        detailLoads += 1;
+        return success(detailLoads === 1 ? household : { ...household, version: 5 });
+      }
+      if (url.pathname.endsWith('/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        const append = body.batch.appends[0];
+        rosterVersions.push(body.expectedRosterVersion);
+        householdVersions.push(append.expectedHouseholdVersion);
+        previewCount += 1;
+        return success({
+          canonicalBatch: body.batch,
+          rosterVersion: 8,
+          targetVersions: [{
+            clientHouseholdId: append.clientHouseholdId,
+            householdId: household.id,
+            version: 5,
+          }],
+          totals: { householdsCreated: 0, householdsUpdated: 1, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 4 },
+          issues: previewCount === 1 ? [{
+            severity: 'blocking',
+            clientHouseholdId: append.clientHouseholdId,
+            field: 'expectedHouseholdVersion',
+            code: 'target_household_version_changed',
+            message: 'This household changed since it was selected.',
+          }] : [],
+          previewDigest: `target-preview-${previewCount}`,
+          canCommit: previewCount > 1,
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Search households'), 'Morgan');
+    await screen.findByRole('option', { name: /The Morgan household/ });
+    await user.selectOptions(screen.getByLabelText('Existing household target'), household.id);
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Added Guest');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.selectOptions(screen.getByLabelText('Attendance for Added Guest'), 'declined');
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+
+    expect(await screen.findByText(/A selected household changed/)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Accept current household and review again' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await waitFor(() => {
+      expect(rosterVersions).toEqual([7, 8]);
+      expect(householdVersions).toEqual([4, 5]);
+    });
+  });
+
+  it('does not adopt a stale conflict refresh after the staged invitation changes', async () => {
+    let detailLoads = 0;
+    let resolveConflictTarget: ((response: Response) => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') {
+        detailLoads += 1;
+        if (detailLoads === 1) return success(household);
+        return new Promise<Response>((resolve) => { resolveConflictTarget = resolve; });
+      }
+      if (url.pathname.endsWith('/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        const append = body.batch.appends[0];
+        return success({
+          canonicalBatch: body.batch,
+          rosterVersion: 8,
+          targetVersions: [{
+            clientHouseholdId: append.clientHouseholdId,
+            householdId: household.id,
+            version: 5,
+          }],
+          totals: { householdsCreated: 0, householdsUpdated: 1, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 4 },
+          issues: [{
+            severity: 'blocking',
+            clientHouseholdId: append.clientHouseholdId,
+            field: 'expectedHouseholdVersion',
+            code: 'target_household_version_changed',
+            message: 'This household changed since it was selected.',
+          }],
+          previewDigest: 'stale-target-preview',
+          canCommit: false,
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Search households'), 'Morgan');
+    await screen.findByRole('option', { name: /The Morgan household/ });
+    await user.selectOptions(screen.getByLabelText('Existing household target'), household.id);
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Added Guest');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.selectOptions(screen.getByLabelText('Attendance for Added Guest'), 'declined');
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await waitFor(() => expect(resolveConflictTarget).not.toBeNull());
+
+    const guestName = screen.getByLabelText('Guest name');
+    await user.clear(guestName);
+    await user.type(guestName, 'Newer Guest');
+    resolveConflictTarget!(await success({
+      ...household,
+      label: 'Stale refreshed household',
+      version: 5,
+    }));
+
+    await waitFor(() => expect(guestName).toHaveValue('Newer Guest'));
+    expect(screen.getByRole('heading', { name: 'Add to The Morgan household' })).toBeVisible();
+    expect(screen.queryByText('Stale refreshed household')).not.toBeInTheDocument();
   });
 
   it('adds required plus-one attendance rows when a conflict refresh finds that the target responded', async () => {
@@ -763,7 +1143,7 @@ describe('manager RSVP panel', () => {
     await user.clear(screen.getByLabelText('Additional plus-one slots'));
     await user.type(screen.getByLabelText('Additional plus-one slots'), '1');
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 1 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
 
     expect(await screen.findByText(/selected household changed/u)).toBeVisible();
     expect(await screen.findByLabelText('Attendance for new plus-one 1')).toBeVisible();
@@ -811,6 +1191,29 @@ describe('manager RSVP panel', () => {
     await waitFor(() => expect(screen.getByLabelText('Guest names or spreadsheet data'))
       .toHaveValue('Guest\tHousehold\nTaylor Morgan\tMorgan'));
     expect(screen.getByText(/Detected:/)).toHaveTextContent('structured data');
+  });
+
+  it('clears the advanced key mapping when Household is unmapped', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success({ households: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(
+      screen.getByLabelText('Guest names or spreadsheet data'),
+      'Guest,Household,Key\nAlex Lee,Lee household,lee-family',
+    );
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    expect(screen.getByLabelText('Household key (advanced)')).toHaveValue('2');
+    await user.selectOptions(screen.getByLabelText('Household'), '');
+    expect(screen.getByLabelText('Household key (advanced)')).toHaveValue('');
+    expect(screen.getByLabelText('Household key (advanced)')).toBeDisabled();
   });
 
   it('refreshes a household conflict and focuses the winning editor heading', async () => {
@@ -888,6 +1291,44 @@ describe('manager RSVP panel', () => {
     await user.click(within(confirmation).getByRole('button', { name: 'Archive The Morgan household' }));
     await waitFor(() => expect(requests[1]?.path).toMatch(/\/archive$/));
     expect(await screen.findByText('Archived')).toBeVisible();
+  });
+
+  it('keeps archived history instead of restoring pristine setup after the last active household is archived', async () => {
+    let archived = false;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(archived ? emptySummary : summary);
+      if (url.pathname.endsWith('/households') && url.searchParams.get('state') === 'archived') {
+        return success({ households: [], nextCursor: null });
+      }
+      if (url.pathname.endsWith('/households')) {
+        return success(archived ? { households: [], nextCursor: null } : listPage());
+      }
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') {
+        return success(household);
+      }
+      if (url.pathname.endsWith('/archive') && init?.method === 'POST') {
+        archived = true;
+        return success({
+          household: { ...household, version: 5, archivedAt: '2026-08-03T00:00:00Z' },
+          rosterVersion: 8,
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(screen.getByRole('button', { name: 'Archive household' }));
+    const confirmation = screen.getByRole('group', { name: 'Archive The Morgan household' });
+    await user.type(within(confirmation).getByLabelText('Type household name'), household.label);
+    await user.click(within(confirmation).getByRole('button', { name: 'Archive The Morgan household' }));
+
+    expect(await screen.findByText('Archived')).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('button', { name: /The Morgan household/ })).not.toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: 'Start your guest list' })).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Invited capacity' })).toBeVisible();
   });
 
   // The create form is the one mutation that does not run through the shared

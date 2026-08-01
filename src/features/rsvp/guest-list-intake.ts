@@ -8,6 +8,7 @@ export interface ParsedGuestListSource {
   rows: string[][];
   kind: GuestListSourceKind;
   strictHeader: boolean;
+  firstRowIsHeader: boolean;
   error?: string;
 }
 
@@ -105,6 +106,7 @@ export function parseGuestListSource(source: string): ParsedGuestListSource {
       rows,
       kind: 'ambiguous',
       strictHeader: false,
+      firstRowIsHeader: false,
       error: 'This source has an unclosed quoted value. Close the quote and try again.',
     };
   }
@@ -112,16 +114,26 @@ export function parseGuestListSource(source: string): ParsedGuestListSource {
 
   const header = rows[0]?.map((cell) => cell.toLowerCase()) ?? [];
   const strictHeader = header.join(',') === 'household_key,household_label,invitee_name,plus_one_slots';
+  const recognizedHeaders = new Set([
+    'guest', 'guest name', 'name', 'invitee_name',
+    'household', 'household label', 'household_label',
+    'slots', 'plus-one slots', 'plus one slots', 'plus_one_slots',
+    'key', 'household key', 'household_key',
+  ]);
+  const firstRowIsHeader = strictHeader || header.some((cell) => recognizedHeaders.has(cell));
   const widths = new Set(rows.map((candidate) => candidate.length));
   const kind: GuestListSourceKind = rows.length > 0 && rows.every(hasExactlyOneNonEmptyCell)
     ? 'plain'
     : rows.length === 0 || widths.size > 1
     ? 'ambiguous'
     : rows[0]?.length === 1 ? 'plain' : 'structured';
-  return { rows, kind, strictHeader };
+  return { rows, kind, strictHeader, firstRowIsHeader };
 }
 
 export function defaultMapping(parsed: ParsedGuestListSource): GuestListMapping {
+  if (!parsed.firstRowIsHeader) {
+    return { guestName: null, household: null, plusOneSlots: null, householdKey: null };
+  }
   const header = parsed.rows[0]?.map((value) => value.toLowerCase()) ?? [];
   const column = (...names: string[]) => {
     const found = header.findIndex((value) => names.includes(value));
@@ -131,10 +143,10 @@ export function defaultMapping(parsed: ParsedGuestListSource): GuestListMapping 
     return { guestName: 2, household: 1, plusOneSlots: 3, householdKey: 0 };
   }
   return {
-    guestName: column('guest name', 'name', 'invitee_name'),
+    guestName: column('guest', 'guest name', 'name', 'invitee_name'),
     household: column('household', 'household label', 'household_label'),
-    plusOneSlots: column('plus-one slots', 'plus one slots', 'plus_one_slots'),
-    householdKey: column('household key', 'household_key'),
+    plusOneSlots: column('slots', 'plus-one slots', 'plus one slots', 'plus_one_slots'),
+    householdKey: column('key', 'household key', 'household_key'),
   };
 }
 
@@ -199,7 +211,8 @@ export function materializeStructuredSource(
 
   // Row positions are a source identity. They survive correcting column
   // mappings, whereas a display value may be deliberately changed by a mapper.
-  for (let sourceIndex = 1; sourceIndex < parsed.rows.length; sourceIndex += 1) {
+  const firstDataRow = parsed.firstRowIsHeader ? 1 : 0;
+  for (let sourceIndex = firstDataRow; sourceIndex < parsed.rows.length; sourceIndex += 1) {
     const row = parsed.rows[sourceIndex]!;
     const name = mapping.guestName === null ? '' : (row[mapping.guestName] ?? '').trim();
     if (!name) continue;
@@ -207,7 +220,7 @@ export function materializeStructuredSource(
     const key = mapping.householdKey === null ? '' : (row[mapping.householdKey] ?? '').trim();
     const rawSlots = mapping.plusOneSlots === null ? '' : (row[mapping.plusOneSlots] ?? '').trim();
     const plusOneSlots = rawSlots === '' ? 0 : Number(rawSlots);
-    const groupKey = household ? `household:${household}\u0001${key}` : `individual:${sourceIndex}`;
+    const groupKey = household ? `household:${household}` : `individual:${sourceIndex}`;
     const invitee = {
       clientInviteeId: rememberedId(ids, `structured-invitee:${sourceIndex}`),
       displayName: name,
@@ -215,6 +228,9 @@ export function materializeStructuredSource(
     const existing = createsByGroup.get(groupKey);
     if (existing) {
       existing.namedInvitees.push(invitee);
+      if (key && !existing.householdKey) {
+        existing.householdKey = { value: key, provenance: 'supplied' };
+      }
       continue;
     }
 
@@ -244,14 +260,11 @@ export function validateMapping(
   if (mapping.householdKey !== null && mapping.household === null) {
     issues.push({ field: 'householdKey', message: 'Household key can be mapped only when Household is mapped.' });
   }
-  if (mapping.household === null) return issues;
-
   const householdToKey = new Map<string, string>();
   const keyToHousehold = new Map<string, string>();
   const householdToSlots = new Map<string, string>();
-  for (const row of parsed.rows.slice(1)) {
-    const household = (row[mapping.household] ?? '').trim();
-    if (!household) continue;
+  const rows = parsed.rows.slice(parsed.firstRowIsHeader ? 1 : 0);
+  for (const row of rows) {
     if (mapping.plusOneSlots !== null) {
       const rawSlots = (row[mapping.plusOneSlots] ?? '').trim();
       const numericSlots = rawSlots === '' ? 0 : Number(rawSlots);
@@ -262,6 +275,9 @@ export function validateMapping(
         });
         break;
       }
+      if (mapping.household === null) continue;
+      const household = (row[mapping.household] ?? '').trim();
+      if (!household) continue;
       const slots = String(numericSlots);
       const previous = householdToSlots.get(household);
       if (previous !== undefined && previous !== slots) {
@@ -273,6 +289,9 @@ export function validateMapping(
       }
       householdToSlots.set(household, slots);
     }
+    if (mapping.household === null) continue;
+    const household = (row[mapping.household] ?? '').trim();
+    if (!household) continue;
     if (mapping.householdKey !== null) {
       const key = (row[mapping.householdKey] ?? '').trim();
       if (!key) continue;

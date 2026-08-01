@@ -45,6 +45,7 @@ export function ManagerRsvpPanel({
   onRosterVersionObserved,
   onDraftDirtyChange,
   onDraftCloseRequested,
+  onDraftCommitPendingChange,
   discardDraftEpoch = 0,
 }: {
   event: EventView;
@@ -55,10 +56,12 @@ export function ManagerRsvpPanel({
   onRosterVersionObserved?: (currentRosterVersion: number) => void;
   onDraftDirtyChange?: (dirty: boolean) => void;
   onDraftCloseRequested?: () => void;
+  onDraftCommitPendingChange?: (pending: boolean) => void;
   discardDraftEpoch?: number;
 }) {
   const eventId = event.id;
   const [summary, setSummary] = useState<RsvpSummary | null>(null);
+  const [summaryState, setSummaryState] = useState<'loading' | 'known' | 'failed'>('loading');
   const [page, setPage] = useState<HouseholdPage>({ households: [], nextCursor: null });
   const [hasHistoricalHouseholds, setHasHistoricalHouseholds] = useState(false);
   const [historicalRosterState, setHistoricalRosterState] = useState<'loading' | 'known' | 'failed'>('loading');
@@ -105,7 +108,13 @@ export function ManagerRsvpPanel({
   }, [eventId, query, state]);
 
   const loadSummary = useCallback(async () => {
-    setSummary(await api<RsvpSummary>(`/api/manage/events/${eventId}/rsvp/summary`));
+    try {
+      setSummary(await api<RsvpSummary>(`/api/manage/events/${eventId}/rsvp/summary`));
+      setSummaryState('known');
+    } catch (caught) {
+      setSummaryState('failed');
+      throw caught;
+    }
   }, [eventId]);
 
   const loadList = useCallback(async () => {
@@ -299,6 +308,7 @@ export function ManagerRsvpPanel({
         }),
       }));
       applyMutation(result, `${result.household.label} archived.`);
+      setHasHistoricalHouseholds(true);
       await refreshRoster();
     });
   }
@@ -311,6 +321,9 @@ export function ManagerRsvpPanel({
     && summary !== null
     && summary.namedInvitees === 0
     && !listing;
+  const rosterProbesComplete = activeRosterState !== 'loading'
+    && historicalRosterState !== 'loading'
+    && summaryState !== 'loading';
 
   return <section className="rsvp-manager" aria-labelledby="rsvp-manager-title">
     <p className="section-label">Guest list</p>
@@ -320,7 +333,7 @@ export function ManagerRsvpPanel({
     {notice && <p className="rsvp-manager__notice" role="alert">{notice}</p>}
     {historicalRosterState === 'failed' && <p className="rsvp-manager__notice" role="alert">Guest-list history could not be checked. The existing guest list remains available.</p>}
 
-    {!intakeOpen && <GuestListIntakeLauncher
+    {!intakeOpen && rosterProbesComplete && <GuestListIntakeLauncher
       // A zero-capacity summary can also mean every historical household was
       // archived. The loaded all-households page is the available manager data
       // that keeps that roster out of the introductory state.
@@ -357,9 +370,10 @@ export function ManagerRsvpPanel({
         setRosterVersion((current) => Math.max(current, currentRosterVersion));
         onRosterVersionObserved?.(currentRosterVersion);
       }}
+      onCommitPendingChange={onDraftCommitPendingChange}
     />}
 
-    {!intakeOpen && !pristine && <ManagerRsvpDashboard
+    {!intakeOpen && rosterProbesComplete && !pristine && <ManagerRsvpDashboard
       summary={summary}
       households={page.households}
       nextCursor={page.nextCursor}

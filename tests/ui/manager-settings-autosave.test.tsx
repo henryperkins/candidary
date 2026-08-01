@@ -91,6 +91,58 @@ describe('manager settings autosave guards', () => {
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
     expect(await screen.findByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    expect(within(screen.getByRole('group', { name: 'Publication status' }))
+      .getByRole('button', { name: 'unpublished' })).toHaveClass('active');
+  });
+
+  it('keeps manager destinations unavailable while a guest-list commit is in flight', async () => {
+    let resolveCommit: ((response: Response) => void) | null = null;
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/rsvp/roster/preview')) {
+        const body = JSON.parse(String(init?.body));
+        return json({
+          canonicalBatch: body.batch,
+          rosterVersion: 7,
+          targetVersions: [],
+          totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+          issues: [],
+          previewDigest: 'pending-commit-preview',
+          canCommit: true,
+        });
+      }
+      if (url.endsWith('/rsvp/roster/commit')) {
+        return new Promise<Response>((resolve) => { resolveCommit = resolve; });
+      }
+      return fallback(input);
+    }));
+
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    await user.click(await screen.findByRole('button', { name: 'Add guests' }));
+    await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue to details' }));
+    await user.click(screen.getByRole('button', { name: 'Review guests' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+
+    expect(nav.getByRole('button', { name: 'Gallery' })).toBeDisabled();
+    expect(screen.queryByRole('region', { name: 'Your pending work is not saved' })).not.toBeInTheDocument();
+
+    resolveCommit!(await json({
+      createdHouseholds: [],
+      updatedHouseholds: [],
+      totals: { householdsCreated: 1, householdsUpdated: 0, namedInviteesAdded: 1, plusOneCapacityAdded: 0, invitedCapacityAdded: 1, resultingHouseholds: 1, resultingInvitedCapacity: 1 },
+      committedRosterVersion: 8,
+      currentRosterVersion: 8,
+      replayed: false,
+    }, 201));
+    expect(await screen.findByRole('heading', { name: 'Guests added' })).toBeVisible();
   });
 
   it('does not auto-proceed a blocked route when Settings saves but a guest draft remains dirty', async () => {
@@ -413,7 +465,7 @@ describe('manager settings autosave guards', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
-    await user.click(await screen.findByRole('button', { name: 'Add 1 guests across 1 households' }));
+    await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
     await waitFor(() => expect(eventReads).toBe(3));
 
     releaseStaleRead!();

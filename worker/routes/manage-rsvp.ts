@@ -2,11 +2,13 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import {
+  MAX_EVENT_RSVP_CAPACITY,
   MAX_HOUSEHOLD_CAPACITY,
   MAX_NAMED_INVITEES_PER_HOUSEHOLD,
   MAX_PLUS_ONES_PER_HOUSEHOLD,
   MAX_RSVP_BATCH_BYTES,
   MAX_RSVP_CSV_BYTES,
+  MAX_RSVP_HOUSEHOLDS,
   MAX_RSVP_TEXT_LENGTH,
 } from '../../shared/constants';
 import type {
@@ -83,6 +85,7 @@ function isWellFormedUnicode(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code >= 0xd800 && code <= 0xdbff) {
+      if (index + 1 >= value.length) return false;
       const next = value.charCodeAt(index + 1);
       if (next < 0xdc00 || next > 0xdfff) return false;
       index += 1;
@@ -178,7 +181,8 @@ function batchWithUniqueClientIds<T extends {
     if (batch.creates.length === 0 && batch.appends.length === 0) {
       context.addIssue({ code: 'custom', path: [], message: 'Add a household or append guests.' });
     }
-    if (batch.creates.length + batch.appends.length > 500 || additions > 500) {
+    if (batch.creates.length + batch.appends.length > MAX_RSVP_HOUSEHOLDS
+      || additions > MAX_EVENT_RSVP_CAPACITY) {
       context.addIssue({ code: 'custom', path: [], message: 'This batch is too large.' });
     }
   });
@@ -188,31 +192,31 @@ const rosterCreateDraftSchema = z.object({
   clientHouseholdId: rosterUuidSchema,
   householdKey: rosterKeyDraftSchema.optional(),
   label: rosterTextSchema,
-  namedInvitees: z.array(rosterCreateInviteeSchema).max(500),
-  plusOneSlots: z.number().int().min(0).max(500),
+  namedInvitees: z.array(rosterCreateInviteeSchema).max(MAX_EVENT_RSVP_CAPACITY),
+  plusOneSlots: z.number().int().min(0).max(MAX_EVENT_RSVP_CAPACITY),
 }).strict();
 const rosterCreateCanonicalSchema = z.object({
   clientHouseholdId: rosterUuidSchema,
   householdKey: rosterKeyCanonicalSchema,
   label: rosterTextSchema,
-  namedInvitees: z.array(rosterCreateInviteeSchema).max(500),
-  plusOneSlots: z.number().int().min(0).max(500),
+  namedInvitees: z.array(rosterCreateInviteeSchema).max(MAX_EVENT_RSVP_CAPACITY),
+  plusOneSlots: z.number().int().min(0).max(MAX_EVENT_RSVP_CAPACITY),
 }).strict();
 const rosterAppendSchema = z.object({
   clientHouseholdId: rosterUuidSchema,
   householdId: rosterUuidSchema,
   expectedHouseholdVersion: z.number().int().min(1),
-  namedInvitees: z.array(rosterAppendInviteeSchema).max(500),
-  plusOneSlotsToAdd: z.number().int().min(0).max(500),
-  newPlusOneResponses: z.array(rosterPlusOneResponseSchema).max(500).optional(),
+  namedInvitees: z.array(rosterAppendInviteeSchema).max(MAX_EVENT_RSVP_CAPACITY),
+  plusOneSlotsToAdd: z.number().int().min(0).max(MAX_EVENT_RSVP_CAPACITY),
+  newPlusOneResponses: z.array(rosterPlusOneResponseSchema).max(MAX_EVENT_RSVP_CAPACITY).optional(),
 }).strict();
 const rosterDraftSchema = batchWithUniqueClientIds(z.object({
-  creates: z.array(rosterCreateDraftSchema).max(500),
-  appends: z.array(rosterAppendSchema).max(500),
+  creates: z.array(rosterCreateDraftSchema).max(MAX_RSVP_HOUSEHOLDS),
+  appends: z.array(rosterAppendSchema).max(MAX_RSVP_HOUSEHOLDS),
 }).strict());
 const rosterCanonicalSchema = batchWithUniqueClientIds(z.object({
-  creates: z.array(rosterCreateCanonicalSchema).max(500),
-  appends: z.array(rosterAppendSchema).max(500),
+  creates: z.array(rosterCreateCanonicalSchema).max(MAX_RSVP_HOUSEHOLDS),
+  appends: z.array(rosterAppendSchema).max(MAX_RSVP_HOUSEHOLDS),
 }).strict());
 const rosterPreviewSchema = z.object({
   batch: rosterDraftSchema,
@@ -288,7 +292,7 @@ manageRsvpRoutes.post('/manage/events/:eventId/rsvp/import/preview', async (cont
 });
 
 manageRsvpRoutes.post('/manage/events/:eventId/rsvp/roster/preview', async (context) => {
-  const auth = await requireManager(context);
+  const auth = await requireManager(context, { write: true });
   const parsed = rosterPreviewSchema.safeParse(await rosterRequestBody(context));
   if (!parsed.success) throw invalidRosterBody();
   const preview = await new RsvpService(context.env).previewRosterBatch(

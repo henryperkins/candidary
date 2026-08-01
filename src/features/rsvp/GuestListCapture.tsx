@@ -99,8 +99,8 @@ export function GuestListCapture({
     <fieldset>
       <legend>Input format</legend>
       <p>Detected: <strong>{kind === 'plain' ? 'plain names' : kind === 'structured' ? 'structured data' : 'choose a format'}</strong></p>
-      <label><input type="radio" checked={kind === 'plain'} onChange={() => onKind('plain')} /> Plain names</label>
-      <label><input type="radio" checked={kind === 'structured'} onChange={() => onKind('structured')} /> Structured data</label>
+      <label><input type="radio" name="guest-list-source-kind" checked={kind === 'plain'} onChange={() => onKind('plain')} /> Plain names</label>
+      <label><input type="radio" name="guest-list-source-kind" checked={kind === 'structured'} onChange={() => onKind('structured')} /> Structured data</label>
     </fieldset>
     {hasHouseholds && <GuestListHouseholdTargetPicker
       eventId={eventId}

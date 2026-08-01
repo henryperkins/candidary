@@ -6,6 +6,8 @@ import type {
   RsvpRosterBatchPreviewResponse,
 } from '../../../shared/contracts';
 
+import { countLabel } from './guest-list-copy';
+
 function issueId(issue: RsvpRosterBatchIssue, index: number): string {
   return `guest-list-issue-${issue.clientHouseholdId ?? 'batch'}-${issue.clientInviteeId ?? issue.field}-${index}`;
 }
@@ -38,7 +40,7 @@ export function GuestListBatchReview({
   const { totals } = preview;
 
   return <div className="guest-list-review">
-    <p>{totals.householdsCreated} new and {totals.householdsUpdated} updated households · {totals.namedInviteesAdded} named guests · {totals.plusOneCapacityAdded} plus-one slots.</p>
+    <p>{countLabel(totals.householdsCreated, 'new household')} and {countLabel(totals.householdsUpdated, 'updated household')} · {countLabel(totals.namedInviteesAdded, 'named guest')} · {countLabel(totals.plusOneCapacityAdded, 'plus-one slot')}.</p>
     {automaticIndividuals.length > 0 && <p>Automatic individual invitations: {automaticIndividuals.map((person) => person.name).join(', ')}</p>}
     {target && <p>Target existing household: <strong>{target.label}</strong>.</p>}
     {issues.length > 0 && <GuestListIssueSummary
@@ -47,9 +49,9 @@ export function GuestListBatchReview({
       focusKey={preview.previewDigest}
     />}
     <div className="guest-list-workspace__actions">
-      <button type="button" className="button button--secondary" onClick={onBack}>Back to details</button>
+      <button type="button" className="button button--secondary" disabled={busy} onClick={onBack}>Back to details</button>
       {preview.canCommit && <button type="button" className="button button--primary" disabled={busy} onClick={onCommit}>
-        Add {totals.namedInviteesAdded + totals.plusOneCapacityAdded} guests across {totals.householdsCreated + totals.householdsUpdated} households
+        Add {countLabel(totals.namedInviteesAdded + totals.plusOneCapacityAdded, 'guest')} across {countLabel(totals.householdsCreated + totals.householdsUpdated, 'household')}
       </button>}
     </div>
   </div>;
@@ -71,7 +73,9 @@ export function GuestListIssueSummary({
   }, [focusKey]);
 
   return <section aria-label="Guest list review issues" className="guest-list-issues">
-    <h4>{blocking.length ? `${blocking.length} issues need attention` : 'Advisory notices'}</h4>
+    <h4>{blocking.length
+      ? `${countLabel(blocking.length, 'issue')} ${blocking.length === 1 ? 'needs' : 'need'} attention`
+      : 'Advisory notices'}</h4>
     <ul>{issues.map((issue, index) => <li key={issueId(issue, index)}>
       <a
         href={`#${issueTarget(issue)}`}
