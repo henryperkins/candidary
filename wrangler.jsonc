@@ -12,7 +12,8 @@
       "/api/*", "/join", "/join/*", "/manage/*", "/create", "/event/*",
       "/recover/manage", "/recover/event-entry",
       "/host/unsubscribe/*", "/host/login", "/host/register",
-      "/host/events", "/host/verify"
+      "/host/events", "/host/verify",
+      "/privacy", "/terms"
     ]
   },
   "d1_databases": [

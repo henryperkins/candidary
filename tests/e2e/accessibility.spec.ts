@@ -18,13 +18,14 @@ import { computedStyleContrast } from './helpers/theme-contrast';
 const HEADER_WIDTHS = [320, 768];
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
 // The public header keeps exactly these exits: the count is asserted so neither a
-// hidden one nor an added one can pass unnoticed. On `/` the `Sign in` exit is visible only above
-// 760px — the hero block carries both account routes at every width, so a phone visitor is never
-// stranded. See `.header-signin` in `src/styles.css`.
+// hidden one nor an added one can pass unnoticed. On `/` the row reads navigate | return | act, and
+// `How it works` is the only member of it whose presence varies by width — it is a page anchor the
+// hero and the footer both still offer, so below 761px it gives up its room to `Sign in`, which a
+// host returning on a phone has no other route past. See `.site-nav` in `src/styles.css`.
 function headerExits(width: number): { path: string; names: string[] }[] {
-  const signIn = width > 760 ? ['Sign in'] : [];
+  const wayfinding = width > 760 ? ['How it works'] : [];
   return [
-    { path: '/', names: ['Candidary home', ...signIn, 'Create an event'] },
+    { path: '/', names: ['Candidary home', ...wayfinding, 'Sign in', 'Create an event'] },
     { path: '/create', names: ['Candidary home', 'Back home'] },
   ];
 }
@@ -116,19 +117,24 @@ test('public actions and creation fields are keyboard reachable with named landm
   await page.goto('/');
   await expect(page.getByRole('banner')).toBeVisible();
   await expect(page.getByRole('main')).toBeVisible();
+  // The landing page now carries a footer that repeats `How it works`, `Sign in` and
+  // `Create an event`, so every exit here is resolved inside the banner rather than page-wide.
+  const header = page.getByRole('banner');
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: 'Candidary home' })).toBeFocused();
-  // `Sign in` is the one header exit whose presence varies by width: visible above 760px, hidden
-  // below it, where the hero block carries both account routes instead. This spec runs in the
-  // desktop *and* mobile projects, so the tab order is asserted against what is actually on screen
-  // rather than against one project's width.
-  const signIn = page.getByRole('link', { name: 'Sign in', exact: true });
-  if (await signIn.isVisible()) {
+  await expect(header.getByRole('link', { name: 'Candidary home' })).toBeFocused();
+  // `How it works` is the one header exit whose presence varies by width: visible above 760px,
+  // hidden below it, where `Sign in` takes its room. This spec runs in the desktop *and* mobile
+  // projects, so the tab order is asserted against what is actually on screen rather than against
+  // one project's width.
+  const wayfinding = header.getByRole('link', { name: 'How it works', exact: true });
+  if (await wayfinding.isVisible()) {
     await page.keyboard.press('Tab');
-    await expect(signIn).toBeFocused();
+    await expect(wayfinding).toBeFocused();
   }
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: 'Create an event', exact: true })).toBeFocused();
+  await expect(header.getByRole('link', { name: 'Sign in', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(header.getByRole('link', { name: 'Create an event', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Create your event', exact: true })).toBeFocused();
   await page.goto('/create');

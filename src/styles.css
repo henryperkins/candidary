@@ -54,15 +54,43 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
    but a third child would park itself in the middle. Exits past the first therefore travel as one
    right-aligned group, and 16px is the band they hold apart from each other. */
 .page-header__actions { display: flex; align-items: center; gap: 16px; }
-/* Sign in is the quieter of the two: `Create an event` is what the page is for, and a returning host
-   is looking for their own way back rather than being sold one. Muted on parchment is the pairing
-   that clears AA by 0.0046 — never darken the ground or lighten the ink to "improve" it. */
-.page-header .header-signin { color: var(--muted); }
-/* The header's third exit only exists above 760px; below that the brand and `Create an event`
-   already fill the row and the hero block carries both routes on its own. Matching the same
-   `<760` boundary the product uses keeps the exit matrix in `accessibility.spec.ts` honest at every
-   width: 320 counts two, 768 counts three. */
-@media (max-width: 760px) { .page-header .header-signin { display: none; } }
+/* The landing bar travels with the page so the create route stays reachable from any scroll
+   position. Opaque paper, not a translucent one: the bar is sticky over the hero media column, and
+   `--muted` sign-in only clears AA on an undarkened ground. The height and row gap stay at the
+   88px/12px the create and success screens use — the redesign is the nav group, not the box — so
+   `.page-header` itself is untouched and only the landing shell opts into travelling. */
+.public-shell--landing .page-header { position: sticky; top: 0; z-index: 30; background: var(--paper); }
+.page-header .site-nav { display: flex; align-items: center; gap: 16px; }
+/* Wayfinding sits left of the account exits and reads as a quiet pill, not a third button. */
+.page-header .site-nav__link { min-height: 44px; padding: 0 13px; display: inline-flex; align-items: center; border-radius: 9px; color: var(--ink); font-size: .9375rem; font-weight: 600; text-decoration: none; transition: background 180ms, color 180ms; }
+.page-header .site-nav__link:hover { background: #f2eadf; color: var(--chestnut); }
+/* Sign in travels with its own divider so the row reads navigate | return | act. It is the quieter
+   of the two account exits: `Create an event` is what the page is for, and a returning host is
+   looking for their own way back rather than being sold one. Muted on parchment is the pairing that
+   clears AA by 0.0046 — never darken the ground or lighten the ink to "improve" it. */
+.page-header .header-signin { display: flex; align-items: center; gap: 16px; }
+.page-header .header-signin__rule { width: 1px; height: 22px; background: var(--border); }
+.page-header .header-signin .text-link { padding: 0 2px; color: var(--muted); }
+/* The outline holds the hero's primary as the page's one filled action; the hover fill gives the
+   sticky bar its own weight once the hero has scrolled away. */
+.page-header .header-cta { min-height: 44px; padding: 11px 18px; font-size: .9375rem; white-space: nowrap; }
+.page-header .header-cta:hover { background: var(--chestnut); color: var(--paper); }
+.page-header .header-cta__short { display: none; }
+/* Phone header. `Sign in` stays in the bar — a host coming back on a phone has no other way into
+   their events — so the room is taken from everything around it: the brand drops to its compact
+   size, the divider goes, and the create button carries its short label. `How it works` is the one
+   thing that leaves, and it is a page anchor the hero and the footer both still offer. The exit
+   matrix in `accessibility.spec.ts` counts three exits at 320 and four at 768. */
+@media (max-width: 760px) {
+  .page-header .site-nav { gap: 10px; }
+  .page-header .site-nav__link { display: none; }
+  .page-header .brand { font-size: 1.05rem; }
+  .page-header .brand__mark { width: 23px; transform: scale(.8); transform-origin: left center; }
+  .page-header .header-signin__rule { display: none; }
+  .page-header .header-cta { padding: 11px 15px; }
+  .page-header .header-cta__long { display: none; }
+  .page-header .header-cta__short { display: inline; }
+}
 .button { min-height: 48px; padding: 12px 20px; border: 1px solid transparent; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; font-weight: 600; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; }
 .button:not(:disabled):hover { transform: translateY(-1px); }
 .button:disabled { opacity: .48; cursor: not-allowed; }
@@ -79,17 +107,31 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .hero__copy { max-width: 710px; grid-row: 1; }
 .hero h1 { margin-bottom: 30px; font-size: 3.15rem; }
 .hero__copy > p { max-width: 600px; margin-bottom: 35px; color: var(--muted); font-size: clamp(1.05rem, 1.5vw, 1.3rem); }
-/* The two account doors sit under the primary CTA behind a hairline divider: `Sign in to your
-   events` for returning hosts, `Create one` for first-timers, sized as answering copy rather than
-   navigation surface. Both links keep the 44px floor. The template's same numbers are copied, not
-   re-derived. */
-.hero__copy > .hero__account { max-width: 560px; margin: 26px 0 0; padding-top: 22px; border-top: 1px solid var(--border); display: grid; gap: 9px; }
-.hero__account p { margin: 0; font-size: .95rem; }
-.hero__account p + p { color: var(--muted); }
-.hero__account .text-link { min-height: 44px; display: inline-flex; align-items: center; }
+/* The eyebrow is a `.section-label`, but `.hero__copy > p` outranks it and would render it as a
+   second grey lead paragraph. Restated at matching depth so the class means the same thing in the
+   hero as it does in the workflow and FAQ headers. */
+.hero__copy > p.section-label { max-width: none; margin-bottom: 12px; color: var(--chestnut); font-size: .76rem; }
+.hero .button-row .button { white-space: nowrap; }
+/* The two account doors sit under the primary CTA behind a hairline divider, as one answering
+   sentence rather than a two-paragraph slab competing with the CTA for the same eye: `Sign in to
+   your events` for returning hosts, `Create one` for first-timers. The 44px floor survives as
+   vertical padding on the inline links, which grows the hit box without breaking the line. The
+   template's same numbers are copied, not re-derived. */
+.hero__copy > .hero__account { max-width: 520px; margin: 28px 0 0; padding-top: 20px; border-top: 1px solid var(--border); display: block; }
+.hero__account p { margin: 0; color: var(--muted); font-size: .925rem; line-height: 1.8; }
+.hero__account .text-link { display: inline; min-height: 0; padding-block: 13px; color: var(--chestnut); }
 .hero__image { height: clamp(280px, 82vw, 360px); max-height: 650px; grid-row: 2; position: relative; }
 .hero__image::before { content: ''; position: absolute; inset: -17px 20px 17px -17px; background: var(--denim-soft); border-radius: 48% 48% 10px 10px; transform: rotate(-2deg); }
 .hero__image img { width: 100%; height: 100%; position: relative; object-fit: cover; border-radius: 48% 48% 9px 9px; }
+/* The hero's right column is a pile, not a picture: the arch stays as the brand anchor and two
+   guest prints overlap it at the angles the brand mark already uses, so the column shows the
+   promise — several people's photographs, one place — instead of only stating it. The prints are
+   paper: 5px radius, a 7px border, and the one lift the elevation scale allows. Deeper than
+   `.hero__image img` so the arch's own 48% radius and full-bleed sizing stop at the frame. */
+.hero__image .hero__print { position: absolute; z-index: 3; width: 37%; aspect-ratio: 1; padding: 7px; border-radius: 5px; background: var(--paper); box-shadow: 0 22px 70px rgb(54 38 30 / 13%); }
+.hero__image .hero__print img { width: 100%; height: 100%; display: block; object-fit: cover; border-radius: 2px; }
+.hero__image .hero__print--a { left: 2%; bottom: 3%; transform: rotate(-7deg); }
+.hero__image .hero__print--b { top: 5%; right: 0; width: 29%; transform: rotate(6deg); }
 .workflow { padding: 50px 20px; border-top: 1px solid var(--border); }
 .workflow > div:first-child { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
 .workflow h2 { margin-bottom: 32px; max-width: 600px; }
@@ -102,6 +144,46 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
    state plus icon, never colour alone, and moss as 14.4px body copy measured 4.4:1 on parchment. */
 .privacy-note { margin: 23px 0 0; display: flex; gap: 8px; align-items: center; font-size: .9rem; }
 .privacy-note svg { color: var(--moss); }
+/* FAQ. One column at every width — an accordion in two columns makes the reader track which panel
+   moved. The measure caps at 760px so the answers stay readable rather than stretching to the shell.
+   Summary rows are 64px, above the 48px standard control and well clear of the 44px floor. */
+.faq { padding: 50px 20px; border-top: 1px solid var(--border); }
+.faq__list { max-width: 760px; margin: 30px 0 0; border-top: 1px solid var(--border); }
+.faq__item { border-bottom: 1px solid var(--border); }
+.faq__item summary { min-height: 64px; padding: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 20px; font-family: 'Manrope'; font-size: 1.05rem; font-weight: 700; list-style: none; cursor: pointer; }
+.faq__item summary::-webkit-details-marker { display: none; }
+.faq__item summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.faq__item summary svg { flex: 0 0 auto; color: var(--chestnut); transition: transform 180ms; }
+.faq__item[open] summary svg { transform: rotate(180deg); }
+.faq__item p { margin: 0; padding: 0 0 26px; max-width: 62ch; color: var(--muted); line-height: 1.75; }
+/* Footer. Paper rather than parchment so the page ends on a surface instead of trailing off. On a
+   phone the link groups are ONE column of full-width rows, not two cramped ones: the whole row is
+   the target, hairlines do the separating, and no row is shorter than 52px. Two-up columns at 390
+   gave each link about 155px of width and 44px of height — a thumb-sized target sitting inside a
+   not-thumb-sized row. Three-across beside the brand returns at 761. */
+.site-footer { padding: 40px 20px calc(30px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--paper); }
+.site-footer__top { display: grid; gap: 30px; }
+.site-footer__blurb { margin: 14px 0 0; max-width: 38ch; color: var(--muted); font-size: .925rem; line-height: 1.7; }
+.site-footer__groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
+.site-footer h3.section-label { margin: 0 0 4px; }
+.site-footer ul { margin: 0; padding: 0; display: grid; border-top: 1px solid var(--border); list-style: none; }
+.site-footer__groups li { border-bottom: 1px solid var(--border); }
+.site-footer__groups a { min-height: 52px; display: flex; align-items: center; }
+/* Scoped to the nav lists rather than every anchor in the footer: `.site-footer a` outranks
+   `.brand` and would repaint the footer's own brand mark grey at .95rem. */
+.site-footer__groups a { color: var(--ink); font-size: .95rem; text-decoration: none; }
+.site-footer__groups a:hover { color: var(--chestnut); text-decoration: underline; }
+/* Stacked and left-aligned: `space-between` on a narrow bar pushed the retention line to a ragged
+   second row that read as a caption for nothing. */
+.site-footer__bottom { margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--border); display: grid; gap: 7px; color: var(--muted); font-size: .85rem; line-height: 1.6; }
+.site-footer__bottom p { margin: 0; }
+/* Privacy and Terms: one measure, the same paper card the recovery page uses. Prose, not layout. */
+.legal-page { width: 100%; max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
+.legal-page > section { padding: 28px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); box-shadow: 0 18px 50px rgb(74 36 21 / 5%); }
+.legal-page h1 { margin-bottom: 16px; font-size: clamp(2.35rem, 9vw, 4rem); }
+.legal-page > section > p { max-width: 62ch; color: var(--muted); }
+.legal-page .trust-list li { align-items: start; }
+.legal-page__pending { margin: 0; padding-top: 24px; border-top: 1px solid var(--border); font-size: .925rem; }
 .create-layout, .success-layout { min-height: calc(100svh - 88px); padding: 65px 7vw 80px; display: grid; grid-template-columns: .8fr 1.2fr; gap: 8vw; align-items: start; }
 .create-intro { position: sticky; top: 55px; padding-top: 36px; }.create-intro h1 { font-size: clamp(2.8rem, 5vw, 4.8rem); }.create-intro > p:not(.section-label) { color: var(--muted); font-size: 1.1rem; }
 .trust-list { margin: 34px 0; padding: 27px 0 0; border-top: 1px solid var(--border); display: grid; gap: 14px; list-style: none; }.trust-list li { display: flex; gap: 10px; align-items: center; }.trust-list svg { color: var(--moss); }
@@ -247,6 +329,17 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   /* The public gutter follows the header, which widens to 5vw at this same boundary. */
   .hero { padding: 7vw 5vw 5vw; }
   .workflow { padding: 70px 5vw 55px; }
+  .faq { padding: 70px 5vw 60px; }
+  .legal-page { padding-top: 56px; }
+  .legal-page > section { padding: 40px; }
+  .site-footer { padding: 56px 5vw 38px; }
+  .site-footer__top { grid-template-columns: minmax(260px, 1fr) auto; gap: 6vw; }
+  .site-footer__groups { grid-template-columns: repeat(3, auto); gap: 0 clamp(32px, 5vw, 80px); }
+  .site-footer h3.section-label { margin: 0 0 6px; }
+  .site-footer ul { border-top: 0; }
+  .site-footer__groups li { border-bottom: 0; }
+  .site-footer__groups a { min-height: 44px; display: inline-flex; }
+  .site-footer__bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 24px; }
   .contributions { padding: 75px 6vw; }
   .photo-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 15px; }
   .photo-grid figure { grid-column: span 4; }
@@ -266,6 +359,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .hero__image { grid-row: auto; }
   .hero h1 { font-size: clamp(2.75rem, 6.4vw, 5.6rem); }
   .hero__image { height: min(61vw, 650px); }
+  /* Only the two-column hero has gutter to spill into. Single-column, the rotated bounding box adds
+     ~8px per side on top of the offset and would push past the 20px page padding into overflow. */
+  .hero__image .hero__print--a { left: -5%; }
+  .hero__image .hero__print--b { right: -3%; }
   .workflow ol { grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 0; }
   .workflow li { padding: 0 40px; border-right: 1px solid var(--border); }
 }
