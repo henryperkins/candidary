@@ -346,6 +346,23 @@ describe('event theme create and read serialization', () => {
       'theme.overrides.accentColor': 'Accent color needs a 3:1 contrast ratio against the event surfaces.',
     });
   });
+
+  it('refuses a primary that dissolves into the event surfaces', async () => {
+    const response = await createEvent({
+      theme: {
+        version: 1,
+        presetId: 'candidary-default',
+        overrides: { primaryColor: '#ffffff' },
+      },
+    });
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors).toEqual({
+      'theme.overrides.primaryColor': 'Primary color needs a 3:1 contrast ratio against the event surfaces.',
+    });
+  });
 });
 
 describe('authorized event theme updates', () => {
@@ -355,7 +372,7 @@ describe('authorized event theme updates', () => {
     overrides: { primaryColor: '#123456' },
   } as const;
 
-  /* The floor sits on the write, not on the read: an accent already saved keeps resolving for guests
+  /* The floors sit on the write, not on the read: a color already saved keeps resolving for guests
      and is only refused when the host next edits it. */
   it('refuses an accent that disappears into the event surfaces', async () => {
     const access = await eventAccess('Illegible accent');
@@ -371,6 +388,47 @@ describe('authorized event theme updates', () => {
     expect(body.fieldErrors).toEqual({
       'overrides.accentColor': 'Accent color needs a 3:1 contrast ratio against the event surfaces.',
     });
+  });
+
+  /* `primaryForeground` keeps the label on the button legible, which is why this one reaches the
+     floor rather than the resolver: the send button would carry readable ink and still be invisible
+     against the surface holding it. */
+  it('refuses a primary that dissolves into the event surfaces', async () => {
+    const access = await eventAccess('Dissolving primary');
+    const response = await putTheme(access.event.id, {
+      version: 1,
+      presetId: 'candidary-default',
+      overrides: { primaryColor: '#ffffff' },
+    }, writeHeaders(access.manager));
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors).toEqual({
+      'overrides.primaryColor': 'Primary color needs a 3:1 contrast ratio against the event surfaces.',
+    });
+    const read = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect((await read.json<any>()).data.event.theme.config).toEqual(DEFAULT_CONFIG);
+  });
+
+  /* The read path is untouched by the floors, so an event carrying a below-floor primary from before
+     one existed still reaches its guests with the color its host chose. */
+  it('keeps serving a stored below-floor primary to guests', async () => {
+    const access = await eventAccess('Stored below floor');
+    await testEnv.DB.prepare('UPDATE events SET theme_config = ? WHERE id = ?')
+      .bind('{"version":1,"presetId":"garden-party","overrides":{"primaryColor":"#ffffff"}}', access.event.id)
+      .run();
+
+    const read = await createApp().request(`/api/event/${access.event.slug}`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    const view = (await read.json<any>()).data.event;
+
+    expect(read.status).toBe(200);
+    expect(view.theme.config.presetId).toBe('garden-party');
+    expect(view.theme.tokens.primary).toBe('#ffffff');
   });
 
   it('updates through either a matching manager link or the owning account', async () => {

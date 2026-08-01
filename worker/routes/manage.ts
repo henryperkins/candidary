@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import {
-  assertAccentLegible,
+  assertOverridesLegible,
   eventThemeConfigSchema,
   EventThemeResolutionError,
   resolveEventTheme,
@@ -183,7 +183,7 @@ manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
   let resolved;
   try {
     resolved = resolveEventTheme(parsed.data);
-    assertAccentLegible(resolved);
+    assertOverridesLegible(resolved);
   } catch (error) {
     if (!(error instanceof EventThemeResolutionError)) throw error;
     throw new ApiError(

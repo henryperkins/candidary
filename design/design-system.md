@@ -159,6 +159,18 @@ its fixed indicator thickness and offset. Normal and control text must clear `4.
 Input boundaries, focus indicators, and actionable primary outlines must clear
 `3:1` against every applicable page, surface, and raised surface.
 
+An overridden `primary` and an overridden `accent` are both meaningful non-text
+and must each clear `3:1` against every applicable page, surface, and raised
+surface at the point the host chooses them. Primary fills the guest's own
+actions, so a value clearing only `primaryForeground` yields a readable label on
+a button that cannot be found; accent is drawn as a mark on those same grounds.
+Both floors sit on the write and never on the read, so a color saved before a
+floor existed keeps resolving for guests and is refused only when that host next
+edits it. `fullscreenBackdrop` is outside both floors: the full-screen brand mark
+is decorative chrome, and no one color clears `3:1` against both near-black and
+the near-white event surfaces. `primaryHover` is derived to always differ from
+`primary`, so a chosen black or white action still answers the pointer.
+
 Danger/failure red, delivered moss, state labels and glyphs, progress meaning,
 retry behavior, spinner geometry and motion, disabled opacity, focus thickness
 and offset, the full-screen caption's black gradient, typography, spacing,

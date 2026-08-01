@@ -194,18 +194,38 @@ function passingForeground(candidates: readonly HexColor[], background: HexColor
   return contrastRatio(candidate, background) >= 4.5 ? candidate : undefined;
 }
 
-function passesAgainstSurfaces(color: HexColor, tokens: EventThemeTokens): boolean {
+function clearsSurfaces(color: HexColor, tokens: EventThemeTokens, ratio: number): boolean {
   return [tokens.page, tokens.surface, tokens.raisedSurface]
-    .every((surface) => contrastRatio(color, surface) >= 4.5);
+    .every((surface) => contrastRatio(color, surface) >= ratio);
 }
 
 function resolvePrimaryOnSurface(primary: HexColor, tokens: EventThemeTokens): HexColor {
-  if (passesAgainstSurfaces(primary, tokens)) return primary;
+  if (clearsSurfaces(primary, tokens, 4.5)) return primary;
   for (let weight = 0.05; weight < 1; weight += 0.05) {
     const candidate = blend(primary, tokens.text, weight);
-    if (passesAgainstSurfaces(candidate, tokens)) return candidate;
+    if (clearsSurfaces(candidate, tokens, 4.5)) return candidate;
   }
   return tokens.text;
+}
+
+/* Which way a hover moves is a decision the foreground already carries: a button with a white label
+   deepens, one with dark ink lightens. At either luminance extreme that pole is the one the color
+   already sits on, so blending toward it returned the primary unchanged and the hover state
+   disappeared outright — `#000000` and `#ffffff` both resolved to a hover identical to the button
+   they were meant to answer. Below this step the intended direction has no room left, so the move is
+   taken the other way, which is the only direction with any. The step is set where that reversal
+   reaches no color a host can still choose except a near-black one: across every color
+   `assertOverridesLegible` admits, the only ones that reverse carry a white label and none is lighter
+   than `#191915`, where deepening means nothing anyway. Every authored preset primary keeps its
+   intended direction. */
+const HOVER_BLEND_WEIGHT = 0.1;
+const MIN_HOVER_CONTRAST = 1.02;
+
+function resolveHover(primary: HexColor, foreground: HexColor): HexColor {
+  const deepen = foreground === '#ffffff';
+  const intended = blend(primary, deepen ? '#000000' : '#ffffff', HOVER_BLEND_WEIGHT);
+  if (contrastRatio(intended, primary) >= MIN_HOVER_CONTRAST) return intended;
+  return blend(primary, deepen ? '#ffffff' : '#000000', HOVER_BLEND_WEIGHT);
 }
 
 export class EventThemeResolutionError extends Error {
@@ -231,7 +251,7 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
     }
     resolvedTokens.primary = primary;
     resolvedTokens.primaryForeground = foreground;
-    resolvedTokens.primaryHover = blend(primary, foreground === '#ffffff' ? '#000000' : '#ffffff', 0.1);
+    resolvedTokens.primaryHover = resolveHover(primary, foreground);
     resolvedTokens.primaryOnSurface = resolvePrimaryOnSurface(primary, resolvedTokens);
     resolvedTokens.primaryShadow = rgba(primary, 13);
   }
@@ -242,7 +262,7 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
        over that pairing turned away colors on a contrast nothing renders — and because both white and
        near-black fall below 4.5:1 across a narrow band of mid luminances, the colors it turned away
        were ordinary mid-tones. `highestContrast` always answers, so the derivation cannot fail.
-       What accent does render on is guarded by `assertAccentLegible` at the point of choosing. */
+       What accent does render on is guarded by `assertOverridesLegible` at the point of choosing. */
     const accentForeground = contrastRatio(resolvedTokens.accentForeground, accent) >= 4.5
       ? resolvedTokens.accentForeground
       : highestContrast(['#ffffff', '#111111'], accent);
@@ -269,21 +289,35 @@ export function resolveEventTheme(input: EventThemeConfigV1): ResolvedEventTheme
   return { config, tokens: resolvedTokens };
 }
 
-/* The floor that actually renders. Accent is only ever drawn as a mark on the event's own grounds —
-   the empty-state and notes glyphs, the guest footer mark — so `design/design-system.md` asks it to
-   clear 3:1 there as meaningful non-text. `fullscreenBackdrop` is deliberately outside the set: the
-   full-screen brand mark sits on near-black while that same accent sits on near-white surfaces, and
-   no one color clears 3:1 against both, so that mark stays decorative brand chrome.
+/* The floor that actually renders. Neither overridable color is text and neither is held to a text
+   ratio: `design/design-system.md` asks meaningful non-text to clear 3:1 on the ground it is drawn
+   on, and that one rule covers both roles here. Accent is only ever a mark on the event's own
+   grounds — the empty-state and notes glyphs, the guest footer mark. Primary is the fill of the
+   guest's own actions, so the same grounds decide whether the action reads as an object at all;
+   `primaryForeground` only ever guaranteed the label inside it, which left `#ffffff` resolving to a
+   send button at 1.04:1 against the surface it sits on — a legible label on a button nobody can find.
+   `fullscreenBackdrop` is deliberately outside the set: the full-screen brand mark sits on near-black
+   while these same colors sit on near-white surfaces, and no one color clears 3:1 against both, so
+   that mark stays decorative brand chrome.
    Deliberately not part of `resolveEventTheme`: this runs only where a host picks a color, so raising
-   the floor can never retire a theme that is already saved. A stored accent below it keeps resolving
+   a floor can never retire a theme that is already saved. A stored color below it keeps resolving
    exactly as it does today, and is only refused when that host next edits it. */
-const ACCENT_SURFACE_CONTRAST = 3;
+const SURFACE_NON_TEXT_CONTRAST = 3;
 
-export function assertAccentLegible(theme: ResolvedEventTheme): void {
-  if (!theme.config.overrides.accentColor) return;
-  const legible = [theme.tokens.page, theme.tokens.surface, theme.tokens.raisedSurface]
-    .every((surface) => contrastRatio(theme.tokens.accent, surface) >= ACCENT_SURFACE_CONTRAST);
-  if (!legible) {
+export function assertOverridesLegible(theme: ResolvedEventTheme): void {
+  if (
+    theme.config.overrides.primaryColor
+    && !clearsSurfaces(theme.tokens.primary, theme.tokens, SURFACE_NON_TEXT_CONTRAST)
+  ) {
+    throw new EventThemeResolutionError(
+      'overrides.primaryColor',
+      'Primary color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+  }
+  if (
+    theme.config.overrides.accentColor
+    && !clearsSurfaces(theme.tokens.accent, theme.tokens, SURFACE_NON_TEXT_CONTRAST)
+  ) {
     throw new EventThemeResolutionError(
       'overrides.accentColor',
       'Accent color needs a 3:1 contrast ratio against the event surfaces.',

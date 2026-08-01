@@ -178,6 +178,61 @@ describe('event appearance editor', () => {
     expect(preview).toHaveStyle({ '--event-accent': '#3f6d95' });
   });
 
+  /* The floors run on every write, so only a color saved before one existed can be below it — the
+     case they were written to tolerate rather than retire. Editing the *other* color then meets a
+     refusal that is not about the edit: the choice has to survive it, and the error has to name the
+     color that actually blocks Save rather than the field the host is typing in. */
+  it('keeps an edit that a floor refuses on the other saved color, and names that color', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    const user = userEvent.setup();
+    render(<EventAppearanceEditor
+      event={{ ...event, theme: resolveEventTheme({
+        version: 1,
+        presetId: 'candidary-default',
+        overrides: { accentColor: '#f5efe6' },
+      }) }}
+      onEventSaved={vi.fn()}
+    />);
+
+    const preview = screen.getByTestId('event-appearance-preview');
+    const primary = screen.getByRole('textbox', { name: 'Primary color' });
+    const accent = screen.getByRole('textbox', { name: 'Accent color' });
+
+    await user.clear(primary);
+    await user.type(primary, '#123456');
+
+    expect(preview).toHaveStyle({ '--event-primary': '#123456' });
+    expect(primary).not.toHaveAttribute('aria-invalid', 'true');
+    expect(accent).toHaveAttribute('aria-invalid', 'true');
+    expect(accent).toHaveAccessibleDescription('Accent color needs a 3:1 contrast ratio against the event surfaces.');
+    expect(screen.getByRole('button', { name: 'Save appearance' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Use preset accent' }));
+    expect(accent).toHaveValue('#3f6d95');
+    expect(preview).toHaveStyle({ '--event-primary': '#123456', '--event-accent': '#3f6d95' });
+    expect(screen.getByRole('button', { name: 'Save appearance' })).toBeEnabled();
+  });
+
+  it('reports a primary that dissolves into the event surfaces on its own field', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 404 }))));
+    const user = userEvent.setup();
+    render(<EventAppearanceEditor event={event} onEventSaved={vi.fn()} />);
+
+    const preview = screen.getByTestId('event-appearance-preview');
+    const primary = screen.getByRole('textbox', { name: 'Primary color' });
+
+    await user.clear(primary);
+    await user.type(primary, '#ffffff');
+    expect(primary).toHaveAttribute('aria-invalid', 'true');
+    expect(primary).toHaveAccessibleDescription('Primary color needs a 3:1 contrast ratio against the event surfaces.');
+    expect(preview).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByRole('button', { name: 'Save appearance' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Use preset primary' }));
+    expect(primary).toHaveValue('#4a2415');
+    expect(preview).toHaveStyle({ '--event-primary': '#4a2415' });
+  });
+
   it('resets locally, sends the canonical configuration, and adopts the normalized response', async () => {
     const normalizedTheme = resolveEventTheme({
       version: 1,
