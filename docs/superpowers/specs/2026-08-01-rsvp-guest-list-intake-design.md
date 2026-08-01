@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-01
 
-**Status:** Approved in design review; awaiting written-spec confirmation
+**Status:** Design approved; written-spec review corrections incorporated
 
 ## 1. Decision
 
@@ -149,7 +149,7 @@ that action.
 The first workspace step accepts:
 
 - drag-and-drop or file selection for `.csv` and text-delimited files up to the
-  existing 256 KB roster-source limit;
+  existing 256 KiB (`262,144` byte) roster-source limit;
 - clipboard paste from Excel, Google Sheets, or another tabular source;
 - clipboard paste with one non-empty name per line; and
 - direct typing for one or more guests.
@@ -198,15 +198,20 @@ The exact existing strict CSV header remains accepted without a mapping step:
 household_key,household_label,invitee_name,plus_one_slots
 ```
 
-Strict initial import preserves supplied household keys. Generic structured
-input may preserve an explicitly mapped key during pristine setup. Otherwise,
-the server generates a stable key. Ordinary setup never asks the host to invent
-or edit one.
+An explicitly supplied or mapped key for a new staged household is preserved at
+pristine setup or later only when it is valid and unused by every committed
+active or archived household and every other materialized create. A supplied
+key is never rewritten or collision-suffixed; an invalid, inconsistently mapped,
+or already-used key is blocking. When no key is supplied, the server generates
+a stable key and may suffix that generated value to avoid a collision. Ordinary
+setup never asks the host to invent or edit a key.
 
-After a roster exists, a supplied key or matching label never silently selects
-an existing household. Candidary may show a manager-only possible match, but the
-host must explicitly choose that household before the batch becomes an append.
-Unconfirmed rows remain new staged households and must pass collision checks.
+A supplied key or matching label never silently selects an existing household.
+Candidary may show a manager-only possible match, but the host must explicitly
+choose that household before the batch becomes an append. The append retains the
+committed household's key and does not write the source key; review makes that
+effect visible. Unconfirmed rows remain new staged households and must pass the
+preserve-if-free collision checks.
 
 ### 6.4 Plain-name path
 
@@ -258,9 +263,10 @@ Each staged new household shows:
 - a plus-one control from `0` through the existing maximum of `10`; and
 - the resulting invited capacity.
 
-New technical household keys are generated on the server and hidden from the
-ordinary form. They remain stable and continue to appear in exports for
-reconciliation.
+When a new household has no supplied key, its technical key is generated on the
+server and hidden from the ordinary form. Explicitly supplied keys that pass
+preview are preserved. Both forms remain stable and continue to appear in
+exports for reconciliation; only generated keys may receive collision suffixes.
 
 An append to a household that has not responded creates pending invitees and
 slots. An append to a household that has responded requires an explicit
@@ -312,6 +318,7 @@ flowchart TD
     WORKSPACE --> CAPTURE[GuestListCapture]
     WORKSPACE --> MAP[GuestListColumnMapper]
     WORKSPACE --> GROUP[GuestListGroupingBoard]
+    WORKSPACE --> TARGET[GuestListHouseholdTargetPicker]
     WORKSPACE --> DETAILS[GuestListInvitationDetails]
     WORKSPACE --> REVIEW[GuestListBatchReview]
     WORKSPACE --> RECEIPT[GuestListCommitReceipt]
@@ -327,8 +334,10 @@ Responsibilities are:
 - `GuestListCapture` owns file, paste, typing, advisory detection, and source
   preservation.
 - `GuestListColumnMapper` owns structured sample rows and semantic mapping.
-- `GuestListGroupingBoard` owns explicit groups, automatic-individual preview,
-  and existing-household selection.
+- `GuestListGroupingBoard` owns explicit groups and automatic-individual
+  preview.
+- `GuestListHouseholdTargetPicker` owns manager-only existing-household search
+  and explicit append targeting from either organization branch.
 - `GuestListInvitationDetails` owns labels, plus-one increases, and attendance
   required for responded targets.
 - `GuestListBatchReview` owns authoritative issues, totals, and commit intent.
@@ -347,6 +356,12 @@ capture -> organize -> details -> materialize -> previewing -> review
         -> committing -> receipt
 ```
 
+`organize` is the shared branch state, not a single component. Structured input
+renders `GuestListColumnMapper`; plain-name and direct input render
+`GuestListGroupingBoard`. When a roster exists,
+`GuestListHouseholdTargetPicker` is available from either branch. All paths
+converge on `details`.
+
 Any state before `committing` may move backward without losing the active draft.
 Preview issues return to `organize` or `details` while keeping server issue
 references. A candidate or expected-version change clears the prior digest and
@@ -363,7 +378,10 @@ Conceptually, the draft contains:
 interface RsvpRosterBatchDraft {
   creates: Array<{
     clientHouseholdId: string;
-    householdKey?: string;
+    householdKey?: {
+      value: string;
+      provenance: 'supplied' | 'generated';
+    };
     label: string;
     namedInvitees: Array<{
       clientInviteeId: string;
@@ -390,6 +408,14 @@ interface RsvpRosterBatchDraft {
 }
 ```
 
+For a preview request, an absent `householdKey` means **generate** and a present
+value must have `supplied` provenance and means **preserve exactly or block**.
+Only the Worker may introduce `generated` provenance. The canonical preview
+contains a resolved value and provenance for every create, so commit can
+distinguish a collision-suffixable generated key from a never-rewritten supplied
+key. An append contains no source key because its explicit `householdId` and
+expected version identify the committed target.
+
 The production type names may follow existing contract conventions, but the
 semantics above are required. Creates never carry attendance because a new
 household has not responded. Appends to a responded household require complete
@@ -412,10 +438,21 @@ interface RsvpRosterBatchIssue {
 
 Only informational conditions may be advisory. Capacity violations, invalid
 names, same-household normalized-name duplicates, unreachable public-lookup
-collisions, stale versions, and incomplete responded-household attendance are
-blocking. A name shared across households is not itself a duplicate error: it
-remains valid when the current exact-name lookup intersection can still resolve
-each household with a second invited name.
+collisions, stale versions, incomplete responded-household attendance, and
+invalid or unavailable supplied keys are blocking. A name shared across
+households is not itself a duplicate error: it remains valid when the current
+exact-name lookup intersection can still resolve each household with a second
+invited name.
+
+Key-related issue codes are stable and field-addressable:
+
+- `household_key_invalid` blocks a pattern or length failure;
+- `household_key_mapping_inconsistent` blocks a source that does not maintain a
+  one-to-one relationship between non-empty Household and key values;
+- `household_key_in_use` blocks a collision with an active, archived, or
+  separate same-batch household; and
+- `possible_existing_household_match` is advisory manager guidance only and
+  never selects or appends by itself.
 
 `clientHouseholdId` and every `clientInviteeId`, including a new plus-one slot,
 are UUIDs that remain stable through grouping and reordering. They are UI
@@ -430,14 +467,28 @@ POST /api/manage/events/:eventId/rsvp/roster/preview
 POST /api/manage/events/:eventId/rsvp/roster/commit
 ```
 
-Both routes reject a serialized UTF-8 JSON body above 256 KB before domain
-work. The schemas allow at most 500 total target households and 500 total added
+Both routes reject a raw request body above 512 KiB (`524,288` bytes), measured
+from the bytes actually received before JSON parsing or domain work. The browser
+performs the same serialized-byte preflight, but the Worker remains
+authoritative. This JSON-envelope limit is separate from the 256 KiB uploaded
+roster-source limit. The shared constant is `MAX_RSVP_BATCH_BYTES`. A modeled
+contract-maximum 500-singleton commit with
+three-byte 80-character names and labels, 64-character keys, UUID client IDs,
+key provenance, digest, and idempotency key is about 390 KB, leaving explicit
+transport margin.
+The production test fixture measures the final serialized contract rather than
+assuming that estimate remains true.
+
+The schemas allow at most 500 total target households and 500 total added
 named-guest or plus-one rows, while the server still validates those additions
 against remaining event and per-household capacity. Names and labels use the
-existing normalized 80-character limit; supplied household keys use the
-existing 64-character limit; roster identifiers and client IDs are UUIDs; and
-the idempotency key is between 1 and 128 characters. Unknown fields and
-duplicate client IDs are rejected.
+existing normalized 80-character limit and must be well-formed Unicode, with
+unpaired surrogates rejected; supplied household keys use the existing
+64-character limit; roster identifiers and client IDs are UUIDs; and the
+idempotency key is between 1 and 128 characters. Every new envelope and nested
+object schema rejects unknown fields with Zod strict-object semantics; duplicate
+client IDs are also rejected. Legacy request schemas retain their existing
+compatibility behavior.
 
 ### 9.1 Preview
 
@@ -459,6 +510,12 @@ Preview performs no writes. It returns:
 
 The Worker, not the browser, owns name normalization, household-key generation,
 capacity, lookup reachability, and all authoritative validation.
+
+For every create, preview either preserves a valid supplied key or resolves a
+generated key. It checks supplied values against active households, archived
+households, and separate creates in the same batch. A supplied collision blocks;
+only a generated key may receive a collision suffix. Appends never acquire or
+change a key.
 
 The digest covers the event scope, canonical candidate, expected event roster
 version, and every target household version. It excludes the idempotency key.
@@ -526,12 +583,19 @@ Using a file after setup is an additive batch, not another strict import. It may
 create new households or explicitly append to selected households, but it never
 matches and overwrites committed data on its own.
 
+`POST /api/manage/events/:eventId/rsvp/households` also remains supported
+unchanged for API compatibility, including its required client-supplied
+`householdKey`. The manager application removes its manual-create caller; every
+visible Add guests action uses the roster batch endpoints, so the ordinary
+direct-entry UI never asks for a technical key. Existing `PUT` household editing
+remains the correction path.
+
 ## 10. Worker and D1 design
 
 A focused roster-batch service owns:
 
 - canonical draft validation;
-- generated household keys and collision suffixes;
+- supplied-key preservation and blocking, plus generated-key collision suffixes;
 - same-household exact normalized-name duplicate checks;
 - cross-household lookup reachability;
 - event, household, named-invitee, plus-one, and total capacity limits;
@@ -543,10 +607,10 @@ A focused roster-batch service owns:
 
 It reuses existing RSVP repository mutation primitives and CSV/domain
 validators where their contracts match. Repository writes remain chunked so no
-D1 statement binds more than 100 parameters. The maximum supported batch still
-fits the current limits of 500 households, 500 invited capacity, 20 named guests
-per household, 10 plus-one slots per household, and 30 total people per
-household.
+D1 statement binds more than 100 parameters. The maximum supported batch fits
+both the 512 KiB request envelope and the current limits of 500 households, 500
+invited capacity, 20 named guests per household, 10 plus-one slots per
+household, and 30 total people per household.
 
 The next available migration adds a manager batch receipt table containing:
 
@@ -592,6 +656,26 @@ and writes nothing. The response identifies affected targets and includes the
 current roster version. A matching prior receipt is replayed before this mutable
 version check.
 
+`RSVP_ROSTER_BATCH_CONFLICT` extends the shared error envelope with a `details`
+property containing typed metadata:
+
+```ts
+interface RsvpRosterBatchConflictDetails {
+  currentRosterVersion: number;
+  targets: Array<{
+    clientHouseholdId: string;
+    householdId: string;
+    currentHouseholdVersion: number | null;
+    state: 'changed' | 'archived' | 'missing';
+  }>;
+}
+```
+
+An event-only roster conflict may have an empty `targets` array. Implementation
+extends the shared `ApiErrorBody`, `ApiError`, `toErrorResponse`, and
+`ClientApiError` contracts so this discriminated metadata survives end to end;
+it is not encoded in prose or overloaded into `fieldErrors`.
+
 The workspace reloads current target details, keeps all unaffected staged work,
 marks the affected items, and requires a new preview. It never silently rebases
 an append onto a changed household. The refreshed expected versions produce a
@@ -617,14 +701,23 @@ error.
 The host may reselect the same corrected file. File inputs must reset in a way
 that makes same-file retry observable to React and assistive technology.
 
+If the materialized JSON exceeds 512 KiB, the workspace preserves the staged
+draft, invalidates any older preview, digest, and idempotency key, and explains
+that the host can split the list into smaller Add guests batches. It does not
+mislabel a source file that passed its separate 256 KiB limit as oversized.
+
 ### 11.5 HTTP behavior
 
 - Auth and permission failures keep existing manager conventions.
 - A valid preview request with roster-content issues returns the preview and
   blocking issues rather than partial success.
-- Malformed or over-limit requests return a request-level client error; file
-  errors remain attached to the source control.
-- Version and changed-idempotency conflicts return `409` with stable codes.
+- A raw body above 512 KiB returns `413 RSVP_ROSTER_BATCH_TOO_LARGE`; malformed
+  shape returns `422 VALIDATION_FAILED`; file errors remain attached to the
+  source control.
+- A preview-digest, roster-version, or target-version mismatch returns
+  `409 RSVP_ROSTER_BATCH_CONFLICT` with the typed details above.
+- Reusing a committed idempotency key with a different digest returns
+  `409 RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT`.
 - Unexpected failures return the existing generic manager-safe message and a
   request ID; raw source rows and guest names are not copied into logs.
 
@@ -678,8 +771,9 @@ change, and independent tasks receive independent commits.
 - automatic materialization of remaining names before server preview;
 - stable client IDs and draft reducer transitions;
 - canonical digest stability and change detection;
-- field-addressable issue mapping; and
-- generated-key normalization and collision suffixing.
+- field-addressable issue mapping;
+- one-to-one Household/key mapping validation; and
+- preserve-if-free supplied keys versus generated-key collision suffixing.
 
 ### 14.2 Worker tests
 
@@ -688,6 +782,9 @@ change, and independent tasks receive independent commits.
 - initial and incremental additive batches;
 - explicit existing-household selection;
 - no silent matching by label or key;
+- supplied-key preservation during initial and later creates;
+- supplied-key collision blocking against active, archived, and same-batch
+  households, with no automatic suffixing;
 - duplicate and public-lookup reachability validation;
 - event and household capacity boundaries;
 - responded-household attendance requirements;
@@ -699,7 +796,13 @@ change, and independent tasks receive independent commits.
 - a lost-response retry after later roster edits;
 - replay returns the immutable committed version and a fresh current roster
   version;
-- request-envelope byte, array, identifier, and text limits;
+- exact 512 KiB request-envelope enforcement before JSON parsing, including a
+  contract-maximum serialized fixture that remains below the cap;
+- rejection of ill-formed Unicode before text canonicalization;
+- strict unknown-field rejection at the envelope, create/append,
+  household-key, invitee, and plus-one-response layers while legacy schemas
+  remain unchanged;
+- typed roster-conflict metadata through the Worker and client transport;
 - event purge cascades manager receipts;
 - spreadsheet-formula protections in current export remain unchanged; and
 - the 500-capacity batch with no prepared statement above 100 bindings.
@@ -711,14 +814,17 @@ change, and independent tasks receive independent commits.
 - every input mode and detection override;
 - structured mapping and source preservation;
 - explicit grouping and automatic individuals;
+- existing-household targeting from structured and plain-name organization;
 - new-household and existing-household quick additions;
 - plus-one-only additions to an explicitly selected existing household;
-- no technical key field in ordinary entry;
+- no required technical-key input in direct entry, while advanced structured
+  column mapping remains optional;
 - plus-one assignment and responded-household attendance;
 - inline issue links and focus;
 - stale preview and version-conflict recovery;
 - unreadable and same-file retry behavior;
 - old-preview invalidation after new source failure;
+- oversized-batch recovery without losing the staged draft;
 - close/discard confirmation;
 - uncertain commit retry and replayed receipt; and
 - direct access from the receipt to newly created or updated households.
@@ -737,6 +843,15 @@ change, and independent tasks receive independent commits.
 - unchanged guest RSVP journey; and
 - unchanged photo-first and photo-upload journeys.
 
+### 14.5 Load rehearsal
+
+The guarded RSVP load rehearsal exercises the new roster batch preview and
+commit path with a maximum-capacity disposable event, asserts that the payload
+stays below 512 KiB, reconciles committed totals, and verifies receipt replay.
+Legacy strict-import behavior remains covered in Worker compatibility tests. If
+the existing harness retains a legacy mode, the new-batch rehearsal uses an
+explicit separate mode or script so neither path is mislabeled.
+
 ## 15. Acceptance criteria
 
 The design is ready for release consideration only when all of these are true:
@@ -747,17 +862,21 @@ The design is ready for release consideration only when all of these are true:
 3. A host can paste plain names, explicitly group shared invitations, and see
    all remaining names become explicit individual candidates before preview and
    individual invitations in final review.
-4. A later single-household addition never asks for a technical key.
-5. A file used after setup is additive only and cannot silently overwrite or
+4. A later single-household addition never asks for a technical key in the
+   ordinary manager UI.
+5. An explicitly supplied key for a new household is preserved when free,
+   blocks when invalid or already reserved, and never selects an existing
+   household by itself.
+6. A file used after setup is additive only and cannot silently overwrite or
    remove committed data.
-6. No preview writes data, and no failed commit leaves a partial batch.
-7. A dropped commit response can be retried without duplicate guests or an
+7. No preview writes data, and no failed commit leaves a partial batch.
+8. A dropped commit response can be retried without duplicate guests or an
    ambiguous result.
-8. Every blocking issue is linked to its affected staged item and is reachable
+9. Every blocking issue is linked to its affected staged item and is reachable
    by keyboard and assistive technology.
-9. The maximum supported roster respects D1's binding limit and current domain
-   limits.
-10. Public lookup protections, RSVP attendance semantics, the durable QR, and
+10. The maximum supported roster fits the 512 KiB JSON envelope and respects
+    D1's binding limit and current domain limits.
+11. Public lookup protections, RSVP attendance semantics, the durable QR, and
     the private photo journey remain unchanged.
 
 ## 16. Implementation and release boundaries
@@ -765,6 +884,17 @@ The design is ready for release consideration only when all of these are true:
 - Implementation must use failing tests before production changes.
 - Work should be split into independently reviewable commits.
 - Existing unrelated dirty and untracked files must remain untouched.
+- The implementation task that adds
+  `RSVP_ROSTER_BATCH_TOO_LARGE`, `RSVP_ROSTER_BATCH_CONFLICT`, and
+  `RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT` must update `shared/errors.ts` and
+  document all three codes in `docs/operations.md`; the typed conflict-detail
+  contract must be updated on both server and client in that task.
+- `docs/rsvp-csv.md` must distinguish universal additive Add guests intake from
+  the preserved one-time strict-import API and document preserved or generated
+  household keys in exports.
+- `docs/operations.md` must also replace its one-time-import-only intake and
+  legacy load-harness narrative with the new additive-batch and rehearsal
+  contracts while retaining the strict API's compatibility boundary.
 - Do not push without asking first.
 - Do not deploy, apply remote D1 migrations, alter remote D1 or R2 data, or set
   or store secrets without explicit authorization.
@@ -785,6 +915,16 @@ The conversational design review approved:
 - the unified staging journey;
 - the validation, atomic commit, idempotency, and recovery model; and
 - the component, API, scope, and verification boundaries in this document.
+
+The written-spec review against the current RSVP source then resolved:
+
+- the separate 256 KiB source and 512 KiB JSON-envelope limits;
+- preserve-if-free supplied keys with blocking active, archived, and same-batch
+  collisions;
+- the legacy manual-create endpoint's compatibility-only role;
+- strict new schemas and typed conflict metadata;
+- operations and CSV documentation obligations; and
+- maximum-capacity load coverage for the new batch path.
 
 This document is the design source for the next implementation-planning phase.
 It does not authorize application changes, pushing, deployment, remote
