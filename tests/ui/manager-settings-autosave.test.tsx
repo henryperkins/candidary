@@ -281,6 +281,59 @@ describe('manager settings autosave guards', () => {
     expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
   });
 
+  it('keeps intake paused when a settings response arrives after entry disable', async () => {
+    const disabledAt = '2026-08-01T15:00:00.000Z';
+    const disabledEvent = { ...MANAGED_EVENT, uploadsEnabled: false, rsvpEnabled: false };
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    let eventReads = 0;
+    let entryReads = 0;
+    let releaseSettings: (() => void) | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? MANAGED_EVENT : disabledEvent });
+      }
+      if (url.endsWith('/entry') && method === 'GET') {
+        entryReads += 1;
+        return json(entryReads === 1
+          ? { eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null }
+          : { eventLink: null, disabledAt });
+      }
+      if (url.endsWith('/entry/disable') && method === 'POST') return json({ disabledAt });
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        await new Promise<void>((resolve) => { releaseSettings = resolve; });
+        // This row was read before disable committed and still says uploads are open.
+        return json({ event: { ...MANAGED_EVENT, moderationRequired: false } });
+      }
+      return fetchMock(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await waitFor(() => expect(releaseSettings).not.toBeNull());
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Disable printed event QR' }));
+    const confirmation = screen.getByRole('group', { name: 'Disable printed event QR' });
+    await user.type(within(confirmation).getByLabelText('Confirm event name'), MANAGED_EVENT.name);
+    await user.click(within(confirmation).getByRole('button', {
+      name: `Disable printed event QR for ${MANAGED_EVENT.name}`,
+    }));
+
+    await waitFor(() => expect(screen.getByText('Guest uploads paused')).toBeVisible());
+    releaseSettings!();
+    await waitFor(() => expect(screen.getByText('Event settings saved')).toBeInTheDocument());
+
+    expect(screen.getByText('Guest uploads paused')).toBeVisible();
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: /settings/i }));
+    expect(screen.getByLabelText('Accept private photo deliveries')).not.toBeChecked();
+  });
+
   it('keeps a deferred cover response from restoring stale settings or theme', async () => {
     const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
     let releaseCover: (() => void) | null = null;

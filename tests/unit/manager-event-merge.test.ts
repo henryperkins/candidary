@@ -40,6 +40,31 @@ describe('manager event merges', () => {
     expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
   });
 
+  it('never regresses the roster version from a delayed settings response', () => {
+    const merged = mergeSettingsResponse(
+      { ...current, rsvpRosterVersion: 9 },
+      { ...staleElsewhere, rsvpRosterVersion: 8 },
+    );
+
+    expect(merged.rsvpRosterVersion).toBe(9);
+  });
+
+  it('never reopens either intake from a settings response after entry disable', () => {
+    const mergeWithEntryState = mergeSettingsResponse as (
+      currentEvent: EventView,
+      responseEvent: EventView,
+      options: { entryDisabled: boolean },
+    ) => EventView;
+    const merged = mergeWithEntryState(
+      { ...current, uploadsEnabled: false, rsvpEnabled: false },
+      { ...staleElsewhere, uploadsEnabled: true, rsvpEnabled: true },
+      { entryDisabled: true },
+    );
+
+    expect(merged.uploadsEnabled).toBe(false);
+    expect(merged.rsvpEnabled).toBe(false);
+  });
+
   it('takes only the theme a theme response owns', () => {
     const merged = mergeThemeResponse(current, { ...staleElsewhere, theme: candidary });
     expect(merged.theme).toBe(candidary);

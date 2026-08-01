@@ -119,6 +119,10 @@ export function ManagerPage() {
   const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
   const [eventLink, setEventLink] = useState('');
   const [entryDisabledAt, setEntryDisabledAt] = useState<string | null>(null);
+  // Updated synchronously when disable confirms so an already-resolving
+  // settings response cannot slip through before React commits the new entry
+  // state. The full refresh later supplies the server's canonical timestamp.
+  const entryDisabled = useRef(false);
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
@@ -267,6 +271,7 @@ export function ManagerPage() {
       setMessages(messageData.messages);
       setExports(exportData.exports);
       setEventLink(linkData.eventLink ?? '');
+      entryDisabled.current = linkData.disabledAt !== null;
       setEntryDisabledAt(linkData.disabledAt);
       loadedOnce.current = true;
     } catch (caught) {
@@ -481,10 +486,17 @@ export function ManagerPage() {
   // apart, because a host cannot undo the second one.
   async function runEntryAction(action: EntryAction) {
     const path = action === 'rotate' ? 'guest-sessions/rotate' : 'entry/disable';
-    await eventWrite(() => api(`/api/manage/events/${eventId}/${path}`, {
+    const result = await eventWrite(() => api<{ disabledAt?: string }>(`/api/manage/events/${eventId}/${path}`, {
       method: 'POST',
       body: JSON.stringify({ confirmName: entryConfirm.trim() }),
     }));
+    if (action === 'disable') {
+      entryDisabled.current = true;
+      setEntryDisabledAt(result.disabledAt ?? null);
+      setEvent((current) => current
+        ? { ...current, uploadsEnabled: false, rsvpEnabled: false }
+        : current);
+    }
     setEntryAction(null);
     setEntryConfirm('');
     await refresh();
@@ -717,7 +729,9 @@ export function ManagerPage() {
           ref={settingsAutosave}
           event={event}
           onEventWrite={eventWrite}
-          onSettingsSaved={(updated) => setEvent((current) => current ? mergeSettingsResponse(current, updated) : updated)}
+          onSettingsSaved={(updated) => setEvent((current) => current
+            ? mergeSettingsResponse(current, updated, { entryDisabled: entryDisabled.current })
+            : updated)}
           onAutosaveStateChange={recordAutosaveState}
         />
         <EventAppearanceEditor

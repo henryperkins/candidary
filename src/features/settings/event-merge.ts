@@ -11,11 +11,8 @@ const SETTINGS_OWNED = [
   'name',
   'welcomeMessage',
   'eventTimezone',
-  'rsvpEnabled',
   'rsvpDeadlineAt',
   'rsvpDeadlineDate',
-  'rsvpRosterVersion',
-  'uploadsEnabled',
   'galleryVisible',
   'moderationRequired',
 ] as const satisfies readonly (keyof EventView)[];
@@ -37,8 +34,21 @@ function mergeOwned(
   return merged;
 }
 
-export function mergeSettingsResponse(current: EventView, response: EventView): EventView {
-  return mergeOwned(current, response, SETTINGS_OWNED);
+export function mergeSettingsResponse(
+  current: EventView,
+  response: EventView,
+  { entryDisabled = false }: { entryDisabled?: boolean } = {},
+): EventView {
+  const merged = mergeOwned(current, response, SETTINGS_OWNED);
+  // RSVP mutations own this counter too. A delayed settings response can only
+  // confirm the version it read; it can never move a newer roster backward.
+  merged.rsvpRosterVersion = Math.max(current.rsvpRosterVersion, response.rsvpRosterVersion);
+  // Settings normally owns the two intake switches. Printed-entry disable is
+  // the one irreversible writer that outranks it, so a response assembled
+  // before the stop can never make either intake look open afterward.
+  merged.uploadsEnabled = entryDisabled ? false : response.uploadsEnabled;
+  merged.rsvpEnabled = entryDisabled ? false : response.rsvpEnabled;
+  return merged;
 }
 
 export function mergeThemeResponse(current: EventView, response: EventView): EventView {
