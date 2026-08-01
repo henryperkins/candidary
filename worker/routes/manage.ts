@@ -269,6 +269,13 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
     { ...parsed.data, eventTimezone, rsvpDeadlineAt, expectedRosterVersion: rosterVersion },
   );
   if (!event) {
+    // The update now refuses an intake reopen itself, so a lost row is no longer
+    // proof of a roster race. Re-read the entry before naming the reason: the
+    // irreversible stop and a moving guest list are different problems with
+    // different ways out.
+    if (parsed.data.uploadsEnabled || parsed.data.rsvpEnabled) {
+      await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+    }
     throw new ApiError(
       'RSVP_ROSTER_INVALID',
       'The guest list changed while these settings were saving. Review it and try again.',

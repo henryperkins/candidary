@@ -152,6 +152,17 @@ export class EventsRepository {
         rsvp_deadline_at = ?,
         rsvp_enabled = ?
       WHERE id = ? AND deleted_at IS NULL AND rsvp_roster_version = ?
+        -- Reopening either intake is only legal while a printed entry is still
+        -- enabled, and that has to be decided inside this statement: the route's
+        -- earlier check is a read, and a settings write already in flight when
+        -- the entry was disabled would otherwise commit against a stale answer.
+        AND (
+          (? = 0 AND ? = 0)
+          OR EXISTS (
+            SELECT 1 FROM event_entry_credentials
+            WHERE event_id = events.id AND disabled_at IS NULL
+          )
+        )
     `).bind(
       input.name ?? null,
       input.welcomeMessage ?? null,
@@ -163,6 +174,8 @@ export class EventsRepository {
       input.rsvpEnabled ? 1 : 0,
       id,
       input.expectedRosterVersion,
+      input.uploadsEnabled ? 1 : 0,
+      input.rsvpEnabled ? 1 : 0,
     ).run();
     // Null rather than an exception: a lost race is an ordinary outcome here,
     // and the route turns it into guest-facing prose.
