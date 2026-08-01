@@ -186,8 +186,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .manager-panel[hidden] { display: none; }
 .manager-panel > h2[tabindex='-1']:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .event-settings-editor__heading { margin-top: 30px; }
-.settings-field { display: grid; gap: 8px; margin-bottom: 23px; }
-.settings-field > label { font-weight: 600; }
+.settings-field { display: grid; gap: 8px; margin-bottom: 23px; font-weight: 600; }
 .settings-form .field-error { display: block; margin-top: 5px; color: var(--danger); font-size: .8rem; font-weight: 500; }
 .settings-toggle-field { display: grid; }
 .settings-toggle-field > .field-error { margin: 5px 4px 10px 40px; }
