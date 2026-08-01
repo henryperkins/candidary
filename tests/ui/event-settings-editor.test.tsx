@@ -347,6 +347,34 @@ describe('event settings editor', () => {
     expect(screen.getByLabelText('Accept RSVPs')).toBeChecked();
   });
 
+  it('stops after one automatic retry when the roster keeps moving', async () => {
+    let rosterVersion = 7;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        return errorJson({
+          code: 'RSVP_ROSTER_INVALID',
+          message: 'The guest list changed since this page loaded. Reload and try again.',
+          fieldErrors: { rsvpEnabled: 'The guest list changed since this page loaded.' },
+          requestId: 'request-a',
+        }, 409);
+      }
+      rosterVersion += 1;
+      return json({ event: { ...EVENT, rsvpRosterVersion: rosterVersion } });
+    }));
+    render(<Harness />);
+
+    fireEvent.click(screen.getByLabelText('Accept RSVPs'));
+    await settleMicrotasks();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS);
+    await settleMicrotasks();
+
+    expect(settingsWrites()).toHaveLength(2);
+    expect(settingsWrites().map((write) => write.rsvpRosterVersion)).toEqual([7, 8]);
+    expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:failed');
+    expect(screen.getByRole('button', { name: /^Retry/u })).toBeVisible();
+  });
+
   it('never reports Saved for the refused write that provoked the rebase', async () => {
     const announced: string[] = [];
     let releaseRetry: (() => void) | null = null;

@@ -62,6 +62,7 @@ function typist() {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -69,6 +70,7 @@ afterEach(() => {
 
 describe('manager settings autosave guards', () => {
   it('flushes a scheduled edit when the host leaves Settings', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     const writes: string[] = [];
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -90,7 +92,9 @@ describe('manager settings autosave guards', () => {
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /gallery/i }));
 
-    await waitFor(() => expect(writes).toHaveLength(1));
+    // The debounce clock has not advanced. Only the destination-boundary
+    // flush can have started this request.
+    expect(writes).toHaveLength(1);
     expect(JSON.parse(writes[0]!).name).toBe('Reception');
   });
 

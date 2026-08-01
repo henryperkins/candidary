@@ -148,6 +148,155 @@ describe('event appearance editor', () => {
     expect(screen.getByText('Event appearance can’t save. Primary color: Enter a six-digit hex color, such as #245c46.')).toBeInTheDocument();
   });
 
+  it('keeps a refused primary color out of the preview and autosave queue', () => {
+    const fetchMock = vi.fn(() => json({ event: eventWithoutCover }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness />);
+    const primary = screen.getByRole('textbox', { name: 'Primary color' });
+
+    fireEvent.change(primary, { target: { value: '#ffffff' } });
+
+    expect(primary).toHaveAccessibleDescription(
+      'Primary color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByTestId('appearance-state')).toHaveTextContent('appearance:invalid');
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use preset primary' }));
+    expect(primary).toHaveValue('#4a2415');
+    expect(primary).toHaveAttribute('aria-invalid', 'false');
+  });
+
+  it('keeps a refused accent color out of the preview and autosave queue', () => {
+    const fetchMock = vi.fn(() => json({ event: eventWithoutCover }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness />);
+    const accent = screen.getByRole('textbox', { name: 'Accent color' });
+
+    fireEvent.change(accent, { target: { value: '#f5efe6' } });
+
+    expect(accent).toHaveAccessibleDescription(
+      'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-accent': '#3f6d95' });
+    expect(screen.getByTestId('appearance-state')).toHaveTextContent('appearance:invalid');
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('keeps a valid edit when the other saved color is below the legibility floor', () => {
+    const legacy = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { accentColor: '#f5efe6' },
+    }) };
+    const normalized = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#123456' },
+    }) };
+    const fetchMock = vi.fn(() => json({ event: normalized }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={legacy} />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Primary color' }), {
+      target: { value: '#123456' },
+    });
+
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#123456' });
+    expect(screen.getByRole('textbox', { name: 'Primary color' })).toHaveAttribute('aria-invalid', 'false');
+    expect(screen.getByRole('textbox', { name: 'Accent color' })).toHaveAccessibleDescription(
+      'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use preset accent' }));
+    expect(themeMutationCalls(fetchMock)).toHaveLength(1);
+    expect(JSON.parse(String(themeMutationCalls(fetchMock)[0]![1]?.body))).toEqual({
+      version: 1,
+      presetId: 'candidary-default',
+      overrides: { primaryColor: '#123456' },
+    });
+  });
+
+  it('rejects a newly illegible accent even when a legacy primary also fails', () => {
+    const legacy = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#ffffff' },
+    }) };
+    const fetchMock = vi.fn(() => json({ event: legacy }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={legacy} />);
+
+    const accent = screen.getByRole('textbox', { name: 'Accent color' });
+    fireEvent.change(accent, { target: { value: '#f5efe6' } });
+
+    expect(accent).toHaveAccessibleDescription(
+      'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-accent': '#3f6d95' });
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('preserves an untouched raw syntax error while the other color changes', () => {
+    const legacy = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'candidary-default', overrides: { primaryColor: '#ffffff' },
+    }) };
+    const fetchMock = vi.fn(() => json({ event: legacy }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={legacy} />);
+
+    const primary = screen.getByRole('textbox', { name: 'Primary color' });
+    fireEvent.change(primary, { target: { value: '#abc' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Accent color' }), {
+      target: { value: '#123456' },
+    });
+
+    expect(primary).toHaveAccessibleDescription('Enter a six-digit hex color, such as #245c46.');
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-accent': '#123456' });
+    expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('associates a primary legibility refusal with the color picker', () => {
+    const fetchMock = vi.fn(() => json({ event: eventWithoutCover }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness />);
+
+    const picker = screen.getByLabelText('Primary color picker');
+    fireEvent.change(picker, { target: { value: '#ffffff' } });
+
+    expect(picker).toHaveAttribute('aria-invalid', 'true');
+    expect(picker).toHaveAccessibleDescription(
+      'Primary color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+  });
+
+  it('associates an accent legibility refusal with the color picker', () => {
+    const fetchMock = vi.fn(() => json({ event: eventWithoutCover }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness />);
+
+    const picker = screen.getByLabelText('Accent color picker');
+    fireEvent.change(picker, { target: { value: '#f5efe6' } });
+
+    expect(picker).toHaveAttribute('aria-invalid', 'true');
+    expect(picker).toHaveAccessibleDescription(
+      'Accent color needs a 3:1 contrast ratio against the event surfaces.',
+    );
+  });
+
+  it('adopts a Worker-normalized theme while the answered intent is still current', async () => {
+    const normalized = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'garden-party', overrides: { primaryColor: '#234567' },
+    }) };
+    const fetchMock = vi.fn(() => json({ event: normalized }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Garden Party' }));
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Primary color' }))
+      .toHaveValue('#234567'));
+    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#234567' });
+    await waitFor(() => expect(screen.getByTestId('appearance-state'))
+      .toHaveTextContent('appearance:saved'));
+  });
+
   it('saves Reset immediately', async () => {
     const garden = { ...eventWithoutCover, theme: resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} }) };
     const responses = [garden, eventWithoutCover];
