@@ -38,6 +38,7 @@ const MAX_BACKOFF_MS = 5 * 60 * 1000;
 export function useLifecycleRecheck(
   delayMs: number | null,
   onRecheck: () => Promise<LifecycleRecheckOutcome>,
+  lifecycleKey: string | null = null,
 ): void {
   // Everything the timer continuation reads has to be readable synchronously
   // from a promise callback, and the callback identity changes every render.
@@ -48,8 +49,10 @@ export function useLifecycleRecheck(
     if (delayMs === null) return;
 
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let running = false;
+    let boundaryPending = false;
     let backoffMs = RECHECK_FLOOR_MS;
     // The earliest moment a *repeat* attempt is allowed. Measured with elapsed
     // time from the same origin as the timer itself, never against a wall
@@ -60,43 +63,96 @@ export function useLifecycleRecheck(
       typeof performance === 'undefined' ? 0 : performance.now()
     );
 
-    function arm(remainingMs: number): void {
+    function schedule(callback: () => void, delay: number): ReturnType<typeof setTimeout> {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        callback();
+      }, delay);
+      timers.add(timer);
+      return timer;
+    }
+
+    function clearRetry(): void {
+      if (retryTimer === undefined) return;
+      clearTimeout(retryTimer);
+      timers.delete(retryTimer);
+      retryTimer = undefined;
+    }
+
+    function clearTimers(): void {
+      for (const active of timers) clearTimeout(active);
+      timers.clear();
+      retryTimer = undefined;
+    }
+
+    function armBoundary(remainingMs: number): void {
       if (disposed) return;
       const slice = Math.min(Math.max(remainingMs, 0), MAX_TIMER_MS);
-      timer = setTimeout(() => {
+      schedule(() => {
         const left = remainingMs - slice;
         // Re-armed rather than fired: a boundary further out than one timer
         // slice keeps sleeping instead of waking the page for nothing.
         if (left > 0) {
-          arm(left);
+          armBoundary(left);
           return;
         }
-        void run();
+        void run('boundary');
       }, slice);
     }
 
-    async function run(): Promise<void> {
-      if (disposed || running) return;
-      if (elapsed() < floorUntil) return;
+    function armRetry(delay: number): void {
+      if (disposed) return;
+      clearRetry();
+      retryTimer = schedule(() => {
+        retryTimer = undefined;
+        void run('retry');
+      }, Math.max(delay, 0));
+    }
+
+    function deferRetry(): void {
+      floorUntil = elapsed() + backoffMs;
+      armRetry(backoffMs);
+      backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+    }
+
+    async function run(source: 'boundary' | 'wake' | 'retry'): Promise<void> {
+      if (disposed) return;
+      if (running) {
+        // A wake may be dropped while another read is already current, but the
+        // one server-supplied boundary must survive a just-before-boundary read.
+        if (source === 'boundary') boundaryPending = true;
+        return;
+      }
+      const remainingFloor = floorUntil - elapsed();
+      if (source !== 'boundary' && remainingFloor > 0) {
+        // A retry timer can fire a fraction early through scheduler rounding;
+        // preserve it for the remaining elapsed-time floor instead of losing it.
+        if (source === 'retry') armRetry(remainingFloor);
+        return;
+      }
       running = true;
       try {
         const outcome = await recheckRef.current();
         if (disposed) return;
         if (outcome === 'changed') {
-          // A changed view arrives with its own delay, and this effect is
-          // re-run with it. Nothing is re-armed here.
+          // A changed view arrives with its own delay and semantic key. The key
+          // reruns this effect even when the replacement delay happens to be
+          // numerically equal. Retire the old timers immediately rather than
+          // leaving a gap before React commits the replacement.
+          boundaryPending = false;
+          clearTimers();
           return;
         }
-        floorUntil = elapsed() + backoffMs;
-        arm(backoffMs);
-        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        deferRetry();
       } catch {
         if (disposed) return;
-        floorUntil = elapsed() + backoffMs;
-        arm(backoffMs);
-        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        deferRetry();
       } finally {
         running = false;
+        if (boundaryPending && !disposed) {
+          boundaryPending = false;
+          void run('boundary');
+        }
       }
     }
 
@@ -105,10 +161,10 @@ export function useLifecycleRecheck(
       // venue, has usually slept straight through its own boundary. The floor
       // is what keeps a flapping connection from turning this into a poll.
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      void run();
+      void run('wake');
     }
 
-    arm(delayMs);
+    armBoundary(delayMs);
     if (typeof window !== 'undefined') {
       document.addEventListener('visibilitychange', wake);
       window.addEventListener('pageshow', wake);
@@ -117,12 +173,12 @@ export function useLifecycleRecheck(
 
     return () => {
       disposed = true;
-      if (timer !== undefined) clearTimeout(timer);
+      clearTimers();
       if (typeof window !== 'undefined') {
         document.removeEventListener('visibilitychange', wake);
         window.removeEventListener('pageshow', wake);
         window.removeEventListener('online', wake);
       }
     };
-  }, [delayMs]);
+  }, [delayMs, lifecycleKey]);
 }

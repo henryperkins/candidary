@@ -24,6 +24,18 @@ import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
    deliberate, not the dead fallback the stylesheet used to carry. */
 const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
 
+function guestLifecycleKey(event: GuestEventView): string {
+  return JSON.stringify([
+    event.phase,
+    event.rsvpState,
+    event.rsvpAccess,
+    event.eventStartAt,
+    event.rsvpDeadlineAt,
+    event.eventTimezone,
+    event.rsvpDeadlineDate,
+  ]);
+}
+
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const { slug = '' } = useParams();
   const [event, setEvent] = useState<GuestEventView | null>(null);
@@ -84,14 +96,12 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     const { event: next } = await api<{ event: GuestEventView; role: string }>(`/api/event/${slug}`);
     if (loadTicket.current !== ticket) return 'unchanged';
     const shown = shownEvent.current;
+    const unchanged = shown && guestLifecycleKey(shown) === guestLifecycleKey(next);
+    // Relative delays drift on every read. Installing a semantic no-op would
+    // replace the delay-keyed effect and erase the floor it just established.
+    if (unchanged) return 'unchanged';
     setEvent(next);
-    return shown
-      && shown.phase === next.phase
-      && shown.rsvpState === next.rsvpState
-      && shown.rsvpAccess === next.rsvpAccess
-      && shown.lifecycleRecheckAfterMs === next.lifecycleRecheckAfterMs
-      ? 'unchanged'
-      : 'changed';
+    return 'changed';
   }, [slug]);
 
   useEffect(() => {
@@ -100,7 +110,11 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     return () => { loadTicket.current += 1; };
   }, [loadEvent]);
 
-  useLifecycleRecheck(event?.lifecycleRecheckAfterMs ?? null, recheckEvent);
+  useLifecycleRecheck(
+    event?.lifecycleRecheckAfterMs ?? null,
+    recheckEvent,
+    event ? guestLifecycleKey(event) : null,
+  );
 
   function toggleExtra(kind: keyof typeof opened, isOpen: boolean) {
     setOpened((current) => ({ ...current, [kind]: isOpen }));

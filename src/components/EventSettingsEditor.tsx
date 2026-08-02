@@ -60,6 +60,19 @@ interface EventSettingsSave {
   generations: FieldGenerations;
 }
 
+type ScheduleFields = Pick<
+  EventSettingsDraft,
+  'eventTimezone' | 'eventStartTime' | 'rsvpDeadlineDate'
+>;
+
+function scheduleKey(settings: ScheduleFields): string {
+  return JSON.stringify([
+    settings.eventTimezone,
+    settings.eventStartTime,
+    settings.rsvpDeadlineDate,
+  ]);
+}
+
 function zeroGenerations(): FieldGenerations {
   return {
     name: 0, welcomeMessage: 0, eventTimezone: 0, eventStartTime: 0,
@@ -130,7 +143,7 @@ function rebaseDraft(
 
 interface EventSettingsEditorProps {
   event: EventView;
-  onSettingsSaved(event: EventView): void;
+  onSettingsSaved(event: EventView, metadata: { scheduleChanged: boolean }): void;
   onAutosaveStateChange(state: DomainAutosaveState): void;
   // Brackets a write so a whole-event read cannot be adopted across it.
   onEventWrite<T>(request: () => Promise<T>): Promise<T>;
@@ -153,6 +166,11 @@ export function EventSettingsEditor({
   // a ref or it would keep calling the first render props forever.
   const savedRef = useRef(onSettingsSaved);
   savedRef.current = onSettingsSaved;
+  // The settings queue is serialized, so this is the exact confirmed server
+  // schedule immediately before each queued snapshot starts. Comparing at
+  // request time avoids calling a name-only save schedule-changing merely
+  // because an earlier schedule edit was still in flight when it was queued.
+  const confirmedScheduleKeyRef = useRef(scheduleKey(state.confirmed));
   // A settings response confirms the field generations carried by its exact
   // queued snapshot. The parent may render that response before the queue's
   // promise continuation settles, so reconciliation reads this synchronously.
@@ -170,6 +188,7 @@ export function EventSettingsEditor({
 
   async function sendSettings(save: EventSettingsSave): Promise<AutosaveOutcome> {
     const { payload } = save;
+    const scheduleChanged = scheduleKey(payload) !== confirmedScheduleKeyRef.current;
     try {
       const result = await onEventWrite(() => api<{ event: EventView }>(
         '/api/manage/events/' + eventId + '/settings',
@@ -177,7 +196,8 @@ export function EventSettingsEditor({
       ));
       raceRef.current = null;
       confirmedThroughRef.current = save.generations;
-      savedRef.current(result.event);
+      confirmedScheduleKeyRef.current = scheduleKey(draftFromEvent(result.event));
+      savedRef.current(result.event, { scheduleChanged });
       // The stored form, read back from the Worker: it canonicalizes the time
       // zone and may return a roster version this payload did not carry.
       return {
@@ -195,7 +215,8 @@ export function EventSettingsEditor({
       const refreshed = await onEventRead(() => (
         api<{ event: EventView }>('/api/manage/events/' + eventId)
       ));
-      savedRef.current(refreshed.event);
+      confirmedScheduleKeyRef.current = scheduleKey(draftFromEvent(refreshed.event));
+      savedRef.current(refreshed.event, { scheduleChanged: false });
       if (refreshed.event.rsvpRosterVersion === payload.rsvpRosterVersion) throw caught;
       const intent = intentKeyOf(payload);
       const seen = raceRef.current?.intent === intent ? raceRef.current.races : 0;
@@ -293,6 +314,7 @@ export function EventSettingsEditor({
   useEffect(() => {
     const current = stateRef.current;
     const incoming = draftFromEvent(event);
+    confirmedScheduleKeyRef.current = scheduleKey(incoming);
     const confirmedThrough = confirmedThroughRef.current;
     confirmedThroughRef.current = null;
     const next: EditorState = {

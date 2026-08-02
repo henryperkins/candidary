@@ -2257,6 +2257,140 @@ describe('guest event phase composition', () => {
     expect(rsvpRequests()).toHaveLength(readBeforeStart);
   });
 
+  it('keeps the guest anti-spin floor when wake responses only shorten the relative delay', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const initial = {
+      ...guestEvent,
+      rsvpState: 'closed' as const,
+      rsvpAccess: 'unavailable' as const,
+      lifecycleRecheckAfterMs: 60_000,
+    };
+    let eventReads = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) {
+        eventReads += 1;
+        return json({
+          event: eventReads === 1
+            ? initial
+            : { ...initial, lifecycleRecheckAfterMs: 50_000 },
+          role: 'guest',
+        });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEvent(initial);
+    await screen.findByRole('button', { name: 'Take a photo' });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+    await act(async () => {
+      window.dispatchEvent(new Event('pageshow'));
+    });
+    await waitFor(() => expect(eventReads).toBe(2));
+    // Let the response commit and any delay-keyed effect replacement attach
+    // its own wake listeners before the second event.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await act(async () => {
+      window.dispatchEvent(new Event('pageshow'));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(eventReads).toBe(2);
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
+  });
+
+  it('installs a moved guest start boundary when its replacement delay is numerically equal', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const beforeStart = {
+      ...guestEvent,
+      phase: 'before-start' as const,
+      rsvpState: 'closed' as const,
+      rsvpAccess: 'unavailable' as const,
+      lifecycleRecheckAfterMs: 60_000,
+    };
+    const movedStart = {
+      ...beforeStart,
+      eventStartAt: '2026-09-19T23:00:00.000Z',
+      lifecycleRecheckAfterMs: 60_000,
+    };
+    const started = {
+      ...movedStart,
+      phase: 'photos-primary' as const,
+      lifecycleRecheckAfterMs: null,
+    };
+    let eventReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) {
+        const replies = [beforeStart, movedStart, started] as const;
+        const event = replies[Math.min(eventReads, replies.length - 1)]!;
+        eventReads += 1;
+        return json({ event, role: 'guest' });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    renderEvent(beforeStart);
+    await screen.findByText('Maya & Theo begins September 19, 2026 at 5:00 PM.');
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+    await act(async () => { window.dispatchEvent(new Event('pageshow')); });
+
+    expect(await screen.findByText('Maya & Theo begins September 19, 2026 at 6:00 PM.')).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
+    expect(eventReads).toBe(3);
+  });
+
+  it('installs a moved RSVP deadline boundary and arms its replacement timer', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const rsvpOpen = {
+      ...guestEvent,
+      uploadsEnabled: false,
+      phase: 'rsvp-primary' as const,
+      rsvpState: 'open' as const,
+      rsvpAccess: 'editable' as const,
+      lifecycleRecheckAfterMs: 60_000,
+    };
+    const movedDeadline = {
+      ...rsvpOpen,
+      rsvpDeadlineAt: '2026-09-07T04:59:59.999Z',
+      rsvpDeadlineDate: '2026-09-06',
+      lifecycleRecheckAfterMs: 1_000,
+    };
+    const closed = {
+      ...movedDeadline,
+      phase: 'before-start' as const,
+      rsvpState: 'closed' as const,
+      rsvpAccess: 'read-only' as const,
+      lifecycleRecheckAfterMs: null,
+    };
+    let eventReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) {
+        const replies = [rsvpOpen, movedDeadline, closed] as const;
+        const event = replies[Math.min(eventReads, replies.length - 1)]!;
+        eventReads += 1;
+        return json({ event, role: 'guest' });
+      }
+      if (path.endsWith('/rsvp/household')) {
+        return errorJson({ code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'r' }, 401);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    renderEvent(rsvpOpen);
+    await screen.findByText('Please RSVP by Sep 5, 2026.');
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+    await act(async () => { window.dispatchEvent(new Event('pageshow')); });
+
+    expect(await screen.findByText('Please RSVP by Sep 6, 2026.')).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
+    expect(eventReads).toBe(3);
+  });
+
   it('says only that photo delivery is paused once the event has started', async () => {
     const waiting = {
       ...guestEvent,

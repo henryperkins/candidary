@@ -116,6 +116,21 @@ export interface EventLifecycleInput {
   entryDisabled?: boolean;
 }
 
+export type GuestLifecycleInput = EventLifecycleInput & {
+  // Server-only. A valid deadline exists on new events before they have a
+  // roster, so the deadline alone cannot make saved-household lookup available.
+  rsvpConfigured: boolean;
+};
+
+export function isRsvpConfigured(input: {
+  rsvpRosterVersion: number;
+  rsvpDeadlineAt: string | null;
+}): boolean {
+  return input.rsvpRosterVersion > 0
+    && input.rsvpDeadlineAt !== null
+    && Number.isFinite(Date.parse(input.rsvpDeadlineAt));
+}
+
 function rsvpStateFor(input: EventLifecycleInput, nowMs: number): RsvpState {
   const deadline = input.rsvpDeadlineAt ? Date.parse(input.rsvpDeadlineAt) : NaN;
   if (!Number.isFinite(deadline)) return 'disabled';
@@ -192,7 +207,7 @@ function hasStarted(input: EventLifecycleInput, nowMs: number): boolean {
 }
 
 export function resolveGuestEventPhase(
-  input: EventLifecycleInput,
+  input: GuestLifecycleInput,
   now = new Date(),
 ): GuestPhaseView {
   const nowMs = now.getTime();
@@ -232,7 +247,7 @@ export function resolveGuestEventPhase(
   // other pre-start state leaves the read-only saved-response window.
   const rsvpAccess: RsvpAccess = started
     ? 'unavailable'
-    : entryDisabled || rsvpState === 'disabled'
+    : entryDisabled || !input.rsvpConfigured || rsvpState === 'disabled'
       ? 'unavailable'
       : rsvpState === 'open' ? 'editable' : 'read-only';
 

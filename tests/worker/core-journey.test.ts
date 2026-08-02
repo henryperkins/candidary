@@ -183,6 +183,7 @@ describe('server-owned event configuration and phase', () => {
       uploadsEnabled: true,
       rsvpEnabled: true,
       rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpRosterVersion: 1,
       eventStartAt: '2026-09-19T05:00:00.000Z',
       photosOpenFrom: null,
       eventTimezone: 'America/Chicago',
@@ -202,6 +203,7 @@ describe('server-owned event configuration and phase', () => {
       uploadsEnabled: true,
       rsvpEnabled: true,
       rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpRosterVersion: 1,
       eventStartAt: '2026-09-19T05:00:00.000Z',
       photosOpenFrom: null,
       eventTimezone: 'America/Chicago',
@@ -212,6 +214,39 @@ describe('server-owned event configuration and phase', () => {
       .toMatchObject({ phase: 'before-start', rsvpAccess: 'read-only' });
     expect(guestEventView(record, new Date('2026-09-19T05:00:00.000Z')))
       .toMatchObject({ phase: 'photos-primary', rsvpAccess: 'unavailable' });
+  });
+
+  it('keeps valid-deadline RSVP unavailable until a roster is configured', () => {
+    const record = {
+      uploadsEnabled: true,
+      rsvpEnabled: false,
+      rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpRosterVersion: 0,
+      eventStartAt: '2026-09-19T05:00:00.000Z',
+      photosOpenFrom: null,
+      eventTimezone: 'America/Chicago',
+      themeConfig: DEFAULT_EVENT_THEME_CONFIG,
+    };
+
+    const unconfigured = guestEventView(
+      record as never,
+      new Date('2026-09-05T12:00:00.000Z'),
+    );
+    expect(unconfigured).toMatchObject({
+      phase: 'before-start',
+      rsvpState: 'paused',
+      rsvpAccess: 'unavailable',
+    });
+    expect(unconfigured).not.toHaveProperty('rsvpConfigured');
+
+    expect(guestEventView(
+      { ...record, rsvpRosterVersion: 1 } as never,
+      new Date('2026-09-05T12:00:00.000Z'),
+    )).toMatchObject({
+      phase: 'before-start',
+      rsvpState: 'paused',
+      rsvpAccess: 'read-only',
+    });
   });
 
   it('refuses to open RSVP with no guest list, and leaves the event untouched', async () => {

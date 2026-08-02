@@ -4,7 +4,12 @@ import {
   localTimeForInstant,
 } from '../../shared/event-time';
 import { resolvedThemeView } from '../../shared/event-theme';
-import { isLegacyEventStart, resolveGuestEventPhase, resolvePhotoIntake } from '../../shared/rsvp';
+import {
+  isLegacyEventStart,
+  isRsvpConfigured,
+  resolveGuestEventPhase,
+  resolvePhotoIntake,
+} from '../../shared/rsvp';
 import type { EventRecord } from '../db/types';
 
 function deadlineDate(event: EventRecord): string | null {
@@ -68,6 +73,7 @@ export function eventView(event: EventRecord, now = new Date()): EventView {
  * never asked to compare the deadline, or the start, to its own clock.
  */
 export function guestEventView(event: EventRecord, now = new Date()): GuestEventView {
+  const rsvpConfigured = isRsvpConfigured(event);
   return {
     id: event.id,
     slug: event.slug,
@@ -82,7 +88,7 @@ export function guestEventView(event: EventRecord, now = new Date()): GuestEvent
     eventStartAt: event.eventStartAt,
     rsvpDeadlineAt: event.rsvpDeadlineAt,
     rsvpDeadlineDate: deadlineDate(event),
-    ...resolveGuestEventPhase(event, now),
+    ...resolveGuestEventPhase({ ...event, rsvpConfigured }, now),
     theme: resolvedThemeView(event.themeConfig),
   };
 }

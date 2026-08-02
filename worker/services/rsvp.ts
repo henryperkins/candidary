@@ -33,6 +33,7 @@ import {
   checkRosterCapacity,
   deriveRsvpSummary,
   findLookupCollisions,
+  isRsvpConfigured,
   normalizeInvitedName,
   parsePersonText,
   resolveGuestEventPhase,
@@ -267,7 +268,10 @@ export class RsvpService {
     // `rsvpAccess`, not `rsvpState`: an event that has started is unavailable
     // however its deadline reads, and this is the same sentence the guest RSVP
     // routes enforce, so the interface and the boundary derive from one value.
-    const { rsvpAccess } = resolveGuestEventPhase(event, now);
+    const { rsvpAccess } = resolveGuestEventPhase({
+      ...event,
+      rsvpConfigured: isRsvpConfigured(event),
+    }, now);
     const sessionOpen = session
       ? now.getTime() <= Date.parse(session.writeAuthorityDeadline)
       : false;
@@ -477,7 +481,10 @@ export class RsvpService {
     // One refusal covers a disabled roster and an event that has already begun,
     // so the start boundary is not an oracle either: a caller learns nothing
     // from it that a plain miss would not have told them.
-    const { rsvpAccess } = resolveGuestEventPhase(event, now);
+    const { rsvpAccess } = resolveGuestEventPhase({
+      ...event,
+      rsvpConfigured: isRsvpConfigured(event),
+    }, now);
     if (rsvpAccess === 'unavailable') return notAvailable;
 
     const names = [input.firstName, input.secondName]

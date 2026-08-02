@@ -105,6 +105,38 @@ describe('manager event merges', () => {
     expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
   });
 
+  it('takes the complete schedule tuple with intake only for a lifecycle read', () => {
+    const lifecycleAnswer: EventView = {
+      ...intakeAnswer,
+      name: 'Remote rename outside lifecycle ownership',
+      eventTimezone: 'America/Los_Angeles',
+      eventStartAt: '2026-09-20T01:30:00.000Z',
+      eventStartTime: '18:30',
+      rsvpDeadlineAt: '2026-09-06T06:59:59.999Z',
+      rsvpDeadlineDate: '2026-09-05',
+      rsvpEnabled: true,
+      theme: candidary,
+      coverObjectKey: null,
+    };
+
+    const merged = mergePhotoIntakeResponse(current, lifecycleAnswer, { ownsSchedule: true });
+
+    expect(merged).toMatchObject({
+      eventTimezone: 'America/Los_Angeles',
+      eventStartAt: '2026-09-20T01:30:00.000Z',
+      eventStartTime: '18:30',
+      rsvpDeadlineAt: '2026-09-06T06:59:59.999Z',
+      rsvpDeadlineDate: '2026-09-05',
+      photosOpen: true,
+      photoIntakeState: 'open',
+      photoIntakeRecheckAfterMs: null,
+    });
+    expect(merged.name).toBe('Maya & Theo');
+    expect(merged.rsvpEnabled).toBe(false);
+    expect(merged.theme).toBe(garden);
+    expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+  });
+
   it('carries a pause the action itself decided', () => {
     const merged = mergePhotoIntakeResponse(current, {
       ...intakeAnswer, uploadsEnabled: false, photosOpen: false, photoIntakeState: 'paused',

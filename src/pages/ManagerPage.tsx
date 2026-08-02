@@ -45,6 +45,17 @@ function initialSection(requested: string | null): Section {
   return requested === 'rsvp' ? 'rsvp' : 'intake';
 }
 
+function managerLifecycleKey(event: EventView): string {
+  return JSON.stringify([
+    event.photoIntakeState,
+    event.eventTimezone,
+    event.eventStartAt,
+    event.eventStartTime,
+    event.rsvpDeadlineAt,
+    event.rsvpDeadlineDate,
+  ]);
+}
+
 // One confirmation is open at a time, so the exact-name field they share cannot
 // be ambiguous about which irreversible thing it is confirming.
 type EntryAction = 'rotate' | 'disable';
@@ -128,6 +139,10 @@ export function ManagerPage() {
   const { eventId = '' } = useParams();
   const [searchParams] = useSearchParams();
   const [event, setEvent] = useState<EventView | null>(null);
+  // Quiet lifecycle reads resolve asynchronously; compare their semantic
+  // answer with what is actually on screen, not the render that started them.
+  const shownEvent = useRef<EventView | null>(null);
+  shownEvent.current = event;
   const [mediaPage, setMediaPage] = useState<MediaPageState>({ rows: [], cursor: null });
   const { rows: media, cursor: nextMediaCursor } = mediaPage;
   const [messages, setMessages] = useState<MessageView[]>([]);
@@ -595,6 +610,18 @@ export function ManagerPage() {
       ? mergePhotoIntakeResponse(current, result.event, { entryDisabled: entryDisabled.current })
       : result.event);
   }
+  async function reconcilePhotoIntakeAfterScheduleSave() {
+    try {
+      const loaded = await eventRead(() => api<{ event: EventView }>(`/api/manage/events/${eventId}`));
+      setEvent((current) => current
+        ? mergePhotoIntakeResponse(current, loaded.event, { entryDisabled: entryDisabled.current })
+        : loaded.event);
+    } catch {
+      // This is a quiet reconciliation of derived state. The confirmed
+      // settings response remains usable, and the lifecycle hook or a later
+      // wake can reconcile intake without replacing the manager with an error.
+    }
+  }
   // The quiet boundary refetch, so a manager page left open across the scheduled
   // opening updates its status and its action without consulting this browser's
   // clock. It reports `changed` only when the server actually moved, and it
@@ -602,15 +629,26 @@ export function ManagerPage() {
   // must leave the working page exactly as it is, and the hook backs off instead.
   async function recheckPhotoIntake(): Promise<LifecycleRecheckOutcome> {
     const loaded = await eventRead(() => api<{ event: EventView }>(`/api/manage/events/${eventId}`));
-    const moved = event === null
-      || event.photoIntakeState !== loaded.event.photoIntakeState
-      || event.photoIntakeRecheckAfterMs !== loaded.event.photoIntakeRecheckAfterMs;
+    const shown = shownEvent.current;
+    const moved = shown === null
+      || managerLifecycleKey(shown) !== managerLifecycleKey(loaded.event);
+    // A shorter relative delay is not a manager-visible transition. Leaving
+    // the current event object alone preserves the hook's armed boundary and
+    // the anti-spin floor established by this recheck.
+    if (!moved) return 'unchanged';
     setEvent((current) => current
-      ? mergePhotoIntakeResponse(current, loaded.event, { entryDisabled: entryDisabled.current })
+      ? mergePhotoIntakeResponse(current, loaded.event, {
+          entryDisabled: entryDisabled.current,
+          ownsSchedule: true,
+        })
       : loaded.event);
-    return moved ? 'changed' : 'unchanged';
+    return 'changed';
   }
-  useLifecycleRecheck(event?.photoIntakeRecheckAfterMs ?? null, recheckPhotoIntake);
+  useLifecycleRecheck(
+    event?.photoIntakeRecheckAfterMs ?? null,
+    recheckPhotoIntake,
+    event ? managerLifecycleKey(event) : null,
+  );
   async function deleteEvent(element: HTMLFormElement) {
     const form = new FormData(element);
     await api(`/api/manage/events/${eventId}`, { method: 'DELETE', body: JSON.stringify({ confirmation: form.get('confirmation') }) });
@@ -851,9 +889,12 @@ export function ManagerPage() {
           event={event}
           onEventWrite={eventWrite}
           onEventRead={eventRead}
-          onSettingsSaved={(updated) => setEvent((current) => current
-            ? mergeSettingsResponse(current, updated, { entryDisabled: entryDisabled.current })
-            : updated)}
+          onSettingsSaved={(updated, { scheduleChanged }) => {
+            setEvent((current) => current
+              ? mergeSettingsResponse(current, updated, { entryDisabled: entryDisabled.current })
+              : updated);
+            if (scheduleChanged) void reconcilePhotoIntakeAfterScheduleSave();
+          }}
           onAutosaveStateChange={recordAutosaveState}
         />
         <ManagerPhotoIntakePanel

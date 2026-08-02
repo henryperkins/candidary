@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +72,207 @@ afterEach(() => {
 });
 
 describe('manager settings autosave guards', () => {
+  it('reconciles schedule-derived photo intake through one fresh read without carrying settings fields', async () => {
+    const scheduled = {
+      ...MANAGED_EVENT,
+      photosOpen: false,
+      photoIntakeState: 'scheduled' as const,
+      photoIntakeRecheckAfterMs: 60_000,
+    };
+    const settingsResponse = {
+      ...scheduled,
+      name: 'Confirmed schedule',
+      eventStartAt: '2026-09-19T23:00:00.000Z',
+      eventStartTime: '18:00',
+    };
+    const refreshed = {
+      ...settingsResponse,
+      // A whole read is permitted to carry every field, but this reconciliation
+      // owns intake only; a later settings value must stay put.
+      name: 'Stale read name',
+      photosOpen: true,
+      photoIntakeState: 'open' as const,
+      photoIntakeRecheckAfterMs: null,
+    };
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    let eventReads = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? scheduled : refreshed });
+      }
+      if (url.endsWith('/settings') && method === 'PATCH') return json({ event: settingsResponse });
+      return fallback(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
+    fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '18:00' } });
+
+    await waitFor(() => expect(eventReads).toBe(2));
+    expect(screen.getByRole('heading', { name: 'Confirmed schedule' })).toBeVisible();
+    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pause photo delivery' })).toBeVisible();
+  });
+
+  it('keeps the working manager surface when schedule reconciliation cannot read', async () => {
+    const scheduled = {
+      ...MANAGED_EVENT,
+      photosOpen: false,
+      photoIntakeState: 'scheduled' as const,
+      photoIntakeRecheckAfterMs: 60_000,
+    };
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    let eventReads = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        eventReads += 1;
+        return eventReads === 1
+          ? json({ event: scheduled })
+          : errorJson({ code: 'INTERNAL_ERROR', message: 'Quiet read failed.', requestId: 'request-a' }, 500);
+      }
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        return json({ event: { ...scheduled, eventStartTime: '18:00' } });
+      }
+      return fallback(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '18:00' } });
+
+    await waitFor(() => expect(eventReads).toBe(2));
+    expect(screen.getByText('Event settings saved')).toBeInTheDocument();
+    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('keeps an explicit photo action newer than a delayed schedule save and its reconciliation', async () => {
+    const scheduled = {
+      ...MANAGED_EVENT,
+      photosOpen: false,
+      photoIntakeState: 'scheduled' as const,
+      photoIntakeRecheckAfterMs: 60_000,
+    };
+    const openEarly = {
+      ...scheduled,
+      photosOpen: true,
+      photoIntakeState: 'open-early' as const,
+      photoIntakeRecheckAfterMs: 45_000,
+    };
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    let eventReads = 0;
+    let releaseSettings: (() => void) | null = null;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? scheduled : openEarly });
+      }
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          releaseSettings = () => resolve(new Response(JSON.stringify({
+            data: { event: { ...scheduled, eventStartTime: '18:00' } },
+            requestId: 'request-a',
+          }), { status: 200, headers: { 'content-type': 'application/json' } }));
+        });
+      }
+      if (url.endsWith('/photo-intake') && method === 'POST') return json({ event: openEarly });
+      return fallback(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '18:00' } });
+    await waitFor(() => expect(releaseSettings).not.toBeNull());
+    await user.click(screen.getByRole('button', { name: 'Open photo delivery now' }));
+    await screen.findByText('Photo delivery is open early.');
+
+    releaseSettings!();
+
+    await waitFor(() => expect(eventReads).toBe(2));
+    expect(screen.getByText('Photo delivery is open early.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pause until the event starts' })).toBeVisible();
+  });
+
+  it('keeps schedule reconciliation newer when an older photo action response arrives last', async () => {
+    const scheduled = {
+      ...MANAGED_EVENT,
+      photosOpen: false,
+      photoIntakeState: 'scheduled' as const,
+      photoIntakeRecheckAfterMs: 60_000,
+    };
+    const openEarly = {
+      ...scheduled,
+      photosOpen: true,
+      photoIntakeState: 'open-early' as const,
+      photoIntakeRecheckAfterMs: 45_000,
+    };
+    const openAfterSchedule = {
+      ...openEarly,
+      name: 'Schedule after action',
+      eventStartAt: '2026-09-19T21:00:00.000Z',
+      eventStartTime: '16:00',
+      photoIntakeState: 'open' as const,
+      photoIntakeRecheckAfterMs: null,
+    };
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    let eventReads = 0;
+    let releasePhoto: (() => void) | null = null;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? scheduled : openAfterSchedule });
+      }
+      if (url.endsWith('/photo-intake') && method === 'POST') {
+        // The action has committed on the server, but its older response is
+        // deliberately held past the later schedule write.
+        return new Promise<Response>((resolve) => {
+          releasePhoto = () => resolve(new Response(JSON.stringify({
+            data: { event: openEarly }, requestId: 'request-a',
+          }), { status: 200, headers: { 'content-type': 'application/json' } }));
+        });
+      }
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        return json({ event: openAfterSchedule });
+      }
+      return fallback(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    await user.click(screen.getByRole('button', { name: 'Open photo delivery now' }));
+    await waitFor(() => expect(releasePhoto).not.toBeNull());
+    fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '16:00' } });
+    await screen.findByRole('heading', { name: 'Schedule after action' });
+    await Promise.resolve();
+    await Promise.resolve();
+    const readStartedBeforePhotoSettled = eventReads > 1;
+
+    releasePhoto!();
+
+    await waitFor(() => expect(eventReads).toBe(2));
+    await waitFor(() => expect(screen.getByText('Photo delivery is open.')).toBeVisible());
+    expect(readStartedBeforePhotoSettled).toBe(false);
+    expect(screen.queryByText('Photo delivery is open early.')).not.toBeInTheDocument();
+  });
+
   it('keeps a guest draft through a combined internal-destination prompt until the host discards it', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
     const user = typist();

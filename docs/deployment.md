@@ -183,36 +183,159 @@ insufficient. An existing event whose RSVP deadline **date equals its event date
 millisecond of that local day, which is after every start the day contains. Those rows need an explicit
 host correction or a reviewed data correction before the new validation is enforced.
 
-The rollout order is deterministic:
+The rollout order is deterministic. Keep the inventory, plan, and SQL artifacts outside the
+repository because they contain event identifiers. The `event-start-backfill:*` tools only read local
+JSON or write deterministic plan, backfill, freeze, and cleanup artifacts. They never invoke Wrangler
+or connect to D1. **Any nonzero release-tool exit blocks the migration, SQL apply, or deployment that
+follows it.** In particular, plan mode exits nonzero and emits no new SQL when a deadline is not
+strictly before the expected local-midnight start.
 
-1. **Before applying `0010`**, inventory every non-deleted event ID and calculate its expected
-   local-midnight start through `instantForLocalDateTime`. Resolve any same-day deadline rows before
-   continuing. Do the zone arithmetic in the inventory tool, never in SQL — SQLite is what got this
-   wrong in the first place.
+1. **Before applying `0010`, inventory and plan every non-deleted event.** Start with a fresh artifact
+   directory, capture Wrangler's machine-readable envelope, then let the Node tool resolve each local
+   midnight through `instantForLocalDateTime`. Review both artifacts before continuing. A blocked row
+   needs an explicit host correction or reviewed data correction; never do the zone arithmetic in SQL.
 
    ```powershell
-   npx wrangler d1 execute candidary-core --remote --command "SELECT id, slug, event_date, event_timezone, rsvp_deadline_at, uploads_enabled, rsvp_enabled FROM events WHERE deleted_at IS NULL ORDER BY event_date"
+   $eventStartGate = Join-Path ([System.IO.Path]::GetTempPath()) ('candidary-event-start-release-' + [guid]::NewGuid().ToString('N'))
+   New-Item -ItemType Directory -Path $eventStartGate | Out-Null
+   $pre0010Inventory = Join-Path $eventStartGate 'pre-0010-inventory.json'
+   $pre0010Plan = Join-Path $eventStartGate 'pre-0010-plan.json'
+   $pre0010Sql = Join-Path $eventStartGate 'pre-0010-backfill.sql'
+   $freezeInstallSql = Join-Path $eventStartGate 'install-schedule-freeze.sql'
+   $freezeRemoveSql = Join-Path $eventStartGate 'remove-schedule-freeze.sql'
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, slug, event_date, event_timezone, rsvp_deadline_at, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $pre0010Inventory
+   if ($LASTEXITCODE -ne 0) { throw 'Pre-0010 inventory failed; release is blocked.' }
+   npm run event-start-backfill:plan -- --input $pre0010Inventory --plan $pre0010Plan --sql $pre0010Sql
+   if ($LASTEXITCODE -ne 0) { throw 'Event-start planning failed; release is blocked.' }
+   npm run event-start-backfill:freeze -- --install $freezeInstallSql --remove $freezeRemoveSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze artifact generation failed; release is blocked.' }
    ```
 
 2. **Apply `0010` while the old Worker is still serving.** Its UTC-midnight values are not yet
    interpreted as lifecycle starts, so the approximation is inert for as long as this step lasts.
-3. **Backfill and verify.** Perform the data-aware backfill, then verify every inventoried ID against
-   its expected IANA instant. The new Worker is not deployed while any inventoried row still holds the
-   approximate value.
+
+   ```powershell
+   npx wrangler d1 migrations apply candidary-core --remote
+   if ($LASTEXITCODE -ne 0) { throw 'Migration apply failed; release is blocked.' }
+   ```
+
+3. **Install the narrow schedule freeze, apply the reviewed SQL, then verify every pre-migration ID
+   and source field exactly.** The temporary trigger rejects only an actual change to `event_date`,
+   `event_timezone`, or `rsvp_deadline_at`. It does not block event creation, an unchanged schedule
+   included in an unrelated settings write, or the backfill's `event_start_at` update. An edit that
+   commits before trigger creation is caught by the guarded SQL or the inventory that follows; an edit
+   after creation is rejected by SQLite. Keep the trigger installed until step 4's post-deploy check.
+
+   ```powershell
+   $freezeStateBeforeDeploy = Join-Path $eventStartGate 'freeze-state-before-deploy.json'
+   npx wrangler d1 execute candidary-core --remote --file $freezeInstallSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze install failed; release is blocked.' }
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeStateBeforeDeploy
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze presence inventory failed; release is blocked.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeStateBeforeDeploy --expect installed
+   if ($LASTEXITCODE -ne 0) { throw 'The exact reviewed schedule freeze is not installed; release is blocked.' }
+
+   $pre0010PlanContents = Get-Content -Raw -LiteralPath $pre0010Plan | ConvertFrom-Json
+   if ($pre0010PlanContents.events.Count -gt 0) {
+     npx wrangler d1 execute candidary-core --remote --file $pre0010Sql
+     if ($LASTEXITCODE -ne 0) { throw 'Event-start SQL apply failed; release is blocked.' }
+   }
+
+   $post0010Inventory = Join-Path $eventStartGate 'post-0010-inventory.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, event_date, event_timezone, rsvp_deadline_at, event_start_at, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $post0010Inventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-0010 inventory failed; release is blocked.' }
+   npm run event-start-backfill:verify -- --plan $pre0010Plan --input $post0010Inventory --require-predeploy-completeness
+   if ($LASTEXITCODE -ne 0) { throw 'Pre-deploy event-start verification failed; release is blocked.' }
+   ```
+
+   Pre-deploy completeness rejects an unplanned non-sentinel row created between inventory and
+   migration, while allowing an epoch-sentinel row created by the old Worker after migration for
+   step 5. Do not deploy while a missing ID, source drift, UTC-midnight approximation, unexpected
+   trigger definition, or other mismatch remains.
+
 4. **Deploy the compatible Worker.** An event created by the old Worker after the migration was
    applied carries the epoch default `1970-01-01T00:00:00.000Z`. The new Worker recognizes that
    sentinel and temporarily retains the pre-0010 boolean/deadline phase rules and guest RSVP route
    availability for such a row, so a deploy-gap event cannot begin refusing RSVPs at a start it does
    not really have.
-5. **Run a final epoch-sentinel scan.** Validate each gap row's deadline, data-aware backfill the rows
-   that satisfy the invariant, and stop for host or reviewed data correction if one does not. Verify
-   that no non-deleted event retains the sentinel before closing the release gate.
 
    ```powershell
-   npx wrangler d1 execute candidary-core --remote --command "SELECT COUNT(*) AS remaining FROM events WHERE deleted_at IS NULL AND event_start_at = '1970-01-01T00:00:00.000Z'"
+   npm run deploy
+   if ($LASTEXITCODE -ne 0) { throw 'Worker deploy failed; the schedule freeze remains installed. Retry deploy or use the explicit abort procedure below.' }
+
+   $freezeStateAfterDeploy = Join-Path $eventStartGate 'freeze-state-after-deploy.json'
+   $postDeployInventory = Join-Path $eventStartGate 'post-deploy-original-plan-inventory.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeStateAfterDeploy
+   if ($LASTEXITCODE -ne 0) { throw 'Post-deploy schedule-freeze inventory failed; release is blocked.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeStateAfterDeploy --expect installed
+   if ($LASTEXITCODE -ne 0) { throw 'The schedule freeze did not remain installed through deployment; release is blocked.' }
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, event_date, event_timezone, rsvp_deadline_at, event_start_at, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $postDeployInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-deploy original-plan inventory failed; release is blocked.' }
+   npm run event-start-backfill:verify -- --plan $pre0010Plan --input $postDeployInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-deploy original-plan verification failed; keep the freeze installed and stop.' }
+
+   npx wrangler d1 execute candidary-core --remote --file $freezeRemoveSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze removal failed; release remains blocked.' }
+   $freezeStateRemoved = Join-Path $eventStartGate 'freeze-state-removed.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeStateRemoved
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze removal inventory failed; release remains blocked.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeStateRemoved --expect absent
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule freeze is still installed; release remains blocked.' }
    ```
 
-   Expected `0`.
+   A failed deploy or failed post-deploy verification deliberately leaves the freeze installed. An
+   operator may retry the deploy or verification against that frozen state. To abandon the release,
+   apply the generated removal SQL and machine-verify absence:
+
+   ```powershell
+   npx wrangler d1 execute candidary-core --remote --file $freezeRemoveSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze abort cleanup failed; it may still be installed.' }
+   $freezeAbortState = Join-Path $eventStartGate 'freeze-state-after-abort.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeAbortState
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze abort inventory failed.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeAbortState --expect absent
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze abort cleanup is not proven.' }
+   ```
+
+   Explicit abort/removal invalidates every earlier inventory and verification artifact. Before a
+   later deployment attempt, take a fresh full inventory, regenerate and review the plan and SQL,
+   correct any non-migration stale start explicitly, reinstall the freeze, and repeat both the
+   pre-deploy and post-deploy checks. Never continue from the old plan after reopening schedule writes.
+
+5. **Repeat the inventory, plan, SQL apply, and exact verification for deploy-gap sentinels.** Plan
+   mode validates each gap row's deadline before emitting SQL. If the plan contains no events, skip
+   the SQL apply. Repeat this block if the final scan finds another gap row; do not close the gate
+   until the final count is exactly zero.
+
+   ```powershell
+   $gapInventory = Join-Path $eventStartGate 'deploy-gap-inventory.json'
+   $gapPlan = Join-Path $eventStartGate 'deploy-gap-plan.json'
+   $gapSql = Join-Path $eventStartGate 'deploy-gap-backfill.sql'
+   $postGapInventory = Join-Path $eventStartGate 'post-gap-inventory.json'
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, slug, event_date, event_timezone, rsvp_deadline_at, event_start_at, deleted_at FROM events WHERE deleted_at IS NULL AND event_start_at = '1970-01-01T00:00:00.000Z' ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $gapInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap inventory failed; release is blocked.' }
+   npm run event-start-backfill:plan -- --input $gapInventory --plan $gapPlan --sql $gapSql
+   if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap planning failed; release is blocked.' }
+
+   $gapPlanContents = Get-Content -Raw -LiteralPath $gapPlan | ConvertFrom-Json
+   if ($gapPlanContents.events.Count -gt 0) {
+     npx wrangler d1 execute candidary-core --remote --file $gapSql
+     if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap SQL apply failed; release is blocked.' }
+   }
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, event_date, event_timezone, rsvp_deadline_at, event_start_at, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $postGapInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-gap inventory failed; release is blocked.' }
+   npm run event-start-backfill:verify -- --plan $gapPlan --input $postGapInventory --require-no-sentinel
+   if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap verification failed; release is blocked.' }
+
+   npx wrangler d1 execute candidary-core --remote --command "SELECT COUNT(*) AS remaining FROM events WHERE deleted_at IS NULL AND event_start_at = '1970-01-01T00:00:00.000Z'"
+   if ($LASTEXITCODE -ne 0) { throw 'Final sentinel scan failed; release is blocked.' }
+   ```
+
+   The final query must report `remaining = 0`; otherwise repeat step 5 with fresh artifact names.
 
 The epoch value is therefore an intermediate migration sentinel and never a live start. Corrected
 legacy rows and events created by the new Worker use the new lifecycle immediately; a deploy-gap row

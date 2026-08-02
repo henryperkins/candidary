@@ -23,6 +23,7 @@ import {
   resolveGuestEventPhase,
   resolvePhotoIntake,
   type EventLifecycleInput,
+  type GuestLifecycleInput,
 } from '../../shared/rsvp';
 
 // Several fixtures below are invisible or near-invisible characters, so every
@@ -115,15 +116,16 @@ const BEFORE_DEADLINE = '2026-09-18T12:00:00.000Z';
 const AFTER_DEADLINE = '2026-09-19T06:00:00.000Z';
 const AFTER_START = '2026-09-19T23:00:00.000Z';
 
-const scheduled: EventLifecycleInput = {
+const scheduled: GuestLifecycleInput = {
   uploadsEnabled: true,
   rsvpEnabled: true,
   rsvpDeadlineAt: DEADLINE_AT,
   eventStartAt: START_AT,
   photosOpenFrom: null,
+  rsvpConfigured: true,
 };
 
-const earlyOpened: EventLifecycleInput = { ...scheduled, photosOpenFrom: EARLY_OPEN_AT };
+const earlyOpened: GuestLifecycleInput = { ...scheduled, photosOpenFrom: EARLY_OPEN_AT };
 
 // Written as a subtraction rather than a literal so a reader checks the two
 // instants, which are the contract, instead of arithmetic that is not.
@@ -131,12 +133,12 @@ function msBetween(from: string, to: string): number {
   return Date.parse(to) - Date.parse(from);
 }
 
-function phaseAt(override: Partial<EventLifecycleInput>, now: string): GuestPhaseView {
+function phaseAt(override: Partial<GuestLifecycleInput>, now: string): GuestPhaseView {
   return resolveGuestEventPhase({ ...scheduled, ...override }, new Date(now));
 }
 
 describe('guest event phase', () => {
-  it.each<[string, Partial<EventLifecycleInput>, string, GuestPhaseView]>([
+  it.each<[string, Partial<GuestLifecycleInput>, string, GuestPhaseView]>([
     [
       'an open RSVP before the start is the whole page',
       {}, BEFORE_DEADLINE,
@@ -158,6 +160,14 @@ describe('guest event phase', () => {
       { rsvpEnabled: false }, BEFORE_DEADLINE,
       {
         phase: 'before-start', rsvpState: 'paused', rsvpAccess: 'read-only',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+    ],
+    [
+      'a valid-deadline event with no roster offers no household lookup',
+      { rsvpEnabled: false, rsvpConfigured: false }, BEFORE_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'paused', rsvpAccess: 'unavailable',
         lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
       },
     ],
@@ -261,7 +271,7 @@ describe('guest phase boundaries', () => {
 });
 
 describe('guest RSVP access', () => {
-  it.each<[string, Partial<EventLifecycleInput>, string]>([
+  it.each<[string, Partial<GuestLifecycleInput>, string]>([
     ['the deadline has passed', {}, START_AT],
     ['RSVP is paused', { rsvpEnabled: false }, START_AT],
     ['RSVP was never configured', { rsvpDeadlineAt: null }, START_AT],
@@ -276,7 +286,7 @@ describe('guest RSVP access', () => {
     expect(phaseAt(override, now).rsvpAccess).toBe('unavailable');
   });
 
-  it.each<[string, Partial<EventLifecycleInput>, string, RsvpAccess]>([
+  it.each<[string, Partial<GuestLifecycleInput>, string, RsvpAccess]>([
     ['a disabled printed entry over an open RSVP', { entryDisabled: true }, BEFORE_DEADLINE, 'unavailable'],
     ['a disabled printed entry over a paused one', { entryDisabled: true, rsvpEnabled: false }, BEFORE_DEADLINE, 'unavailable'],
     ['no deadline at all', { rsvpDeadlineAt: null }, BEFORE_DEADLINE, 'unavailable'],
@@ -289,7 +299,7 @@ describe('guest RSVP access', () => {
     expect(phaseAt(override, now).rsvpAccess).toBe(expected);
   });
 
-  it.each<[string, Partial<EventLifecycleInput>, string, RsvpAccess]>([
+  it.each<[string, Partial<GuestLifecycleInput>, string, RsvpAccess]>([
     ['editable', {}, BEFORE_DEADLINE, 'editable'],
     ['read-only', {}, AFTER_DEADLINE, 'read-only'],
     ['unavailable', { entryDisabled: true }, BEFORE_DEADLINE, 'unavailable'],
@@ -349,7 +359,7 @@ describe('guest lifecycle recheck delay', () => {
 });
 
 describe('migration-sentinel events', () => {
-  const legacy: EventLifecycleInput = {
+  const legacy: GuestLifecycleInput = {
     ...scheduled,
     eventStartAt: EVENT_START_MIGRATION_SENTINEL,
   };
@@ -383,6 +393,18 @@ describe('migration-sentinel events', () => {
         phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable',
         lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
       });
+  });
+
+  it('preserves the old paused RSVP access even without a configured roster', () => {
+    expect(resolveGuestEventPhase({
+      ...legacy,
+      uploadsEnabled: false,
+      rsvpEnabled: false,
+      rsvpConfigured: false,
+    }, new Date(BEFORE_DEADLINE))).toEqual({
+      phase: 'waiting', rsvpState: 'paused', rsvpAccess: 'read-only',
+      lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+    });
   });
 
   it('never reaches before-start, which is a post-0010 state', () => {

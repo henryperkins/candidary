@@ -44,11 +44,13 @@ function Harness({
   rosterVersion,
   synchronousResponses = false,
   onEventRead = (request) => request(),
+  onSettingsMetadata = () => undefined,
 }: {
   initial?: EventView;
   rosterVersion?: number;
   synchronousResponses?: boolean;
   onEventRead?: <T>(request: () => Promise<T>) => Promise<T>;
+  onSettingsMetadata?: (metadata: { scheduleChanged: boolean }) => void;
 }) {
   const [event, setEvent] = useState(initial);
   const [state, setState] = useState<DomainAutosaveState | null>(null);
@@ -61,7 +63,8 @@ function Harness({
       event={applied}
       onEventWrite={(request) => request()}
       onEventRead={onEventRead}
-      onSettingsSaved={(updated) => {
+      onSettingsSaved={(updated, metadata) => {
+        onSettingsMetadata(metadata);
         const applyResponse = () => setEvent((current) => mergeSettingsResponse(current, updated));
         if (synchronousResponses) flushSync(applyResponse);
         else applyResponse();
@@ -155,6 +158,45 @@ describe('event settings editor', () => {
     });
     await settleMicrotasks();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saved');
+  });
+
+  it.each([
+    ['Event time zone', 'America/New_York'],
+    ['Event start time', '18:30'],
+    ['RSVP deadline', '2026-09-03'],
+  ])('reports a confirmed %s change as schedule-changing', async (label, value) => {
+    const metadata = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ event: { ...EVENT, ...payload } });
+    }));
+    render(<Harness onSettingsMetadata={metadata} />);
+
+    const field = screen.getByLabelText(label);
+    fireEvent.change(field, { target: { value } });
+    fireEvent.blur(field);
+    await settleMicrotasks();
+
+    expect(metadata).toHaveBeenCalledWith({ scheduleChanged: true });
+  });
+
+  it.each([
+    ['Event name', 'Maya and Theo'],
+    ['Welcome message', 'Welcome, friends.'],
+  ])('reports a confirmed %s change as schedule-neutral', async (label, value) => {
+    const metadata = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ event: { ...EVENT, ...payload } });
+    }));
+    render(<Harness onSettingsMetadata={metadata} />);
+
+    const field = screen.getByLabelText(label);
+    fireEvent.change(field, { target: { value } });
+    fireEvent.blur(field);
+    await settleMicrotasks();
+
+    expect(metadata).toHaveBeenCalledWith({ scheduleChanged: false });
   });
 
   it('debounces typing into one request and flushes on blur', async () => {

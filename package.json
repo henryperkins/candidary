@@ -18,6 +18,10 @@
     "test:e2e": "playwright test",
     "test:load:wedding": "node scripts/wedding-load-harness.mjs",
     "test:load:rsvp": "node scripts/rsvp-load-harness.mjs",
+    "event-start-backfill:freeze": "node --experimental-strip-types scripts/event-start-backfill.ts freeze",
+    "event-start-backfill:freeze:verify": "node --experimental-strip-types scripts/event-start-backfill.ts verify-freeze",
+    "event-start-backfill:plan": "node --experimental-strip-types scripts/event-start-backfill.ts plan",
+    "event-start-backfill:verify": "node --experimental-strip-types scripts/event-start-backfill.ts verify",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
