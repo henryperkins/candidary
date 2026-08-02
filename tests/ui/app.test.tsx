@@ -155,7 +155,43 @@ describe('public Candidary experience', () => {
     render(<RouterProvider router={createAppRouter(['/'])} />);
     expect(screen.getByRole('heading', { name: 'Gather the moments you didn’t see.' })).toBeVisible();
     expect(screen.getByRole('link', { name: 'Create your event' })).toHaveAttribute('href', '/create');
-    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    // Scoped to the workflow list: the footer's own link groups are list items too.
+    const workflow = screen.getByRole('heading', { name: 'One place. Every perspective.' }).closest('section');
+    expect(within(workflow as HTMLElement).getAllByRole('listitem')).toHaveLength(3);
+    expect(within(workflow as HTMLElement).getByText('No app, no account')).toBeVisible();
+  });
+
+  // Six disclosures, closed on arrival, each answering with a limit the product actually enforces.
+  it('answers the common questions without opening any of them first', async () => {
+    render(<RouterProvider router={createAppRouter(['/'])} />);
+    const faq = screen.getByRole('heading', { name: 'The short answers.' }).closest('section') as HTMLElement;
+    const questions = within(faq).getAllByRole('group');
+    expect(questions).toHaveLength(6);
+    for (const question of questions) expect(question).not.toHaveAttribute('open');
+
+    await userEvent.setup().click(within(faq).getByText('What can guests send?'));
+    expect(questions[0]).not.toHaveAttribute('open');
+    expect(within(faq).getByText(/up to 20 MB per image/)).toBeVisible();
+  });
+
+  it('carries a footer with both account doors and the retention fact', () => {
+    render(<RouterProvider router={createAppRouter(['/'])} />);
+    const footer = screen.getByRole('contentinfo');
+    expect(within(footer).getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/host/login');
+    expect(within(footer).getByRole('link', { name: 'Create an account' })).toHaveAttribute('href', '/host/register');
+    expect(within(footer).getByRole('link', { name: 'Privacy' })).toHaveAttribute('href', '/privacy');
+    expect(within(footer).getByRole('link', { name: 'Terms' })).toHaveAttribute('href', '/terms');
+    expect(within(footer).getByText('Guest access ends 30 days after your event. Files delete at 120.')).toBeVisible();
+  });
+
+  // The footer links are live routes, so neither can land on the catch-all.
+  it.each([
+    ['/privacy', 'Privacy'],
+    ['/terms', 'Terms'],
+  ])('serves %s as its own page', (path, heading) => {
+    render(<RouterProvider router={createAppRouter([path])} />);
+    expect(screen.getByRole('heading', { level: 1, name: heading })).toBeVisible();
+    expect(screen.queryByText('That page wandered off.')).not.toBeInTheDocument();
   });
 
   it('creates an event and clearly returns both access links', async () => {

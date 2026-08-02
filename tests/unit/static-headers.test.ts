@@ -56,4 +56,11 @@ describe('static asset security headers', () => {
       '/host/login', '/host/register', '/host/events', '/host/verify',
     ]));
   });
+
+  // The site footer links to both from every public page, and a legal page is the kind of URL that
+  // gets shared and bookmarked, so both are reached cold rather than from an already-loaded shell.
+  it('routes the footer legal pages through it too', () => {
+    const patterns = wranglerConfig.assets?.run_worker_first ?? [];
+    expect(patterns).toEqual(expect.arrayContaining(['/privacy', '/terms']));
+  });
 });

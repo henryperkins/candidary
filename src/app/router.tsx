@@ -9,6 +9,7 @@ import { EventEntryPage } from '../pages/EventEntryPage';
 import { EventEntryUnavailablePage } from '../pages/EventEntryUnavailablePage';
 import { EventPage } from '../pages/EventPage';
 import { LandingPage } from '../pages/LandingPage';
+import { PrivacyPage, TermsPage } from '../pages/LegalPage';
 import { HostEventsPage } from '../pages/HostEventsPage';
 import { HostLoginPage } from '../pages/HostLoginPage';
 import { HostRegisterPage } from '../pages/HostRegisterPage';
@@ -19,6 +20,9 @@ import { ManagementRecoveryPage } from '../pages/ManagementRecoveryPage';
 const routes: RouteObject[] = [
   { path: '/', element: <LandingPage /> },
   { path: '/create', element: <CreatePage /> },
+  // The site footer links to both from every page, so the routes exist before the documents do.
+  { path: '/privacy', element: <PrivacyPage /> },
+  { path: '/terms', element: <TermsPage /> },
   { path: '/join', element: <EventEntryPage /> },
   { path: '/event/:slug', element: <EventPage /> },
   { path: '/event/:slug/fullscreen', element: <EventPage fullscreen /> },

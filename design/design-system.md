@@ -227,11 +227,15 @@ tokens above. Every state below is narrow-first at 320px and carries 44px target
 
 ### Icon inventory
 
-Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCircle`, `Link`, `Copy`, `QrCode`, `Check`, `Ban`, `Trash2`, `Download`, `Settings`, `CalendarDays`, `ShieldCheck`, `ClipboardCheck`, `Search`, `Inbox`, `Eye`, `EyeOff`, and `ChevronRight`. Icons remain secondary to text labels except familiar close controls.
+Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCircle`, `Link`, `Copy`, `QrCode`, `Check`, `Ban`, `Trash2`, `Download`, `Settings`, `CalendarDays`, `ShieldCheck`, `ClipboardCheck`, `Search`, `Inbox`, `Eye`, `EyeOff`, `ChevronRight`, and `ChevronDown`. Icons remain secondary to text labels except familiar close controls. `ChevronDown` carries the open and closed state of the landing FAQ disclosures and is the one icon that rotates.
 
 ### Allowed above-the-fold copy
 
-Public: `Candidary`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three workflow labels. The returning-host entry point is also allowed, worded exactly `Already have an account?` and `Sign in to your events`. It is permitted because a host who already has an account otherwise reaches their events only from a manager card or a typed URL; it sits below the primary actions, and it clears the fold at 320 x 568 but not at 360 x 640 or 390 x 844.
+Public: `Candidary`, the eyebrow `Private event albums`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three capability labels (`No app, no account`, `Untouched originals`, `You choose what is shared`). The eyebrow is permitted because the headline states a feeling and nothing above it states the category; it is a `.section-label`, not a sentence, and it is the only line allowed to precede the headline.
+
+The landing header carries three exits beside the brand: `How it works`, `Sign in`, and `Create an event` (shortened to `Create` below 761px, with the full name kept as the accessible name). `How it works` is wayfinding to an anchor that exists on the page, and it is the one exit that drops below 761px. `Sign in` holds its place at every width because a host returning on a phone reaches their events no other way.
+
+The returning-host entry point is also allowed, worded exactly `Already have an account?` and `Sign in to your events`, followed by `New here?` and `Create one`. It is permitted because a host who already has an account otherwise reaches their events only from a manager card or a typed URL; it sits below the primary actions as one sentence, and it clears the fold at 320 x 568 but not at 360 x 640 or 390 x 844.
 
 Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
 

@@ -53,6 +53,12 @@ git diff --check
 
 ## Tracked visual baselines
 
+> **Pending recapture.** The landing redesign — hero photo cluster, the capability rows that replaced
+> Create / Share / Gather, and the new FAQ and footer — invalidates `landing-first-fold-320.png` and
+> `landing-workflow-780.png`. Both baselines carry the `win32` platform suffix, so they can only be
+> regenerated on the machine that owns them; a Linux run reports them missing rather than diffing
+> against them. Regenerate with the `--update-snapshots` commands below before the next visual gate.
+
 `tests/e2e/visual-qa.spec.ts` and `tests/e2e/event-theming-visual.spec.ts` assert committed images
 under their matching `*-snapshots/` directories, compared exactly — `threshold: 0` **and**
 `maxDiffPixels: 0` — with animations disabled, the caret hidden, and `scale: 'css'`. `output/`
@@ -92,7 +98,7 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 
 | Baseline | Route and state | Viewport |
 | --- | --- | ---: |
-| `landing-first-fold-320.png` | `/` first fold: headline, supporting sentence, both actions | 320 x 568 |
+| `landing-first-fold-320.png` | `/` first fold: eyebrow, headline, supporting sentence, both actions | 320 x 568 |
 | `landing-workflow-780.png` | `/` `.workflow` band, two columns | 780 x 900 |
 | `create-validation-focus-390.png` | `/create` `.create-form` after a 422 with three field errors, focus on the first invalid field | 390 x 844 |
 | `guest-long-welcome-320.png` | `/event/:slug` with a 500-character welcome, clamped with its disclosure | 320 x 568 |
@@ -241,7 +247,7 @@ in the final handoff and are not preclaimed here.
 | `/` and `/create` at 200% zoom | 640 x 450 | One-column hero and workflow; headline in the fold; a full 44 px primary target reachable |
 | `/create` field errors | 320, 360, 390, 430, 768 | Errors rendered outside the field name, `aria-describedby` resolves, 12–14 px, first invalid field focused |
 | `/create` private link | 320, 360, 390, 430, 768 | 44 px reveal target; the revealed 136-character link wraps and is focusable |
-| Header exits | 320, 768 | Exactly two exits on each of `/` and `/create`, each 44 x 44, at least 8 px apart |
+| Header exits | 320, 768 | Exactly three exits on `/` at 320 and four at 768, two on `/create`, each 44 x 44, at least 8 px apart |
 | Cover photo control | 390 x 844 | Focus ring drawn on the visible control, never on the hidden input |
 
 ### Guest — `tests/e2e/guest-responsive.spec.ts`, `tests/e2e/accessibility.spec.ts`
