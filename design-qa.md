@@ -53,11 +53,13 @@ git diff --check
 
 ## Tracked visual baselines
 
-> **Pending recapture.** The landing redesign — hero photo cluster, the capability rows that replaced
-> Create / Share / Gather, and the new FAQ and footer — invalidates `landing-first-fold-320.png` and
-> `landing-workflow-780.png`. Both baselines carry the `win32` platform suffix, so they can only be
-> regenerated on the machine that owns them; a Linux run reports them missing rather than diffing
-> against them. Regenerate with the `--update-snapshots` commands below before the next visual gate.
+The two landing baselines were recaptured on Windows and inspected side by side at their natural
+dimensions on 2026-08-02. `landing-first-fold-320-mobile-win32.png` is 320 x 568 with SHA-256
+`ACF41E57B9AF8635105B5E864A1DB87D36420C51D5BF44872CDEEB874D2C702A`;
+`landing-workflow-780-mobile-win32.png` is a 780 x 608 element capture from the 780 x 900 viewport
+with SHA-256 `A9592B6C1DFF656B887618ECB7803C62C8C458D899D1C6475AA8AE772AB22A42`.
+The complete mobile visual suite then passed without update mode. The `win32` platform suffix still
+means a Linux run reports these baselines missing rather than comparing different font rasterization.
 
 `tests/e2e/visual-qa.spec.ts` and `tests/e2e/event-theming-visual.spec.ts` assert committed images
 under their matching `*-snapshots/` directories, compared exactly — `threshold: 0` **and**
@@ -114,7 +116,7 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
 | `rsvp-household-320.png` | `/event/:slug` household card: a named attend, a decline, an attending plus-one | 320 wide |
 | `rsvp-receipt-390.png` | `/event/:slug` saved household receipt with `Change RSVP` | 390 wide |
-| `rsvp-closed-390.png` | `/event/:slug` closed deadline showing the saved response and no action | 390 wide |
+| `rsvp-before-start-390.png` | `/event/:slug` before-start surface showing the saved response and no write action | 390 x 844 |
 
 The event-theme suite adds exactly eight tracked images:
 
@@ -397,24 +399,23 @@ Fixed under this task:
 - `color-contrast` on the guest ground — see "Contrast remediation" below.
 - `color-contrast` on the landing privacy note — see "Contrast remediation" below.
 
-## Awaiting verification — date-driven guest phase
+## Automated browser evidence — date-driven guest phase
 
 `docs/superpowers/specs/2026-08-01-date-driven-guest-phase-design.md` adds two guest surfaces and
-one manager control. **Nothing in the table below has been measured.** Every other matrix in this
-document records a browser run; this one records what the responsive and accessibility pass owes, so
-that the absence of evidence is written down rather than inferred from a missing row. No entry may
-move into "Verified states" without a run of the commands at the top of this document on the
-revision that carries it.
+one manager control. The converged browser run measured the local automated states named below.
+Partial rows retain their exact outstanding claim; none of this evidence proves a physical device,
+native assistive technology, production runtime, or manual rehearsal.
 
-| Surface | Widths / viewports | Claim to be measured |
+| Surface | Widths / viewports | Measured result and remaining boundary |
 | --- | --- | --- |
-| Before-start, responded household | 320 x 568, 390 x 844 | Heading, start line, photo line, and the embedded saved response contained with no page-level horizontal scroll; exactly one `<h1>` in the document with the embedded household headings beneath it at `<h2>` |
-| Before-start, unrecognized or unresponded | 320 x 844, 390 x 844 | A 44 x 44 lookup field and complete action; the refusal sentence identical to the one a miss returns; no guest RSVP request issued at all when `rsvpAccess` is `unavailable` |
-| Waiting, photo delivery paused | 320 x 844, 390 x 844 | The event hero and the two paused sentences and nothing else; no RSVP lookup, receipt, or disclosure in the document |
-| Manager photo intake control | 320 x 844, 390 x 844 | The state rendered as text beside a 44 x 44 action at both widths, and the status and action refetching across the event start from `photoIntakeRecheckAfterMs` rather than from the browser clock |
+| Before-start, responded household | 320 x 844, 390 x 844 | `guest-lifecycle.spec.ts` passed one `<h1>`, nested `<h2>`, Axe, and document containment at both viewports; `rsvp-responsive.spec.ts` contained the maximum-name receipt at both widths; `visual-qa.spec.ts` passed the exact 390 x 844 `rsvp-before-start-390.png` baseline. **Outstanding:** the 320 x 568 first-fold composition was not exercised. |
+| Before-start lookup and unavailable access | 320 x 844, 390 x 844 | `rsvp-journey.spec.ts` passed the session-free saved-response lookup at the mobile project's 390 x 844 viewport; `guest-lifecycle.spec.ts` exercised unavailable access at both pinned viewports. **Outstanding:** exact unresponded/miss copy parity and an explicit no-household-request assertion were not measured by these browser cases. |
+| Waiting, photo delivery paused | 320 x 844, 390 x 844 | `guest-lifecycle.spec.ts` passed the single paused heading/copy, absence of RSVP lookup or receipt, Axe, and document containment at both viewports. Local automation only; physical/manual evidence remains outstanding. |
+| Automatic schedule transition | 320 x 844, 390 x 844 | `guest-lifecycle.spec.ts` passed untouched boundary crossing, quiet refresh failure, `pageshow` recovery, long-delay slicing, and server-delay behavior with browser clocks four days behind and six days ahead at both viewports. Local automation only; physical/manual evidence remains outstanding. |
+| Manager photo intake control | 320 x 844, 390 x 844 | **Outstanding:** the selected browser suites did not exercise the manager status/action recheck across the event start. Unit/UI coverage is not promoted to browser or manual evidence. |
 
-No tracked baseline is claimed for any of these. A PNG is added to the matrices above only once the
-state has been captured and inspected under the exactness rules in "Tracked visual baselines".
+The responded before-start surface now has the inspected 390 x 844 tracked baseline named above.
+No waiting, automatic-transition, or manager photo-intake PNG is claimed.
 
 ## Decisions recorded
 
