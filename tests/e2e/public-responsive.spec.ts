@@ -145,22 +145,26 @@ test('create errors reach their fields and the first one across the width matrix
   }
 });
 
-test('the event date stays inside its field under iOS native date sizing', async ({ page }) => {
+test('native event date and start time stay inside their fields under iOS sizing', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 });
   await page.goto('/create');
 
-  // iOS WebKit currently sizes a padded date input with a percentage width as though its content
-  // box owned that percentage. Reproduce that layout calculation without replacing the real field.
-  await page.addStyleTag({ content: 'input[type="date"] { box-sizing: content-box; }' });
+  // iOS WebKit currently sizes a padded native picker with a percentage width as though its content
+  // box owned that percentage. Reproduce that layout calculation without replacing the real fields.
+  await page.addStyleTag({
+    content: 'input[type="date"], input[type="time"] { box-sizing: content-box; }',
+  });
 
-  const field = page.getByLabel('Event date');
-  const fieldBounds = await field.boundingBox();
-  const labelBounds = await field.locator('..').boundingBox();
-  if (!fieldBounds || !labelBounds) throw new Error('the event date and its label must be laid out');
+  for (const label of ['Event date', 'Event start time']) {
+    const field = page.getByLabel(label);
+    const fieldBounds = await field.boundingBox();
+    const labelBounds = await field.locator('..').boundingBox();
+    if (!fieldBounds || !labelBounds) throw new Error(`${label} and its label must be laid out`);
 
-  expect(fieldBounds.x, 'date input starts inside its label').toBeGreaterThanOrEqual(labelBounds.x);
-  expect(fieldBounds.x + fieldBounds.width, 'date input ends inside its label')
-    .toBeLessThanOrEqual(labelBounds.x + labelBounds.width + 1);
+    expect(fieldBounds.x, `${label} starts inside its label`).toBeGreaterThanOrEqual(labelBounds.x);
+    expect(fieldBounds.x + fieldBounds.width, `${label} ends inside its label`)
+      .toBeLessThanOrEqual(labelBounds.x + labelBounds.width + 1);
+  }
 
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
