@@ -1109,7 +1109,12 @@ function validateMigrations(value: unknown): NonNullable<CandidateManifest['migr
     const match = /^migrations\/(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/u.exec(file.path);
     if (!match || Number.parseInt(match[1]!, 10) !== index + 1) throw new TypeError('migration manifest is not gap-free');
   }
-  const verification = exactRecord(record.verification, [
+  const verification = parseMigrationVerification(record.verification);
+  return { manifest, verification };
+}
+
+export function parseMigrationVerification(value: unknown): MigrationVerification {
+  const verification = exactRecord(value, [
     'migrationCount', 'ledgerSha256', 'foreignKeyRows', 'integrity', 'terminalSchema',
   ], 'migration verification');
   const terminal = exactRecord(verification.terminalSchema, [
@@ -1120,14 +1125,11 @@ function validateMigrations(value: unknown): NonNullable<CandidateManifest['migr
     throw new TypeError('migration verification literals are invalid');
   }
   return {
-    manifest,
-    verification: {
-      migrationCount: nonnegativeInteger(verification.migrationCount, 'migrationCount'),
-      ledgerSha256: sha256Value(verification.ledgerSha256, 'ledgerSha256'),
-      foreignKeyRows: 0,
-      integrity: 'ok',
-      terminalSchema: { events: true, rosterBatchReceipts: true, releaseCertifications: true },
-    },
+    migrationCount: nonnegativeInteger(verification.migrationCount, 'migrationCount'),
+    ledgerSha256: sha256Value(verification.ledgerSha256, 'ledgerSha256'),
+    foreignKeyRows: 0,
+    integrity: 'ok',
+    terminalSchema: { events: true, rosterBatchReceipts: true, releaseCertifications: true },
   };
 }
 

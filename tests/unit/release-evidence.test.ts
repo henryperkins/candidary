@@ -13,6 +13,7 @@ import {
   collectDeployableArtifacts,
   collectMigrationManifest,
   normalizedBindingTopology,
+  parseMigrationVerification,
   parsePlaywrightReport,
   parseVitestReport,
   releaseBuildSha,
@@ -581,6 +582,41 @@ describe('test report parsers', () => {
       },
     })).toThrow();
     expect(() => parsePlaywrightReport({})).toThrow();
+  });
+});
+
+describe('migration verification parser', () => {
+  const valid = {
+    migrationCount: 11,
+    ledgerSha256: 'a'.repeat(64),
+    foreignKeyRows: 0,
+    integrity: 'ok',
+    terminalSchema: {
+      events: true,
+      rosterBatchReceipts: true,
+      releaseCertifications: true,
+    },
+  } as const;
+
+  it('accepts only the exact typed fresh-D1 result', () => {
+    expect(parseMigrationVerification(structuredClone(valid))).toEqual(valid);
+  });
+
+  it.each([
+    ['unknown root field', { ...valid, output: 'raw command output' }],
+    ['unsafe count', { ...valid, migrationCount: -1 }],
+    ['nonzero foreign keys', { ...valid, foreignKeyRows: 1 }],
+    ['nonliteral integrity', { ...valid, integrity: 'OK' }],
+    ['terminal field missing', {
+      ...valid,
+      terminalSchema: { events: true, rosterBatchReceipts: true },
+    }],
+    ['terminal literal false', {
+      ...valid,
+      terminalSchema: { ...valid.terminalSchema, releaseCertifications: false },
+    }],
+  ])('rejects %s', (_label, value) => {
+    expect(() => parseMigrationVerification(value)).toThrow();
   });
 });
 
