@@ -584,10 +584,10 @@ export function normalizedBindingTopology(config: unknown): BindingTopology {
   const requiredSecrets = record.secrets === undefined
     ? []
     : optionalArray(requireRecord(record.secrets, 'secrets').required, 'secrets.required').map((value, index) =>
-      safeName(value, `secrets.required[${index}]`));
+      environmentName(value, `secrets.required[${index}]`));
   const variableNames = record.vars === undefined
     ? []
-    : Object.keys(requireRecord(record.vars, 'vars')).map((name) => safeName(name, 'vars key'));
+    : Object.keys(requireRecord(record.vars, 'vars')).map((name) => environmentName(name, 'vars key'));
   const versionMetadata = record.version_metadata === undefined
     ? null
     : safeName(requireRecord(record.version_metadata, 'version_metadata').binding, 'version_metadata.binding');
@@ -790,6 +790,7 @@ function safeToken(value: unknown, label: string): string {
 
 function credentialLike(value: string): boolean {
   return /(?:^|[/_.-])(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{8,}/iu.test(value)
+    || /(?:^|[/_.-])sk_(?:live|test)_[A-Za-z0-9]{8,}/iu.test(value)
     || /bearer[ _-]+[A-Za-z0-9_-]{8,}/iu.test(value);
 }
 
@@ -811,6 +812,13 @@ function versionToken(value: unknown, label: string): string {
 function safeName(value: unknown, label: string): string {
   if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/u.test(value) || credentialLike(value)) {
     throw new TypeError(`${label} must be an allowlisted name`);
+  }
+  return value;
+}
+
+function environmentName(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[A-Z][A-Z0-9_]{0,127}$/u.test(value) || credentialLike(value)) {
+    throw new TypeError(`${label} must be an uppercase environment name`);
   }
   return value;
 }
@@ -927,8 +935,8 @@ function validateTopology(value: unknown): BindingTopology {
       sendEmail: stringArray(bindings.sendEmail, 'email bindings', safeName),
       versionMetadata: nullable(bindings.versionMetadata, (item) => safeName(item, 'version metadata binding')),
     },
-    requiredSecrets: stringArray(record.requiredSecrets, 'requiredSecrets', safeName),
-    variableNames: stringArray(record.variableNames, 'variableNames', safeName),
+    requiredSecrets: stringArray(record.requiredSecrets, 'requiredSecrets', environmentName),
+    variableNames: stringArray(record.variableNames, 'variableNames', environmentName),
     workflows,
     rateLimits,
     crons: stringArray(record.crons, 'crons', cronExpression),
@@ -1228,6 +1236,9 @@ function enforceStageEvidence(
     if (command.status === 'passed') {
       if (report.counts === null && !matchingFailure) {
         throw new TypeError(`${report.id} passed without report evidence`);
+      }
+      if (report.counts !== null && report.counts.failed !== 0) {
+        throw new TypeError(`${report.id} exited zero with failed test counts`);
       }
     } else if (report.counts !== null) {
       throw new TypeError(`${report.id} did not pass but has report evidence`);

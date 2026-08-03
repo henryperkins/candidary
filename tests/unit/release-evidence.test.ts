@@ -602,6 +602,14 @@ describe('strict redacted candidate manifests', () => {
     freeFormMode.bindings!.secondBuildTopologySha256 = freeFormTopologyHash;
     expectInvalid(freeFormMode);
 
+    const secretShapedName = passedManifest();
+    secretShapedName.bindings!.topology.requiredSecrets = ['sk_live_51ABCDEF12345678'];
+    const secretTopologyHash = independentSha(independentCanonical(secretShapedName.bindings!.topology));
+    secretShapedName.bindings!.sourceTopologySha256 = secretTopologyHash;
+    secretShapedName.bindings!.firstBuildTopologySha256 = secretTopologyHash;
+    secretShapedName.bindings!.secondBuildTopologySha256 = secretTopologyHash;
+    expectInvalid(secretShapedName);
+
     const credentialPath = passedManifest();
     credentialPath.artifacts!.client[0]!.path = 'dist/client/\nBearer ghp_abc123.txt';
     const credentialTreeHash = independentSha(independentCanonical({
@@ -715,6 +723,14 @@ describe('strict redacted candidate manifests', () => {
     missingBindingRelabeled.bindings = null;
     missingBindingRelabeled.artifacts!.secondTreeSha256 = 'f'.repeat(64);
     expectInvalid(missingBindingRelabeled);
+
+    const failedCountsBehindPassedCommand = passedManifest();
+    failedCountsBehindPassedCommand.status = 'failed';
+    failedCountsBehindPassedCommand.failureCode = 'artifact_drift';
+    failedCountsBehindPassedCommand.claims.localAutomated = 'failed';
+    failedCountsBehindPassedCommand.tests.unitUi = { total: 10, passed: 8, failed: 1, skipped: 1, flaky: 0 };
+    failedCountsBehindPassedCommand.artifacts!.secondTreeSha256 = 'f'.repeat(64);
+    expectInvalid(failedCountsBehindPassedCommand);
 
     const cleanupCannotMaskEvidence = passedManifest();
     cleanupCannotMaskEvidence.status = 'failed';
