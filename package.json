@@ -23,7 +23,8 @@
     "event-start-backfill:plan": "node --experimental-strip-types scripts/event-start-backfill.ts plan",
     "event-start-backfill:verify": "node --experimental-strip-types scripts/event-start-backfill.ts verify",
     "cf-typegen": "wrangler types",
-    "verify:bindings": "wrangler types --check"
+    "verify:bindings": "wrangler types --check",
+    "verify:fresh-d1": "node --experimental-strip-types scripts/verify-fresh-d1.ts"
   },
   "dependencies": {
     "@fontsource/dm-sans": "5.3.0",
