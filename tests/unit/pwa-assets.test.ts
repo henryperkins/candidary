@@ -6,6 +6,7 @@ import { createElement } from 'react';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { buildDeploymentCommandPlan } from '../../scripts/deploy-release';
 import { createAppRouter } from '../../src/app/router';
 
 const root = process.cwd();
@@ -114,7 +115,18 @@ describe('iOS web app metadata', () => {
     };
 
     expect(packageJson.scripts?.deploy)
-      .toBe('npm run build && npm run verify:pwa-build && wrangler deploy');
+      .toBe('node --experimental-strip-types scripts/deploy-release.ts');
+
+    const plan = buildDeploymentCommandPlan({
+      candidateRoot: root,
+      sha: 'a'.repeat(40),
+      nodeExecPath: process.execPath,
+      npmCliPath: fromRoot('tooling/npm-cli.js'),
+      wranglerCliPath: fromRoot('node_modules/wrangler/bin/wrangler.js'),
+    });
+    expect(plan.map((command) => command.id)).toEqual([
+      'npm-ci', 'build', 'verify-pwa-build', 'deploy',
+    ]);
   });
 });
 

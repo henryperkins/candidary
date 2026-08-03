@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "generate:app-icons": "node scripts/generate-app-icons.mjs",
     "verify:pwa-build": "node scripts/verify-pwa-build.mjs",
-    "deploy": "npm run build && npm run verify:pwa-build && wrangler deploy",
+    "deploy": "node --experimental-strip-types scripts/deploy-release.ts",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings=0",
     "test": "npm run test:unit && npm run test:worker",
