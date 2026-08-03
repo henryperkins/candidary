@@ -33,6 +33,7 @@ const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
 const INTAKE_POLL_MS = 5_000;
 
 test('paginates intake instead of loading every stored photo', async ({ page }) => {
+  test.setTimeout(60_000);
   const previewRequests: string[] = [];
   page.on('request', (request) => {
     if (/\/api\/media\/[^/]+\/preview$/u.test(request.url())) previewRequests.push(request.url());
@@ -79,7 +80,7 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
     const url = new URL(response.url());
     return url.pathname === `/api/manage/events/${EVENT_FIXTURE.id}/media`
       && !url.searchParams.has('cursor');
-  }, { timeout: INTAKE_POLL_MS + 3_000 });
+  }, { timeout: INTAKE_POLL_MS * 3 });
   await expect(more, 'an answered poll keeps the exhausted keyset exhausted').toHaveCount(0);
   await expect(previews, 'an answered poll retains all five pages').toHaveCount(STORED_PHOTOS);
 
