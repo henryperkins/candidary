@@ -1,4 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@cloudflare/vite-plugin', () => ({ cloudflare: () => ({ name: 'cloudflare-test-stub' }) }));
+vi.mock('@vitejs/plugin-react', () => ({ default: () => ({ name: 'react-test-stub' }) }));
 
 import {
   GUEST_JOURNEY_VERSION,
@@ -9,11 +17,40 @@ import {
   type ReleaseCertification,
   type RuntimeReleaseIdentity,
 } from '../../shared/release';
+import { resolveBuildCandidate } from '../../vite.config';
 
 const BUILD_SHA = '0123456789abcdef0123456789abcdef01234567';
 const MIGRATION_SHA = 'a'.repeat(64);
 const EVIDENCE_SHA = 'b'.repeat(64);
 const PHYSICAL_SHA = 'c'.repeat(64);
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
+});
+
+function git(root: string, ...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+async function releaseCandidateRepository(): Promise<{ root: string; sha: string }> {
+  const root = await mkdtemp(join(tmpdir(), 'candidary-release-build-'));
+  temporaryRoots.push(root);
+  await mkdir(join(root, 'migrations'), { recursive: true });
+  await writeFile(join(root, '.gitignore'), 'node_modules/\ndist/\n.wrangler/\noutput/\n', 'utf8');
+  await writeFile(join(root, 'migrations', '0001_initial.sql'), 'select 1;\n', 'utf8');
+  await writeFile(join(root, 'tracked.txt'), 'clean\n', 'utf8');
+  git(root, 'init', '--quiet');
+  git(root, 'config', 'user.name', 'Candidary Tests');
+  git(root, 'config', 'user.email', 'tests@candidary.invalid');
+  git(root, 'add', '.');
+  git(root, 'commit', '--quiet', '-m', 'fixture');
+  return { root, sha: git(root, 'rev-parse', 'HEAD') };
+}
 
 const CERTIFICATION: ReleaseCertification = {
   buildSha: BUILD_SHA,
@@ -48,6 +85,37 @@ function certificationInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe('release contract', () => {
+  // Production break caught: a clean commit is not injected exactly, or source dirt is mislabeled as that commit.
+  it('resolves the exact clean build candidate and rejects tracked or untracked dirt', async () => {
+    const clean = await releaseCandidateRepository();
+    expect(resolveBuildCandidate(clean.root).buildSha).toBe(clean.sha);
+
+    const tracked = await releaseCandidateRepository();
+    await writeFile(join(tracked.root, 'tracked.txt'), 'dirty\n', 'utf8');
+    expect(resolveBuildCandidate(tracked.root).buildSha).toBe('');
+
+    const untracked = await releaseCandidateRepository();
+    await writeFile(join(untracked.root, 'notes.txt'), 'untracked\n', 'utf8');
+    expect(resolveBuildCandidate(untracked.root).buildSha).toBe('');
+  });
+
+  // Production break caught: ordinary ignored dependency/build/tool output prevents a clean candidate identity.
+  it('does not count ignored dependency, build, Wrangler, or release output', async () => {
+    const candidate = await releaseCandidateRepository();
+    for (const path of [
+      'node_modules/example/index.js',
+      'dist/client/index.html',
+      '.wrangler/state.json',
+      'output/release/result.json',
+    ]) {
+      const target = join(candidate.root, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, 'ignored\n', 'utf8');
+    }
+
+    expect(resolveBuildCandidate(candidate.root).buildSha).toBe(candidate.sha);
+  });
+
   // Production break caught: either checked-in version source drifts from the first contract version.
   it('exports the checked-in evidence and guest journey versions', () => {
     expect(RELEASE_EVIDENCE_SCHEMA_VERSION).toBe(1);

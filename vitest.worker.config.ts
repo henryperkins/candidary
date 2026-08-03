@@ -6,8 +6,14 @@ const migrations = await readD1Migrations(
   fileURLToPath(new URL('./migrations', import.meta.url)),
 );
 const migrationQueries = migrations.flatMap((migration) => migration.queries);
+const testBuildSha = '0123456789abcdef0123456789abcdef01234567';
+const testMigrationManifestSha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 export default defineConfig({
+  define: {
+    __CANDIDARY_BUILD_SHA__: JSON.stringify(testBuildSha),
+    __CANDIDARY_MIGRATION_MANIFEST_SHA256__: JSON.stringify(testMigrationManifestSha256),
+  },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
