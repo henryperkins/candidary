@@ -65,10 +65,10 @@ export async function applySettings(
     method: 'PATCH',
     headers: writeHeaders(access.manager),
     body: JSON.stringify({
-      uploadsEnabled: access.event.uploadsEnabled,
       galleryVisible: access.event.galleryVisible,
       moderationRequired: access.event.moderationRequired,
       eventTimezone: access.event.eventTimezone,
+      eventStartTime: access.event.eventStartTime,
       rsvpDeadlineDate: access.event.rsvpDeadlineDate,
       rsvpEnabled: access.event.rsvpEnabled,
       rsvpRosterVersion: access.event.rsvpRosterVersion,
@@ -77,10 +77,12 @@ export async function applySettings(
   }, testEnv);
 }
 
-// New events open nothing. The photo-journey fixtures all assume intake is
-// running, so this turns it on the way a host would rather than by writing to
-// the database behind the route that owns the decision.
-export async function eventAccess(name = 'Maya & Theo', uploadsEnabled = true) {
+// New events permit photo delivery, but the clock does the opening and this
+// fixture's event is still ahead of its own start. The photo-journey fixtures
+// all assume intake is running, so this opens it early the way a host would
+// rather than by writing to the database behind the route that owns the
+// decision.
+export async function eventAccess(name = 'Maya & Theo', openPhotosEarly = true) {
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
     body: JSON.stringify({
@@ -99,8 +101,15 @@ export async function eventAccess(name = 'Maya & Theo', uploadsEnabled = true) {
     guest: cookiesFrom(guestExchange),
   };
 
-  if (!uploadsEnabled) return access;
-  const opened = await applySettings(access, { uploadsEnabled: true });
+  if (!openPhotosEarly) return access;
+  const opened = await createApp().request(`/api/manage/events/${access.event.id}/photo-intake`, {
+    method: 'POST',
+    headers: writeHeaders(access.manager),
+    body: JSON.stringify({ action: 'open_early' }),
+  }, testEnv);
+  if (opened.status !== 200) {
+    throw new Error(`Photo delivery fixture did not open: ${await opened.text()}`);
+  }
   access.event = (await opened.json<any>()).data.event;
   return access;
 }

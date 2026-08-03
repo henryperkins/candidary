@@ -11,6 +11,10 @@ import type { MediaView, MessageView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
+import { GuestBeforeStart } from '../features/guest/GuestBeforeStart';
+import { GuestWaiting } from '../features/guest/GuestWaiting';
+import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRecheck';
+import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
 import { GuestRsvpFlow } from '../features/rsvp/GuestRsvpFlow';
 import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
 
@@ -19,6 +23,19 @@ import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
    instead of an event. The type cannot police that, so the canonical default stands behind it. This is
    deliberate, not the dead fallback the stylesheet used to carry. */
 const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
+
+function guestLifecycleKey(event: GuestEventView): string {
+  return JSON.stringify([
+    event.phase,
+    event.rsvpState,
+    event.rsvpAccess,
+    event.eventStartAt,
+    event.rsvpDeadlineAt,
+    event.eventTimezone,
+    event.rsvpDeadlineDate,
+    event.lifecycleRecheckAfterMs !== null,
+  ]);
+}
 
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const { slug = '' } = useParams();
@@ -34,6 +51,9 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   // Each load takes the next ticket and only the newest one may install its answer. A slug change, a
   // second Try again press, or an unmount all leave an older load holding a ticket nobody honours.
   const loadTicket = useRef(0);
+  // What is on screen, readable from the boundary refetch without re-arming its timer every render.
+  const shownEvent = useRef<GuestEventView | null>(null);
+  shownEvent.current = event;
 
   const loadGallery = useCallback(async () => {
     const result = await api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`);
@@ -68,11 +88,34 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     }
   }, [fullscreen, loadGallery, slug]);
 
+  /* The lifecycle boundary refetch. It takes a ticket like every other load, so a slow answer that
+     was overtaken cannot install itself, and it deliberately never touches `failure`: a background
+     refresh that fails must leave the surface a guest is using alone rather than replace a working
+     event with an error. The rejection is left to the hook, which retries with bounded backoff. */
+  const recheckEvent = useCallback(async (): Promise<LifecycleRecheckOutcome> => {
+    const ticket = (loadTicket.current += 1);
+    const { event: next } = await api<{ event: GuestEventView; role: string }>(`/api/event/${slug}`);
+    if (loadTicket.current !== ticket) return 'unchanged';
+    const shown = shownEvent.current;
+    const unchanged = shown && guestLifecycleKey(shown) === guestLifecycleKey(next);
+    // Relative delays drift on every read. Installing a semantic no-op would
+    // replace the delay-keyed effect and erase the floor it just established.
+    if (unchanged) return 'unchanged';
+    setEvent(next);
+    return 'changed';
+  }, [slug]);
+
   useEffect(() => {
     void loadEvent();
     // An unmount retires the ticket, so a load still in flight cannot install its answer afterwards.
     return () => { loadTicket.current += 1; };
   }, [loadEvent]);
+
+  useLifecycleRecheck(
+    event?.lifecycleRecheckAfterMs ?? null,
+    recheckEvent,
+    event ? guestLifecycleKey(event) : null,
+  );
 
   function toggleExtra(kind: keyof typeof opened, isOpen: boolean) {
     setOpened((current) => ({ ...current, [kind]: isOpen }));
@@ -124,24 +167,15 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         presentation="primary"
       />}
 
+      {event.phase === 'before-start' && <GuestBeforeStart event={event} />}
+
       {event.phase === 'photos-primary' && <GuestUploadFlow
         event={event}
         slug={slug}
         onDelivered={() => setTerminal(true)}
       />}
 
-      {event.phase === 'waiting' && event.rsvpDeadlineAt && <GuestRsvpFlow
-        event={event}
-        presentation="read-only"
-      />}
-
-      {/* Existing events without RSVP metadata still retain the paused-photo
-          landing state instead of turning into an empty page. */}
-      {event.phase === 'waiting' && !event.rsvpDeadlineAt && <GuestUploadFlow
-        event={event}
-        slug={slug}
-        onDelivered={() => setTerminal(true)}
-      />}
+      {event.phase === 'waiting' && <GuestWaiting event={event} />}
 
       {!terminal && event.phase === 'photos-primary' && <section className="guest-secondary" aria-labelledby="more-from-event">
         <div className="guest-secondary__heading">
@@ -150,7 +184,10 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
           <p>Photos are delivered privately first. The shared gallery and notes stay out of your way until you choose them.</p>
         </div>
 
-        {event.rsvpDeadlineAt && <details
+        {/* Photos can open before the event does, so the household disclosure survives into that
+            early window and disappears at the start. The server says which it is — a date the
+            browser compared itself would be a guest device's clock deciding a boundary. */}
+        {(event.rsvpAccess === 'editable' || event.rsvpAccess === 'read-only') && <details
           className="event-extra"
           onToggle={(toggle) => setRsvpExpanded(toggle.currentTarget.open)}
         >
@@ -184,6 +221,8 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
           {opened.notes && <div className="event-extra__content notes-secondary">
             <div><MessageCircle aria-hidden="true" /><h3>A few words for {event.name}</h3><p>Share a wish or memory whenever you have a moment.</p></div>
             {/* The name belongs to the field, not to the placeholder that vanishes on the first keystroke. */}
+            {/* The button is held for the round trip so the guest cannot answer silence with a second
+                press, and a refusal is announced rather than swallowed. */}
             <div><form className="note-form" onSubmit={(formEvent) => void leaveNote(formEvent)}><label><span className="sr-only">Note for {event.name}</span><textarea name="body" rows={3} maxLength={500} required placeholder="Write a note…" /></label><button className="button button--primary">Leave a note <ArrowRight aria-hidden="true" /></button></form>{messages.length > 0 && <ul className="notes-feed">{messages.map((item) => <li key={item.id}><p>{item.body}</p><small>{item.guestName || 'A guest'}</small></li>)}</ul>}</div>
           </div>}
         </details>

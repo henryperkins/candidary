@@ -495,14 +495,19 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* Household RSVP is deliberately isolated from the upload state machine. It
    shares only the event semantic tokens and the narrow guest shell. */
 .rsvp-flow { width: 100%; max-width: 620px; min-height: 100svh; margin: 0 auto; padding: 24px 20px 36px; display: grid; align-content: start; gap: 20px; overflow-wrap: anywhere; background: var(--event-surface); color: var(--event-text); }
-.rsvp-flow--secondary { max-width: none; min-height: 0; padding: 0; background: transparent; }
-/* Primary/waiting share the photo-drop hero: edge-to-edge band, body padded underneath. */
+/* Secondary and embedded are nested blocks inside a page that already has its own frame: no page
+   height, no surface of their own. Embedded additionally sits under a hero it must not repeat. */
+.rsvp-flow--secondary, .rsvp-flow--embedded { max-width: none; min-height: 0; padding: 0; background: transparent; }
+/* Primary, before-start, and waiting share the photo-drop hero: edge-to-edge band, body padded underneath. */
 .rsvp-flow--with-hero { padding: 0; gap: 0; overflow: hidden; }
 .rsvp-flow__body { padding: 24px 20px 36px; display: grid; align-content: start; gap: 20px; }
 .event-extra__content.guest-secondary { max-width: none; margin: 0; padding: 5px 0 35px; background: transparent; }
 .rsvp-identity { display: grid; gap: 6px; padding: 8px 2px 2px; }
 .rsvp-identity__event, .rsvp-eyebrow { margin: 0; color: var(--event-primary-on-surface); font-size: .72rem; font-weight: 800; letter-spacing: .09em; line-height: 1.4; text-transform: uppercase; }
-.rsvp-identity h1, .rsvp-card h1 { margin: 0; color: var(--event-page-text); font-size: clamp(1.9rem, 8vw, 2.8rem); line-height: 1.08; text-wrap: balance; }
+/* Embedded drops every heading a level so the before-start page keeps the only level-one, and takes
+   the size down with it: stacking two page-scale headings would deny in type what the outline says. */
+.rsvp-identity h1, .rsvp-identity h2, .rsvp-card h1, .rsvp-card h2 { margin: 0; color: var(--event-page-text); font-size: clamp(1.9rem, 8vw, 2.8rem); line-height: 1.08; text-wrap: balance; }
+.rsvp-flow--embedded .rsvp-identity h2, .rsvp-flow--embedded .rsvp-card h2 { font-size: clamp(1.3rem, 5.5vw, 1.65rem); line-height: 1.2; }
 .rsvp-identity > p:not(.rsvp-identity__event), .rsvp-card > p { margin: 0; color: var(--event-muted-text); line-height: 1.5; }
 .rsvp-deadline { font-weight: 700; }
 .rsvp-card { min-width: 0; padding: 22px 20px; display: grid; gap: 18px; border: 1px solid var(--event-border); border-radius: var(--event-card-radius); background: var(--event-raised-surface); box-shadow: 0 10px 28px var(--event-primary-shadow); }
@@ -518,7 +523,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .rsvp-button--primary:not(:disabled):hover { background: var(--event-primary-hover); }
 .rsvp-button--secondary { border: 1px solid var(--event-primary-on-surface); background: transparent; color: var(--event-primary-on-surface); }
 .rsvp-button:disabled, .rsvp-person:disabled { opacity: .58; cursor: not-allowed; }
-.rsvp-button:focus-visible, .rsvp-attendance input:focus-visible + span, .rsvp-field input:focus-visible, .rsvp-household__heading h1:focus-visible { outline: 3px solid var(--event-focus); outline-offset: 3px; }
+.rsvp-button:focus-visible, .rsvp-attendance input:focus-visible + span, .rsvp-field input:focus-visible, .rsvp-household__heading h1:focus-visible, .rsvp-household__heading h2:focus-visible { outline: 3px solid var(--event-focus); outline-offset: 3px; }
 .rsvp-card > .rsvp-counts { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--event-accent-soft); color: var(--event-accent-soft-foreground); font-size: .85rem; font-weight: 800; line-height: 1.4; }
 .rsvp-person { min-width: 0; margin: 0; padding: 15px 13px; border: 1px solid var(--event-border); border-radius: var(--event-card-radius); }
 .rsvp-person legend { max-width: 100%; padding: 0 5px; color: var(--event-page-text); font-family: 'Manrope', sans-serif; font-weight: 800; overflow-wrap: anywhere; }
@@ -541,14 +546,21 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .rsvp-response--pending::before { content: '?'; }
 .rsvp-receipt__deadline { font-size: .78rem; }
 
+/* Before-start and waiting are the same product as the RSVP surface — same frame, same hero, same
+   card — so they add only the air their own copy needs. */
+.guest-before-start .rsvp-identity { gap: 10px; }
+.guest-waiting .rsvp-card { gap: 12px; }
+
 @media (min-width: 700px) and (min-height: 760px) {
-  .rsvp-flow:not(.rsvp-flow--secondary) { box-sizing: content-box; min-height: 680px; margin: 38px auto 70px; padding: 40px; border: 1px solid var(--event-border); border-radius: var(--event-frame-radius); box-shadow: 0 22px 70px var(--event-frame-shadow); }
+  .rsvp-flow:not(.rsvp-flow--secondary):not(.rsvp-flow--embedded) { box-sizing: content-box; min-height: 680px; margin: 38px auto 70px; padding: 40px; border: 1px solid var(--event-border); border-radius: var(--event-frame-radius); box-shadow: 0 22px 70px var(--event-frame-shadow); }
   .rsvp-flow--with-hero { padding: 0; }
   .rsvp-flow--with-hero .rsvp-flow__body { padding: 32px 40px 40px; }
 }
 
 @media (max-width: 360px) {
-  .rsvp-flow { padding-right: 14px; padding-left: 14px; }
+  /* Embedded is excluded: its own page body already holds the narrow gutter, and insetting it twice
+     costs the household roster 28px it does not have at 320. */
+  .rsvp-flow:not(.rsvp-flow--embedded) { padding-right: 14px; padding-left: 14px; }
   .rsvp-card { padding-right: 14px; padding-left: 14px; }
   .rsvp-attendance { grid-template-columns: 1fr; }
 }

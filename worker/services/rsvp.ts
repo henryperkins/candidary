@@ -27,11 +27,13 @@ import { csvCell, parseRsvpCsv } from '../../shared/csv';
 import { ApiError } from '../../shared/errors';
 import { localDateForInstant } from '../../shared/event-time';
 import {
+  EVENT_START_MIGRATION_SENTINEL,
   RSVP_HOUSEHOLD_KEY_PATTERN,
   checkHouseholdCapacity,
   checkRosterCapacity,
   deriveRsvpSummary,
   findLookupCollisions,
+  isRsvpConfigured,
   normalizeInvitedName,
   parsePersonText,
   resolveGuestEventPhase,
@@ -263,7 +265,13 @@ export class RsvpService {
     session: { writeAuthorityDeadline: string } | null,
     now = new Date(),
   ): RsvpHouseholdView {
-    const { rsvpState } = resolveGuestEventPhase(event, now);
+    // `rsvpAccess`, not `rsvpState`: an event that has started is unavailable
+    // however its deadline reads, and this is the same sentence the guest RSVP
+    // routes enforce, so the interface and the boundary derive from one value.
+    const { rsvpAccess } = resolveGuestEventPhase({
+      ...event,
+      rsvpConfigured: isRsvpConfigured(event),
+    }, now);
     const sessionOpen = session
       ? now.getTime() <= Date.parse(session.writeAuthorityDeadline)
       : false;
@@ -271,10 +279,10 @@ export class RsvpService {
       id: household.id,
       label: household.label,
       version: household.version,
-      editable: rsvpState === 'open' && sessionOpen,
+      editable: rsvpAccess === 'editable' && sessionOpen,
       // The event is still open, but this device's proof is older than the
       // deadline it was given. A fresh exact lookup restores the window.
-      renewalRequired: rsvpState === 'open' && session !== null && !sessionOpen,
+      renewalRequired: rsvpAccess === 'editable' && session !== null && !sessionOpen,
       deadlineAt: event.rsvpDeadlineAt ?? '',
       invitees: invitees.map((invitee) => ({
         id: invitee.id,
@@ -470,8 +478,14 @@ export class RsvpService {
       message: 'We could not open an invitation with those details.',
     } as const;
 
-    const { rsvpState } = resolveGuestEventPhase(event, now);
-    if (rsvpState === 'disabled') return notAvailable;
+    // One refusal covers a disabled roster and an event that has already begun,
+    // so the start boundary is not an oracle either: a caller learns nothing
+    // from it that a plain miss would not have told them.
+    const { rsvpAccess } = resolveGuestEventPhase({
+      ...event,
+      rsvpConfigured: isRsvpConfigured(event),
+    }, now);
+    if (rsvpAccess === 'unavailable') return notAvailable;
 
     const names = [input.firstName, input.secondName]
       .filter((name): name is string => typeof name === 'string' && name.trim().length > 0);
@@ -496,7 +510,7 @@ export class RsvpService {
     // that never answered stays invisible, and that has to be applied before the
     // ambiguity test as well: `second_name_required` is itself a statement that
     // the name is on the list twice, so a roster nobody can open must not make it.
-    const candidates = rsvpState === 'open'
+    const candidates = rsvpAccess === 'editable'
       ? households
       : households.filter((record) => record!.firstRespondedAt !== null);
 
@@ -617,8 +631,10 @@ export class RsvpService {
    *
    * Two different things can look like a repeat, and they are answered
    * differently. The same idempotency key with the same answer is a lost
-   * confirmation, and replays as success even if the household has moved on
-   * since — a guest on a bad connection must never be asked to answer twice.
+   * confirmation, and replays as success while guest RSVP remains available,
+   * even if the household has moved on since — a guest on a bad connection
+   * must never be asked to answer twice. Event start still closes every guest
+   * RSVP route, including receipt replay.
    * The same key with a *different* answer is a bug or a tampered retry, and is
    * refused rather than silently applied.
    */
@@ -655,6 +671,8 @@ export class RsvpService {
           auth.household.id,
           request.version,
           nowIso,
+          nowIso,
+          EVENT_START_MIGRATION_SENTINEL,
           auth.session.id,
           nowIso,
           nowIso,
@@ -710,8 +728,17 @@ export class RsvpService {
     digest: string,
     now: Date,
   ): Promise<RsvpSubmissionResponse | null> {
-    const receipt = await this.rsvp.getReceipt(auth.household.id, request.idempotencyKey);
+    const state = await this.rsvp.getSubmissionReceiptState(
+      auth.event.id,
+      auth.household.id,
+      request.idempotencyKey,
+      now.toISOString(),
+    );
+    const receipt = state.receipt;
     if (!receipt) return null;
+    if (state.eventStarted) {
+      throw new ApiError('RSVP_CLOSED', 'RSVP closed when the event started.', 409);
+    }
     if (receipt.requestDigest !== digest) {
       throw new ApiError(
         'RSVP_SUBMISSION_CONFLICT',

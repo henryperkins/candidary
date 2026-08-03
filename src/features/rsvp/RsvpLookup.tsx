@@ -5,7 +5,7 @@ import { RsvpShell } from './RsvpShell';
 
 interface RsvpLookupProps {
   event: GuestEventView;
-  presentation: 'primary' | 'secondary' | 'read-only';
+  presentation: 'primary' | 'secondary' | 'embedded';
   secondNameRequired: boolean;
   busy: boolean;
   message: string;
@@ -56,14 +56,21 @@ export function RsvpLookup({
     await onLookup(first, secondNameRequired ? second : undefined);
   }
 
-  const withHero = presentation === 'primary' || presentation === 'read-only';
+  /* Secondary opens inside a disclosure far below the photo drop's hero, so it repeats the event
+     identity. Primary and embedded both sit directly under a hero that already carries it. */
+  const withIdentity = presentation === 'secondary';
+  const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
 
   return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--lookup">
     <header className="rsvp-identity">
-      {!withHero && <p className="rsvp-identity__event">{event.name}</p>}
-      <h1>Find your household invitation</h1>
-      {!withHero && <p>{displayDate(event.eventDate)}</p>}
-      {event.rsvpDeadlineDate && <p className="rsvp-deadline">Please RSVP by {displayDate(event.rsvpDeadlineDate)}.</p>}
+      {withIdentity && <p className="rsvp-identity__event">{event.name}</p>}
+      <HeadingTag>{presentation === 'embedded'
+        ? 'Find your household to view a saved response.'
+        : 'Find your household invitation'}</HeadingTag>
+      {withIdentity && <p>{displayDate(event.eventDate)}</p>}
+      {/* The deadline sentence is an instruction to answer. Once access is read-only it would name a
+          date nobody can act on, which is the dead-end this surface exists to replace. */}
+      {event.rsvpDeadlineDate && event.rsvpAccess === 'editable' && <p className="rsvp-deadline">Please RSVP by {displayDate(event.rsvpDeadlineDate)}.</p>}
     </header>
     <div className="rsvp-card rsvp-lookup">
       <form onSubmit={(formEvent) => void submit(formEvent)} noValidate>

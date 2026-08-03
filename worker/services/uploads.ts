@@ -6,6 +6,7 @@ import {
   type SupportedImageType,
 } from '../../shared/constants';
 import { ApiError, type ApiErrorCode } from '../../shared/errors';
+import { resolvePhotoIntake } from '../../shared/rsvp';
 import { MediaRepository, type ReserveMediaRecord } from '../db/media';
 import type { AppEnv, AuthenticatedSession } from '../env';
 import { sanitizeFilename } from '../security/filenames';
@@ -53,9 +54,14 @@ export function resolveSupportedImageType(filename: string, mimeType: string): S
 export class UploadService {
   constructor(private readonly env: AppEnv) {}
 
-  private assertCanUpload(auth: AuthenticatedSession) {
+  // Photo delivery has to be *open*, not merely permitted. Since 0010 an event
+  // carries `uploads_enabled = 1` from creation and the schedule decides when it
+  // opens, so testing the flag alone would accept a photo months before the day.
+  private assertCanUpload(auth: AuthenticatedSession, now = new Date()) {
     if (auth.session.role !== 'guest') throw new ApiError('ROLE_FORBIDDEN', 'Only guests can add event photos.', 403);
-    if (!auth.event.uploadsEnabled) throw new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this event.', 409);
+    if (!resolvePhotoIntake(auth.event, now).photosOpen) {
+      throw new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this event.', 409);
+    }
   }
 
   private prepareReservation(

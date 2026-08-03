@@ -51,14 +51,30 @@ Outbound email needs no local configuration: `wrangler dev` simulates the `EMAIL
 ```powershell
 npm test
 npm run typecheck
+npm run typecheck:e2e
 npm run lint
 npm run build
+npm run verify:bindings
+npm run verify:fresh-d1 -- --run-root <absolute-candidary-release-temp-root> --report-file <root>/migration-verification.json
 npm run test:e2e
 npm run test:load:wedding
 npm run test:load:rsvp
 ```
 
 Both load commands are dry runs unless an operator supplies a dedicated rehearsal event and the explicit live confirmation described in [operations.md](docs/operations.md). Browser automation at 390 by 844 pixels supplements—but does not replace—physical iPhone Safari and Android Chrome acceptance.
+
+For an immutable local release candidate, commit the complete candidate first and pass both exact
+commit IDs to the aggregate gate:
+
+```powershell
+$reviewedSha = git rev-parse HEAD
+npm run verify:release -- --sha $reviewedSha --base-sha 0b92387d2e237d568d2514373dcc3044e7960d4b
+```
+
+The command verifies a detached temporary worktree, including a fresh local D1 through
+`npm run verify:fresh-d1`, and writes redacted evidence under `output/release/`. It does not migrate
+remote D1, deploy, certify a runtime, or replace physical-device rehearsal. See
+[deployment.md](docs/deployment.md) for the evidence and authorization boundaries.
 
 ## Architecture
 

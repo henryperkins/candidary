@@ -6,13 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```powershell
 npm run dev            # Vite + @cloudflare/vite-plugin — SPA and Worker run together
-npm run build          # tsc -b (both projects) then vite build
+npm run build          # tsc -b (app, Worker, scripts) then vite build
 npm run typecheck      # tsc -b --pretty false
+npm run typecheck:e2e  # tests/e2e + shared + Playwright config
 npm run lint           # eslint . --max-warnings=0
 npm test               # test:unit + test:worker
 npm run test:unit      # jsdom: tests/unit + tests/ui
 npm run test:worker    # workerd (vitest-pool-workers): tests/worker
 npm run test:e2e       # Playwright against a built `vite preview`
+npm run verify:bindings    # fail if generated Worker binding types drift
+npm run verify:fresh-d1 -- --run-root <existing-absolute-temp>/candidary-release-<id> --report-file <run-root>/migration-verification.json
+npm run verify:release -- --sha <full-commit> --base-sha 0b92387d2e237d568d2514373dcc3044e7960d4b
 npm run test:load:wedding   # dry-run plan unless CANDIDARY_LOAD_CONFIRM is set
 npm run test:load:rsvp      # dry-run plan unless CANDIDARY_RSVP_CONFIRM is set
 npm run cf-typegen     # regenerate worker-configuration.d.ts after binding changes
@@ -33,6 +37,7 @@ Local secrets go in `.dev.vars` (copy `.dev.vars.example`). `TOKEN_HMAC_KEY`, `S
 32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY`
 are persisted-data keys: rotating one without a re-encryption/re-digest migration breaks every
 printed QR or the roster lookup. Ordinary guest-grant and session rotation must leave them alone.
+Local `vite dev` reads this file, while production builds explicitly omit it from generated output.
 
 ## Architecture
 
@@ -40,12 +45,17 @@ One Cloudflare Worker (`worker/index.ts`) serves everything: a Hono API, the Rea
 binding, daily cleanup and hourly notification-dispatch scheduled jobs, and the exported
 `ExportWorkflow` class. Bindings are `DB` (D1), `MEDIA_BUCKET` (private R2), `IMAGES`,
 `EXPORT_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`, and `ASSETS`.
+`CF_VERSION_METADATA` supplies the deployed Worker version identity used by release certification.
 
-Two build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`) and
-`tsconfig.worker.json` (`worker`, `tests/worker`). Both include `shared/`, which is imported by relative
+Three build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`),
+`tsconfig.worker.json` (`worker`, `tests/worker`), and `tsconfig.scripts.json` (release and operational
+scripts plus Vite/Vitest configuration). The app and Worker projects include `shared/`, which is imported by relative
 path (`../../shared/constants`) from either side — there are no path aliases. The separate
 `tsconfig.e2e.json` covers `tests/e2e`, `shared`, and `playwright.config.ts`; run
-`npx tsc -p tsconfig.e2e.json --pretty false` because `npm run typecheck` does not include it.
+`npm run typecheck:e2e` because `npm run typecheck` does not include it. `verify:release` is the
+immutable aggregate candidate gate: it imports the target commit's own dependency-free runner in a
+detached temporary worktree and leaves the caller checkout, including dirty or untracked files,
+untouched. It creates local evidence only; deployment and remote migration remain separate authority.
 
 ### Authorization
 
@@ -107,7 +117,7 @@ NOT NULL constraint rolls the batch back. Every successful `(household, idempote
 `rsvp_submission_receipts` until the event is purged: replaying the same key and payload digest
 returns success, and reusing it with different content is `RSVP_SUBMISSION_CONFLICT`. The browser never
 infers phase — `resolveGuestEventPhase()` runs on the Worker and returns `rsvp-primary`,
-`photos-primary`, or `waiting` with the current `rsvpState`.
+`before-start`, `photos-primary`, or `waiting` with the current `rsvpState` and `rsvpAccess`.
 
 ### Upload path (the core journey)
 

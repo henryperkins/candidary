@@ -9,7 +9,7 @@ import { RsvpShell } from './RsvpShell';
 
 interface RsvpHouseholdFormProps {
   event: GuestEventView;
-  presentation: 'primary' | 'secondary' | 'read-only';
+  presentation: 'primary' | 'secondary' | 'embedded';
   household: RsvpHouseholdView;
   draft: RsvpDraft;
   saving: boolean;
@@ -89,16 +89,17 @@ export function RsvpHouseholdForm({
   const attending = values.filter((value) => value?.attendance === 'attending').length;
   const declined = values.filter((value) => value?.attendance === 'declined').length;
   const unanswered = household.invitees.length - attending - declined;
+  const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
   let plusOneNumber = 0;
 
   return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--household">
     <div className="rsvp-card rsvp-household">
       <header className="rsvp-household__heading">
         <p className="rsvp-eyebrow">{household.label}</p>
-        <h1
+        <HeadingTag
           ref={reviewHeadingRef}
           tabIndex={reviewUpdated ? -1 : undefined}
-        >{reviewUpdated ? 'Review updated household' : 'Your household RSVP'}</h1>
+        >{reviewUpdated ? 'Review updated household' : 'Your household RSVP'}</HeadingTag>
         {reviewUpdated && <p>The invitation changed. Review every person before sending again.</p>}
       </header>
 

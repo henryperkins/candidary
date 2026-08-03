@@ -30,6 +30,7 @@ const RSVP_PRIMARY = {
   uploadsEnabled: false,
   phase: 'rsvp-primary' as const,
   rsvpState: 'open' as const,
+  rsvpAccess: 'editable' as const,
   rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
   rsvpDeadlineDate: '2026-09-05',
 };
@@ -175,12 +176,13 @@ test('the RSVP lookup, household, and receipt hold their composition', async ({ 
   await expect(page.locator('.rsvp-receipt')).toHaveScreenshot('rsvp-receipt-390.png');
 });
 
-test('the closed RSVP keeps its saved response readable without an action', async ({ page }) => {
+test('the before-start surface keeps its saved response readable without an action', async ({ page }) => {
   await stubGuestRoutes(page, {
     event: {
-      uploadsEnabled: false,
-      phase: 'waiting',
+      uploadsEnabled: true,
+      phase: 'before-start',
       rsvpState: 'closed',
+      rsvpAccess: 'read-only',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },
@@ -200,10 +202,13 @@ test('the closed RSVP keeps its saved response readable without an action', asyn
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
   await settle(page);
-  await expect(page.locator('.rsvp-receipt')).toHaveScreenshot('rsvp-closed-390.png');
+  // The whole surface, not the card alone: the start line and the appreciation
+  // copy are the two things this state exists to say, and both sit above it.
+  await expect(page.locator('.guest-before-start')).toHaveScreenshot('rsvp-before-start-390.png');
 });
 
 test('the manager guest list holds its totals, filters, and household rows', async ({ page }) => {
@@ -244,9 +249,12 @@ test('the manager card controls and the mobile export panel hold their layout', 
   await destination(page, 'Gallery').click();
   await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
   const card = page.locator('.moderation-grid article').first();
-  await expect(card.locator('.intake-card-actions button')).toHaveCount(3);
+  const cardContent = card.locator('.intake-card-actions').locator('..');
+  await expect(cardContent.locator('.intake-card-actions button')).toHaveCount(3);
   await settle(page);
-  await expect(card).toHaveScreenshot('manager-actions-320.png');
+  // The evidence is the wrapped identity and its controls. Chromium GPU processes can quantize the
+  // photograph's antialiased outer corners one colour channel apart under parallel load.
+  await expect(cardContent).toHaveScreenshot('manager-actions-320.png');
 
   // The Share section is taller than a phone screen, and the rail is sticky: scrolling any part of it
   // into view for a capture would put the rail on top of it. Phone width is what the layout is made

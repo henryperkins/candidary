@@ -67,12 +67,94 @@ account authentication, and `RSVP_LOOKUP_RATE_LIMIT` at 30 requests per 60 secon
 lookup. Confirm both exist in the target account before an event opens; the D1 budgets behind them are
 defense in depth, not a replacement.
 
-## Migrate and deploy
+## Build immutable local candidate evidence
+
+Commit the complete candidate before running the aggregate gate. The SHA and approved base must be
+full lowercase commit IDs; a branch name, `HEAD`, shortened SHA, or another ancestor is refused.
 
 ```powershell
-npx wrangler d1 migrations apply candidary-core --remote
-npm run deploy
+$reviewedSha = git rev-parse HEAD
+$approvedBaseSha = '0b92387d2e237d568d2514373dcc3044e7960d4b'
+if ($reviewedSha -notmatch '^[0-9a-f]{40}$') { throw 'Expected a full lowercase commit SHA.' }
+npm run verify:release -- --sha $reviewedSha --base-sha $approvedBaseSha
 ```
+
+`verify:release` creates a detached `candidary-release-` worktree under the OS temporary directory,
+imports that commit's own dependency-free runner, installs dependencies there, and removes the
+worktree through Git before finalizing evidence. Dirty or untracked files in the caller checkout are
+irrelevant and untouched. Its command plan is local-only: binding generation, application and E2E
+typechecks, lint, unit/UI and Worker tests, two production builds with PWA checks around Playwright,
+a strict Wrangler **dry run**, a new local D1 containing every migration, diff hygiene, and final
+detached-SHA/tree/status checks. It never uses `--remote` and never writes remote D1, R2, bindings,
+secrets, or a Worker version.
+
+Successful bootstrap writes exactly:
+
+```text
+output/release/<candidate-sha>/<run-id>/candidate-manifest.json
+output/release/<candidate-sha>/<run-id>/candidate-manifest.json.sha256
+```
+
+The manifest includes the candidate SHA, approved base, Git tree, guest-journey version, lockfile,
+source-Wrangler hash, and deploy-Wrangler hash, plus tool versions, command
+IDs/times/durations/exit codes, exact Vitest and Playwright counts, fresh-D1 results, normalized
+binding topology, and Worker/client artifact hashes.
+The content-bound `migrationManifestSha256` is SHA-256 over canonical JSON of the ordered migration
+`{ path, sha256 }` pairs after CRLF-to-LF normalization. The fresh-D1 report's separate `ledgerSha256` hashes canonical JSON of the
+ordered filenames only; the two digests are deliberately not interchangeable.
+
+Artifact evidence covers the generated Worker main, every regular client asset selected by the
+generated Vite/Wrangler config, and a canonical deploy config containing every production-target
+value. Only the checkout-local `configPath` and `userConfigPath` provenance fields are omitted from
+that deploy config. First build, Playwright rebuild, and dry-run Worker hashes must agree.
+The Worker contains the exact candidate and migration literals; client JS/HTML contains neither.
+Secret-file names, links, unexpected dry-run files, report output, environment values, command output,
+absolute temporary paths, and unsafe free-form strings are never serialized.
+
+The adjacent sidecar is exactly `<sha256>  candidate-manifest.json\n`, hashing the final canonical
+manifest bytes including their trailing newline. This unkeyed SHA-256 is an integrity checksum, not
+an authenticity signature. Bootstrap failures before safe output creation write no manifest; closed
+candidate failures after that boundary write a schema-valid failed manifest.
+
+The five claims are intentionally separate. Only `claims.localAutomated` can become `passed`; the
+`remoteMigration`, `deployment`, `physicalDevices`, and `runtimeCertification` claims remain
+`not_run`. Candidate evidence has no Worker version ID. It must not be described as migrated,
+deployed, physically verified, certified, wedding-ready, or production-ready.
+
+## Migrate and deploy only with separate authorization
+
+Local candidate evidence does not authorize a remote migration or deployment. Inventory the remote
+ledger and follow the migration-specific runbook first, under its own approval. Do not apply every
+pending migration merely because it is checked in: `0010_event_start.sql` has the data-aware procedure
+below, while `0011_release_certifications.sql` is a distinct, later schema operation and does not
+certify anything by being applied.
+
+After the approved remote migration state is compatible, select the passed manifest for the exact
+clean checkout and request deployment authorization separately:
+
+```powershell
+$reviewedSha = git rev-parse HEAD
+$candidateManifest = Get-ChildItem -LiteralPath "output/release/$reviewedSha" -Recurse -Filter 'candidate-manifest.json' |
+  Where-Object { (Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json).status -eq 'passed' } |
+  Sort-Object LastWriteTimeUtc |
+  Select-Object -Last 1 -ExpandProperty FullName
+if (-not $candidateManifest) { throw 'No passed candidate manifest exists for the reviewed SHA.' }
+$candidateManifest = (Resolve-Path -LiteralPath $candidateManifest).Path
+npm run deploy -- --sha $reviewedSha --manifest $candidateManifest
+```
+
+The guarded wrapper requires an exact clean SHA/tree, validates the manifest and sidecar, runs
+`npm ci`, rebuilds, rechecks PWA assets, and requires artifact/binding identity to match before it can
+reach Wrangler. It copies only the verified Worker, client, and canonical deploy-config bytes into an
+operator-owned temporary snapshot, verifies that snapshot again, and makes Wrangler read from the
+snapshot rather than the caller's ignored, writable `dist/`. The only live deploy command is strict
+and tags the Worker version with the full reviewed SHA. Cloudflare
+Worker Version Metadata supplies the runtime version ID, tag, and timestamp through
+`CF_VERSION_METADATA`; runtime identity fails closed unless the tag equals the embedded build SHA.
+The wrapper does not migrate D1 and does not create a certification row.
+
+The following migration note and numbered runbooks remain authoritative when their exact migration
+is separately approved.
 
 > **`migrations apply --remote` failed on 0008 (wrangler 4.113.0).** It returned
 > `incomplete input: SQLITE_ERROR [code: 7500]` and applied nothing — the ledger stayed at 0007 and no
@@ -94,24 +176,18 @@ npm run deploy
 > The export contains real event, guest, and message data — keep it outside the repository and delete
 > it once the deploy is confirmed.
 
-This applies every pending migration, including the private-delivery/publication split,
-partitioned-export schema, host accounts, and canonical per-event theme configuration. The deploy
-then publishes the export Workflow, Images binding, private asset routing, the daily cleanup
-trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the
-HTTPS origin before printing a QR code.
-
-The two commands are in that order for a reason, and from `0005_media_stored_at.sql` onward the
-order is load-bearing rather than tidy: the manager's intake queries select and order by
+Migration-before-compatible-Worker order is load-bearing rather than tidy: the manager's intake
+queries select and order by
 `media.stored_at` (`worker/db/media.ts`), so Worker code deployed against a database without that
 column fails the manager's first request. The opposite order strands nobody — `0005` carries a
 compatibility trigger that stamps `stored_at` for any finalization performed by Worker code older
 than the column, so a migrated database serving the previous deployment is a state the schema was
 written to sit in.
 
-Production is migrated through `0007_event_theme.sql` as of 2026-07-29, confirmed by the apply
-command reporting nothing to do. The apply command is the only thing that answers what is true of
-the database you are actually pointed at, so run it before every deploy regardless of what this
-paragraph remembers.
+Production was read-only verified through `0010_event_start.sql` on 2026-08-02, with
+`0011_release_certifications.sql` pending. This dated statement is not authority: re-read the exact
+remote ledger before every release. A pending migration blocks claims about remote convergence but
+does not alter a local manifest's `remoteMigration: not_run` claim.
 
 ### 0008 is a clean-launch migration with no backfill
 
@@ -159,6 +235,234 @@ npx wrangler d1 execute candidary-core --remote --command "PRAGMA foreign_key_ch
 ```
 
 Both must come back empty.
+
+### 0010 is gated on a data-aware backfill, not on its own SQL
+
+`0010_event_start.sql` adds `events.event_start_at` and `events.photos_open_from`, backfills the start
+from `event_date || 'T00:00:00.000Z'`, and stamps `photos_open_from` on every event whose photo
+delivery is already on. **It must not be treated as safe on the strength of that stamp alone.** SQLite
+has no IANA database, so the backfilled start lands at UTC midnight rather than local midnight — up to
+roughly fourteen hours off. For an event whose delivery is already on, the stamp makes that
+irrelevant. For an uploads-off event with an active roster it is not irrelevant at all: under the new
+Worker its guest RSVP routes would begin refusing at the approximate start, potentially most of a day
+early or late.
+
+Before start-time enforcement is enabled, release must either:
+
+1. prove there are no non-deleted legacy events; or
+2. perform a data-aware backfill that resolves each non-deleted event's start through its own IANA
+   zone.
+
+A second condition applies to either path, and checking only for the backfill's zone error is
+insufficient. An existing event whose RSVP deadline **date equals its event date** can never satisfy
+`rsvpDeadlineAt < eventStartAt` at any start time on that date: the stored deadline is the last
+millisecond of that local day, which is after every start the day contains. Those rows need an explicit
+host correction or a reviewed data correction before the new validation is enforced.
+
+The rollout order is deterministic. Keep the inventory, plan, and SQL artifacts outside the
+repository because they contain event identifiers. The `event-start-backfill:*` tools only read local
+JSON or write deterministic plan, backfill, freeze, and cleanup artifacts. They never invoke Wrangler
+or connect to D1. **Any nonzero release-tool exit blocks the migration, SQL apply, or deployment that
+follows it.** In particular, plan mode exits nonzero and emits no new SQL when a deadline is not
+strictly before the expected local-midnight start. Plan version 3 snapshots the database inventory
+instant, `uploads_enabled`, and printed-entry state. Its pre-deploy SQL preserves old-Worker-open
+photo delivery but deliberately leaves a legacy future event off under the old boolean semantics.
+Only the separately reviewed post-deploy SQL restores that row to scheduled capability, after the
+compatible Worker is live. Verification proves both stages and preserves disabled-entry tombstones.
+
+Run the immutable local candidate gate above before starting this remote procedure, and retain its
+`$reviewedSha`. Immediately before step 4, repeat the guarded passed-manifest selection so
+`$candidateManifest` still names evidence for that exact SHA. The local result does not replace any
+inventory or authorize any write. If an environment is still behind `0010`, the approved migration source must
+present **exactly** `0010_event_start.sql` as pending at step 2; do not run the command from a source
+that would also apply `0011_release_certifications.sql`. Apply `0011` only as its own separately
+reviewed and authorized operation.
+
+1. **Before applying `0010`, inventory and plan every non-deleted event.** Start with a fresh artifact
+   directory, capture Wrangler's machine-readable envelope, then let the Node tool resolve each local
+   midnight through `instantForLocalDateTime`. Review both artifacts before continuing. A blocked row
+   needs an explicit host correction or reviewed data correction; never do the zone arithmetic in SQL.
+
+   ```powershell
+   $eventStartGate = Join-Path ([System.IO.Path]::GetTempPath()) ('candidary-event-start-release-' + [guid]::NewGuid().ToString('N'))
+   New-Item -ItemType Directory -Path $eventStartGate | Out-Null
+   $pre0010Inventory = Join-Path $eventStartGate 'pre-0010-inventory.json'
+   $pre0010Plan = Join-Path $eventStartGate 'pre-0010-plan.json'
+   $pre0010Sql = Join-Path $eventStartGate 'pre-0010-backfill.sql'
+   $pre0010PostDeploySql = Join-Path $eventStartGate 'pre-0010-post-deploy.sql'
+   $freezeInstallSql = Join-Path $eventStartGate 'install-schedule-freeze.sql'
+   $freezeRemoveSql = Join-Path $eventStartGate 'remove-schedule-freeze.sql'
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, slug, event_date, event_timezone, rsvp_deadline_at, uploads_enabled, EXISTS (SELECT 1 FROM event_entry_credentials WHERE event_id = events.id AND disabled_at IS NULL) AS entry_enabled, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS inventory_at, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $pre0010Inventory
+   if ($LASTEXITCODE -ne 0) { throw 'Pre-0010 inventory failed; release is blocked.' }
+   npm run event-start-backfill:plan -- --input $pre0010Inventory --plan $pre0010Plan --sql $pre0010Sql --post-deploy-sql $pre0010PostDeploySql
+   if ($LASTEXITCODE -ne 0) { throw 'Event-start planning failed; release is blocked.' }
+   npm run event-start-backfill:freeze -- --install $freezeInstallSql --remove $freezeRemoveSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze artifact generation failed; release is blocked.' }
+   ```
+
+2. **Apply only `0010` while the old Worker is still serving.** Its UTC-midnight values are not yet
+   interpreted as lifecycle starts, so the approximation is inert for as long as this step lasts.
+
+   ```powershell
+   # Proceed only after the remote pending set and reviewed source prove 0010 is the sole apply.
+   npx wrangler d1 migrations apply candidary-core --remote
+   if ($LASTEXITCODE -ne 0) { throw 'Migration apply failed; release is blocked.' }
+   ```
+
+3. **Install the narrow lifecycle-source freeze, apply the reviewed pre-deploy SQL, then verify every
+   pre-migration ID and source field exactly.** The temporary trigger rejects only an actual change
+   to `event_date`, `event_timezone`, or `rsvp_deadline_at`. It does not block event creation,
+   unchanged source values included in an unrelated settings write, or the backfill's
+   `event_start_at` and `photos_open_from` update. Photo capability and printed-entry state remain
+   independently guarded in the generated SQL and exact inventories. An edit that
+   commits before trigger creation is caught by the guarded SQL or the inventory that follows; an edit
+   after creation is rejected by SQLite. Keep the trigger installed through step 5's final sentinel
+   and exact-state checks.
+
+   ```powershell
+   $freezeStateBeforeDeploy = Join-Path $eventStartGate 'freeze-state-before-deploy.json'
+   npx wrangler d1 execute candidary-core --remote --file $freezeInstallSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze install failed; release is blocked.' }
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeStateBeforeDeploy
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze presence inventory failed; release is blocked.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeStateBeforeDeploy --expect installed
+   if ($LASTEXITCODE -ne 0) { throw 'The exact reviewed schedule freeze is not installed; release is blocked.' }
+
+   $pre0010PlanContents = Get-Content -Raw -LiteralPath $pre0010Plan | ConvertFrom-Json
+   if ($pre0010PlanContents.events.Count -gt 0) {
+     npx wrangler d1 execute candidary-core --remote --file $pre0010Sql
+     if ($LASTEXITCODE -ne 0) { throw 'Event-start SQL apply failed; release is blocked.' }
+   }
+
+   $post0010Inventory = Join-Path $eventStartGate 'post-0010-inventory.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, event_date, event_timezone, rsvp_deadline_at, event_start_at, photos_open_from, uploads_enabled, EXISTS (SELECT 1 FROM event_entry_credentials WHERE event_id = events.id AND disabled_at IS NULL) AS entry_enabled, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $post0010Inventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-0010 inventory failed; release is blocked.' }
+   npm run event-start-backfill:verify -- --plan $pre0010Plan --input $post0010Inventory --stage predeploy --require-predeploy-completeness
+   if ($LASTEXITCODE -ne 0) { throw 'Pre-deploy event-start verification failed; release is blocked.' }
+   ```
+
+   Pre-deploy completeness rejects an unplanned non-sentinel row created between inventory and
+   migration, while allowing an epoch-sentinel row created by the old Worker after migration for
+   step 5. Do not deploy while a missing ID, source drift, lost photo-open stamp, UTC-midnight
+   approximation, unexpected trigger definition, or other mismatch remains.
+
+4. **Deploy the compatible Worker, then finalize legacy scheduled capability.** An event created by the old Worker after the migration was
+   applied carries the epoch default `1970-01-01T00:00:00.000Z`. The new Worker recognizes that
+   sentinel and temporarily retains the pre-0010 boolean/deadline phase rules and guest RSVP route
+   availability for such a row, so a deploy-gap event cannot begin refusing RSVPs at a start it does
+   not really have.
+
+   ```powershell
+   $reviewedSha = git rev-parse HEAD
+   $candidateManifest = Get-ChildItem -LiteralPath "output/release/$reviewedSha" -Recurse -Filter 'candidate-manifest.json' |
+     Where-Object { (Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json).status -eq 'passed' } |
+     Sort-Object LastWriteTimeUtc |
+     Select-Object -Last 1 -ExpandProperty FullName
+   if (-not $candidateManifest) { throw 'No passed candidate manifest exists for the reviewed SHA.' }
+   $candidateManifest = (Resolve-Path -LiteralPath $candidateManifest).Path
+   npm run deploy -- --sha $reviewedSha --manifest $candidateManifest
+   if ($LASTEXITCODE -ne 0) { throw 'Worker deploy failed; the schedule freeze remains installed. Retry deploy or use the explicit abort procedure below.' }
+
+   $freezeStateAfterDeploy = Join-Path $eventStartGate 'freeze-state-after-deploy.json'
+   $postDeployInventory = Join-Path $eventStartGate 'post-deploy-original-plan-inventory.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeStateAfterDeploy
+   if ($LASTEXITCODE -ne 0) { throw 'Post-deploy schedule-freeze inventory failed; release is blocked.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeStateAfterDeploy --expect installed
+   if ($LASTEXITCODE -ne 0) { throw 'The schedule freeze did not remain installed through deployment; release is blocked.' }
+
+   if ($pre0010PlanContents.events.Count -gt 0) {
+     npx wrangler d1 execute candidary-core --remote --file $pre0010PostDeploySql
+     if ($LASTEXITCODE -ne 0) { throw 'Post-deploy photo-capability finalization failed; keep the freeze installed and stop.' }
+   }
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, event_date, event_timezone, rsvp_deadline_at, event_start_at, photos_open_from, uploads_enabled, EXISTS (SELECT 1 FROM event_entry_credentials WHERE event_id = events.id AND disabled_at IS NULL) AS entry_enabled, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $postDeployInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-deploy original-plan inventory failed; release is blocked.' }
+   npm run event-start-backfill:verify -- --plan $pre0010Plan --input $postDeployInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-deploy original-plan verification failed; keep the freeze installed and stop.' }
+
+   ```
+
+   A failed deploy or failed post-deploy verification deliberately leaves the freeze installed. An
+   operator may retry the deploy or verification against that frozen state. To abandon the release,
+   apply the generated removal SQL and machine-verify absence:
+
+   ```powershell
+   npx wrangler d1 execute candidary-core --remote --file $freezeRemoveSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze abort cleanup failed; it may still be installed.' }
+   $freezeAbortState = Join-Path $eventStartGate 'freeze-state-after-abort.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeAbortState
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze abort inventory failed.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeAbortState --expect absent
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze abort cleanup is not proven.' }
+   ```
+
+   Explicit abort/removal invalidates every earlier inventory and verification artifact. Before a
+   later deployment attempt, take a fresh full inventory, regenerate and review the plan and SQL,
+   correct any non-migration stale start explicitly, reinstall the freeze, and repeat both the
+   pre-deploy and post-deploy checks. Never continue from the old plan after reopening schedule writes.
+
+5. **Repeat the inventory, plan, SQL apply, and exact verification for deploy-gap sentinels.** Plan
+   mode validates each gap row's deadline before emitting SQL. If the plan contains no events, skip
+   the SQL apply. Repeat this block if the final scan finds another gap row; do not close the gate
+   until the final count is exactly zero.
+
+   ```powershell
+   $gapInventory = Join-Path $eventStartGate 'deploy-gap-inventory.json'
+   $gapPlan = Join-Path $eventStartGate 'deploy-gap-plan.json'
+   $gapSql = Join-Path $eventStartGate 'deploy-gap-backfill.sql'
+   $gapPostDeploySql = Join-Path $eventStartGate 'deploy-gap-post-deploy.sql'
+   $postGapInventory = Join-Path $eventStartGate 'post-gap-inventory.json'
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, slug, event_date, event_timezone, rsvp_deadline_at, event_start_at, photos_open_from, uploads_enabled, EXISTS (SELECT 1 FROM event_entry_credentials WHERE event_id = events.id AND disabled_at IS NULL) AS entry_enabled, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS inventory_at, deleted_at FROM events WHERE deleted_at IS NULL AND event_start_at = '1970-01-01T00:00:00.000Z' ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $gapInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap inventory failed; release is blocked.' }
+   npm run event-start-backfill:plan -- --input $gapInventory --plan $gapPlan --sql $gapSql --post-deploy-sql $gapPostDeploySql
+   if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap planning failed; release is blocked.' }
+
+   $gapPlanContents = Get-Content -Raw -LiteralPath $gapPlan | ConvertFrom-Json
+   if ($gapPlanContents.events.Count -gt 0) {
+     npx wrangler d1 execute candidary-core --remote --file $gapSql
+     if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap SQL apply failed; release is blocked.' }
+     npx wrangler d1 execute candidary-core --remote --file $gapPostDeploySql
+     if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap capability finalization failed; release is blocked.' }
+   }
+
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT id, event_date, event_timezone, rsvp_deadline_at, event_start_at, photos_open_from, uploads_enabled, EXISTS (SELECT 1 FROM event_entry_credentials WHERE event_id = events.id AND disabled_at IS NULL) AS entry_enabled, deleted_at FROM events WHERE deleted_at IS NULL ORDER BY id" | Set-Content -Encoding utf8 -LiteralPath $postGapInventory
+   if ($LASTEXITCODE -ne 0) { throw 'Post-gap inventory failed; release is blocked.' }
+   npm run event-start-backfill:verify -- --plan $gapPlan --input $postGapInventory --require-no-sentinel
+   if ($LASTEXITCODE -ne 0) { throw 'Deploy-gap verification failed; release is blocked.' }
+
+   npx wrangler d1 execute candidary-core --remote --command "SELECT COUNT(*) AS remaining FROM events WHERE deleted_at IS NULL AND event_start_at = '1970-01-01T00:00:00.000Z'"
+   if ($LASTEXITCODE -ne 0) { throw 'Final sentinel scan failed; release is blocked.' }
+
+   npx wrangler d1 execute candidary-core --remote --file $freezeRemoveSql
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze removal failed; release remains blocked.' }
+   $freezeStateRemoved = Join-Path $eventStartGate 'freeze-state-removed.json'
+   npx wrangler d1 execute candidary-core --remote --json --command "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name = 'candidary_event_start_schedule_freeze'" | Set-Content -Encoding utf8 -LiteralPath $freezeStateRemoved
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze removal inventory failed; release remains blocked.' }
+   npm run event-start-backfill:freeze:verify -- --input $freezeStateRemoved --expect absent
+   if ($LASTEXITCODE -ne 0) { throw 'Schedule freeze is still installed; release remains blocked.' }
+   ```
+
+   The final query must report `remaining = 0`; otherwise repeat step 5 with fresh artifact names.
+
+The epoch value is therefore an intermediate migration sentinel and never a live start. Corrected
+legacy rows and events created by the new Worker use the new lifecycle immediately; a deploy-gap row
+stays safely on the old behavior only until step 5.
+
+### 0011 creates a certification ledger; it does not certify a release
+
+`0011_release_certifications.sql` is the next migration after the lifecycle rollout. The local
+candidate gate applies it only to a disposable local D1 so schema and upgrade invariants can be
+proved. Applying it to remote D1 is a separate operation requiring explicit authorization after the
+`0010` state has converged; never let a generic pending-migration apply silently combine the two
+procedures.
+
+The migration creates storage for a later certification record. Neither `verify:release`, the guarded
+deploy wrapper, nor any HTTP route or checked-in command inserts that record. A deployed Worker is
+therefore still uncertified until a future, explicitly designed physical-evidence workflow records an
+exact matching Worker version, build SHA, journey version, migration digest, evidence-manifest digest,
+and redacted physical references. See [operations.md](operations.md) for the fail-closed contract.
 
 ## Wedding rehearsal gate
 

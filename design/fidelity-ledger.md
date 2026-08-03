@@ -45,7 +45,7 @@ full route, state, width, and baseline matrix.
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review and getting-ready state | 320 × 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 × 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal delivery receipt | 390 × 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview with global chrome outside scope | 390 × 3907 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview with global chrome outside scope | 390 × 4212 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 × 900 |
 
 The Default Notes image is a new approved theme baseline, not one of the three
@@ -80,7 +80,7 @@ Reviewed on 2026-07-31 against
 | One permanent printed entry | The same URL opens RSVP before the event and photos on the day | `rsvp-journey.spec.ts` navigates the real `/join#…` shell in both phases and asserts the credential reaches only the same-origin POST body; `security.spec.ts` asserts it never appears in the address bar, a request line, the rendered page, or the console | The join shell reads the fragment once, erases it before any network call, and replaces the URL on success. A missing or refused credential lands on one token-free recovery page. Real cookie and header behaviour is proved in `tests/worker/event-entry-api.test.ts`, which a route stub could not do. |
 | Exact-name lookup without browsing | A full name typed exactly, never a suggested or visible list | `rsvp-lookup-390.png`, `accessibility.spec.ts` lookup case, `rsvp-journey.spec.ts` ambiguity and miss cases | The first viewport at 320 × 568 holds identity, date, deadline, the field, the privacy sentence, and the complete action. No listbox or roster suggestion exists, an ambiguous name asks for a second one without naming anybody, and a miss reads exactly like a paused event. |
 | Individual household answers | Every named guest and plus-one slot answers for itself | `rsvp-household-320.png`, `rsvp-receipt-390.png`, `accessibility.spec.ts`, `rsvp-responsive.spec.ts` | Each person is a `fieldset` with two labelled native radios and a 44 px target; an attending plus-one gains a name field; the selected state carries a thicker border as well as colour. The 20-named-plus-10-slot maximum household reflows at 320 and 390 with no sideways page. |
-| Revision, closure, and conflict | Revisable until the deadline; read-only afterwards; never a silent overwrite | `rsvp-closed-390.png`, `rsvp-journey.spec.ts` revision, stale-conflict, and closed cases | A reload restores the saved response, `Change RSVP` reopens it, a refused write replaces the draft with the winning roster and focuses its review heading, and a closed event shows the saved answer with no write action. |
+| Revision, closure, and conflict | Revisable until the deadline; read-only afterwards; never a silent overwrite | `rsvp-before-start-390.png`, `rsvp-journey.spec.ts` revision, stale-conflict, and closed cases | A reload restores the saved response, `Change RSVP` reopens it, a refused write replaces the draft with the winning roster and focuses its review heading, and the before-start read-only event shows the saved answer with no write action. |
 | Host guest list | Server-derived totals, filters, import, editing, archive, export | `manager-rsvp-390.png`, `manager-rsvp-panel.test.tsx`, `rsvp-responsive.spec.ts` | All eight totals come from the server and are never recomputed from one page. CSV preview reports row, field, and message without echoing the file, commit is a separate explicit decision, and archive requires the exact household name. The issue list is the only region with its own scrollbar. |
 | Six manager destinations | RSVP inserted after Intake at every width | `manager-nav-768.png`, `manager-nav-count-390.png`, `manager-responsive.spec.ts`, `rsvp-responsive.spec.ts` | Every label stays visible at the 14 px control-text floor from 320 px upward, the count badges do not collide with them, and the vertical rail stays packed at the top. |
 | Durable-QR host controls | Signing devices out and disabling the QR are different decisions | `manager-export-first-390.png`, `app.test.tsx` entry-control cases | Share carries the event link, the QR, and both actions with their own copy; each requires the exact event name. Signing devices out leaves the QR input byte-identical; disabling removes the link, the QR, and both actions with no replacement offered. |
@@ -94,7 +94,7 @@ Reviewed on 2026-07-31 against
 | `rsvp-lookup-390-mobile-win32.png` | Guest lookup first viewport | 390 × 844 |
 | `rsvp-household-320-mobile-win32.png` | Household card at 320 with a named attend, a decline, and an attending plus-one | 292 × 1062 |
 | `rsvp-receipt-390-mobile-win32.png` | Saved household receipt with `Change RSVP` | 350 × 497 |
-| `rsvp-closed-390-mobile-win32.png` | Closed deadline showing the saved response with no action | 350 × 431 |
+| `rsvp-before-start-390-mobile-win32.png` | Before-start surface showing the saved response with no write action | 390 × 844 |
 | `manager-rsvp-390-mobile-win32.png` | Manager guest list: totals, filters, list, editor entry, and import | 350 × 1146 |
 
 The three element captures are narrower than their viewports because each is the card or panel
@@ -151,6 +151,28 @@ recorded as passed on the strength of the automated suite or of the gate above:
 - **VoiceOver** and **TalkBack** over the RSVP lookup, household form, and manager guest list;
 - **degraded-network** retry of an RSVP submission; and
 - the **emergency-disable rehearsal** on a disposable event.
+
+## Date-driven guest phase
+
+Specified on 2026-08-01 in
+`docs/superpowers/specs/2026-08-01-date-driven-guest-phase-design.md`, which moves the guest between
+RSVP, before-start, photo delivery, and paused waiting from the event's own schedule rather than a
+host flipping a checkbox on the morning of the event.
+
+The converged local browser run measured the automated states named below. Partial rows retain the
+exact unmeasured claim. None of these results proves a physical device, native assistive technology,
+production runtime, or manual rehearsal; those gates remain explicitly outstanding.
+
+| Contract point | Accepted direction | Browser result | Disposition |
+| --- | --- | --- | --- |
+| A designed pre-event surface | The post-deadline, pre-event window gets a page of its own instead of a fallback that talks about a deadline the guest can no longer act on | `guest-lifecycle.spec.ts` passed one `<h1>`, nested `<h2>`, Axe, and containment at 320 × 844 and 390 × 844; `rsvp-responsive.spec.ts` contained the maximum-name receipt at both widths; `visual-qa.spec.ts` passed `rsvp-before-start-390.png` at 390 × 844 | **Automated evidence recorded. Outstanding:** the 320 × 568 first-fold composition and all physical/manual checks. |
+| Recognizing a saved response | A household that answered is thanked, including on a device that never held an RSVP session; one that never answered is neither thanked nor scolded and reads exactly like a miss | `rsvp-journey.spec.ts` passed the session-free saved-response lookup at the mobile project's 390 × 844 viewport; `guest-lifecycle.spec.ts` exercised unavailable access at 320 × 844 and 390 × 844 | **Partially evidenced. Outstanding:** exact unresponded/miss copy parity, an explicit no-household-request assertion, and physical/manual checks. |
+| Waiting means one thing | Once the event has started and photo capability is withheld, `Photo delivery is paused` is the whole primary | `guest-lifecycle.spec.ts` passed the paused heading/copy, absence of RSVP lookup/receipt, Axe, and containment at 320 × 844 and 390 × 844 | **Automated evidence recorded.** Physical/manual checks remain outstanding. |
+| The page changes itself | The phase moves with the schedule and with no user action, driven by a server-computed relative delay so a wrong browser clock cannot switch early or late | `guest-lifecycle.spec.ts` passed untouched crossing, quiet refresh failure, `pageshow`, long-delay slicing, and clocks four days behind/six days ahead at 320 × 844 and 390 × 844 | **Automated evidence recorded.** Physical/manual checks remain outstanding. |
+| Manager photo intake | One server-derived state and the one action legal from it, never a browser clock comparison; a pre-start pause never withdraws capability | The selected browser suites did not exercise the manager status/action refetch across the event start | **Outstanding:** browser and physical/manual evidence. Unit/UI coverage is not promoted here. |
+
+The responded before-start surface has the inspected 390 × 844 baseline named above. No waiting,
+automatic-transition, or manager photo-intake screenshot is claimed.
 
 ## Intentional adaptations
 

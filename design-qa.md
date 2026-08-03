@@ -53,11 +53,13 @@ git diff --check
 
 ## Tracked visual baselines
 
-> **Pending recapture.** The landing redesign — hero photo cluster, the capability rows that replaced
-> Create / Share / Gather, and the new FAQ and footer — invalidates `landing-first-fold-320.png` and
-> `landing-workflow-780.png`. Both baselines carry the `win32` platform suffix, so they can only be
-> regenerated on the machine that owns them; a Linux run reports them missing rather than diffing
-> against them. Regenerate with the `--update-snapshots` commands below before the next visual gate.
+The two landing baselines were recaptured on Windows and inspected side by side at their natural
+dimensions on 2026-08-02. `landing-first-fold-320-mobile-win32.png` is 320 x 568 with SHA-256
+`ACF41E57B9AF8635105B5E864A1DB87D36420C51D5BF44872CDEEB874D2C702A`;
+`landing-workflow-780-mobile-win32.png` is a 780 x 608 element capture from the 780 x 900 viewport
+with SHA-256 `A9592B6C1DFF656B887618ECB7803C62C8C458D899D1C6475AA8AE772AB22A42`.
+The complete mobile visual suite then passed without update mode. The `win32` platform suffix still
+means a Linux run reports these baselines missing rather than comparing different font rasterization.
 
 `tests/e2e/visual-qa.spec.ts` and `tests/e2e/event-theming-visual.spec.ts` assert committed images
 under their matching `*-snapshots/` directories, compared exactly — `threshold: 0` **and**
@@ -114,7 +116,7 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
 | `rsvp-household-320.png` | `/event/:slug` household card: a named attend, a decline, an attending plus-one | 320 wide |
 | `rsvp-receipt-390.png` | `/event/:slug` saved household receipt with `Change RSVP` | 390 wide |
-| `rsvp-closed-390.png` | `/event/:slug` closed deadline showing the saved response and no action | 390 wide |
+| `rsvp-before-start-390.png` | `/event/:slug` before-start surface showing the saved response and no write action | 390 x 844 |
 
 The event-theme suite adds exactly eight tracked images:
 
@@ -126,7 +128,7 @@ The event-theme suite adds exactly eight tracked images:
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review/getting-ready crop | 320 x 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 x 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal receipt | 390 x 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3907 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 4212 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 x 900 |
 
 At the event-theming feature head, three existing Default files were deliberately updated:
@@ -396,6 +398,24 @@ Fixed under this task:
   surface. It now inherits the ink the surrounding feed already uses.
 - `color-contrast` on the guest ground — see "Contrast remediation" below.
 - `color-contrast` on the landing privacy note — see "Contrast remediation" below.
+
+## Automated browser evidence — date-driven guest phase
+
+`docs/superpowers/specs/2026-08-01-date-driven-guest-phase-design.md` adds two guest surfaces and
+one manager control. The converged browser run measured the local automated states named below.
+Partial rows retain their exact outstanding claim; none of this evidence proves a physical device,
+native assistive technology, production runtime, or manual rehearsal.
+
+| Surface | Widths / viewports | Measured result and remaining boundary |
+| --- | --- | --- |
+| Before-start, responded household | 320 x 844, 390 x 844 | `guest-lifecycle.spec.ts` passed one `<h1>`, nested `<h2>`, Axe, and document containment at both viewports; `rsvp-responsive.spec.ts` contained the maximum-name receipt at both widths; `visual-qa.spec.ts` passed the exact 390 x 844 `rsvp-before-start-390.png` baseline. **Outstanding:** the 320 x 568 first-fold composition was not exercised. |
+| Before-start lookup and unavailable access | 320 x 844, 390 x 844 | `rsvp-journey.spec.ts` passed the session-free saved-response lookup at the mobile project's 390 x 844 viewport; `guest-lifecycle.spec.ts` exercised unavailable access at both pinned viewports. **Outstanding:** exact unresponded/miss copy parity and an explicit no-household-request assertion were not measured by these browser cases. |
+| Waiting, photo delivery paused | 320 x 844, 390 x 844 | `guest-lifecycle.spec.ts` passed the single paused heading/copy, absence of RSVP lookup or receipt, Axe, and document containment at both viewports. Local automation only; physical/manual evidence remains outstanding. |
+| Automatic schedule transition | 320 x 844, 390 x 844 | `guest-lifecycle.spec.ts` passed untouched boundary crossing, quiet refresh failure, `pageshow` recovery, long-delay slicing, and server-delay behavior with browser clocks four days behind and six days ahead at both viewports. Local automation only; physical/manual evidence remains outstanding. |
+| Manager photo intake control | 320 x 844, 390 x 844 | **Outstanding:** the selected browser suites did not exercise the manager status/action recheck across the event start. Unit/UI coverage is not promoted to browser or manual evidence. |
+
+The responded before-start surface now has the inspected 390 x 844 tracked baseline named above.
+No waiting, automatic-transition, or manager photo-intake PNG is claimed.
 
 ## Decisions recorded
 

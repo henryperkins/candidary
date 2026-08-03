@@ -6,7 +6,7 @@ import type {
   RsvpInviteeKind,
 } from '../../shared/contracts';
 import type { RsvpHouseholdCursor } from '../http/rsvp-cursor';
-import type { HouseholdNameKeys } from '../../shared/rsvp';
+import { EVENT_START_MIGRATION_SENTINEL, type HouseholdNameKeys } from '../../shared/rsvp';
 import type { RsvpHouseholdRecord, RsvpInviteeRecord } from './types';
 
 // D1 refuses a statement binding more than 100 values, so a 500-person roster
@@ -309,7 +309,18 @@ export const SUBMIT_INVITEES_SQL = `
       WHERE id = rsvp_invitees.event_id
         AND deleted_at IS NULL
         AND rsvp_enabled = 1
-        AND rsvp_deadline_at >= ?
+        -- The later of the request's observed time and D1's execution clock
+        -- closes the gap between the route check and this guarded write.
+        AND rsvp_deadline_at >= MAX(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        -- The event has not begun. A route-level check alone would reopen the
+        -- race this guarded write exists to close: a submission that passed it
+        -- microseconds before the start would otherwise commit after it. The
+        -- second value is EVENT_START_MIGRATION_SENTINEL from shared/rsvp.ts —
+        -- a row still holding it keeps the pre-0010 rules, including this one.
+        AND (
+          event_start_at > MAX(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+          OR event_start_at = ?
+        )
     )
     AND EXISTS (
       SELECT 1 FROM rsvp_sessions
@@ -317,8 +328,8 @@ export const SUBMIT_INVITEES_SQL = `
         AND event_id = rsvp_invitees.event_id
         AND household_id = rsvp_invitees.household_id
         AND revoked_at IS NULL
-        AND expires_at >= ?
-        AND write_authority_deadline >= ?
+        AND expires_at >= MAX(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        AND write_authority_deadline >= MAX(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
 `;
 
@@ -613,16 +624,49 @@ export class RsvpRepository {
     return rows.results;
   }
 
-  async getReceipt(
+  async getSubmissionReceiptState(
+    eventId: string,
     householdId: string,
     idempotencyKey: string,
-  ): Promise<{ requestDigest: string; resultVersion: number } | null> {
+    observedAt: string,
+  ): Promise<{
+    eventStarted: boolean;
+    receipt: { requestDigest: string; resultVersion: number } | null;
+  }> {
     const row = await this.db.prepare(`
-      SELECT request_digest, result_version FROM rsvp_submission_receipts
-      WHERE household_id = ? AND idempotency_key = ?
-    `).bind(householdId, idempotencyKey)
-      .first<{ request_digest: string; result_version: number }>();
-    return row ? { requestDigest: row.request_digest, resultVersion: row.result_version } : null;
+      SELECT
+        CASE
+          WHEN event.event_start_at <> ?
+            AND event.event_start_at <= MAX(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+          THEN 1
+          ELSE 0
+        END AS event_started,
+        receipt.request_digest,
+        receipt.result_version
+      FROM events AS event
+      LEFT JOIN rsvp_submission_receipts AS receipt
+        ON receipt.event_id = event.id
+       AND receipt.household_id = ?
+       AND receipt.idempotency_key = ?
+      WHERE event.id = ? AND event.deleted_at IS NULL
+    `).bind(
+      EVENT_START_MIGRATION_SENTINEL,
+      observedAt,
+      householdId,
+      idempotencyKey,
+      eventId,
+    ).first<{
+      event_started: number;
+      request_digest: string | null;
+      result_version: number | null;
+    }>();
+    if (!row) return { eventStarted: false, receipt: null };
+    return {
+      eventStarted: row.event_started === 1,
+      receipt: row.request_digest !== null && row.result_version !== null
+        ? { requestDigest: row.request_digest, resultVersion: row.result_version }
+        : null,
+    };
   }
 
   async getRosterBatchReceipt(

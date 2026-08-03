@@ -33,6 +33,18 @@ interface MediaRow {
   deleted_at: string | null;
 }
 
+/**
+ * Photo delivery is open for this event *right now*.
+ *
+ * Since 0010 `uploads_enabled` is capability rather than an open door — a new
+ * event carries it from creation — so the scheduled opening has to be part of
+ * the same guarded write. The route checks it too, but only this is a boundary:
+ * a pause landing between the read and the reservation must not be able to slip
+ * a photo through. Binds one value, the request's own instant.
+ */
+const PHOTO_INTAKE_OPEN_SQL
+  = 'uploads_enabled = 1 AND COALESCE(photos_open_from, event_start_at) <= ?';
+
 export interface ReserveMediaRecord {
   id: string;
   eventId: string;
@@ -251,7 +263,7 @@ export class MediaRepository {
         WHERE id = ? AND upload_state = 'failed'
           AND EXISTS (
             SELECT 1 FROM events
-            WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
+            WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
               AND reserved_media_count + stored_media_count < ?
               AND reserved_bytes + stored_bytes + ? <= ?
           )
@@ -262,6 +274,7 @@ export class MediaRepository {
         input.originalFilename,
         existing.id,
         input.eventId,
+        input.createdAt,
         MAX_EVENT_MEDIA,
         input.declaredByteSize,
         MAX_EVENT_BYTES,
@@ -299,10 +312,10 @@ export class MediaRepository {
               reserved_bytes = reserved_bytes + ?
           WHERE id = ?
             AND deleted_at IS NULL
-            AND uploads_enabled = 1
+            AND ${PHOTO_INTAKE_OPEN_SQL}
             AND reserved_media_count + stored_media_count < ?
             AND reserved_bytes + stored_bytes + ? <= ?
-        `).bind(input.declaredByteSize, input.eventId, MAX_EVENT_MEDIA, input.declaredByteSize, MAX_EVENT_BYTES),
+        `).bind(input.declaredByteSize, input.eventId, input.createdAt, MAX_EVENT_MEDIA, input.declaredByteSize, MAX_EVENT_BYTES),
         this.db.prepare(`
           INSERT INTO media (
             id, event_id, uploader_session_id, object_key, original_filename, mime_type,
@@ -344,6 +357,9 @@ export class MediaRepository {
   async reserveBatch(inputs: readonly ReserveMediaRecord[]): Promise<ReserveMediaBatchResult[]> {
     if (inputs.length === 0) return [];
     const eventId = inputs[0]!.eventId;
+    // One instant for the whole batch, taken from the request that built it, so
+    // every capacity and schedule guard below answers the same question.
+    const reservedAt = inputs[0]!.createdAt;
     if (inputs.some((input) => input.eventId !== eventId)) {
       throw new ApiError('VALIDATION_FAILED', 'Every photo in a batch must belong to the same event.', 422);
     }
@@ -377,8 +393,8 @@ export class MediaRepository {
     if (pending.length > 0) {
       const event = await this.db.prepare(`
         SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes
-        FROM events WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
-      `).bind(eventId).first<{
+        FROM events WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+      `).bind(eventId, reservedAt).first<{
         reserved_media_count: number;
         stored_media_count: number;
         reserved_bytes: number;
@@ -413,10 +429,10 @@ export class MediaRepository {
               UPDATE events
               SET reserved_media_count = reserved_media_count + ?,
                   reserved_bytes = reserved_bytes + ?
-              WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
+              WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
                 AND reserved_media_count + stored_media_count + ? <= ?
                 AND reserved_bytes + stored_bytes + ? <= ?
-            `).bind(accepted.length, totalBytes, eventId, accepted.length, MAX_EVENT_MEDIA, totalBytes, MAX_EVENT_BYTES),
+            `).bind(accepted.length, totalBytes, eventId, reservedAt, accepted.length, MAX_EVENT_MEDIA, totalBytes, MAX_EVENT_BYTES),
             ...accepted.map(({ input }) => this.db.prepare(`
               INSERT INTO media (
                 id, event_id, uploader_session_id, object_key, original_filename, mime_type,

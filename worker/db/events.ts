@@ -22,6 +22,8 @@ export interface EventRow {
   created_at: string;
   deleted_at: string | null;
   event_timezone: string;
+  event_start_at: string;
+  photos_open_from: string | null;
   rsvp_enabled: number;
   rsvp_deadline_at: string | null;
   rsvp_roster_version: number;
@@ -42,6 +44,9 @@ export interface CreateEventRecord {
   // The last millisecond of the host's chosen local day, already resolved. The
   // repository never converts a date, so no zone logic can drift in here.
   rsvpDeadlineAt: string;
+  // The event's start as an absolute instant, resolved the same way and for the
+  // same reason.
+  eventStartAt: string;
 }
 
 export function mapEvent(row: EventRow): EventRecord {
@@ -66,6 +71,8 @@ export function mapEvent(row: EventRow): EventRecord {
     createdAt: row.created_at,
     deletedAt: row.deleted_at,
     eventTimezone: row.event_timezone,
+    eventStartAt: row.event_start_at,
+    photosOpenFrom: row.photos_open_from,
     rsvpEnabled: row.rsvp_enabled === 1,
     rsvpDeadlineAt: row.rsvp_deadline_at,
     rsvpRosterVersion: row.rsvp_roster_version,
@@ -79,15 +86,19 @@ export class EventsRepository {
   // creator session, and any account ownership in one batch rather than a sequence
   // of writes a failure could tear in half.
   createStatement(input: CreateEventRecord): D1PreparedStatement {
-    // Both intakes are written off explicitly rather than left to a column
-    // default. A new event opens nothing until the host has seen what it will
-    // collect: RSVP waits for a validated roster, photos wait for the day.
+    // `uploads_enabled = 1` is capability, not an open door: photo delivery is
+    // permitted for this event, and `event_start_at` decides when it opens.
+    // Written explicitly rather than taken from the column default, so the
+    // default itself stays untouched and existing rows are unaffected.
+    //
+    // `rsvp_enabled = 0` still waits for a roster that has passed collision and
+    // capacity validation. Nothing about that changes here.
     return this.db.prepare(`
       INSERT INTO events (
         id, slug, name, event_date, welcome_message, gallery_visible,
-        uploads_enabled, rsvp_enabled, event_timezone, rsvp_deadline_at,
+        uploads_enabled, rsvp_enabled, event_timezone, event_start_at, rsvp_deadline_at,
         guest_access_expires_at, management_access_expires_at, purge_after, created_at, theme_config
-      ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 0, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       input.id,
       input.slug,
@@ -95,6 +106,7 @@ export class EventsRepository {
       input.eventDate,
       input.welcomeMessage,
       input.eventTimezone,
+      input.eventStartAt,
       input.rsvpDeadlineAt,
       input.guestAccessExpiresAt,
       input.managementAccessExpiresAt,
@@ -132,11 +144,14 @@ export class EventsRepository {
     input: {
       name?: string;
       welcomeMessage?: string;
-      uploadsEnabled: boolean;
       galleryVisible: boolean;
       moderationRequired: boolean;
       eventTimezone: string;
+      // Both instants are recomputed from the same date/time/zone tuple and
+      // written together. Moving one without the other would let a time-zone
+      // change push the deadline past the start.
       rsvpDeadlineAt: string;
+      eventStartAt: string;
       rsvpEnabled: boolean;
       expectedRosterVersion: number;
     },
@@ -145,19 +160,43 @@ export class EventsRepository {
       UPDATE events SET
         name = COALESCE(?, name),
         welcome_message = COALESCE(?, welcome_message),
-        uploads_enabled = ?,
         gallery_visible = ?,
         moderation_required = ?,
         event_timezone = ?,
         rsvp_deadline_at = ?,
+        -- A pause after the old start cannot survive a move back into the
+        -- future: that would create the forbidden pre-start paused state and
+        -- prevent the automatic opening at the new start. Restore capability
+        -- only while printed entry is still live; the emergency stop wins.
+        uploads_enabled = CASE
+          WHEN uploads_enabled = 0
+            AND ? > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            AND EXISTS (
+              SELECT 1 FROM event_entry_credentials
+              WHERE event_id = events.id AND disabled_at IS NULL
+            )
+          THEN 1
+          ELSE uploads_enabled
+        END,
+        photos_open_from = CASE
+          WHEN uploads_enabled = 0
+            AND ? > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            AND EXISTS (
+              SELECT 1 FROM event_entry_credentials
+              WHERE event_id = events.id AND disabled_at IS NULL
+            )
+          THEN NULL
+          ELSE photos_open_from
+        END,
+        event_start_at = ?,
         rsvp_enabled = ?
       WHERE id = ? AND deleted_at IS NULL AND rsvp_roster_version = ?
-        -- Reopening either intake is only legal while a printed entry is still
-        -- enabled, and that has to be decided inside this statement: the route's
-        -- earlier check is a read, and a settings write already in flight when
-        -- the entry was disabled would otherwise commit against a stale answer.
+        -- Reopening RSVP is only legal while a printed entry is still enabled,
+        -- and that has to be decided inside this statement: the route's earlier
+        -- check is a read, and a settings write already in flight when the entry
+        -- was disabled would otherwise commit against a stale answer.
         AND (
-          (? = 0 AND ? = 0)
+          ? = 0
           OR EXISTS (
             SELECT 1 FROM event_entry_credentials
             WHERE event_id = events.id AND disabled_at IS NULL
@@ -166,19 +205,96 @@ export class EventsRepository {
     `).bind(
       input.name ?? null,
       input.welcomeMessage ?? null,
-      input.uploadsEnabled ? 1 : 0,
       input.galleryVisible ? 1 : 0,
       input.moderationRequired ? 1 : 0,
       input.eventTimezone,
       input.rsvpDeadlineAt,
+      input.eventStartAt,
+      input.eventStartAt,
+      input.eventStartAt,
       input.rsvpEnabled ? 1 : 0,
       id,
       input.expectedRosterVersion,
-      input.uploadsEnabled ? 1 : 0,
       input.rsvpEnabled ? 1 : 0,
     ).run();
     // Null rather than an exception: a lost race is an ordinary outcome here,
     // and the route turns it into guest-facing prose.
+    if ((result.meta.changes ?? 0) !== 1) return null;
+    return (await this.getById(id))!;
+  }
+
+  /**
+   * Applies one photo-intake transition, or nothing.
+   *
+   * The legal transition is decided in SQL against the row as it stands, not
+   * from a state a manager page read earlier: a page that loaded before the
+   * event started must not be able to send a pre-start action after it. Each
+   * statement therefore restates the whole precondition its state name implies.
+   *
+   * `open_early` stamps the server's own clock. No client timestamp is accepted
+   * anywhere on this path.
+   *
+   * A pre-start pause clears `photos_open_from` and deliberately leaves
+   * `uploads_enabled` alone. This is the load-bearing rule of the whole feature:
+   * if it withdrew capability, a host who opened photos early and then thought
+   * better of it would silently cancel the scheduled opening, and the event
+   * would sit on `waiting` through its own reception.
+   */
+  async applyPhotoIntake(
+    id: string,
+    action: 'open_early' | 'return_to_schedule' | 'pause' | 'reopen',
+    now = new Date(),
+  ): Promise<EventRecord | null> {
+    const nowIso = now.toISOString();
+    // Reopening cannot outrank the irreversible printed-entry stop, and the
+    // check belongs inside the statement for the same reason it does in
+    // `updateSettings`.
+    const entryOpen = `
+      EXISTS (
+        SELECT 1 FROM event_entry_credentials
+        WHERE event_id = events.id AND disabled_at IS NULL
+      )
+    `;
+    const statement = action === 'open_early'
+      // Legal only from `scheduled`: permitted, before the start, and not
+      // already opened early.
+      ? this.db.prepare(`
+          UPDATE events SET photos_open_from = ?
+          WHERE id = ? AND deleted_at IS NULL
+            AND event_start_at > ?
+            AND uploads_enabled = 1
+            AND photos_open_from IS NULL
+            AND ${entryOpen}
+        `).bind(nowIso, id, nowIso)
+      : action === 'return_to_schedule'
+        // Legal only from `open-early`. There is deliberately no pre-start
+        // control that revokes capability; a host who wants photo delivery off
+        // for the event does it after the start, when the effect is visible.
+        ? this.db.prepare(`
+            UPDATE events SET photos_open_from = NULL
+            WHERE id = ? AND deleted_at IS NULL
+              AND event_start_at > ?
+              AND uploads_enabled = 1
+              AND photos_open_from IS NOT NULL
+          `).bind(id, nowIso)
+        : action === 'pause'
+          ? this.db.prepare(`
+              UPDATE events SET uploads_enabled = 0
+              WHERE id = ? AND deleted_at IS NULL
+                AND event_start_at <= ?
+                AND uploads_enabled = 1
+            `).bind(id, nowIso)
+          : this.db.prepare(`
+              UPDATE events SET uploads_enabled = 1
+              WHERE id = ? AND deleted_at IS NULL
+                AND event_start_at <= ?
+                AND uploads_enabled = 0
+                AND ${entryOpen}
+            `).bind(id, nowIso);
+
+    const result = await statement.run();
+    // Null rather than an exception: a stale or illegal transition is an
+    // ordinary outcome, and the route turns it into "reload and try again".
     if ((result.meta.changes ?? 0) !== 1) return null;
     return (await this.getById(id))!;
   }

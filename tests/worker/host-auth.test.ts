@@ -985,13 +985,13 @@ describe('managing an event through an account', () => {
       method: 'PATCH',
       headers: hostHeaders(host),
       body: JSON.stringify({
-        uploadsEnabled: false, galleryVisible: true, moderationRequired: true,
-        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
-        rsvpEnabled: false, rsvpRosterVersion: 0,
+        galleryVisible: true, moderationRequired: true,
+        eventTimezone: 'America/Chicago', eventStartTime: '00:00',
+        rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,
       }),
     }, testEnv);
     expect(settings.status).toBe(200);
-    expect((await settings.json<any>()).data.event.uploadsEnabled).toBe(false);
+    expect((await settings.json<any>()).data.event.galleryVisible).toBe(true);
 
     const media = await createApp().request(`/api/manage/events/${access.event.id}/media`, {
       headers: { cookie: host.cookie },

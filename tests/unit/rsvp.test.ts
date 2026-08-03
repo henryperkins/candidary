@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import type { GuestPhaseView, RsvpState } from '../../shared/contracts';
+import type {
+  GuestEventPhase,
+  GuestPhaseView,
+  PhotoIntakeState,
+  RsvpAccess,
+} from '../../shared/contracts';
 import {
+  EVENT_START_MIGRATION_SENTINEL,
   MAX_EVENT_RSVP_CAPACITY,
   MAX_HOUSEHOLD_CAPACITY,
   MAX_NAMED_INVITEES_PER_HOUSEHOLD,
@@ -9,10 +15,15 @@ import {
   MAX_RSVP_HOUSEHOLDS,
   RSVP_HOUSEHOLD_KEY_PATTERN,
   deriveRsvpSummary,
+  eventStartHasPassed,
   findLookupCollisions,
+  isLegacyEventStart,
   normalizeInvitedName,
   parsePersonText,
   resolveGuestEventPhase,
+  resolvePhotoIntake,
+  type EventLifecycleInput,
+  type GuestLifecycleInput,
 } from '../../shared/rsvp';
 
 // Several fixtures below are invisible or near-invisible characters, so every
@@ -64,69 +75,6 @@ describe('RSVP domain', () => {
     expect(normalizeInvitedName('Anne-Marie St. James')).toBe('anne-marie st. james');
   });
 
-  it('uses server time to select phase and close RSVP', () => {
-    const input = {
-      uploadsEnabled: false,
-      rsvpEnabled: true,
-      rsvpDeadlineAt: '2026-07-31T04:59:59.999Z',
-    };
-    expect(resolveGuestEventPhase(input, new Date('2026-07-31T04:59:59.999Z')))
-      .toEqual({ phase: 'rsvp-primary', rsvpState: 'open' });
-    expect(resolveGuestEventPhase(input, new Date('2026-07-31T05:00:00.000Z')))
-      .toEqual({ phase: 'waiting', rsvpState: 'closed' });
-    expect(resolveGuestEventPhase(
-      { ...input, uploadsEnabled: true },
-      new Date('2026-07-30T12:00:00.000Z'),
-    )).toEqual({ phase: 'photos-primary', rsvpState: 'open' });
-  });
-
-  it.each<[
-    string,
-    { uploadsEnabled: boolean; rsvpEnabled: boolean; rsvpDeadlineAt: string | null },
-    GuestPhaseView,
-  ]>([
-    [
-      'paused RSVP before the deadline waits',
-      { uploadsEnabled: false, rsvpEnabled: false, rsvpDeadlineAt: '2026-07-31T04:59:59.999Z' },
-      { phase: 'waiting', rsvpState: 'paused' },
-    ],
-    [
-      'no deadline is disabled, never open',
-      { uploadsEnabled: false, rsvpEnabled: false, rsvpDeadlineAt: null },
-      { phase: 'waiting', rsvpState: 'disabled' },
-    ],
-    [
-      'photos-only events skip RSVP entirely',
-      { uploadsEnabled: true, rsvpEnabled: false, rsvpDeadlineAt: null },
-      { phase: 'photos-primary', rsvpState: 'disabled' },
-    ],
-    [
-      'event day keeps photos primary after RSVP closes',
-      { uploadsEnabled: true, rsvpEnabled: true, rsvpDeadlineAt: '2026-07-01T04:59:59.999Z' },
-      { phase: 'photos-primary', rsvpState: 'closed' },
-    ],
-    [
-      'paused RSVP still yields to open photo intake',
-      { uploadsEnabled: true, rsvpEnabled: false, rsvpDeadlineAt: '2026-07-31T04:59:59.999Z' },
-      { phase: 'photos-primary', rsvpState: 'paused' },
-    ],
-    [
-      'an unparseable deadline is disabled rather than open',
-      { uploadsEnabled: false, rsvpEnabled: true, rsvpDeadlineAt: 'not-a-timestamp' },
-      { phase: 'waiting', rsvpState: 'disabled' },
-    ],
-  ])('%s', (_label, input, expected) => {
-    expect(resolveGuestEventPhase(input, new Date('2026-07-30T12:00:00.000Z'))).toEqual(expected);
-  });
-
-  it('never reports an open RSVP state without a deadline', () => {
-    const states: RsvpState[] = [true, false].map((rsvpEnabled) => resolveGuestEventPhase(
-      { uploadsEnabled: false, rsvpEnabled, rsvpDeadlineAt: null },
-      new Date('2026-07-30T12:00:00.000Z'),
-    ).rsvpState);
-    expect(states).toEqual(['disabled', 'disabled']);
-  });
-
   it('freezes the approved capacity limits', () => {
     expect(MAX_EVENT_RSVP_CAPACITY).toBe(500);
     expect(MAX_RSVP_HOUSEHOLDS).toBe(500);
@@ -149,6 +97,373 @@ describe('RSVP domain', () => {
     ['perkins.household', false],
   ])('accepts only lowercase stable household keys (%s)', (value, valid) => {
     expect(RSVP_HOUSEHOLD_KEY_PATTERN.test(value)).toBe(valid);
+  });
+});
+
+// One event, read at many instants, so every case below differs only in when it
+// was asked. The RSVP deadline is the last local millisecond of 2026-09-18 in
+// America/Chicago and the start is 5:00 PM local on the 19th, which is the
+// strict ordering the Worker validates.
+const DEADLINE_AT = '2026-09-19T04:59:59.999Z';
+// The first millisecond RSVP reads as closed. The deadline instant itself is
+// still open, so this is the boundary a guest view is scheduled against.
+const RSVP_CLOSES_AT = '2026-09-19T05:00:00.000Z';
+const START_AT = '2026-09-19T22:00:00.000Z';
+const EARLY_OPEN_AT = '2026-09-18T09:00:00.000Z';
+
+const BEFORE_EARLY_OPEN = '2026-09-18T08:00:00.000Z';
+const BEFORE_DEADLINE = '2026-09-18T12:00:00.000Z';
+const AFTER_DEADLINE = '2026-09-19T06:00:00.000Z';
+const AFTER_START = '2026-09-19T23:00:00.000Z';
+
+const scheduled: GuestLifecycleInput = {
+  uploadsEnabled: true,
+  rsvpEnabled: true,
+  rsvpDeadlineAt: DEADLINE_AT,
+  eventStartAt: START_AT,
+  photosOpenFrom: null,
+  rsvpConfigured: true,
+};
+
+const earlyOpened: GuestLifecycleInput = { ...scheduled, photosOpenFrom: EARLY_OPEN_AT };
+
+// Written as a subtraction rather than a literal so a reader checks the two
+// instants, which are the contract, instead of arithmetic that is not.
+function msBetween(from: string, to: string): number {
+  return Date.parse(to) - Date.parse(from);
+}
+
+function phaseAt(override: Partial<GuestLifecycleInput>, now: string): GuestPhaseView {
+  return resolveGuestEventPhase({ ...scheduled, ...override }, new Date(now));
+}
+
+describe('guest event phase', () => {
+  it.each<[string, Partial<GuestLifecycleInput>, string, GuestPhaseView]>([
+    [
+      'an open RSVP before the start is the whole page',
+      {}, BEFORE_DEADLINE,
+      {
+        phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+    ],
+    [
+      'a closed RSVP before the start is its own surface',
+      {}, AFTER_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only',
+        lifecycleRecheckAfterMs: msBetween(AFTER_DEADLINE, START_AT),
+      },
+    ],
+    [
+      'a roster the host has not switched on yet is that surface too',
+      { rsvpEnabled: false }, BEFORE_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'paused', rsvpAccess: 'read-only',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+    ],
+    [
+      'a valid-deadline event with no roster offers no household lookup',
+      { rsvpEnabled: false, rsvpConfigured: false }, BEFORE_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'paused', rsvpAccess: 'unavailable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+    ],
+    [
+      'an event that never adopted RSVP advertises no household lookup',
+      { rsvpEnabled: false, rsvpDeadlineAt: null }, BEFORE_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'disabled', rsvpAccess: 'unavailable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, START_AT),
+      },
+    ],
+    [
+      'an unreadable deadline is disabled rather than open',
+      { rsvpDeadlineAt: 'not-a-timestamp' }, BEFORE_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'disabled', rsvpAccess: 'unavailable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, START_AT),
+      },
+    ],
+    [
+      'the start opens photo delivery with no host action',
+      {}, START_AT,
+      {
+        phase: 'photos-primary', rsvpState: 'closed', rsvpAccess: 'unavailable',
+        lifecycleRecheckAfterMs: null,
+      },
+    ],
+    [
+      'a host pause after the start is the waiting surface',
+      { uploadsEnabled: false }, AFTER_START,
+      {
+        phase: 'waiting', rsvpState: 'closed', rsvpAccess: 'unavailable',
+        lifecycleRecheckAfterMs: null,
+      },
+    ],
+    [
+      'an early opening makes photos primary while RSVP is still open',
+      { photosOpenFrom: EARLY_OPEN_AT }, BEFORE_DEADLINE,
+      {
+        phase: 'photos-primary', rsvpState: 'open', rsvpAccess: 'editable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+    ],
+    [
+      'a disabled printed entry withdraws every household affordance',
+      { entryDisabled: true, uploadsEnabled: false, rsvpEnabled: false }, BEFORE_DEADLINE,
+      {
+        phase: 'before-start', rsvpState: 'paused', rsvpAccess: 'unavailable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+    ],
+  ])('%s', (_label, override, now, expected) => {
+    expect(phaseAt(override, now)).toEqual(expected);
+  });
+
+  it('never reports an open RSVP state without a deadline', () => {
+    for (const rsvpEnabled of [true, false]) {
+      expect(phaseAt({ rsvpEnabled, rsvpDeadlineAt: null }, BEFORE_DEADLINE).rsvpState)
+        .toBe('disabled');
+    }
+  });
+});
+
+describe('guest phase boundaries', () => {
+  it('keeps the deadline millisecond open and closes on the next one', () => {
+    expect(phaseAt({}, DEADLINE_AT)).toEqual({
+      phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable',
+      // One millisecond, because the boundary worth waking for is the first
+      // closed instant and not the deadline that is still open.
+      lifecycleRecheckAfterMs: 1,
+    });
+    expect(phaseAt({}, RSVP_CLOSES_AT)).toEqual({
+      phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only',
+      lifecycleRecheckAfterMs: msBetween(RSVP_CLOSES_AT, START_AT),
+    });
+  });
+
+  it('opens photo delivery on the start instant itself, not the one after', () => {
+    const oneBefore = new Date(Date.parse(START_AT) - 1).toISOString();
+    expect(phaseAt({}, oneBefore)).toEqual({
+      phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only',
+      lifecycleRecheckAfterMs: 1,
+    });
+    expect(phaseAt({}, START_AT)).toEqual({
+      phase: 'photos-primary', rsvpState: 'closed', rsvpAccess: 'unavailable',
+      lifecycleRecheckAfterMs: null,
+    });
+  });
+
+  it('opens photo delivery on the early instant itself', () => {
+    const oneBefore = new Date(Date.parse(EARLY_OPEN_AT) - 1).toISOString();
+    expect(phaseAt({ photosOpenFrom: EARLY_OPEN_AT }, oneBefore)).toMatchObject({
+      phase: 'rsvp-primary',
+      lifecycleRecheckAfterMs: 1,
+    });
+    expect(phaseAt({ photosOpenFrom: EARLY_OPEN_AT }, EARLY_OPEN_AT)).toMatchObject({
+      phase: 'photos-primary',
+      rsvpAccess: 'editable',
+    });
+  });
+});
+
+describe('guest RSVP access', () => {
+  it.each<[string, Partial<GuestLifecycleInput>, string]>([
+    ['the deadline has passed', {}, START_AT],
+    ['RSVP is paused', { rsvpEnabled: false }, START_AT],
+    ['RSVP was never configured', { rsvpDeadlineAt: null }, START_AT],
+    ['photo delivery is paused', { uploadsEnabled: false }, AFTER_START],
+    ['photo delivery opened early', { photosOpenFrom: EARLY_OPEN_AT }, AFTER_START],
+    // Validation refuses a deadline that outlives the start, so this state
+    // cannot be reached through the API. The rule is unconditional anyway: at
+    // the start RSVP has left the guest experience, and that is not a deadline
+    // comparison.
+    ['a deadline outlives the start', { rsvpDeadlineAt: '2026-09-20T04:59:59.999Z' }, START_AT],
+  ])('is unavailable at or after the start when %s', (_label, override, now) => {
+    expect(phaseAt(override, now).rsvpAccess).toBe('unavailable');
+  });
+
+  it.each<[string, Partial<GuestLifecycleInput>, string, RsvpAccess]>([
+    ['a disabled printed entry over an open RSVP', { entryDisabled: true }, BEFORE_DEADLINE, 'unavailable'],
+    ['a disabled printed entry over a paused one', { entryDisabled: true, rsvpEnabled: false }, BEFORE_DEADLINE, 'unavailable'],
+    ['no deadline at all', { rsvpDeadlineAt: null }, BEFORE_DEADLINE, 'unavailable'],
+    ['an unreadable deadline', { rsvpDeadlineAt: 'not-a-timestamp' }, BEFORE_DEADLINE, 'unavailable'],
+    ['an open RSVP', {}, BEFORE_DEADLINE, 'editable'],
+    ['a paused RSVP', { rsvpEnabled: false }, BEFORE_DEADLINE, 'read-only'],
+    ['a closed RSVP', {}, AFTER_DEADLINE, 'read-only'],
+    ['a closed RSVP the host never switched on', { rsvpEnabled: false }, AFTER_DEADLINE, 'read-only'],
+  ])('before the start, %s is %s', (_label, override, now, expected) => {
+    expect(phaseAt(override, now).rsvpAccess).toBe(expected);
+  });
+
+  it.each<[string, Partial<GuestLifecycleInput>, string, RsvpAccess]>([
+    ['editable', {}, BEFORE_DEADLINE, 'editable'],
+    ['read-only', {}, AFTER_DEADLINE, 'read-only'],
+    ['unavailable', { entryDisabled: true }, BEFORE_DEADLINE, 'unavailable'],
+  ])('an early-open page can hold RSVP %s before the start', (_label, override, now, expected) => {
+    const view = resolveGuestEventPhase({ ...earlyOpened, ...override }, new Date(now));
+    expect(view.phase).toBe('photos-primary');
+    expect(view.rsvpAccess).toBe(expected);
+  });
+});
+
+describe('guest lifecycle recheck delay', () => {
+  it('tracks the disclosure across an early-open period the phase never leaves', () => {
+    // The phase does not move at the deadline or at the start here, but the
+    // household disclosure goes editable, then read-only, then away, so every
+    // one of those instants is still a boundary worth waking for.
+    const walk = [BEFORE_EARLY_OPEN, BEFORE_DEADLINE, AFTER_DEADLINE, AFTER_START]
+      .map((now) => {
+        const { phase, rsvpAccess, lifecycleRecheckAfterMs } = resolveGuestEventPhase(
+          earlyOpened,
+          new Date(now),
+        );
+        return { phase, rsvpAccess, lifecycleRecheckAfterMs };
+      });
+
+    expect(walk).toEqual([
+      {
+        phase: 'rsvp-primary', rsvpAccess: 'editable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_EARLY_OPEN, EARLY_OPEN_AT),
+      },
+      {
+        phase: 'photos-primary', rsvpAccess: 'editable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      },
+      {
+        phase: 'photos-primary', rsvpAccess: 'read-only',
+        lifecycleRecheckAfterMs: msBetween(AFTER_DEADLINE, START_AT),
+      },
+      { phase: 'photos-primary', rsvpAccess: 'unavailable', lifecycleRecheckAfterMs: null },
+    ]);
+  });
+
+  it('never schedules a boundary that has already gone', () => {
+    // A deadline behind the resolving instant is not a boundary, so the start
+    // is what remains; past the start nothing is.
+    expect(phaseAt({}, AFTER_DEADLINE).lifecycleRecheckAfterMs)
+      .toBe(msBetween(AFTER_DEADLINE, START_AT));
+    expect(phaseAt({}, AFTER_START).lifecycleRecheckAfterMs).toBeNull();
+    expect(phaseAt({ uploadsEnabled: false }, AFTER_START).lifecycleRecheckAfterMs).toBeNull();
+  });
+
+  it('measures from the instant it was handed, never from the machine clock', () => {
+    const early = phaseAt({}, BEFORE_DEADLINE).lifecycleRecheckAfterMs;
+    const late = phaseAt({}, '2026-09-18T13:00:00.000Z').lifecycleRecheckAfterMs;
+    expect(early).not.toBeNull();
+    expect(late).toBe((early ?? 0) - 60 * 60 * 1000);
+  });
+});
+
+describe('migration-sentinel events', () => {
+  const legacy: GuestLifecycleInput = {
+    ...scheduled,
+    eventStartAt: EVENT_START_MIGRATION_SENTINEL,
+  };
+
+  it('recognizes the sentinel and every start it cannot read', () => {
+    expect(isLegacyEventStart(EVENT_START_MIGRATION_SENTINEL)).toBe(true);
+    expect(isLegacyEventStart('not-a-timestamp')).toBe(true);
+    expect(isLegacyEventStart(START_AT)).toBe(false);
+  });
+
+  it('never lets a sentinel start pass, however late it is read', () => {
+    expect(eventStartHasPassed(EVENT_START_MIGRATION_SENTINEL, new Date(AFTER_START))).toBe(false);
+    expect(eventStartHasPassed('not-a-timestamp', new Date(AFTER_START))).toBe(false);
+    expect(eventStartHasPassed(START_AT, new Date(Date.parse(START_AT) - 1))).toBe(false);
+    expect(eventStartHasPassed(START_AT, new Date(START_AT))).toBe(true);
+  });
+
+  it('restores uploadsEnabled as the unconditional override', () => {
+    expect(phaseAt({ eventStartAt: EVENT_START_MIGRATION_SENTINEL }, BEFORE_DEADLINE).phase)
+      .toBe('photos-primary');
+    // Uploads off with RSVP open is the case the epoch would otherwise decide:
+    // its instant is long past, so the new rules would call this row started and
+    // begin refusing RSVPs at a start it does not really have.
+    expect(resolveGuestEventPhase({ ...legacy, uploadsEnabled: false }, new Date(AFTER_START)))
+      .toEqual({
+        phase: 'waiting', rsvpState: 'closed', rsvpAccess: 'read-only',
+        lifecycleRecheckAfterMs: null,
+      });
+    expect(resolveGuestEventPhase({ ...legacy, uploadsEnabled: false }, new Date(BEFORE_DEADLINE)))
+      .toEqual({
+        phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable',
+        lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+      });
+  });
+
+  it('preserves the old paused RSVP access even without a configured roster', () => {
+    expect(resolveGuestEventPhase({
+      ...legacy,
+      uploadsEnabled: false,
+      rsvpEnabled: false,
+      rsvpConfigured: false,
+    }, new Date(BEFORE_DEADLINE))).toEqual({
+      phase: 'waiting', rsvpState: 'paused', rsvpAccess: 'read-only',
+      lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
+    });
+  });
+
+  it('never reaches before-start, which is a post-0010 state', () => {
+    const phases = new Set<GuestEventPhase>();
+    for (const uploadsEnabled of [true, false]) {
+      for (const rsvpEnabled of [true, false]) {
+        for (const now of [BEFORE_DEADLINE, AFTER_DEADLINE, START_AT, AFTER_START]) {
+          phases.add(resolveGuestEventPhase(
+            { ...legacy, uploadsEnabled, rsvpEnabled },
+            new Date(now),
+          ).phase);
+        }
+      }
+    }
+    expect([...phases].sort()).toEqual(['photos-primary', 'rsvp-primary', 'waiting']);
+  });
+});
+
+describe('host photo intake state', () => {
+  it.each<[string, Partial<EventLifecycleInput>, string, PhotoIntakeState, boolean]>([
+    ['withheld capability outranks a schedule that has not opened', { uploadsEnabled: false }, BEFORE_DEADLINE, 'paused', false],
+    ['withheld capability outranks an early opening', { uploadsEnabled: false, photosOpenFrom: EARLY_OPEN_AT }, BEFORE_DEADLINE, 'paused', false],
+    ['withheld capability outranks the start itself', { uploadsEnabled: false }, AFTER_START, 'paused', false],
+    ['permitted and waiting on the clock', {}, BEFORE_DEADLINE, 'scheduled', false],
+    ['permitted past a manual opening but before the start', { photosOpenFrom: EARLY_OPEN_AT }, BEFORE_DEADLINE, 'open-early', true],
+    ['permitted at the start', {}, START_AT, 'open', true],
+    ['permitted after the start', {}, AFTER_START, 'open', true],
+  ])('%s reports %s', (_label, override, now, photoIntakeState, photosOpen) => {
+    expect(resolvePhotoIntake({ ...scheduled, ...override }, new Date(now)))
+      .toMatchObject({ photoIntakeState, photosOpen });
+  });
+
+  it('opens on the scheduled instant itself', () => {
+    const beforeStart = new Date(Date.parse(START_AT) - 1);
+    expect(resolvePhotoIntake(scheduled, beforeStart).photoIntakeState).toBe('scheduled');
+    expect(resolvePhotoIntake(scheduled, new Date(START_AT)).photoIntakeState).toBe('open');
+
+    const beforeEarly = new Date(Date.parse(EARLY_OPEN_AT) - 1);
+    expect(resolvePhotoIntake(earlyOpened, beforeEarly).photoIntakeState).toBe('scheduled');
+    expect(resolvePhotoIntake(earlyOpened, new Date(EARLY_OPEN_AT)).photoIntakeState)
+      .toBe('open-early');
+  });
+
+  it('schedules its own refetch from the opening and the start, never the deadline', () => {
+    expect(resolvePhotoIntake(scheduled, new Date(BEFORE_DEADLINE)).photoIntakeRecheckAfterMs)
+      .toBe(msBetween(BEFORE_DEADLINE, START_AT));
+    expect(resolvePhotoIntake(earlyOpened, new Date(BEFORE_EARLY_OPEN)).photoIntakeRecheckAfterMs)
+      .toBe(msBetween(BEFORE_EARLY_OPEN, EARLY_OPEN_AT));
+    expect(resolvePhotoIntake(earlyOpened, new Date(AFTER_DEADLINE)).photoIntakeRecheckAfterMs)
+      .toBe(msBetween(AFTER_DEADLINE, START_AT));
+    expect(resolvePhotoIntake(scheduled, new Date(AFTER_START)).photoIntakeRecheckAfterMs)
+      .toBeNull();
+  });
+
+  it('keeps a paused event on the same boundary, so its page still refreshes', () => {
+    expect(resolvePhotoIntake(
+      { ...scheduled, uploadsEnabled: false },
+      new Date(BEFORE_DEADLINE),
+    ).photoIntakeRecheckAfterMs).toBe(msBetween(BEFORE_DEADLINE, START_AT));
   });
 });
 

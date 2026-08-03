@@ -1,0 +1,2 @@
+worker-configuration.d.ts text eol=lf
+migrations/*.sql text eol=lf

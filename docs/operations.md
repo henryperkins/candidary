@@ -17,6 +17,63 @@ The daily `17 3 * * *` handler performs five idempotent jobs:
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 
+## Release identity and certification boundary
+
+The build embeds two Worker-only literals: the full clean Git SHA and the content-bound migration
+manifest SHA-256. `config/release.json` supplies the positive `guestJourneyVersion` (currently 1),
+and the `CF_VERSION_METADATA` binding supplies Cloudflare's Worker version ID, deployment tag, and
+timestamp. Runtime identity is available only when all values are well formed and the version tag is
+exactly the embedded build SHA. A missing metadata binding, empty ID or tag, tag/SHA mismatch,
+unreplaced build literal, or malformed digest produces `null`; it must never degrade to a partial or
+"probably current" identity.
+
+`0011_release_certifications.sql` defines one row per Worker version with these exact columns:
+
+- `worker_version_id` — trimmed Cloudflare Worker version ID and primary key.
+- `build_sha` — 40 lowercase hexadecimal characters.
+- `guest_journey_version` — positive integer matching `config/release.json`.
+- `migration_manifest_sha256` — 64 lowercase hexadecimal characters for the checked-in migration
+  contents after canonical CRLF-to-LF normalization, not the filename-only fresh-D1 ledger digest.
+- `evidence_manifest_sha256` — SHA-256 of the exact canonical local candidate-manifest bytes.
+- `physical_evidence_refs_json` — a nonempty JSON array of redacted evidence references.
+- `certified_at` — canonical UTC instant with millisecond precision.
+
+Each physical reference has exactly this safe shape:
+
+```json
+{
+  "category": "printed-entry-ios",
+  "evidenceId": "123e4567-e89b-42d3-a456-426614174000",
+  "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capturedAt": "2026-08-02T12:00:00.000Z"
+}
+```
+
+Categories are allowlisted and unique within the row. `evidenceId` is a UUID and
+`manifestSha256` identifies a separate redacted evidence manifest. Never store a raw invitation or
+management URL, credential, cookie, submitted name, device identifier, screenshot path, free-form
+note, or secret in this array.
+
+There is deliberately no HTTP route, public command, scheduled job, deploy hook, or migration hook
+that writes a certification. The repository class can validate and persist a record for a future
+explicit workflow, but it has no remotely reachable caller. `verify:release` writes only local
+candidate evidence, the guarded deploy writes only a tagged Worker version, and applying `0011`
+creates only the empty table. Do not insert a row by hand and do not document an ad hoc write command.
+
+A future readiness decision must fail closed unless all of the following are true at the same time:
+
+1. the remote migration ledger has no unapproved or pending migration;
+2. runtime identity is non-null, including an exact nonempty tag/build-SHA match;
+3. one certification matches Worker version ID, build SHA, journey version, and migration digest
+   exactly;
+4. its evidence-manifest digest matches the retained local manifest and checksum sidecar; and
+5. every required physical category has a valid redacted reference.
+
+Missing bindings, malformed metadata or evidence, an unknown certification, a pending migration, or
+any identity mismatch means **not certified**. Candidate evidence itself keeps
+`remoteMigration`, `deployment`, `physicalDevices`, and `runtimeCertification` at `not_run` and
+contains no Worker version ID, so it cannot be used to claim deployment or wedding readiness.
+
 ## Delivery and publication
 
 A finalized `stored` media row is a private host delivery. Its `publication_status` is independently `unpublished`, `published`, or `hidden`; changing publication never changes private retention or export eligibility. Originals are never guest-readable. Cached previews use separate R2 keys and can be regenerated without changing the original.
@@ -56,11 +113,64 @@ Two host actions look similar and are not:
   verify afterwards that manager access still works while both future scans and existing guest and
   household sessions do not.
 
+`uploads_enabled` means photo delivery is **permitted** for this event, not that it is open. Three
+stored values decide what a guest actually sees:
+
+- `uploads_enabled` — capability. A new event is created with it on.
+- `event_start_at` — the schedule. It is derived server-side from `event_date`, the host's local
+  start time, and `event_timezone`, and it opens photo delivery by itself. Nothing has to be run and
+  nobody has to remember anything on the day of the event.
+- `photos_open_from` — `NULL` normally. A non-null value is a manual early opening and holds the
+  server instant at which the host performed it.
+
+`POST /api/manage/events/:eventId/photo-intake` takes one of four explicit actions and never a client
+timestamp. Which one is legal is decided in SQL against the row as it stands, not against the state a
+manager page read earlier:
+
+| Action | Legal from | Effect |
+| --- | --- | --- |
+| `open_early` | `scheduled` — permitted, before the start, not already opened early | Stamps `photos_open_from` with the server's own clock |
+| `return_to_schedule` | `open-early` | Clears `photos_open_from` |
+| `pause` | `open` — permitted, at or after the start | `uploads_enabled = 0` |
+| `reopen` | `paused`, at or after the start, printed entry still enabled | `uploads_enabled = 1` |
+
+A pause **before** the start is `return_to_schedule`, and it clears `photos_open_from` only. It
+deliberately does not withdraw capability: if it did, a host who opened photos early and then thought
+better of it would silently cancel the scheduled opening, and the event would sit on the guest waiting
+surface through its own reception. There is deliberately no pre-start control that revokes capability
+at all — a host who wants photo delivery off for the event does it after the start, when the effect is
+visible to them.
+
+If a host pauses after the start and then moves the event start back into the future, the guarded
+settings write returns photo delivery to `scheduled`: it restores capability and clears any manual
+opening stamp. It does so only while the printed entry remains enabled; an irreversible entry disable
+continues to win.
+
+A stale or illegal transition — most often a manager page that loaded before the start sending a
+pre-start action after it — is the existing `VALIDATION_FAILED` envelope at HTTP 409, telling the host
+to reload. No new error code was added for it.
+
+The irreversible entry disable still wins over all four: it sets `uploads_enabled = 0` and
+`rsvp_enabled = 0`, and no photo-intake action may open or reopen an event whose printed entry is
+disabled. That is enforced inside the statement, not only ahead of it.
+
+`uploadsEnabled` has left the settings payload entirely; `PATCH .../settings` no longer accepts it.
+This follows `Sign out guest devices` and `Disable printed event QR`, which are explicit actions for
+the same reason: a stale autosave draft could send `uploadsEnabled: false` meaning "pause until the
+start" and instead destroy capability for the whole event.
+
 RSVP opens only when the event has a deadline and the active roster passes collision and capacity
 validation. The deadline is a calendar date in the event's IANA time zone; the server stores the final
-millisecond of that local day. Shortening a deadline takes effect immediately for sessions already
-issued; extending one requires each household to look itself up again before it regains write
-authority. A host may correct any household after the deadline.
+millisecond of that local day, and that instant must be strictly earlier than `event_start_at`. Because
+the stored deadline is the last millisecond of its own local day, the deadline date must therefore be
+earlier than the event date. Create and settings enforce the rule identically, on the resolved instants
+rather than on the dates, and report it on `rsvpDeadlineDate`. Any edit to the deadline date, the start
+time, or the time zone recomputes both instants from the same tuple in the same guarded write, so a
+zone change can never move one without the other. Shortening a deadline takes effect immediately for
+sessions already issued; extending one requires each household to look itself up again before it
+regains write authority. A host may correct any household after the deadline, and after the start:
+from `event_start_at` onward every guest RSVP route is unavailable while manager correction, roster
+management, import, and export all keep working.
 
 The manager's **Add guests** workspace is additive at both initial setup and later use. It stages file,
 paste, and direct-entry sources locally, previews a normalized batch without writes, and commits every
@@ -128,7 +238,7 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
 - `EVENT_EXPIRED` on a scan — the printed credential is valid but the event's internal guest grant has expired. The event's own guest window has ended; nothing about the QR is wrong. (`GUEST_LINK_UNAVAILABLE` is retired: the route that raised it was replaced by `GET /api/manage/events/:eventId/entry`, and no code path emits it any more.)
 - `RSVP_UNAVAILABLE` — RSVP is disabled or paused for this event.
-- `RSVP_CLOSED` — the earlier of the event deadline and the session's captured write deadline has passed. A prior response is still readable; a host may still correct it.
+- `RSVP_CLOSED` — the event has started. Before the start, deadline and session-window write races use the conflict/session envelopes below; a prior response remains readable and an already committed idempotency key can replay its receipt. At and after `event_start_at` every guest RSVP route is unavailable — reads and idempotent replays included — because RSVP has left the guest experience entirely. A host may still correct the household throughout.
 - `RSVP_SESSION_REQUIRED` — the household session is missing, expired, revoked, or archived. The guest looks the invitation up again.
 - `RSVP_HOUSEHOLD_CONFLICT` — the version the write was built on is no longer current, and nothing was written. The response carries a message only, deliberately: the caller re-reads the household (`GET /api/event/:slug/rsvp/household`, or the manager household detail) and submits again against the current version. A host roster edit that changes who is in a household reports this too, rather than a validation failure.
 - `RSVP_SUBMISSION_CONFLICT` — a previously successful idempotency key was reused with different content. Use a new key rather than editing the old payload.
