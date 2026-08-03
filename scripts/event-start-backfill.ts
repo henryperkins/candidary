@@ -12,8 +12,9 @@ const eventTimeModulePath = '../shared/event-time.ts';
 const { instantForLocalDateTime } = await import(eventTimeModulePath) as typeof EventTimeModule;
 
 const PLAN_KIND = 'candidary-event-start-backfill' as const;
-const PLAN_VERSION = 1 as const;
+const PLAN_VERSION = 3 as const;
 const EPOCH_SENTINEL = '1970-01-01T00:00:00.000Z';
+const UTC_ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SCHEDULE_FREEZE_TRIGGER_NAME = 'candidary_event_start_schedule_freeze';
 const SCHEDULE_FREEZE_ERROR = 'CANDIDARY_EVENT_START_RELEASE_SCHEDULE_FROZEN';
 const SCHEDULE_FREEZE_STATEMENT = `CREATE TRIGGER ${SCHEDULE_FREEZE_TRIGGER_NAME}
@@ -26,7 +27,7 @@ BEGIN
   SELECT RAISE(ABORT, '${SCHEDULE_FREEZE_ERROR}');
 END`;
 const SCHEDULE_FREEZE_INSTALL_SQL = [
-  '-- Temporary release gate: blocks only actual schedule-source changes.',
+  '-- Temporary release gate: blocks actual schedule-source changes.',
   '-- Inserts, derived event_start_at writes, and unrelated updates remain available.',
   `${SCHEDULE_FREEZE_STATEMENT};`,
   '',
@@ -46,6 +47,10 @@ export interface InventoryRow extends JsonRecord {
   event_timezone?: string;
   rsvp_deadline_at?: string | null;
   event_start_at?: string | null;
+  photos_open_from?: string | null;
+  uploads_enabled?: number;
+  entry_enabled?: number;
+  inventory_at?: string;
   deleted_at?: string | null;
 }
 
@@ -54,6 +59,10 @@ export interface BackfillPlanEvent {
   eventDate: string;
   eventTimezone: string;
   rsvpDeadlineAt: string | null;
+  inventoryAt: string;
+  uploadsEnabled: boolean;
+  entryEnabled: boolean;
+  photoDisposition: 'preserve-open' | 'restore-scheduled' | 'remain-paused';
   expectedEventStartAt: string;
 }
 
@@ -67,6 +76,7 @@ export interface BackfillArtifacts {
   plan: BackfillPlan;
   planJson: string;
   sql: string;
+  postDeploySql: string;
 }
 
 export type VerificationIssueKind =
@@ -75,20 +85,25 @@ export type VerificationIssueKind =
   | 'epoch-sentinel'
   | 'utc-midnight-approximation'
   | 'source-mismatch'
+  | 'capability-mismatch'
+  | 'photo-open-not-preserved'
+  | 'photo-state-mismatch'
   | 'unplanned-non-sentinel'
   | 'mismatch';
 
 export type InventorySourceField =
   | 'event_date'
   | 'event_timezone'
-  | 'rsvp_deadline_at';
+  | 'rsvp_deadline_at'
+  | 'uploads_enabled'
+  | 'entry_enabled';
 
 export interface VerificationIssue {
   id: string;
   kind: VerificationIssueKind;
   field?: InventorySourceField;
-  expected: string | null;
-  actual: string | null;
+  expected: string | number | null;
+  actual: string | number | null;
 }
 
 export interface VerificationResult {
@@ -100,6 +115,7 @@ export interface VerificationResult {
 export interface VerificationOptions {
   requireNoSentinel?: boolean;
   requirePredeployCompleteness?: boolean;
+  stage?: 'predeploy' | 'final';
 }
 
 export type FreezeExpectation = 'installed' | 'absent';
@@ -178,6 +194,38 @@ function deadlineFor(row: InventoryRow, id: string): string | null {
   return value;
 }
 
+function uploadsEnabledFor(row: InventoryRow, id: string): boolean {
+  if (row.uploads_enabled !== 0 && row.uploads_enabled !== 1) {
+    throw new TypeError(`Event ${JSON.stringify(id)} needs uploads_enabled 0 or 1.`);
+  }
+  return row.uploads_enabled === 1;
+}
+
+function inventoryAtFor(row: InventoryRow, id: string): string {
+  const value = row.inventory_at;
+  if (typeof value !== 'string'
+    || !UTC_ISO_INSTANT_PATTERN.test(value)
+    || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError(`Event ${JSON.stringify(id)} needs a canonical inventory_at instant.`);
+  }
+  return value;
+}
+
+function entryEnabledFor(row: InventoryRow, id: string): boolean {
+  if (row.entry_enabled !== 0 && row.entry_enabled !== 1) {
+    throw new TypeError(`Event ${JSON.stringify(id)} needs entry_enabled 0 or 1.`);
+  }
+  return row.entry_enabled === 1;
+}
+
+function expectedUploadsEnabled(
+  event: BackfillPlanEvent,
+  stage: 'predeploy' | 'final',
+): boolean {
+  return event.photoDisposition === 'preserve-open'
+    || (stage === 'final' && event.photoDisposition === 'restore-scheduled');
+}
+
 function compareIds(left: { id: string }, right: { id: string }): number {
   if (left.id < right.id) return -1;
   if (left.id > right.id) return 1;
@@ -200,8 +248,31 @@ function renderSql(events: BackfillPlanEvent[]): string {
     const deadlineGuard = event.rsvpDeadlineAt === null
       ? 'rsvp_deadline_at IS NULL'
       : `rsvp_deadline_at = ${sqlString(event.rsvpDeadlineAt)}`;
+    const sourceUploadsEnabled = event.uploadsEnabled ? 1 : 0;
+    const photosOpenFrom = event.photoDisposition === 'preserve-open'
+      ? "COALESCE(photos_open_from, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+      : 'NULL';
     lines.push(
-      `UPDATE events SET event_start_at = ${sqlString(event.expectedEventStartAt)} WHERE id = ${sqlString(event.id)} AND deleted_at IS NULL AND event_date = ${sqlString(event.eventDate)} AND event_timezone = ${sqlString(event.eventTimezone)} AND ${deadlineGuard} AND event_start_at IN (${sqlString(EPOCH_SENTINEL)}, ${sqlString(utcMidnightApproximation)});`,
+      `UPDATE events SET event_start_at = ${sqlString(event.expectedEventStartAt)}, photos_open_from = ${photosOpenFrom} WHERE id = ${sqlString(event.id)} AND deleted_at IS NULL AND event_date = ${sqlString(event.eventDate)} AND event_timezone = ${sqlString(event.eventTimezone)} AND ${deadlineGuard} AND uploads_enabled = ${sourceUploadsEnabled} AND event_start_at IN (${sqlString(EPOCH_SENTINEL)}, ${sqlString(utcMidnightApproximation)});`,
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function renderPostDeploySql(events: BackfillPlanEvent[]): string {
+  const lines = [
+    `-- Candidary post-deploy photo-capability finalization plan v${PLAN_VERSION}.`,
+    '-- Apply only after the compatible Worker is deployed and while the schedule freeze remains installed.',
+    '-- This generator never connects to or mutates D1.',
+    '',
+  ];
+  for (const event of events) {
+    if (event.photoDisposition !== 'restore-scheduled') continue;
+    const deadlineGuard = event.rsvpDeadlineAt === null
+      ? 'rsvp_deadline_at IS NULL'
+      : `rsvp_deadline_at = ${sqlString(event.rsvpDeadlineAt)}`;
+    lines.push(
+      `UPDATE events SET uploads_enabled = 1, photos_open_from = NULL WHERE id = ${sqlString(event.id)} AND deleted_at IS NULL AND event_date = ${sqlString(event.eventDate)} AND event_timezone = ${sqlString(event.eventTimezone)} AND ${deadlineGuard} AND event_start_at = ${sqlString(event.expectedEventStartAt)} AND uploads_enabled = 0 AND photos_open_from IS NULL AND EXISTS (SELECT 1 FROM event_entry_credentials WHERE event_id = events.id AND disabled_at IS NULL);`,
     );
   }
   return `${lines.join('\n')}\n`;
@@ -261,6 +332,9 @@ export function buildBackfillArtifacts(rows: InventoryRow[]): BackfillArtifacts 
     const eventDate = requireString(row, 'event_date', id);
     const eventTimezone = requireString(row, 'event_timezone', id);
     const rsvpDeadlineAt = deadlineFor(row, id);
+    const uploadsEnabled = uploadsEnabledFor(row, id);
+    const entryEnabled = entryEnabledFor(row, id);
+    const inventoryAt = inventoryAtFor(row, id);
 
     let expectedEventStartAt: string;
     try {
@@ -282,11 +356,21 @@ export function buildBackfillArtifacts(rows: InventoryRow[]): BackfillArtifacts 
       );
     }
 
+    const photoDisposition: BackfillPlanEvent['photoDisposition'] = uploadsEnabled
+      ? 'preserve-open'
+      : entryEnabled && expectedEventStartAt > inventoryAt
+        ? 'restore-scheduled'
+        : 'remain-paused';
+
     events.push({
       id,
       eventDate,
       eventTimezone,
       rsvpDeadlineAt,
+      inventoryAt,
+      uploadsEnabled,
+      entryEnabled,
+      photoDisposition,
       expectedEventStartAt,
     });
   }
@@ -297,6 +381,7 @@ export function buildBackfillArtifacts(rows: InventoryRow[]): BackfillArtifacts 
     plan,
     planJson: `${JSON.stringify(plan, null, 2)}\n`,
     sql: renderSql(events),
+    postDeploySql: renderPostDeploySql(events),
   };
 }
 
@@ -320,6 +405,30 @@ function assertPlan(value: unknown): asserts value is BackfillPlan {
     if (candidate.rsvpDeadlineAt !== null && typeof candidate.rsvpDeadlineAt !== 'string') {
       throw new TypeError(`Plan event ${index + 1} has an invalid rsvpDeadlineAt.`);
     }
+    if (typeof candidate.inventoryAt !== 'string'
+      || !UTC_ISO_INSTANT_PATTERN.test(candidate.inventoryAt)
+      || !Number.isFinite(Date.parse(candidate.inventoryAt))) {
+      throw new TypeError(`Plan event ${index + 1} has an invalid inventoryAt.`);
+    }
+    if (typeof candidate.uploadsEnabled !== 'boolean') {
+      throw new TypeError(`Plan event ${index + 1} has an invalid uploadsEnabled.`);
+    }
+    if (typeof candidate.entryEnabled !== 'boolean') {
+      throw new TypeError(`Plan event ${index + 1} has an invalid entryEnabled.`);
+    }
+    if (candidate.photoDisposition !== 'preserve-open'
+      && candidate.photoDisposition !== 'restore-scheduled'
+      && candidate.photoDisposition !== 'remain-paused') {
+      throw new TypeError(`Plan event ${index + 1} has an invalid photoDisposition.`);
+    }
+    const expectedDisposition = candidate.uploadsEnabled
+      ? 'preserve-open'
+      : candidate.entryEnabled && (candidate.expectedEventStartAt as string) > candidate.inventoryAt
+        ? 'restore-scheduled'
+        : 'remain-paused';
+    if (candidate.photoDisposition !== expectedDisposition) {
+      throw new TypeError(`Plan event ${index + 1} has an inconsistent photoDisposition.`);
+    }
     if (seenIds.has(candidate.id as string)) {
       throw new TypeError(`Plan contains duplicate event ID ${JSON.stringify(candidate.id)}.`);
     }
@@ -332,6 +441,7 @@ export function verifyBackfillPlan(
   rows: InventoryRow[],
   options: VerificationOptions = {},
 ): VerificationResult {
+  const stage = options.stage ?? 'final';
   assertPlan(plan);
 
   const rowsById = new Map<string, InventoryRow[]>();
@@ -370,15 +480,17 @@ export function verifyBackfillPlan(
     let sourceMatches = true;
     const sourceFields: Array<{
       field: InventorySourceField;
-      expected: string | null;
+      expected: string | number | null;
     }> = [
       { field: 'event_date', expected: event.eventDate },
       { field: 'event_timezone', expected: event.eventTimezone },
       { field: 'rsvp_deadline_at', expected: event.rsvpDeadlineAt },
+      { field: 'entry_enabled', expected: event.entryEnabled ? 1 : 0 },
     ];
     for (const { field, expected } of sourceFields) {
       const rawActual = row[field];
-      const actual = typeof rawActual === 'string' || rawActual === null ? rawActual : null;
+      const actual = typeof rawActual === 'string' || typeof rawActual === 'number'
+        || rawActual === null ? rawActual : null;
       if (Object.hasOwn(row, field) && rawActual === expected) continue;
       sourceMatches = false;
       issues.push({
@@ -390,10 +502,49 @@ export function verifyBackfillPlan(
       });
     }
 
+    let photoStateMatches = true;
+    const expectedCapability = expectedUploadsEnabled(event, stage) ? 1 : 0;
+    const rawCapability = row.uploads_enabled;
+    const actualCapability = rawCapability === 0 || rawCapability === 1 ? rawCapability : null;
+    if (actualCapability !== expectedCapability) {
+      photoStateMatches = false;
+      issues.push({
+        id: event.id,
+        kind: 'capability-mismatch',
+        field: 'uploads_enabled',
+        expected: expectedCapability,
+        actual: actualCapability,
+      });
+    }
+
+    if (event.photoDisposition === 'preserve-open') {
+      const rawPhotoOpenFrom = row.photos_open_from;
+      const actualPhotoOpenFrom = typeof rawPhotoOpenFrom === 'string'
+        ? rawPhotoOpenFrom
+        : null;
+      if (!actualPhotoOpenFrom || !UTC_ISO_INSTANT_PATTERN.test(actualPhotoOpenFrom)) {
+        photoStateMatches = false;
+        issues.push({
+          id: event.id,
+          kind: 'photo-open-not-preserved',
+          expected: 'UTC ISO instant',
+          actual: actualPhotoOpenFrom,
+        });
+      }
+    } else if (!Object.hasOwn(row, 'photos_open_from') || row.photos_open_from !== null) {
+      photoStateMatches = false;
+      issues.push({
+        id: event.id,
+        kind: 'photo-state-mismatch',
+        expected: null,
+        actual: typeof row.photos_open_from === 'string' ? row.photos_open_from : null,
+      });
+    }
+
     const actualValue = row.event_start_at;
     const actual = typeof actualValue === 'string' ? actualValue : null;
     if (actual === event.expectedEventStartAt) {
-      if (sourceMatches) verifiedCount += 1;
+      if (sourceMatches && photoStateMatches) verifiedCount += 1;
       continue;
     }
 
@@ -487,8 +638,8 @@ function optionValue(args: string[], name: string): string {
 function usage(): string {
   return [
     'Usage:',
-    '  event-start-backfill.ts plan --input <inventory.json> --plan <plan.json> --sql <backfill.sql>',
-    '  event-start-backfill.ts verify --plan <plan.json> --input <post-inventory.json> [--require-predeploy-completeness] [--require-no-sentinel]',
+    '  event-start-backfill.ts plan --input <inventory.json> --plan <plan.json> --sql <backfill.sql> --post-deploy-sql <finalize.sql>',
+    '  event-start-backfill.ts verify --plan <plan.json> --input <post-inventory.json> [--stage <predeploy|final>] [--require-predeploy-completeness] [--require-no-sentinel]',
     '  event-start-backfill.ts freeze --install <install.sql> --remove <remove.sql>',
     '  event-start-backfill.ts verify-freeze --input <trigger-inventory.json> --expect <installed|absent>',
   ].join('\n');
@@ -509,6 +660,15 @@ function issueMessage(issue: VerificationIssue): string {
   }
   if (issue.kind === 'source-mismatch') {
     return `${issue.id}: ${issue.field} changed after planning; expected ${issue.expected ?? 'NULL'}, found ${issue.actual ?? 'NULL or missing'}; generate and review a fresh plan`;
+  }
+  if (issue.kind === 'capability-mismatch') {
+    return `${issue.id}: planned photo capability is ${issue.expected}, found ${issue.actual ?? 'NULL or missing'}; keep the freeze installed and do not deploy`;
+  }
+  if (issue.kind === 'photo-open-not-preserved') {
+    return `${issue.id}: photo delivery was enabled before planning but photos_open_from is not a UTC ISO instant; keep the freeze installed and do not deploy`;
+  }
+  if (issue.kind === 'photo-state-mismatch') {
+    return `${issue.id}: scheduled or paused photo state requires photos_open_from NULL; keep the freeze installed and do not deploy`;
   }
   if (issue.kind === 'unplanned-non-sentinel') {
     return `${issue.id}: non-deleted event was not in the plan and has non-sentinel start ${issue.actual ?? 'NULL or unreadable'}; repeat inventory and planning before deployment`;
@@ -549,12 +709,14 @@ export function runCli(args: string[]): number {
     const inputPath = optionValue(options, '--input');
     const planPath = optionValue(options, '--plan');
     const sqlPath = optionValue(options, '--sql');
+    const postDeploySqlPath = optionValue(options, '--post-deploy-sql');
     const rows = parseInventoryPayload(decodeJsonFile(inputPath));
     const artifacts = buildBackfillArtifacts(rows);
     writeFileSync(planPath, artifacts.planJson, 'utf8');
     writeFileSync(sqlPath, artifacts.sql, 'utf8');
+    writeFileSync(postDeploySqlPath, artifacts.postDeploySql, 'utf8');
     console.log(
-      `Planned ${artifacts.plan.events.length} event start${artifacts.plan.events.length === 1 ? '' : 's'}; wrote ${planPath} and ${sqlPath}. No database command was run.`,
+      `Planned ${artifacts.plan.events.length} event start${artifacts.plan.events.length === 1 ? '' : 's'}; wrote ${planPath}, ${sqlPath}, and ${postDeploySqlPath}. No database command was run.`,
     );
     return 0;
   }
@@ -565,9 +727,15 @@ export function runCli(args: string[]): number {
     const plan = decodeJsonFile(planPath);
     assertPlan(plan);
     const rows = parseInventoryPayload(decodeJsonFile(inputPath));
+    const stageIndex = options.indexOf('--stage');
+    const rawStage = stageIndex < 0 ? 'final' : options[stageIndex + 1];
+    if (rawStage !== 'predeploy' && rawStage !== 'final') {
+      throw new TypeError('--stage must be either predeploy or final.');
+    }
     const result = verifyBackfillPlan(plan, rows, {
       requireNoSentinel: options.includes('--require-no-sentinel'),
       requirePredeployCompleteness: options.includes('--require-predeploy-completeness'),
+      stage: rawStage,
     });
     if (!result.ok) {
       console.error(`Verification blocked: ${result.issues.length} planned event start issue${result.issues.length === 1 ? '' : 's'}.`);

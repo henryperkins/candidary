@@ -33,7 +33,7 @@ unreplaced build literal, or malformed digest produces `null`; it must never deg
 - `build_sha` — 40 lowercase hexadecimal characters.
 - `guest_journey_version` — positive integer matching `config/release.json`.
 - `migration_manifest_sha256` — 64 lowercase hexadecimal characters for the checked-in migration
-  contents, not the filename-only fresh-D1 ledger digest.
+  contents after canonical CRLF-to-LF normalization, not the filename-only fresh-D1 ledger digest.
 - `evidence_manifest_sha256` — SHA-256 of the exact canonical local candidate-manifest bytes.
 - `physical_evidence_refs_json` — a nonempty JSON array of redacted evidence references.
 - `certified_at` — canonical UTC instant with millisecond precision.
@@ -141,6 +141,11 @@ surface through its own reception. There is deliberately no pre-start control th
 at all — a host who wants photo delivery off for the event does it after the start, when the effect is
 visible to them.
 
+If a host pauses after the start and then moves the event start back into the future, the guarded
+settings write returns photo delivery to `scheduled`: it restores capability and clears any manual
+opening stamp. It does so only while the printed entry remains enabled; an irreversible entry disable
+continues to win.
+
 A stale or illegal transition — most often a manager page that loaded before the start sending a
 pre-start action after it — is the existing `VALIDATION_FAILED` envelope at HTTP 409, telling the host
 to reload. No new error code was added for it.
@@ -233,7 +238,7 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
 - `EVENT_EXPIRED` on a scan — the printed credential is valid but the event's internal guest grant has expired. The event's own guest window has ended; nothing about the QR is wrong. (`GUEST_LINK_UNAVAILABLE` is retired: the route that raised it was replaced by `GET /api/manage/events/:eventId/entry`, and no code path emits it any more.)
 - `RSVP_UNAVAILABLE` — RSVP is disabled or paused for this event.
-- `RSVP_CLOSED` — one of three has passed: the event deadline, the session's captured write deadline, or the event start. Before the start a prior response is still readable and an already committed idempotency key still replays its receipt. At and after `event_start_at` every guest RSVP route is unavailable — reads and idempotent replays included — because RSVP has left the guest experience entirely. A host may still correct the household throughout.
+- `RSVP_CLOSED` — the event has started. Before the start, deadline and session-window write races use the conflict/session envelopes below; a prior response remains readable and an already committed idempotency key can replay its receipt. At and after `event_start_at` every guest RSVP route is unavailable — reads and idempotent replays included — because RSVP has left the guest experience entirely. A host may still correct the household throughout.
 - `RSVP_SESSION_REQUIRED` — the household session is missing, expired, revoked, or archived. The guest looks the invitation up again.
 - `RSVP_HOUSEHOLD_CONFLICT` — the version the write was built on is no longer current, and nothing was written. The response carries a message only, deliberately: the caller re-reads the household (`GET /api/event/:slug/rsvp/household`, or the manager household detail) and submits again against the current version. A host roster edit that changes who is in a household reports this too, rather than a validation failure.
 - `RSVP_SUBMISSION_CONFLICT` — a previously successful idempotency key was reused with different content. Use a new key rather than editing the old payload.

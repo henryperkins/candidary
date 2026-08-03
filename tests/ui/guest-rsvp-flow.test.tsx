@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -63,6 +63,12 @@ function requestPath(input: RequestInfo | URL) {
 
 function sessionRequired() {
   return failure('RSVP_SESSION_REQUIRED', 'Find your invitation to continue.', 401);
+}
+
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((complete) => { resolve = complete; });
+  return { promise, resolve };
 }
 
 async function openInvitation(user: ReturnType<typeof userEvent.setup>, name = 'Taylor Morgan') {
@@ -138,6 +144,101 @@ describe('household RSVP guest flow', () => {
     await user.click(screen.getByRole('button', { name: 'Find my invitation' }));
     await screen.findByRole('heading', { name: 'Your household RSVP' });
     expect(localStorage.getItem('candidary_guest_name')).toBe('Taylor Morgan');
+  });
+
+  it('ignores a lookup that finishes after RSVP becomes read-only', async () => {
+    const pendingLookup = deferredResponse();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/lookup')) return pendingLookup.promise;
+      if (path.endsWith('/rsvp/household')) return sessionRequired();
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    const rendered = render(<GuestRsvpFlow event={event} presentation="primary" />);
+    await openInvitation(user);
+
+    rendered.rerender(<GuestRsvpFlow
+      event={{ ...event, phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only' }}
+      presentation="embedded"
+    />);
+    expect(await screen.findByRole('heading', {
+      name: 'Find your household to view a saved response.',
+    })).toBeVisible();
+
+    await act(async () => {
+      pendingLookup.resolve(await success({ status: 'matched', household }));
+      await pendingLookup.promise;
+      await new Promise((complete) => setTimeout(complete, 0));
+    });
+
+    expect(screen.getByRole('heading', {
+      name: 'Find your household to view a saved response.',
+    })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Submit RSVP' })).not.toBeInTheDocument();
+  });
+
+  it('ignores a submission that finishes after RSVP becomes read-only', async () => {
+    const pendingSubmit = deferredResponse();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/household') && init?.method === 'PUT') {
+        return pendingSubmit.promise;
+      }
+      if (path.endsWith('/rsvp/household')) return success({ household });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    const rendered = render(<GuestRsvpFlow event={event} presentation="primary" />);
+    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await selectAllAttendance(user, 'Not attending');
+    await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
+
+    rendered.rerender(<GuestRsvpFlow
+      event={{ ...event, phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only' }}
+      presentation="embedded"
+    />);
+    expect(await screen.findByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+
+    await act(async () => {
+      pendingSubmit.resolve(await success({
+        household: { ...household, firstRespondedAt: '2026-08-03T12:00:00.000Z' },
+        committedVersion: 5,
+        replayed: false,
+      }));
+      await pendingSubmit.promise;
+      await new Promise((complete) => setTimeout(complete, 0));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+      expect(screen.queryByRole('button', { name: 'Submit RSVP' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('stays closed when a boundary refusal also closes the household read', async () => {
+    let householdReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/household') && init?.method === 'PUT') {
+        return failure('RSVP_HOUSEHOLD_CONFLICT', 'The invitation changed.', 409);
+      }
+      if (path.endsWith('/rsvp/household')) {
+        householdReads += 1;
+        return householdReads === 1
+          ? success({ household })
+          : failure('RSVP_CLOSED', 'RSVP closed when the event started.', 409);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    render(<GuestRsvpFlow event={event} presentation="primary" />);
+    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await selectAllAttendance(user, 'Not attending');
+    await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
+
+    expect(await screen.findByRole('heading', { name: 'RSVP is closed' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Submit RSVP' })).not.toBeInTheDocument();
   });
 
   it('keeps no-match generic and moves ambiguity to a second exact-name field without roster choices', async () => {

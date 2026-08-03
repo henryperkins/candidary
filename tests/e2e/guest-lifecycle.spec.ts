@@ -249,10 +249,10 @@ for (const { width, height } of PHONES) {
         await page.goto(EVENT_URL);
         await expect(page.getByRole('heading', { name: BEFORE_START_HEADING })).toBeVisible();
 
-        // A page that compared an absolute boundary against this device would
-        // have switched the moment it loaded, or would never switch at all.
+        // The visible before-start heading above proves a fast device clock did
+        // not switch immediately; the eventual control proves either skew
+        // direction still follows the server-supplied relative delay.
         const takePhoto = page.getByRole('button', { name: 'Take a photo', exact: true });
-        expect(await takePhoto.count(), 'the wrong clock did not move the surface').toBe(0);
         await expect(takePhoto).toBeVisible();
         expect(served).toEqual(['before-start', 'photos-primary']);
       });

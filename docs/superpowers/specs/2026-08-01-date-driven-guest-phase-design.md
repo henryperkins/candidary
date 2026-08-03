@@ -521,11 +521,11 @@ row uses the exact two sentences in §8.5.
 390 px.
 
 `docs/operations.md` needs real edits despite no new error code. Its "RSVP and
-photo entry" section describes the old host controls and deadline behavior, and
-the support-code meanings move: `RSVP_CLOSED` currently reads "the earlier of the
-event deadline and the session's captured write deadline has passed," and event
-start becomes a third condition. The runbook must document the scheduled opening
-and the four explicit actions.
+photo entry" section describes the old host controls and deadline behavior. The
+support-code meanings distinguish deadline/version write conflicts and expired
+sessions from `RSVP_CLOSED`, which now means the event start has made every guest
+RSVP route unavailable. The runbook must document the scheduled opening and the
+four explicit actions.
 
 `docs/deployment.md` carries the release gate.
 
@@ -545,20 +545,25 @@ for the backfill's zone error is insufficient.
 
 The deterministic rollout order is:
 
-1. Before applying `0010`, inventory every non-deleted event ID and calculate its
-   expected local-midnight start through `instantForLocalDateTime`. Resolve any
-   same-day deadline rows before continuing.
+1. Before applying `0010`, inventory every non-deleted event ID, its photo
+   capability, printed-entry state, database inventory instant, and schedule sources used to calculate its expected
+   local-midnight start through `instantForLocalDateTime`. Resolve any same-day
+   deadline rows before continuing.
 2. Apply `0010` while the old Worker is still serving. Its UTC-midnight values are
    not yet interpreted as lifecycle starts.
-3. Data-aware backfill and verify every inventoried ID against its expected IANA
-   instant. The new Worker is not deployed while any inventoried row still holds
-   the approximate value.
-4. Deploy the compatible Worker. An event created by the old Worker after the
+3. Freeze the inventoried schedule sources, data-aware backfill every ID, preserve photo delivery for rows the old Worker considers
+   open, and verify the exact IANA instant plus the preserved photo-open stamp. Leave legacy
+   uploads-off rows unchanged while the old Worker is serving so they cannot open early.
+   The new Worker is not deployed while any inventoried row still holds the
+   approximate value or has lost that open-delivery proof.
+4. Deploy the compatible Worker, then apply the separately generated capability finalization that
+   restores enabled future legacy entries to `scheduled`; never restore a disabled-entry tombstone.
+   An event created by the old Worker after the
    migration has the epoch default; the new Worker recognizes that sentinel and
    temporarily retains the old boolean/deadline phase rules and RSVP route
    availability for that row.
 5. Run a final epoch-sentinel scan. Validate each gap row's deadline, data-aware
-   backfill rows that satisfy the invariant, and stop for host or reviewed data
+   backfill and capability-finalize rows that satisfy the invariant, and stop for host or reviewed data
    correction if one does not. Verify that no non-deleted event retains the
    sentinel before closing the release gate.
 

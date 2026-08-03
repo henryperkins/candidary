@@ -15,7 +15,6 @@ import {
   bootstrapRelease,
   executeRelease,
   finalizeCandidateManifest,
-  parseReleaseArgs,
   runCandidate,
   writeCandidateEvidence,
   type CandidateReleaseModule,
@@ -219,6 +218,7 @@ interface InnerOptions {
   clientIdentityLeak?: boolean;
   forbiddenSecretAt?: 'worker' | 'client' | 'dry-run';
   invalidMigrationReport?: boolean;
+  generatedTypesMissing?: boolean;
   wranglerLinkEscape?: boolean;
   dryRunLinkEscape?: boolean;
   candidateIdentityUnavailable?: boolean;
@@ -287,7 +287,7 @@ async function createInnerFixture(options: InnerOptions = {}): Promise<InnerFixt
   const migrationBytes = 'CREATE TABLE fixture (id TEXT PRIMARY KEY);\n';
   await put(candidateRoot, 'migrations/0001_initial.sql', migrationBytes);
   await put(candidateRoot, 'package-lock.json', '{"lockfileVersion":3}\n');
-  await put(candidateRoot, 'config/release.json', '{"evidenceSchemaVersion":1,"guestJourneyVersion":1}\n');
+  await put(candidateRoot, 'config/release.json', '{"guestJourneyVersion":1}\n');
   await put(candidateRoot, 'wrangler.jsonc', `${JSON.stringify(sourceWranglerConfig, null, 2)}\n`);
   const migrationFileSha = independentSha(migrationBytes);
   const migrationDigest = independentSha(independentCanonical([
@@ -381,7 +381,9 @@ async function createInnerFixture(options: InnerOptions = {}): Promise<InnerFixt
       const id = commandId(input.executable, input.args);
       calls.push({ ...input, args: [...input.args], env: { ...input.env } });
       if (id === 'npm-ci') await installDependencies();
-      if (id === 'verify-bindings') await put(candidateRoot, 'worker-configuration.d.ts', '// generated binding types\n');
+      if (id === 'verify-bindings' && !options.generatedTypesMissing) {
+        await put(candidateRoot, 'worker-configuration.d.ts', '// generated binding types\n');
+      }
       if (id === 'unit-ui' && options.missingReport !== id) {
         await writeFile(unitReport, options.invalidReport === id ? '{' : JSON.stringify(vitestReport(4, 3, 0, 1)), 'utf8');
       }
@@ -509,9 +511,11 @@ describe('release bootstrap isolation', () => {
     ['short base SHA', ['--sha', CANDIDATE_SHA, '--base-sha', 'abc']],
     ['unapproved full ancestor', ['--sha', CANDIDATE_SHA, '--base-sha', 'c'.repeat(40)]],
   ])('rejects %s before reserving a run', async (_label, args) => {
+    const callerRoot = await temporaryRoot();
     const adapters = bootstrapAdapters();
-    expect(() => parseReleaseArgs(args)).toThrow();
+    await expect(bootstrapRelease(args, callerRoot, adapters)).rejects.toThrow();
     expect(adapters.generatedIds).toBe(0);
+    expect(adapters.calls).toHaveLength(0);
   });
 
   it('rejects non-commit objects and a non-ancestor approved base before worktree creation', async () => {
@@ -933,6 +937,7 @@ describe('immutable candidate command runner', () => {
     ['linked Wrangler directory', { wranglerLinkEscape: true }, 'evidence_invalid', 'tool_version_invalid'],
     ['linked dry-run directory', { dryRunLinkEscape: true }, 'evidence_invalid', 'artifact_collection_invalid'],
     ['invalid migration result', { invalidMigrationReport: true }, 'evidence_invalid', 'migration_verification_invalid'],
+    ['missing generated binding types', { generatedTypesMissing: true }, 'evidence_invalid', 'binding_collection_invalid'],
   ] as const)('maps %s deterministically', async (_label, options, failureCode, observation) => {
     const fixture = await createInnerFixture(options);
     const manifest = finalizeCandidateManifest(await runCandidate(fixture.request, fixture.adapters), true);

@@ -194,18 +194,45 @@ export function assertFreshD1CommandPlan(
   plan: readonly FreshD1Command[],
   input: FreshD1CommandPlanInput,
 ): void {
-  const expected = buildFreshD1CommandPlan(input);
-  if (plan.length !== expected.length) throw new Error('Fresh-D1 command plan has the wrong length.');
+  const expectedIds: FreshD1CommandId[] = ['apply', 'invariants'];
+  const expectedArgs = [
+    [
+      input.wranglerCliPath,
+      'd1',
+      'migrations',
+      'apply',
+      'DB',
+      '--config',
+      'wrangler.jsonc',
+      '--local',
+      '--persist-to',
+      input.freshD1,
+    ],
+    [
+      input.wranglerCliPath,
+      'd1',
+      'execute',
+      'DB',
+      '--config',
+      'wrangler.jsonc',
+      '--local',
+      '--persist-to',
+      input.freshD1,
+      '--json',
+      '--command',
+      READ_ONLY_INVARIANT_QUERY,
+    ],
+  ];
+  if (plan.length !== expectedIds.length) throw new Error('Fresh-D1 command plan has the wrong length.');
   for (const [index, command] of plan.entries()) {
-    const required = expected[index]!;
-    if (command.id !== required.id
-      || command.executable !== required.executable
-      || command.cwd !== required.cwd
+    if (command.id !== expectedIds[index]
+      || command.executable !== input.nodeExecPath
+      || command.cwd !== input.candidateRoot
       || command.shell !== false
-      || command.captureStdout !== required.captureStdout
+      || command.captureStdout !== (index === 1)
       || command.env.CI !== '1'
       || Object.keys(command.env).length !== 1
-      || !exactArguments(command.args, required.args)) {
+      || !exactArguments(command.args, expectedArgs[index]!)) {
       throw new Error(`Fresh-D1 command ${index + 1} does not match the local-only plan.`);
     }
   }
@@ -479,13 +506,45 @@ function publishReport(reportFile: string, report: MigrationVerification): void 
   }
 }
 
+const FRESH_D1_ENVIRONMENT_NAMES = new Set([
+  'ALLUSERSPROFILE', 'APPDATA', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)',
+  'COMMONPROGRAMW6432', 'COMPUTERNAME', 'COMSPEC', 'HOMEDRIVE', 'HOMEPATH',
+  'HOME', 'LANG', 'LANGUAGE', 'LOCALAPPDATA', 'LOGNAME', 'NODE_EXTRA_CA_CERTS',
+  'NO_PROXY', 'NUMBER_OF_PROCESSORS', 'NPM_CONFIG_CACHE', 'OPENSSL_CONF', 'OS',
+  'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'PROGRAMDATA', 'PROGRAMFILES',
+  'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PUBLIC', 'SHELL', 'SSL_CERT_DIR',
+  'SSL_CERT_FILE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'TMPDIR',
+  'TZ', 'USER', 'USERNAME', 'USERPROFILE', 'WINDIR', 'XDG_CACHE_HOME',
+]);
+
+export function freshD1ProcessEnvironment(
+  source: NodeJS.ProcessEnv,
+  commandEnvironment: FreshD1Command['env'],
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(source)) {
+    const upper = name.toUpperCase();
+    if (value !== undefined && (
+      FRESH_D1_ENVIRONMENT_NAMES.has(upper)
+      || upper.startsWith('LC_')
+      || upper === 'HTTP_PROXY'
+      || upper === 'HTTPS_PROXY'
+      || upper === 'ALL_PROXY'
+    )) {
+      environment[name] = value;
+    }
+  }
+  environment.WRANGLER_SEND_METRICS = 'false';
+  return { ...environment, ...commandEnvironment };
+}
+
 const defaultAdapters: FreshD1Adapters = {
   nodeExecPath: process.execPath,
   run(command) {
     const result = spawnSync(command.executable, command.args, {
       cwd: command.cwd,
       encoding: command.captureStdout ? 'utf8' : undefined,
-      env: { ...process.env, ...command.env },
+      env: freshD1ProcessEnvironment(process.env, command.env),
       shell: command.shell,
       stdio: command.captureStdout ? ['ignore', 'pipe', 'inherit'] : 'inherit',
     });

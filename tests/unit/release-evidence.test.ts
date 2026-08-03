@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -141,8 +141,11 @@ function passedManifest(): CandidateManifest {
     independentCanonical([{ path: migrationFile.path, sha256: migrationFile.sha256 }]),
   );
   const worker = { path: 'dist/candidary/index.js', bytes: 20, sha256: 'd'.repeat(64) };
+  const deployWranglerConfig = {
+    path: 'dist/candidary/wrangler.json', bytes: 40, sha256: '4'.repeat(64),
+  };
   const client = [{ path: 'dist/client/index.html', bytes: 30, sha256: 'e'.repeat(64) }];
-  const artifactDigest = independentSha(independentCanonical({ worker, client }));
+  const artifactDigest = independentSha(independentCanonical({ deployWranglerConfig, worker, client }));
   const topologyDigest = independentSha(independentCanonical(topology));
   const gitSha = 'a'.repeat(40);
   const gitTree = 'b'.repeat(40);
@@ -208,6 +211,7 @@ function passedManifest(): CandidateManifest {
       generatedTypesSha256: '3'.repeat(64),
     },
     artifacts: {
+      deployWranglerConfig,
       worker,
       client,
       firstTreeSha256: artifactDigest,
@@ -273,7 +277,7 @@ describe('canonical evidence hashing', () => {
 });
 
 describe('migration manifests', () => {
-  it('sorts a gap-free sequence and changes only when exact bytes change', async () => {
+  it('sorts a gap-free sequence and changes when canonical SQL content changes', async () => {
     const root = await temporaryRoot();
     await put(root, 'migrations/0002_add_table.sql', 'two\r\n');
     await put(root, 'migrations/0001_initial.sql', new Uint8Array([0xef, 0xbb, 0xbf, 0x31]));
@@ -292,6 +296,18 @@ describe('migration manifests', () => {
 
     await put(root, 'migrations/0002_add_table.sql', 'twO\r\n');
     expect(collectMigrationManifest(root).sha256).not.toBe(first.sha256);
+  });
+
+  it('hashes LF and CRLF checkouts of the same migration identically', async () => {
+    const root = await temporaryRoot();
+    await put(root, 'migrations/0001_initial.sql', 'CREATE TABLE example (\n  id TEXT PRIMARY KEY\n);\n');
+    const lf = collectMigrationManifest(root);
+
+    await put(root, 'migrations/0001_initial.sql', 'CREATE TABLE example (\r\n  id TEXT PRIMARY KEY\r\n);\r\n');
+    const crlf = collectMigrationManifest(root);
+
+    expect(crlf).toEqual(lf);
+    expect(lf.files[0]?.bytes).toBe(48);
   });
 
   it.each([
@@ -351,16 +367,60 @@ describe('deployable artifacts', () => {
   it('normalizes logical paths and hashes a deterministic worker/client tree', async () => {
     const root = await validBuild();
     const first = collectDeployableArtifacts(root);
+    expect(first.deployWranglerConfig.path).toBe('dist/candidary/wrangler.json');
     expect(first.worker.path).toBe('dist/candidary/chunks/worker.js');
     expect(first.client.map((file) => file.path)).toEqual([
       'dist/client/assets/app.js',
       'dist/client/index.html',
     ]);
     expect(first.treeSha256).toBe(
-      independentSha(independentCanonical({ worker: first.worker, client: first.client })),
+      independentSha(independentCanonical({
+        deployWranglerConfig: first.deployWranglerConfig,
+        worker: first.worker,
+        client: first.client,
+      })),
     );
     await put(root, 'dist/client/assets/app.js', 'oK');
     expect(collectDeployableArtifacts(root).treeSha256).not.toBe(first.treeSha256);
+  });
+
+  it('binds every deployment-target value into the deployable tree', async () => {
+    const root = await validBuild();
+    const first = collectDeployableArtifacts(root);
+    await put(
+      root,
+      'dist/candidary/wrangler.json',
+      JSON.stringify({
+        main: 'chunks\\worker.js',
+        assets: { directory: '../client' },
+        d1_databases: [{ binding: 'DB', database_id: 'different-production-target' }],
+      }),
+    );
+
+    const changed = collectDeployableArtifacts(root);
+    expect(changed.worker).toEqual(first.worker);
+    expect(changed.client).toEqual(first.client);
+    expect(changed.deployWranglerConfig.sha256).not.toBe(first.deployWranglerConfig.sha256);
+    expect(changed.treeSha256).not.toBe(first.treeSha256);
+  });
+
+  it('excludes only checkout-local Wrangler provenance paths from the deploy config', async () => {
+    const root = await validBuild();
+    const configPath = join(root, 'dist/candidary/wrangler.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    await put(root, 'dist/candidary/wrangler.json', JSON.stringify({
+      ...config,
+      configPath: 'C:\\first-checkout\\wrangler.jsonc',
+      userConfigPath: 'C:\\first-checkout\\wrangler.jsonc',
+    }));
+    const first = collectDeployableArtifacts(root);
+    await put(root, 'dist/candidary/wrangler.json', JSON.stringify({
+      ...config,
+      configPath: 'D:\\second-checkout\\wrangler.jsonc',
+      userConfigPath: 'D:\\second-checkout\\wrangler.jsonc',
+    }));
+
+    expect(collectDeployableArtifacts(root).treeSha256).toBe(first.treeSha256);
   });
 
   it.each([
@@ -386,14 +446,14 @@ describe('deployable artifacts', () => {
     expect(() => collectDeployableArtifacts(root)).toThrow();
     await rm(join(root, 'dist/client/assets/.env.production'));
 
-    await put(root, 'outside.txt', 'outside');
-    const link = join(root, 'dist/client/assets/linked.txt');
-    try {
-      await symlink(join(root, 'outside.txt'), link, 'file');
-      expect(() => collectDeployableArtifacts(root)).toThrow();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
-    }
+    await put(root, 'outside/escaped.txt', 'outside');
+    const link = join(root, 'dist/client/assets/linked-directory');
+    await symlink(
+      join(root, 'outside'),
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(() => collectDeployableArtifacts(root)).toThrow();
   });
 
   it('rejects an approved build root that is itself a directory link', async () => {

@@ -53,6 +53,7 @@ function managerLifecycleKey(event: EventView): string {
     event.eventStartTime,
     event.rsvpDeadlineAt,
     event.rsvpDeadlineDate,
+    event.photoIntakeRecheckAfterMs !== null,
   ]);
 }
 
@@ -154,6 +155,8 @@ export function ManagerPage() {
   // settings response cannot slip through before React commits the new entry
   // state. The full refresh later supplies the server's canonical timestamp.
   const entryDisabled = useRef(false);
+  const [photoIntakePending, setPhotoIntakePending] = useState(false);
+  const photoIntakePendingRef = useRef(false);
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
@@ -603,12 +606,20 @@ export function ManagerPage() {
   // after it: the refusal arrives as an ordinary manager notice telling the host
   // to reload.
   async function applyPhotoIntake(action: PhotoIntakeAction) {
-    const result = await eventWrite(() => api<{ event: EventView }>(`/api/manage/events/${eventId}/photo-intake`, {
-      method: 'POST', body: JSON.stringify({ action }),
-    }));
-    setEvent((current) => current
-      ? mergePhotoIntakeResponse(current, result.event, { entryDisabled: entryDisabled.current })
-      : result.event);
+    if (photoIntakePendingRef.current) return;
+    photoIntakePendingRef.current = true;
+    setPhotoIntakePending(true);
+    try {
+      const result = await eventWrite(() => api<{ event: EventView }>(`/api/manage/events/${eventId}/photo-intake`, {
+        method: 'POST', body: JSON.stringify({ action }),
+      }));
+      setEvent((current) => current
+        ? mergePhotoIntakeResponse(current, result.event, { entryDisabled: entryDisabled.current })
+        : result.event);
+    } finally {
+      photoIntakePendingRef.current = false;
+      setPhotoIntakePending(false);
+    }
   }
   async function reconcilePhotoIntakeAfterScheduleSave() {
     try {
@@ -900,6 +911,7 @@ export function ManagerPage() {
         <ManagerPhotoIntakePanel
           event={event}
           entryDisabled={entryDisabledAt !== null}
+          pending={photoIntakePending}
           onAction={(action) => void runManagerAction(() => applyPhotoIntake(action))}
         />
         <EventAppearanceEditor

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,7 +69,7 @@ interface Fixture {
 async function candidateFixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'candidary-deploy-test-'));
   roots.push(root);
-  await put(root, 'config/release.json', '{"evidenceSchemaVersion":1,"guestJourneyVersion":1}\n');
+  await put(root, 'config/release.json', '{"guestJourneyVersion":1}\n');
   await put(root, 'migrations/0001_initial.sql', 'select 1;\n');
   await put(root, 'dist/candidary/index.js', `worker-${SHA}\n`);
   await put(root, 'dist/client/index.html', '<!doctype html><title>Candidary</title>\n');
@@ -162,6 +162,7 @@ async function candidateFixture(): Promise<Fixture> {
       generatedTypesSha256: '3'.repeat(64),
     },
     artifacts: {
+      deployWranglerConfig: artifacts.deployWranglerConfig,
       worker: artifacts.worker,
       client: artifacts.client,
       firstTreeSha256: artifacts.treeSha256,
@@ -206,6 +207,7 @@ function fakeAdapters(fixture: Fixture, options: AdapterOptions = {}) {
   const adapters: DeployReleaseAdapters = {
     nodeExecPath: process.execPath,
     npmExecPath: fixture.npmCliPath,
+    environment: {},
     git(args) {
       if (args[0] === 'status') {
         const status = statusReads === 0 ? options.initialStatus ?? '' : options.finalStatus ?? '';
@@ -341,7 +343,9 @@ describe('guarded release deployment', () => {
       'npm-ci', 'build', 'verify-pwa-build', 'deploy',
     ]);
     expect(run.commands.every((command) => command.executable === process.execPath)).toBe(true);
-    expect(run.commands.every((command) => command.cwd === fixture.root && command.shell === false)).toBe(true);
+    expect(run.commands.slice(0, 3).every((command) => command.cwd === fixture.root && command.shell === false)).toBe(true);
+    expect(run.commands[3]!.cwd).not.toBe(fixture.root);
+    expect(run.commands[3]!.shell).toBe(false);
     expect(run.commands[0]!.args).toEqual([fixture.npmCliPath, 'ci']);
     expect(run.commands[1]!.args).toEqual([fixture.npmCliPath, 'run', 'build']);
     expect(run.commands[2]!.args).toEqual([fixture.npmCliPath, 'run', 'verify:pwa-build']);
@@ -358,14 +362,87 @@ describe('guarded release deployment', () => {
     expect(serialized).not.toMatch(/\.cmd|\bnpx\b|--dry-run|\bd1\b|secret/iu);
   });
 
+  it('deploys only an isolated snapshot of the verified artifact bytes', async () => {
+    const fixture = await candidateFixture();
+    const originalWorker = readFileSync(join(fixture.root, 'dist/candidary/index.js'), 'utf8');
+    const originalConfig = readFileSync(join(fixture.root, 'dist/candidary/wrangler.json'), 'utf8');
+    let deployRoot = '';
+    let deployedWorker = '';
+    let deployedConfig = '';
+    const run = fakeAdapters(fixture, {
+      onRun(command) {
+        if (command.id !== 'deploy') return;
+        deployRoot = command.cwd;
+        writeFileSync(join(fixture.root, 'dist/candidary/index.js'), 'swapped after verification\n', 'utf8');
+        writeFileSync(
+          join(fixture.root, 'dist/candidary/wrangler.json'),
+          JSON.stringify({ main: 'different.js', assets: { directory: '../client' } }),
+          'utf8',
+        );
+        deployedWorker = readFileSync(join(command.cwd, 'dist/candidary/index.js'), 'utf8');
+        deployedConfig = readFileSync(join(command.cwd, 'dist/candidary/wrangler.json'), 'utf8');
+      },
+    });
+
+    runDeployRelease({
+      candidateRoot: fixture.root,
+      sha: SHA,
+      manifestPath: fixture.manifestPath,
+    }, run.adapters);
+
+    expect(deployRoot).not.toBe(fixture.root);
+    expect(deployedWorker).toBe(originalWorker);
+    expect(JSON.parse(deployedConfig)).toEqual(JSON.parse(originalConfig));
+    expect(existsSync(deployRoot)).toBe(false);
+  });
+
+  it('withholds deployment credentials from every prerequisite process', async () => {
+    const fixture = await candidateFixture();
+    const run = fakeAdapters(fixture);
+    const deploymentEnvironment: NodeJS.ProcessEnv = {
+      PATH: 'C:\\tooling',
+      CLOUDFLARE_API_TOKEN: 'deploy-only',
+      SESSION_HMAC_KEY: 'worker-secret',
+      VITE_ACCIDENTAL_SECRET: 'client-visible',
+      UNRELATED_VALUE: 'not-needed-by-build',
+    };
+    (run.adapters as DeployReleaseAdapters & { environment: NodeJS.ProcessEnv }).environment =
+      deploymentEnvironment;
+
+    runDeployRelease({
+      candidateRoot: fixture.root,
+      sha: SHA,
+      manifestPath: fixture.manifestPath,
+    }, run.adapters);
+
+    for (const command of run.commands.slice(0, 3)) {
+      const environment = (command as DeployCommand & { env?: NodeJS.ProcessEnv }).env;
+      expect(environment).toMatchObject({
+        PATH: 'C:\\tooling',
+        CI: '1',
+        WRANGLER_SEND_METRICS: 'false',
+        CLOUDFLARE_VITE_FORCE_LOCAL: 'true',
+      });
+      expect(environment).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+      expect(environment).not.toHaveProperty('SESSION_HMAC_KEY');
+      expect(environment).not.toHaveProperty('VITE_ACCIDENTAL_SECRET');
+      expect(environment).not.toHaveProperty('UNRELATED_VALUE');
+    }
+    expect((run.commands[3] as DeployCommand & { env?: NodeJS.ProcessEnv }).env)
+      .toBe(deploymentEnvironment);
+  });
+
   it('fails closed when a deployment plan loses its exact config, strictness, or tag', async () => {
     const fixture = await candidateFixture();
     const input = {
       candidateRoot: fixture.root,
+      deployRoot: resolve(fixture.root, 'sealed-deploy'),
       sha: SHA,
       nodeExecPath: process.execPath,
       npmCliPath: fixture.npmCliPath,
       wranglerCliPath: fixture.wranglerCliPath,
+      prerequisiteEnv: {},
+      deployEnv: {},
     };
     const plan = buildDeploymentCommandPlan(input);
     expect(() => assertDeploymentCommandPlan(plan, input)).not.toThrow();

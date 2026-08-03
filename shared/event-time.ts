@@ -124,6 +124,15 @@ function parseCalendarDate(dateOnly: string): CalendarDate {
   return { year, month, day };
 }
 
+export function isCalendarDate(value: string): boolean {
+  try {
+    parseCalendarDate(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function nextCalendarDate(date: CalendarDate): CalendarDate {
   const next = new Date(Date.UTC(date.year, date.month - 1, date.day) + 24 * 60 * 60 * 1000);
   return {

@@ -32,6 +32,7 @@ const releaseEvidence: typeof ReleaseEvidenceModule = await import(releaseEviden
 const assertRedactedCandidateManifest: typeof ReleaseEvidenceModule.assertRedactedCandidateManifest =
   releaseEvidence.assertRedactedCandidateManifest;
 const {
+  CANDIDATE_MANIFEST_SCHEMA_VERSION,
   canonicalJson,
   collectDeployableArtifacts,
   collectMigrationManifest,
@@ -947,7 +948,7 @@ export async function runCandidate(
   const startedAt = adapters.now();
   const manifest: CandidateManifest = {
     kind: 'candidary.release-candidate',
-    schemaVersion: 1,
+    schemaVersion: CANDIDATE_MANIFEST_SCHEMA_VERSION,
     status: 'failed',
     failureCode: null,
     failureObservation: null,
@@ -1211,6 +1212,7 @@ export async function runCandidate(
       try {
         const first = collectDeployableArtifacts(request.candidateRoot);
         manifest.artifacts = {
+          deployWranglerConfig: first.deployWranglerConfig,
           worker: first.worker,
           client: first.client,
           firstTreeSha256: first.treeSha256,

@@ -121,6 +121,7 @@ describe('migration 0011', () => {
     ['missing milliseconds', '2026-08-02T13:00:00Z'],
     ['offset', '2026-08-02T08:00:00.000-05:00'],
     ['malformed', 'not-a-timestamp'],
+    ['structurally canonical but impossible', '2026-99-99T99:99:99.999Z'],
   ])('rejects a %s certification timestamp', async (_label, certifiedAt) => {
     await expect(insert({ ...valid, certifiedAt })).rejects.toThrow();
   });

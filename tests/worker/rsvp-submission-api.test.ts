@@ -411,6 +411,52 @@ describe('the event start', () => {
       SELECT COUNT(*) AS count FROM rsvp_submission_receipts WHERE household_id = ?
     `).bind(session.household.id).first('count')).toBe(0);
   });
+
+  it('uses the database clock when the request crosses the event start', async () => {
+    const { access, session } = await opened();
+    const databaseNow = Date.now();
+    const staleRequestTime = new Date(databaseNow - 60_000);
+    const startBetweenRouteAndWrite = new Date(databaseNow - 30_000).toISOString();
+    await env.DB.prepare('UPDATE events SET event_start_at = ? WHERE id = ?')
+      .bind(startBetweenRouteAndWrite, access.event.id).run();
+    const auth = await new RsvpAuthService(testEnv).resolve(session.token);
+
+    await expect(new RsvpService(testEnv).submitHousehold(auth, {
+      version: 1,
+      idempotencyKey: 'crossed-start-before-sql',
+      invitees: answers(session.household, 'attending', 'Sam Rivera'),
+    }, staleRequestTime)).rejects.toMatchObject({ code: 'RSVP_HOUSEHOLD_CONFLICT' });
+
+    expect((await storedAttendance(session.household.id)).every((row) => row[2] === 'pending')).toBe(true);
+    expect(await env.DB.prepare('SELECT version FROM rsvp_households WHERE id = ?')
+      .bind(session.household.id).first('version')).toBe(1);
+  });
+
+  it('database-gates a receipt replay that crosses the event start', async () => {
+    const { access, session } = await opened();
+    const request = {
+      version: 1,
+      idempotencyKey: 'replay-crossed-start',
+      invitees: answers(session.household, 'attending', 'Sam Rivera'),
+    };
+    await submit(access, session, request);
+
+    const databaseNow = Date.now();
+    const staleRequestTime = new Date(databaseNow - 60_000);
+    const startBetweenAttempts = new Date(databaseNow - 30_000).toISOString();
+    await env.DB.prepare('UPDATE events SET event_start_at = ? WHERE id = ?')
+      .bind(startBetweenAttempts, access.event.id).run();
+    const auth = await new RsvpAuthService(testEnv).resolve(session.token);
+
+    await expect(new RsvpService(testEnv).submitHousehold(
+      auth,
+      request,
+      staleRequestTime,
+    )).rejects.toMatchObject({ code: 'RSVP_CLOSED' });
+
+    expect(await env.DB.prepare('SELECT version FROM rsvp_households WHERE id = ?')
+      .bind(session.household.id).first('version')).toBe(2);
+  });
 });
 
 describe('replay and conflict', () => {

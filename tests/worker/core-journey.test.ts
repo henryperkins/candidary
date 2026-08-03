@@ -136,6 +136,7 @@ describe('server-owned event configuration and phase', () => {
   it.each<[string, Record<string, unknown>, string]>([
     ['an invented zone', { eventTimezone: 'Central Wedding Time' }, 'eventTimezone'],
     ['a fixed offset', { eventTimezone: '-05:00' }, 'eventTimezone'],
+    ['an impossible event date', { eventDate: '2026-02-30' }, 'eventDate'],
     ['an impossible date', { rsvpDeadlineDate: '2026-02-30' }, 'rsvpDeadlineDate'],
     ['a malformed date', { rsvpDeadlineDate: '2026-9-5' }, 'rsvpDeadlineDate'],
     ['a deadline after the event', { rsvpDeadlineDate: '2026-09-20' }, 'rsvpDeadlineDate'],
@@ -320,6 +321,35 @@ describe('server-owned event configuration and phase', () => {
     });
   });
 
+  it('preserves the existing wall-clock start for a stale settings payload', async () => {
+    const created = await create({ eventStartTime: '17:30' });
+    const body = await created.json<any>();
+    const manager = { ...cookiesFrom(created), csrf: body.data.csrfToken as string };
+
+    const response = await createApp().request(`/api/manage/events/${body.data.event.id}/settings`, {
+      method: 'PATCH',
+      headers: writeHeaders(manager),
+      body: JSON.stringify({
+        galleryVisible: body.data.event.galleryVisible,
+        moderationRequired: body.data.event.moderationRequired,
+        eventTimezone: 'America/New_York',
+        rsvpDeadlineDate: body.data.event.rsvpDeadlineDate,
+        rsvpEnabled: body.data.event.rsvpEnabled,
+        rsvpRosterVersion: body.data.event.rsvpRosterVersion,
+        // A pre-release client sends this obsolete field and has no start-time field.
+        uploadsEnabled: false,
+      }),
+    }, testEnv);
+    const updated = await response.json<any>();
+
+    expect(response.status).toBe(200);
+    expect(updated.data.event).toMatchObject({
+      eventTimezone: 'America/New_York',
+      eventStartTime: '17:30',
+      eventStartAt: '2026-09-19T21:30:00.000Z',
+    });
+  });
+
   it.each<[string, string]>([
     ['on the event date', '2026-09-19'],
     ['after the event', '2026-09-20'],
@@ -353,5 +383,20 @@ describe('server-owned event configuration and phase', () => {
     });
     expect(await testEnv.DB.prepare('SELECT event_start_at FROM events WHERE id = ?')
       .bind(access.event.id).first('event_start_at')).toBe('2027-03-14T07:00:00.000Z');
+  });
+
+  it('attributes an impossible stored event date to the date field', async () => {
+    const access = await eventAccess();
+    await testEnv.DB.prepare('UPDATE events SET event_date = ? WHERE id = ?')
+      .bind('2026-02-30', access.event.id).run();
+
+    const response = await applySettings(access);
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(422);
+    expect(body.fieldErrors).toMatchObject({
+      eventDate: 'Choose a valid event date.',
+    });
+    expect(body.fieldErrors).not.toHaveProperty('eventStartTime');
   });
 });

@@ -156,10 +156,13 @@ post-implementation review findings were remediated before the final verificatio
 
 - [x] **Step 6: Close review-found release races**
 
-  Guard generated updates with the inventoried source tuple, reject unplanned non-sentinel
-  rows, and serialize the final verification/deploy window with a temporary source-field-only
-  SQLite trigger. Machine-verify the exact trigger before deployment, revalidate the original
-  plan after deployment while the freeze remains installed, then remove it and prove absence.
+  Guard generated updates with the inventoried schedule tuple, photo capability, inventory instant,
+  and printed-entry state. Preserve old-Worker-open photo delivery, leave legacy scheduled rows off
+  until the compatible Worker is live, then restore only enabled future entries with a separate
+  post-deploy artifact. Reject unplanned non-sentinel rows and serialize the final verification/deploy
+  window with a temporary schedule-source-only SQLite trigger. Machine-verify the exact trigger,
+  revalidate the original plan and deploy-gap rows while it remains installed, then remove it and
+  prove absence.
   A failed deploy keeps the freeze installed; explicit abort invalidates all prior evidence.
 
 ### Task 5: Integrated review and release-quality verification

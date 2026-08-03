@@ -128,7 +128,7 @@ The event-theme suite adds exactly eight tracked images:
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review/getting-ready crop | 320 x 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 x 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal receipt | 390 x 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 3907 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview and global chrome | 390 x 4212 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 x 900 |
 
 At the event-theming feature head, three existing Default files were deliberately updated:

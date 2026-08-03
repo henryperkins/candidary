@@ -1,5 +1,5 @@
 import { ApiError } from '../../shared/errors';
-import { endOfLocalDate, instantForLocalDateTime } from '../../shared/event-time';
+import { endOfLocalDate, instantForLocalDateTime, isCalendarDate } from '../../shared/event-time';
 
 export interface EventScheduleInput {
   eventDate: string;
@@ -42,6 +42,11 @@ export function resolveEventSchedule(
   message: string,
 ): ResolvedEventSchedule {
   const startTime = input.eventStartTime ?? DEFAULT_EVENT_START_TIME;
+  if (!isCalendarDate(input.eventDate)) {
+    throw new ApiError('VALIDATION_FAILED', message, 422, {
+      eventDate: 'Choose a valid event date.',
+    });
+  }
   let eventStartAt: string;
   try {
     eventStartAt = instantForLocalDateTime(input.eventDate, startTime, input.eventTimezone);

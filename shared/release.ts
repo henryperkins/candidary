@@ -10,10 +10,8 @@ function assertPositiveSafeInteger(value: unknown, name: string): asserts value 
   }
 }
 
-assertPositiveSafeInteger(releaseConfig.evidenceSchemaVersion, 'evidenceSchemaVersion');
 assertPositiveSafeInteger(releaseConfig.guestJourneyVersion, 'guestJourneyVersion');
 
-export const RELEASE_EVIDENCE_SCHEMA_VERSION: number = releaseConfig.evidenceSchemaVersion;
 export const GUEST_JOURNEY_VERSION: number = releaseConfig.guestJourneyVersion;
 
 export interface RuntimeReleaseIdentity {

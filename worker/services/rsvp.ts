@@ -631,8 +631,10 @@ export class RsvpService {
    *
    * Two different things can look like a repeat, and they are answered
    * differently. The same idempotency key with the same answer is a lost
-   * confirmation, and replays as success even if the household has moved on
-   * since — a guest on a bad connection must never be asked to answer twice.
+   * confirmation, and replays as success while guest RSVP remains available,
+   * even if the household has moved on since — a guest on a bad connection
+   * must never be asked to answer twice. Event start still closes every guest
+   * RSVP route, including receipt replay.
    * The same key with a *different* answer is a bug or a tampered retry, and is
    * refused rather than silently applied.
    */
@@ -726,8 +728,17 @@ export class RsvpService {
     digest: string,
     now: Date,
   ): Promise<RsvpSubmissionResponse | null> {
-    const receipt = await this.rsvp.getReceipt(auth.household.id, request.idempotencyKey);
+    const state = await this.rsvp.getSubmissionReceiptState(
+      auth.event.id,
+      auth.household.id,
+      request.idempotencyKey,
+      now.toISOString(),
+    );
+    const receipt = state.receipt;
     if (!receipt) return null;
+    if (state.eventStarted) {
+      throw new ApiError('RSVP_CLOSED', 'RSVP closed when the event started.', 409);
+    }
     if (receipt.requestDigest !== digest) {
       throw new ApiError(
         'RSVP_SUBMISSION_CONFLICT',

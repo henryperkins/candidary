@@ -164,6 +164,30 @@ export class EventsRepository {
         moderation_required = ?,
         event_timezone = ?,
         rsvp_deadline_at = ?,
+        -- A pause after the old start cannot survive a move back into the
+        -- future: that would create the forbidden pre-start paused state and
+        -- prevent the automatic opening at the new start. Restore capability
+        -- only while printed entry is still live; the emergency stop wins.
+        uploads_enabled = CASE
+          WHEN uploads_enabled = 0
+            AND ? > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            AND EXISTS (
+              SELECT 1 FROM event_entry_credentials
+              WHERE event_id = events.id AND disabled_at IS NULL
+            )
+          THEN 1
+          ELSE uploads_enabled
+        END,
+        photos_open_from = CASE
+          WHEN uploads_enabled = 0
+            AND ? > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            AND EXISTS (
+              SELECT 1 FROM event_entry_credentials
+              WHERE event_id = events.id AND disabled_at IS NULL
+            )
+          THEN NULL
+          ELSE photos_open_from
+        END,
         event_start_at = ?,
         rsvp_enabled = ?
       WHERE id = ? AND deleted_at IS NULL AND rsvp_roster_version = ?
@@ -185,6 +209,8 @@ export class EventsRepository {
       input.moderationRequired ? 1 : 0,
       input.eventTimezone,
       input.rsvpDeadlineAt,
+      input.eventStartAt,
+      input.eventStartAt,
       input.eventStartAt,
       input.rsvpEnabled ? 1 : 0,
       id,

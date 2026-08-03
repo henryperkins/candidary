@@ -21,6 +21,7 @@ CREATE TABLE release_certifications (
     CHECK (json_array_length(physical_evidence_refs_json) > 0),
   certified_at TEXT NOT NULL
     CHECK (length(certified_at) = 24)
+    CHECK (strftime('%Y-%m-%dT%H:%M:%fZ', certified_at) IS NOT NULL)
     CHECK (strftime('%Y-%m-%dT%H:%M:%fZ', certified_at) = certified_at)
 );
 

@@ -45,7 +45,7 @@ full route, state, width, and baseline matrix.
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review and getting-ready state | 320 × 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 × 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal delivery receipt | 390 × 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview with global chrome outside scope | 390 × 3907 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview with global chrome outside scope | 390 × 4212 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 × 900 |
 
 The Default Notes image is a new approved theme baseline, not one of the three

@@ -7,6 +7,7 @@ interface ManagerPhotoIntakePanelProps {
   // The printed entry has been stopped for good. Reopening is not one of the
   // transitions the server would accept, so it is never offered.
   entryDisabled: boolean;
+  pending: boolean;
   onAction(action: PhotoIntakeAction): void;
 }
 
@@ -54,7 +55,12 @@ function formatZonedStart(instant: string, timeZone: string): string {
   return `${date} at ${time}`;
 }
 
-export function ManagerPhotoIntakePanel({ event, entryDisabled, onAction }: ManagerPhotoIntakePanelProps) {
+export function ManagerPhotoIntakePanel({
+  event,
+  entryDisabled,
+  pending,
+  onAction,
+}: ManagerPhotoIntakePanelProps) {
   const control = PHOTO_INTAKE_CONTROLS[event.photoIntakeState];
   // "Before the start" without a clock comparison: the server only sends a delay
   // while a scheduled opening or the start itself is still ahead of it. A pause
@@ -70,10 +76,15 @@ export function ManagerPhotoIntakePanel({ event, entryDisabled, onAction }: Mana
         : null;
   return <section className="manager-credential" aria-labelledby="photo-intake-title">
     <h3 id="photo-intake-title">Photo delivery</h3>
-    <p>{control.status}</p>
-    <p>Photo delivery opens {formatZonedStart(event.eventStartAt, event.eventTimezone)} ({event.eventTimezone}).</p>
+    <p role="status" aria-live="polite">{pending ? 'Saving photo delivery…' : control.status}</p>
+    <p>Event start: {formatZonedStart(event.eventStartAt, event.eventTimezone)} ({event.eventTimezone}).</p>
     {withheld
       ? <p>{withheld}</p>
-      : <button type="button" className="button button--secondary" onClick={() => onAction(control.action)}>{control.label}</button>}
+      : <button
+          type="button"
+          className="button button--secondary"
+          disabled={pending}
+          onClick={() => onAction(control.action)}
+        >{pending ? 'Saving…' : control.label}</button>}
   </section>;
 }

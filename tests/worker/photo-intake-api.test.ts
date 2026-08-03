@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
-import { eventAccess, resetDatabase, testEnv, writeHeaders } from './helpers';
+import { applySettings, eventAccess, resetDatabase, testEnv, writeHeaders } from './helpers';
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 type PhotoIntakeAction = 'open_early' | 'return_to_schedule' | 'pause' | 'reopen';
@@ -132,6 +132,23 @@ describe('scheduled photo delivery', () => {
       // wake the manager page up for.
       photoIntakeRecheckAfterMs: null,
     });
+  });
+
+  it('returns a paused event to its schedule when the start moves back into the future', async () => {
+    const access = await reach('paused');
+
+    const response = await applySettings(access, { eventStartTime: '17:30' });
+    const event = (await response.json<any>()).data.event;
+
+    expect(response.status).toBe(200);
+    expect(event).toMatchObject({
+      eventStartAt: '2026-09-19T22:30:00.000Z',
+      uploadsEnabled: true,
+      photosOpen: false,
+      photoIntakeState: 'scheduled',
+    });
+    expect(await intakeColumns(access.event.id))
+      .toEqual({ uploads_enabled: 1, photos_open_from: null });
   });
 });
 

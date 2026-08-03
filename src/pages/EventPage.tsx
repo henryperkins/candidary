@@ -33,6 +33,7 @@ function guestLifecycleKey(event: GuestEventView): string {
     event.rsvpDeadlineAt,
     event.eventTimezone,
     event.rsvpDeadlineDate,
+    event.lifecycleRecheckAfterMs !== null,
   ]);
 }
 

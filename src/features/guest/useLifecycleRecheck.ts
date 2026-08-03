@@ -46,9 +46,8 @@ export function useLifecycleRecheck(
   recheckRef.current = onRecheck;
 
   useEffect(() => {
-    if (delayMs === null) return;
-
     let disposed = false;
+    const hasBoundary = delayMs !== null;
     const timers = new Set<ReturnType<typeof setTimeout>>();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let running = false;
@@ -143,6 +142,15 @@ export function useLifecycleRecheck(
           clearTimers();
           return;
         }
+        // With no scheduled boundary, wake reads are event-driven freshness
+        // checks rather than the beginning of a poll. A failed read may retry,
+        // but one successful no-op retires that retry chain completely.
+        if (!hasBoundary) {
+          clearRetry();
+          floorUntil = 0;
+          backoffMs = RECHECK_FLOOR_MS;
+          return;
+        }
         deferRetry();
       } catch {
         if (disposed) return;
@@ -164,11 +172,12 @@ export function useLifecycleRecheck(
       void run('wake');
     }
 
-    armBoundary(delayMs);
+    if (delayMs !== null) armBoundary(delayMs);
     if (typeof window !== 'undefined') {
       document.addEventListener('visibilitychange', wake);
       window.addEventListener('pageshow', wake);
       window.addEventListener('online', wake);
+      window.addEventListener('focus', wake);
     }
 
     return () => {
@@ -178,6 +187,7 @@ export function useLifecycleRecheck(
         document.removeEventListener('visibilitychange', wake);
         window.removeEventListener('pageshow', wake);
         window.removeEventListener('online', wake);
+        window.removeEventListener('focus', wake);
       }
     };
   }, [delayMs, lifecycleKey]);

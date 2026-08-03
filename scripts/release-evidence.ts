@@ -16,6 +16,8 @@ import {
   sep,
 } from 'node:path';
 
+export const CANDIDATE_MANIFEST_SCHEMA_VERSION = 1 as const;
+
 export interface HashedFile {
   path: string;
   bytes: number;
@@ -140,7 +142,7 @@ export interface CommandResult<Id extends ReleaseCommandId> {
 
 export interface CandidateManifest {
   kind: 'candidary.release-candidate';
-  schemaVersion: 1;
+  schemaVersion: typeof CANDIDATE_MANIFEST_SCHEMA_VERSION;
   status: 'passed' | 'failed';
   failureCode: ReleaseFailureCode | null;
   failureObservation: EvidenceFailureObservation | null;
@@ -204,6 +206,7 @@ export interface CandidateManifest {
     generatedTypesSha256: string;
   } | null;
   artifacts: {
+    deployWranglerConfig: HashedFile;
     worker: HashedFile;
     client: HashedFile[];
     firstTreeSha256: string;
@@ -414,6 +417,25 @@ function hashedFile(root: string, target: string): HashedFile {
   return { path: logicalPath(root, target), bytes: bytes.byteLength, sha256: sha256(bytes) };
 }
 
+function canonicalMigrationBytes(target: string): Buffer {
+  const source = readFileSync(target);
+  const canonical = Buffer.allocUnsafe(source.byteLength);
+  let outputIndex = 0;
+  for (let sourceIndex = 0; sourceIndex < source.byteLength; sourceIndex += 1) {
+    if (source[sourceIndex] === 0x0d && source[sourceIndex + 1] === 0x0a) continue;
+    canonical[outputIndex] = source[sourceIndex]!;
+    outputIndex += 1;
+  }
+  return canonical.subarray(0, outputIndex);
+}
+
+function hashedMigrationFile(root: string, target: string): HashedFile {
+  const stat = lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('migrations must be regular files');
+  const bytes = canonicalMigrationBytes(target);
+  return { path: logicalPath(root, target), bytes: bytes.byteLength, sha256: sha256(bytes) };
+}
+
 export function collectMigrationManifest(root: string): MigrationManifest {
   const resolvedRoot = resolve(root);
   const migrationRoot = resolve(resolvedRoot, 'migrations');
@@ -437,7 +459,7 @@ export function collectMigrationManifest(root: string): MigrationManifest {
   const files = discovered.map(({ entry }) => {
     const target = resolve(migrationRoot, entry.name);
     assertRealContainment(migrationRoot, target, 'migration');
-    return hashedFile(resolvedRoot, target);
+    return hashedMigrationFile(resolvedRoot, target);
   });
   return {
     files,
@@ -478,6 +500,7 @@ function collectRegularFiles(root: string, repositoryRoot: string): HashedFile[]
 }
 
 export function collectDeployableArtifacts(root: string): {
+  deployWranglerConfig: HashedFile;
   worker: HashedFile;
   client: HashedFile[];
   treeSha256: string;
@@ -505,11 +528,30 @@ export function collectDeployableArtifacts(root: string): {
   scanNoSecretsOrLinks(workerRoot);
   scanNoSecretsOrLinks(clientRoot);
 
+  const deployConfigBytes = deployWranglerConfigBytes(parsed);
+  const deployWranglerConfig = {
+    path: logicalPath(resolvedRoot, generatedConfig),
+    bytes: deployConfigBytes.byteLength,
+    sha256: sha256(deployConfigBytes),
+  };
   const worker = hashedFile(resolvedRoot, workerTarget);
   const client = collectRegularFiles(assetsTarget, resolvedRoot);
   if (client.length === 0) throw new Error('client artifact inventory is empty');
-  const treeSha256 = sha256(canonicalJson({ worker, client }));
-  return { worker, client, treeSha256 };
+  const treeSha256 = sha256(canonicalJson({ deployWranglerConfig, worker, client }));
+  return { deployWranglerConfig, worker, client, treeSha256 };
+}
+
+export function deployWranglerConfigBytes(value: unknown): Buffer {
+  const record = requireRecord(value, 'generated Wrangler config');
+  for (const key of ['configPath', 'userConfigPath'] as const) {
+    if (record[key] !== undefined && typeof record[key] !== 'string') {
+      throw new TypeError(`${key} must be a string when present`);
+    }
+  }
+  const deployConfig = { ...record };
+  delete deployConfig.configPath;
+  delete deployConfig.userConfigPath;
+  return Buffer.from(`${canonicalJson(deployConfig)}\n`, 'utf8');
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -1156,7 +1198,7 @@ function validateBindings(value: unknown): NonNullable<CandidateManifest['bindin
 
 function validateArtifacts(value: unknown): NonNullable<CandidateManifest['artifacts']> {
   const record = exactRecord(value, [
-    'worker', 'client', 'firstTreeSha256', 'secondTreeSha256', 'dryRunWorkerSha256',
+    'deployWranglerConfig', 'worker', 'client', 'firstTreeSha256', 'secondTreeSha256', 'dryRunWorkerSha256',
   ], 'artifacts');
   if (!Array.isArray(record.client) || record.client.length === 0) throw new TypeError('client artifacts must be nonempty');
   const client = record.client.map((file, index) => parseHashedFile(file, `client artifact[${index}]`));
@@ -1169,7 +1211,15 @@ function validateArtifacts(value: unknown): NonNullable<CandidateManifest['artif
     || worker.path.toLowerCase() === 'dist/candidary/wrangler.json') {
     throw new TypeError('Worker artifact must remain under dist/candidary and exclude generated config');
   }
+  const deployWranglerConfig = parseHashedFile(
+    record.deployWranglerConfig,
+    'deploy Wrangler config artifact',
+  );
+  if (deployWranglerConfig.path.toLowerCase() !== 'dist/candidary/wrangler.json') {
+    throw new TypeError('deploy Wrangler config artifact must be the exact generated config path');
+  }
   return {
+    deployWranglerConfig,
     worker,
     client,
     firstTreeSha256: sha256Value(record.firstTreeSha256, 'firstTreeSha256'),
@@ -1319,7 +1369,8 @@ function enforceStageEvidence(
 
   const buildStatus = commandById(manifest.commands, 'build').status;
   const missingArtifactsAllowed = code === 'evidence_invalid'
-    && (observation === 'artifact_collection_invalid' || observation === 'forbidden_secret_file');
+    && (observation === 'artifact_collection_invalid' || observation === 'binding_collection_invalid'
+      || observation === 'forbidden_secret_file');
   const missingBindingsAllowed = code === 'evidence_invalid'
     && (observation === 'artifact_collection_invalid' || observation === 'binding_collection_invalid'
       || observation === 'forbidden_secret_file');
@@ -1378,7 +1429,10 @@ export function assertRedactedCandidateManifest(value: unknown): asserts value i
     'kind', 'schemaVersion', 'status', 'failureCode', 'failureObservation', 'preconditionObservation', 'runId',
     'candidate', 'execution', 'commands', 'tests', 'migrations', 'bindings', 'artifacts', 'claims',
   ], 'candidate manifest');
-  if (root.kind !== 'candidary.release-candidate' || root.schemaVersion !== 1) throw new TypeError('manifest identity is invalid');
+  if (root.kind !== 'candidary.release-candidate'
+    || root.schemaVersion !== CANDIDATE_MANIFEST_SCHEMA_VERSION) {
+    throw new TypeError('manifest identity is invalid');
+  }
   const status = oneOf(root.status, ['passed', 'failed'] as const, 'manifest status');
   const code = failureCode(root.failureCode);
   const observation = nullable(root.failureObservation, (item) => oneOf(item, evidenceObservations, 'failureObservation'));
@@ -1411,7 +1465,11 @@ export function assertRedactedCandidateManifest(value: unknown): asserts value i
   if (bindings && bindings.sourceTopologySha256 !== sha256(canonicalJson(bindings.topology))) {
     throw new TypeError('binding topology aggregate is invalid');
   }
-  if (artifacts && artifacts.firstTreeSha256 !== sha256(canonicalJson({ worker: artifacts.worker, client: artifacts.client }))) {
+  if (artifacts && artifacts.firstTreeSha256 !== sha256(canonicalJson({
+    deployWranglerConfig: artifacts.deployWranglerConfig,
+    worker: artifacts.worker,
+    client: artifacts.client,
+  }))) {
     throw new TypeError('artifact tree aggregate is invalid');
   }
 

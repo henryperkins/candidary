@@ -28,6 +28,7 @@ type Screen =
   | { kind: 'receipt'; household: RsvpHouseholdView }
   | { kind: 'read-only'; household: RsvpHouseholdView }
   | { kind: 'before-start'; household: RsvpHouseholdView }
+  | { kind: 'closed' }
   | { kind: 'paused'; household: RsvpHouseholdView | null };
 
 interface GuestRsvpFlowProps {
@@ -102,9 +103,12 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   const [saveError, setSaveError] = useState('');
   const [reviewUpdated, setReviewUpdated] = useState(false);
   const idempotencyKey = useRef<string | null>(null);
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
+    const generation = ++requestGeneration.current;
     setScreen({ kind: 'restoring' });
+    setLookupBusy(false);
     setLookupMessage('');
     setSaveError('');
     setReviewUpdated(false);
@@ -112,15 +116,16 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
     // read is itself an act on the guest's behalf, and the server would only refuse it.
     if (event.rsvpAccess === 'unavailable') {
       setScreen({ kind: 'paused', household: null });
-      return;
+      return () => { requestGeneration.current += 1; };
     }
-    let active = true;
     void api<{ household: RsvpHouseholdView }>(`/api/event/${event.slug}/rsvp/household`)
       .then(({ household }) => {
-        if (active) setScreen(screenForHousehold(event, household));
+        if (requestGeneration.current === generation) {
+          setScreen(screenForHousehold(event, household));
+        }
       })
       .catch((caught: unknown) => {
-        if (!active) return;
+        if (requestGeneration.current !== generation) return;
         if (caught instanceof ClientApiError && caught.code === 'RSVP_SESSION_REQUIRED') {
           setScreen(screenWithoutHousehold(event));
           return;
@@ -128,10 +133,11 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
         setLookupMessage(caught instanceof Error ? caught.message : 'We could not check for a saved RSVP.');
         setScreen(screenWithoutHousehold(event));
       });
-    return () => { active = false; };
+    return () => { requestGeneration.current += 1; };
   }, [event.rsvpAccess, event.rsvpState, event.slug]);
 
   async function lookup(firstName: string, secondName?: string) {
+    const generation = requestGeneration.current;
     setLookupBusy(true);
     setLookupMessage('');
     try {
@@ -142,6 +148,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
           ...(secondName ? { secondName } : {}),
         }),
       });
+      if (requestGeneration.current !== generation) return;
       if (result.status === 'second_name_required') {
         setScreen({ kind: 'lookup', secondNameRequired: true });
         setLookupMessage('Enter the full name of another person on this invitation.');
@@ -155,9 +162,10 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
       setReviewUpdated(false);
       setScreen(screenForHousehold(event, result.household));
     } catch (caught) {
+      if (requestGeneration.current !== generation) return;
       setLookupMessage(caught instanceof Error ? caught.message : 'We could not find that invitation.');
     } finally {
-      setLookupBusy(false);
+      if (requestGeneration.current === generation) setLookupBusy(false);
     }
   }
 
@@ -166,6 +174,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   }
 
   async function submit(household: RsvpHouseholdView, draft: RsvpDraft) {
+    const generation = requestGeneration.current;
     const key = idempotencyKey.current ?? crypto.randomUUID();
     idempotencyKey.current = key;
     setSaveError('');
@@ -179,12 +188,15 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
           invitees: submissionInvitees(household, draft),
         }),
       });
+      if (requestGeneration.current !== generation) return;
       setReviewUpdated(false);
       setScreen({ kind: 'receipt', household: result.household });
     } catch (caught) {
+      if (requestGeneration.current !== generation) return;
       if (caught instanceof ClientApiError && caught.code === 'RSVP_HOUSEHOLD_CONFLICT') {
         try {
           const current = await readCurrentHousehold();
+          if (requestGeneration.current !== generation) return;
           idempotencyKey.current = null;
           const next = screenAfterConflict(event, current.household, draft);
           // The review banner is an instruction, so it belongs only where the
@@ -193,24 +205,29 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
           setScreen(next);
           return;
         } catch (refreshError) {
+          if (requestGeneration.current !== generation) return;
+          if (refreshError instanceof ClientApiError && refreshError.code === 'RSVP_CLOSED') {
+            idempotencyKey.current = null;
+            setReviewUpdated(false);
+            setScreen({ kind: 'closed' });
+            return;
+          }
           setSaveError(refreshError instanceof Error
             ? refreshError.message
             : 'The invitation changed, but we could not reload it.');
         }
       } else if (caught instanceof ClientApiError && caught.code === 'RSVP_CLOSED') {
-        try {
-          const current = await readCurrentHousehold();
-          setScreen({ kind: 'read-only', household: current.household });
-          return;
-        } catch {
-          // The original deadline message remains the most useful recovery hint.
-        }
+        idempotencyKey.current = null;
+        setScreen({ kind: 'closed' });
+        return;
       } else if (caught instanceof ClientApiError && caught.code === 'RSVP_UNAVAILABLE') {
         try {
           const current = await readCurrentHousehold();
+          if (requestGeneration.current !== generation) return;
           setScreen({ kind: 'paused', household: current.household });
           return;
         } catch {
+          if (requestGeneration.current !== generation) return;
           setScreen({ kind: 'paused', household: null });
           return;
         }
@@ -242,10 +259,28 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
     idempotencyKey.current = null;
     setSaveError('');
     setReviewUpdated(false);
+    if (event.rsvpAccess !== 'editable') {
+      setScreen(screenForHousehold(event, household));
+      return;
+    }
     setScreen({ kind: 'editing', household, draft: createHouseholdDraft(household) });
   }
 
-  if (screen.kind === 'restoring') {
+  // Effects retire stale requests, but they run after render. Never paint an
+  // editable or saving form for even one frame after the authoritative event
+  // prop has moved out of editable access.
+  const renderedScreen: Screen = (
+    (screen.kind === 'editing' || screen.kind === 'saving')
+    && event.rsvpAccess !== 'editable'
+  )
+    ? event.rsvpAccess === 'unavailable'
+      && event.rsvpState !== 'paused'
+      && event.rsvpState !== 'disabled'
+      ? { kind: 'closed' }
+      : screenForHousehold(event, screen.household)
+    : screen;
+
+  if (renderedScreen.kind === 'restoring') {
     return <RsvpShell event={event} presentation={presentation}>
       <div className="rsvp-card rsvp-restoring" aria-live="polite">
         <p>Checking for a saved RSVP…</p>
@@ -253,69 +288,80 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
     </RsvpShell>;
   }
 
-  if (screen.kind === 'lookup') {
+  if (renderedScreen.kind === 'lookup') {
     return <RsvpLookup
       event={event}
       presentation={presentation}
-      secondNameRequired={screen.secondNameRequired}
+      secondNameRequired={renderedScreen.secondNameRequired}
       busy={lookupBusy}
       message={lookupMessage}
       onLookup={lookup}
     />;
   }
 
-  if (screen.kind === 'editing' || screen.kind === 'saving') {
+  if (renderedScreen.kind === 'editing' || renderedScreen.kind === 'saving') {
     return <RsvpHouseholdForm
       event={event}
       presentation={presentation}
-      household={screen.household}
-      draft={screen.draft}
-      saving={screen.kind === 'saving'}
+      household={renderedScreen.household}
+      draft={renderedScreen.draft}
+      saving={renderedScreen.kind === 'saving'}
       saveError={saveError}
       reviewUpdated={reviewUpdated}
       onDraftChange={changeDraft}
-      onSubmit={(draft) => submit(screen.household, draft)}
+      onSubmit={(draft) => submit(renderedScreen.household, draft)}
     />;
   }
 
-  if (screen.kind === 'receipt') {
+  if (renderedScreen.kind === 'receipt') {
     return <RsvpReceipt
       event={event}
       presentation={presentation}
-      household={screen.household}
+      household={renderedScreen.household}
       mode="receipt"
-      onChange={() => changeResponse(screen.household)}
+      onChange={() => changeResponse(renderedScreen.household)}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
     />;
   }
 
-  if (screen.kind === 'read-only') {
+  if (renderedScreen.kind === 'read-only') {
     return <RsvpReceipt
       event={event}
       presentation={presentation}
-      household={screen.household}
+      household={renderedScreen.household}
       mode="read-only"
-      onChange={() => changeResponse(screen.household)}
+      onChange={() => changeResponse(renderedScreen.household)}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
     />;
   }
 
-  if (screen.kind === 'before-start') {
+  if (renderedScreen.kind === 'before-start') {
     return <RsvpReceipt
       event={event}
       presentation={presentation}
-      household={screen.household}
+      household={renderedScreen.household}
       mode="before-start"
       onChange={() => undefined}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
     />;
   }
 
-  if (screen.household) {
+  if (renderedScreen.kind === 'closed') {
+    const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
+    return <RsvpShell event={event} presentation={presentation}>
+      <div className="rsvp-card rsvp-unavailable" aria-live="polite">
+        {presentation !== 'embedded' && <p className="rsvp-eyebrow">{event.name}</p>}
+        <HeadingTag>RSVP is closed</HeadingTag>
+        <p>The event has started, so guest RSVP is no longer available.</p>
+      </div>
+    </RsvpShell>;
+  }
+
+  if (renderedScreen.household) {
     return <RsvpReceipt
       event={event}
       presentation={presentation}
-      household={screen.household}
+      household={renderedScreen.household}
       mode="paused"
       onChange={() => undefined}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}

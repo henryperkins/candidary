@@ -8,16 +8,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@cloudflare/vite-plugin', () => ({ cloudflare: () => ({ name: 'cloudflare-test-stub' }) }));
 vi.mock('@vitejs/plugin-react', () => ({ default: () => ({ name: 'react-test-stub' }) }));
 
+import releaseConfig from '../../config/release.json';
 import {
   GUEST_JOURNEY_VERSION,
-  RELEASE_EVIDENCE_SCHEMA_VERSION,
   parseReleaseCertification,
   parseRuntimeReleaseIdentity,
   releaseCertificationMatches,
   type ReleaseCertification,
   type RuntimeReleaseIdentity,
 } from '../../shared/release';
-import { resolveBuildCandidate } from '../../vite.config';
+import {
+  omitLocalDevVars,
+  resolveBuildCandidate,
+  resolveConfigBuildCandidate,
+} from '../../vite.config';
+import { CANDIDATE_MANIFEST_SCHEMA_VERSION } from '../../scripts/release-evidence';
 
 const BUILD_SHA = '0123456789abcdef0123456789abcdef01234567';
 const MIGRATION_SHA = 'a'.repeat(64);
@@ -85,6 +90,31 @@ function certificationInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe('release contract', () => {
+  // Production break caught: Cloudflare's build plugin copies the local secret file into
+  // dist/candidary, where the release scanner correctly refuses to deploy it.
+  it('removes only the local .dev.vars asset from generated build output', () => {
+    const devVars = { type: 'asset', source: 'SECRET=value' };
+    const worker = { type: 'chunk', code: 'export default {}' };
+    const bundle = { '.dev.vars': devVars, 'chunks/worker.js': worker };
+
+    omitLocalDevVars(bundle);
+
+    expect(bundle).toEqual({ 'chunks/worker.js': worker });
+  });
+
+  it('fails closed for release builds but keeps gitless local serving available', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'candidary-gitless-serve-'));
+    temporaryRoots.push(root);
+    const warn = vi.fn();
+
+    expect(resolveConfigBuildCandidate(root, 'serve', warn)).toEqual({
+      buildSha: '',
+      migrationManifestSha256: '',
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('release identity unavailable'));
+    expect(() => resolveConfigBuildCandidate(root, 'build', warn)).toThrow();
+  });
+
   // Production break caught: a clean commit is not injected exactly, or source dirt is mislabeled as that commit.
   it('resolves the exact clean build candidate and rejects tracked or untracked dirt', async () => {
     const clean = await releaseCandidateRepository();
@@ -153,9 +183,10 @@ describe('release contract', () => {
     expect(git(checkout, 'status', '--porcelain=v1', '--untracked-files=all')).toBe('');
   });
 
-  // Production break caught: either checked-in version source drifts from the first contract version.
-  it('exports the checked-in evidence and guest journey versions', () => {
-    expect(RELEASE_EVIDENCE_SCHEMA_VERSION).toBe(1);
+  // Production break caught: an evidence-format knob in the runtime config relabels an unchanged manifest.
+  it('keeps evidence schema versioning in the evidence contract', () => {
+    expect(releaseConfig).toEqual({ guestJourneyVersion: 1 });
+    expect(CANDIDATE_MANIFEST_SCHEMA_VERSION).toBe(1);
     expect(GUEST_JOURNEY_VERSION).toBe(1);
   });
 

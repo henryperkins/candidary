@@ -24,6 +24,7 @@ import {
   READ_ONLY_INVARIANT_QUERY,
   assertFreshD1CommandPlan,
   buildFreshD1CommandPlan,
+  freshD1ProcessEnvironment,
   parseFreshD1Args,
   parseWranglerInvariantOutput,
   runFreshD1Verification,
@@ -171,6 +172,28 @@ function successfulAdapters(output: string) {
 }
 
 describe('fresh local D1 verification', () => {
+  it('withholds deployment credentials from standalone local Wrangler commands', () => {
+    const environment = freshD1ProcessEnvironment({
+      PATH: 'tools',
+      TEMP: 'temp',
+      CLOUDFLARE_API_TOKEN: 'remote-token',
+      CLOUDFLARE_ACCOUNT_ID: 'remote-account',
+      R2_SECRET_ACCESS_KEY: 'r2-secret',
+      CANDIDARY_UNRELATED: 'drop-me',
+    }, { CI: '1' });
+
+    expect(environment).toMatchObject({
+      PATH: 'tools',
+      TEMP: 'temp',
+      CI: '1',
+      WRANGLER_SEND_METRICS: 'false',
+    });
+    expect(environment).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+    expect(environment).not.toHaveProperty('CLOUDFLARE_ACCOUNT_ID');
+    expect(environment).not.toHaveProperty('R2_SECRET_ACCESS_KEY');
+    expect(environment).not.toHaveProperty('CANDIDARY_UNRELATED');
+  });
+
   it('accepts only an exact absent report under a real prefixed OS-temp root', async () => {
     const valid = await fixture();
     expect(parseFreshD1Args([

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
-import { canonicalTimeZone, isIanaTimeZone } from '../../shared/event-time';
+import { canonicalTimeZone, isCalendarDate, isIanaTimeZone } from '../../shared/event-time';
 import {
   assertOverridesLegible,
   DEFAULT_EVENT_THEME_CONFIG,
@@ -22,7 +22,7 @@ import { EventService } from '../services/events';
 const eventSchema = z.object({
   name: z.string().trim().min(1, 'Enter an event name.').max(80, 'Use 80 characters or fewer.'),
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid event date.')
-    .refine((value) => !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`)), 'Choose a valid event date.'),
+    .refine(isCalendarDate, 'Choose a valid event date.'),
   welcomeMessage: z.string().trim().min(1, 'Add a welcome message.').max(500, 'Use 500 characters or fewer.'),
   eventTimezone: z.string().min(1).max(64)
     .refine(isIanaTimeZone, 'Choose a valid time zone.'),

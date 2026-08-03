@@ -119,10 +119,13 @@ describe('iOS web app metadata', () => {
 
     const plan = buildDeploymentCommandPlan({
       candidateRoot: root,
+      deployRoot: fromRoot('output/sealed-deploy'),
       sha: 'a'.repeat(40),
       nodeExecPath: process.execPath,
       npmCliPath: fromRoot('tooling/npm-cli.js'),
       wranglerCliPath: fromRoot('node_modules/wrangler/bin/wrangler.js'),
+      prerequisiteEnv: {},
+      deployEnv: {},
     });
     expect(plan.map((command) => command.id)).toEqual([
       'npm-ci', 'build', 'verify-pwa-build', 'deploy',

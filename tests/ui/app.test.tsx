@@ -2293,6 +2293,34 @@ describe('guest event phase composition', () => {
     expect(rsvpRequests()).toHaveLength(readBeforeStart);
   });
 
+  it('ends a guest no-op boundary without entering a retry poll', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const beforeStart = {
+      ...guestEvent,
+      rsvpState: 'disabled' as const,
+      rsvpAccess: 'unavailable' as const,
+      lifecycleRecheckAfterMs: 1_000,
+    };
+    const afterStart = { ...beforeStart, lifecycleRecheckAfterMs: null };
+    let eventReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? beforeStart : afterStart, role: 'guest' });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+
+    renderEvent(beforeStart);
+    await screen.findByRole('button', { name: 'Take a photo' });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(eventReads).toBe(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+    expect(eventReads).toBe(2);
+  });
+
   it('keeps the guest anti-spin floor when wake responses only shorten the relative delay', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const initial = {

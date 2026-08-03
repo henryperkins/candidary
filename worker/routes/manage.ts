@@ -28,7 +28,7 @@ import {
   SUPPORTED_IMAGE_TYPES,
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
-import { DEFAULT_EVENT_START_TIME, resolveEventSchedule } from '../http/event-schedule';
+import { resolveEventSchedule } from '../http/event-schedule';
 import { eventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { sanitizeFilename } from '../security/filenames';
@@ -51,7 +51,7 @@ const settingsSchema = z.object({
   eventTimezone: z.string().min(1).max(64).refine(isIanaTimeZone, 'Choose a valid time zone.'),
   eventStartTime: z.string()
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/u, 'Choose a valid start time.')
-    .default(DEFAULT_EVENT_START_TIME),
+    .optional(),
   rsvpDeadlineDate: z.string()
     .regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid RSVP deadline.')
     .refine(
@@ -251,10 +251,14 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
   }
 
   const eventTimezone = canonicalTimeZone(parsed.data.eventTimezone) ?? parsed.data.eventTimezone;
+  // A pre-release settings bundle does not send eventStartTime. Preserve the
+  // host's existing wall-clock choice, including across a time-zone edit,
+  // instead of interpreting omission as a destructive reset to midnight.
+  const eventStartTime = parsed.data.eventStartTime ?? eventView(auth.event).eventStartTime;
   // Any edit to the start time, the deadline date, or the zone recomputes both
   // absolute instants from the same tuple, and they are written together below.
   const schedule = resolveEventSchedule(
-    { ...parsed.data, eventDate: auth.event.eventDate, eventTimezone },
+    { ...parsed.data, eventDate: auth.event.eventDate, eventTimezone, eventStartTime },
     'Check the event settings.',
   );
 

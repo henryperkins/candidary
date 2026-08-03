@@ -68,10 +68,12 @@ async function openSettings(user: ReturnType<typeof userEvent.setup>) {
 
 function LifecycleHarness({
   onRecheck,
+  delayMs = 10_000,
 }: {
   onRecheck: () => Promise<LifecycleRecheckOutcome>;
+  delayMs?: number | null;
 }) {
-  useLifecycleRecheck(10_000, onRecheck);
+  useLifecycleRecheck(delayMs, onRecheck);
   return null;
 }
 
@@ -83,6 +85,28 @@ afterEach(() => {
 });
 
 describe('manager photo delivery', () => {
+  it('rechecks a boundary-free page on every browser wake source without polling', async () => {
+    vi.useFakeTimers();
+    const onRecheck = vi.fn(async (): Promise<LifecycleRecheckOutcome> => 'unchanged');
+    render(<LifecycleHarness delayMs={null} onRecheck={onRecheck} />);
+
+    for (const [target, event] of [
+      [document, new Event('visibilitychange')],
+      [window, new Event('pageshow')],
+      [window, new Event('online')],
+      [window, new Event('focus')],
+    ] as const) {
+      await act(async () => {
+        target.dispatchEvent(event);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    }
+
+    expect(onRecheck).toHaveBeenCalledTimes(4);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('cancels both the original boundary and a wake retry when it unmounts', async () => {
     vi.useFakeTimers();
     const onRecheck = vi.fn(async (): Promise<LifecycleRecheckOutcome> => 'unchanged');
@@ -128,6 +152,70 @@ describe('manager photo delivery', () => {
     expect(fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith('/api/manage/events/event-a')))
       .toHaveLength(readsBeforeStart + 1);
+  });
+
+  it('ends a paused no-op boundary without entering a retry poll', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const paused = {
+      ...SCHEDULED,
+      uploadsEnabled: false,
+      photoIntakeState: 'paused' as const,
+      photoIntakeRecheckAfterMs: 1_000,
+    };
+    const startedPaused = { ...paused, photoIntakeRecheckAfterMs: null };
+    const fetchMock = managerFetch([paused, startedPaused]);
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+    const eventReads = () => fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith('/api/manage/events/event-a')).length;
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(screen.getByRole('button', { name: 'Reopen photo delivery' })).toBeVisible();
+    expect(eventReads()).toBe(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+    expect(eventReads()).toBe(2);
+  });
+
+
+  it('admits only one explicit transition while its request is pending', async () => {
+    const fallback = managerFetch([SCHEDULED]);
+    let photoIntakeRequests = 0;
+    let finishPhotoIntake!: (response: Response) => void;
+    const pendingPhotoIntake = new Promise<Response>((resolve) => {
+      finishPhotoIntake = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/photo-intake') && init?.method === 'POST') {
+        photoIntakeRequests += 1;
+        return pendingPhotoIntake;
+      }
+      return fallback(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+
+    const action = screen.getByRole('button', { name: 'Open photo delivery now' });
+    fireEvent.click(action);
+    fireEvent.click(action);
+
+    expect(photoIntakeRequests).toBe(1);
+    expect(action).toBeDisabled();
+    expect(screen.getByText('Saving photo delivery…')).toHaveAttribute('role', 'status');
+
+    finishPhotoIntake(await json({
+      event: {
+        ...SCHEDULED,
+        photosOpen: true,
+        photoIntakeState: 'open-early',
+      },
+    }));
+    expect(await screen.findByRole('button', { name: 'Pause until the event starts' })).toBeVisible();
   });
 
   it('keeps the anti-spin floor when wake responses only shorten the relative delay', async () => {
@@ -179,10 +267,10 @@ describe('manager photo delivery', () => {
     await openSettings(user);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
 
-    expect(screen.getByText(/Photo delivery opens September 19, 2026 at 5:00 PM/u)).toBeVisible();
+    expect(screen.getByText(/Event start: September 19, 2026 at 5:00 PM/u)).toBeVisible();
     await act(async () => { window.dispatchEvent(new Event('pageshow')); });
 
-    expect(await screen.findByText(/Photo delivery opens September 19, 2026 at 6:00 PM/u)).toBeVisible();
+    expect(await screen.findByText(/Event start: September 19, 2026 at 6:00 PM/u)).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 
     expect(screen.getByText('Photo delivery is open.')).toBeVisible();
@@ -245,10 +333,10 @@ describe('manager photo delivery', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    expect(screen.getByText(/Photo delivery opens September 19, 2026 at 5:00 PM/u)).toBeVisible();
+    expect(screen.getByText(/Event start: September 19, 2026 at 5:00 PM/u)).toBeVisible();
     await act(async () => { window.dispatchEvent(new Event('pageshow')); });
 
-    expect(await screen.findByText(/Photo delivery opens September 19, 2026 at 6:30 PM/u)).toBeVisible();
+    expect(await screen.findByText(/Event start: September 19, 2026 at 6:30 PM/u)).toBeVisible();
     expect(screen.getByLabelText('Event name')).toHaveValue('Maya & Theo');
     expect(screen.getByLabelText('Event time zone')).toHaveValue('America/Los_Angeles');
     expect(screen.getByLabelText('Event start time')).toHaveValue('18:30');
@@ -266,7 +354,7 @@ describe('manager photo delivery', () => {
       rsvpDeadlineDate: '2026-09-05',
     });
     expect(await screen.findByText('Event settings saved')).toBeVisible();
-    expect(screen.getByText(/Photo delivery opens September 19, 2026 at 6:30 PM/u)).toBeVisible();
+    expect(screen.getByText(/Event start: September 19, 2026 at 6:30 PM/u)).toBeVisible();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
