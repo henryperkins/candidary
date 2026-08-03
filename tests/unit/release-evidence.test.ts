@@ -17,6 +17,7 @@ import {
   parsePlaywrightReport,
   parseVitestReport,
   releaseBuildSha,
+  sameFileIdentity,
   sha256,
   type BindingTopology,
   type CandidateManifest,
@@ -324,6 +325,16 @@ describe('migration manifests', () => {
 });
 
 describe('deployable artifacts', () => {
+  it('keeps distinct 64-bit file IDs distinct beyond Number precision', () => {
+    const left = 9_007_199_254_740_992n;
+    const right = left + 1n;
+
+    expect(Number(left)).toBe(Number(right));
+    expect(sameFileIdentity({ dev: 1n, ino: left }, { dev: 1n, ino: right })).toBe(false);
+    expect(sameFileIdentity({ dev: 1n, ino: left }, { dev: 1n, ino: left })).toBe(true);
+    expect(sameFileIdentity({ dev: 1n, ino: 0n }, { dev: 1n, ino: 0n })).toBe(false);
+  });
+
   async function validBuild(): Promise<string> {
     const root = await temporaryRoot();
     await put(

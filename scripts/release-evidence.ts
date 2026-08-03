@@ -369,14 +369,22 @@ function assertRealContainment(container: string, target: string, field: string)
   if (!within(realContainer, realTarget)) throw new Error(`${field} escapes its approved root`);
 }
 
+export function sameFileIdentity(
+  left: { dev: bigint; ino: bigint },
+  right: { dev: bigint; ino: bigint },
+): boolean {
+  return left.ino !== 0n && left.dev === right.dev && left.ino === right.ino;
+}
+
 function sameFile(left: string, right: string): boolean {
   const leftReal = realpathSync(left);
   const rightReal = realpathSync(right);
   const normalizeCase = (path: string): string => sep === '\\' ? path.toLowerCase() : path;
   if (normalizeCase(leftReal) === normalizeCase(rightReal)) return true;
-  const leftStat = statSync(left);
-  const rightStat = statSync(right);
-  return leftStat.ino !== 0 && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  return sameFileIdentity(
+    statSync(left, { bigint: true }),
+    statSync(right, { bigint: true }),
+  );
 }
 
 function assertDirectoryChainHasNoLinks(base: string, target: string, field: string): void {
