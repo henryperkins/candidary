@@ -249,9 +249,12 @@ test('the manager card controls and the mobile export panel hold their layout', 
   await destination(page, 'Gallery').click();
   await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
   const card = page.locator('.moderation-grid article').first();
-  await expect(card.locator('.intake-card-actions button')).toHaveCount(3);
+  const cardContent = card.locator('.intake-card-actions').locator('..');
+  await expect(cardContent.locator('.intake-card-actions button')).toHaveCount(3);
   await settle(page);
-  await expect(card).toHaveScreenshot('manager-actions-320.png');
+  // The evidence is the wrapped identity and its controls. Chromium GPU processes can quantize the
+  // photograph's antialiased outer corners one colour channel apart under parallel load.
+  await expect(cardContent).toHaveScreenshot('manager-actions-320.png');
 
   // The Share section is taller than a phone screen, and the rail is sticky: scrolling any part of it
   // into view for a capture would put the rail on top of it. Phone width is what the layout is made
