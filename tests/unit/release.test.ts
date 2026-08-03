@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -114,6 +114,43 @@ describe('release contract', () => {
     }
 
     expect(resolveBuildCandidate(candidate.root).buildSha).toBe(candidate.sha);
+  });
+
+  // Production break caught: a fresh Windows worktree rewrites generated binding types to CRLF,
+  // so Wrangler rejects the otherwise clean immutable candidate before any substantive gate runs.
+  it('keeps generated binding types byte-stable in a fresh autocrlf checkout', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'candidary-binding-checkout-'));
+    temporaryRoots.push(fixtureRoot);
+    const origin = join(fixtureRoot, 'origin');
+    const checkout = join(fixtureRoot, 'checkout');
+    await mkdir(origin);
+    git(origin, '-c', 'core.autocrlf=false', 'init', '--quiet');
+    git(origin, 'config', 'user.name', 'Candidary Tests');
+    git(origin, 'config', 'user.email', 'tests@candidary.invalid');
+    git(origin, 'config', 'core.autocrlf', 'false');
+    await writeFile(
+      join(origin, 'worker-configuration.d.ts'),
+      await readFile(join(process.cwd(), 'worker-configuration.d.ts')),
+    );
+    try {
+      await writeFile(
+        join(origin, '.gitattributes'),
+        await readFile(join(process.cwd(), '.gitattributes')),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    git(origin, 'add', '.');
+    git(origin, 'commit', '--quiet', '-m', 'fixture');
+
+    execFileSync('git', [
+      '-c', 'core.autocrlf=true',
+      'clone', '--quiet', origin, checkout,
+    ], { cwd: fixtureRoot, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    const checkedOutTypes = await readFile(join(checkout, 'worker-configuration.d.ts'));
+    expect(checkedOutTypes.includes(Buffer.from('\r\n'))).toBe(false);
+    expect(git(checkout, 'status', '--porcelain=v1', '--untracked-files=all')).toBe('');
   });
 
   // Production break caught: either checked-in version source drifts from the first contract version.
