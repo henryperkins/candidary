@@ -10,6 +10,7 @@
     "verify:pwa-build": "node scripts/verify-pwa-build.mjs",
     "deploy": "node --experimental-strip-types scripts/deploy-release.ts",
     "typecheck": "tsc -b --pretty false",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json --pretty false",
     "lint": "eslint . --max-warnings=0",
     "test": "npm run test:unit && npm run test:worker",
     "test:unit": "vitest run --config vitest.config.ts",
@@ -24,7 +25,8 @@
     "event-start-backfill:verify": "node --experimental-strip-types scripts/event-start-backfill.ts verify",
     "cf-typegen": "wrangler types",
     "verify:bindings": "wrangler types --check",
-    "verify:fresh-d1": "node --experimental-strip-types scripts/verify-fresh-d1.ts"
+    "verify:fresh-d1": "node --experimental-strip-types scripts/verify-fresh-d1.ts",
+    "verify:release": "node --experimental-strip-types scripts/verify-release.ts"
   },
   "dependencies": {
     "@fontsource/dm-sans": "5.3.0",

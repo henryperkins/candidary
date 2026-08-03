@@ -799,7 +799,7 @@ describe('strict redacted candidate manifests', () => {
     cleanupWithoutInitialIdentity.migrations = null;
     cleanupWithoutInitialIdentity.bindings = null;
     cleanupWithoutInitialIdentity.artifacts = null;
-    expectInvalid(cleanupWithoutInitialIdentity);
+    expect(() => assertRedactedCandidateManifest(cleanupWithoutInitialIdentity)).not.toThrow();
 
     const falseCleanupLabel = structuredClone(failed);
     falseCleanupLabel.failureCode = 'cleanup_failed';

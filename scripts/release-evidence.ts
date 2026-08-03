@@ -1453,7 +1453,7 @@ export function assertRedactedCandidateManifest(value: unknown): asserts value i
     if ((precondition === 'candidate_identity_unavailable') !== (candidate === null)) {
       throw new TypeError('candidate identity availability does not match the precondition observation');
     }
-  } else {
+  } else if (code !== 'cleanup_failed') {
     if (!candidate || execution.initialDetachedHead !== true
       || execution.initialHeadSha !== candidate.gitSha
       || execution.initialHeadTree !== candidate.gitTree

@@ -1,6 +1,17 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, lstat, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -74,6 +85,7 @@ export interface ReleaseBootstrapAdapters {
   git(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string }>;
   importCandidate(url: string): Promise<CandidateReleaseModule>;
   writeStatus(status: 'bootstrap_failed' | 'bootstrap_cleanup_failed'): void;
+  removeRunRoot?(runRoot: string): Promise<void>;
 }
 
 export interface ReleaseArguments {
@@ -88,6 +100,18 @@ export interface ReleaseBootstrapResult {
   request: ReleaseRunRequest;
   draft: CandidateManifestDraft;
   candidateModule: CandidateReleaseModule;
+}
+
+export interface CandidateEvidenceWriteResult {
+  manifestPath: string;
+  sidecarPath: string;
+  digest: string;
+}
+
+export interface ReleaseExecutionResult extends CandidateEvidenceWriteResult {
+  outputDirectory: string;
+  runRoot: string;
+  manifest: CandidateManifest;
 }
 
 interface PlannedCommand {
@@ -145,7 +169,7 @@ const ESSENTIAL_ENVIRONMENT_NAMES = new Set([
   'ALLUSERSPROFILE', 'APPDATA', 'CHROME_BIN', 'COLORTERM', 'COMMONPROGRAMFILES',
   'COMMONPROGRAMFILES(X86)', 'COMMONPROGRAMW6432', 'COMPUTERNAME', 'COMSPEC',
   'HOMEDRIVE', 'HOMEPATH', 'HOME', 'LANG', 'LANGUAGE', 'LOCALAPPDATA', 'LOGNAME',
-  'NODE_EXTRA_CA_CERTS', 'NODE_PATH', 'NO_PROXY', 'NUMBER_OF_PROCESSORS',
+  'NODE_EXTRA_CA_CERTS', 'NO_PROXY', 'NUMBER_OF_PROCESSORS',
   'NPM_CONFIG_CACHE', 'OPENSSL_CONF', 'OS', 'PATH', 'PATHEXT',
   'PLAYWRIGHT_BROWSERS_PATH', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
   'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'PROGRAMDATA', 'PROGRAMFILES',
@@ -271,6 +295,7 @@ function runtimeSpecifiers(source: string): string[] {
     const literal = /^(['"])([^'"]+)\1$/u.exec(expression);
     if (literal) continue;
     if (/^[A-Za-z_$][\w$]*$/u.test(expression) && stringConstants.has(expression)) continue;
+    if (expression === 'candidateModuleUrl') continue;
     throw new Error('Bootstrap graph contains an unresolved dynamic bootstrap import.');
   }
   const matches = [
@@ -309,6 +334,154 @@ export async function assertDependencyFreeBootstrapGraph(entryPath: string): Pro
   return [...visited].sort();
 }
 
+function pathWithin(root: string, target: string): boolean {
+  const path = relative(root, target);
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+function missingPath(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+async function validateCallerOutputChain(callerRoot: string, candidateSha: string): Promise<void> {
+  const logicalRoot = resolve(callerRoot);
+  const realRoot = await exactDirectory(logicalRoot, 'caller repository root');
+  const chain = [
+    resolve(logicalRoot, 'output'),
+    resolve(logicalRoot, 'output/release'),
+    resolve(logicalRoot, 'output/release', candidateSha),
+  ];
+  for (const [index, directory] of chain.entries()) {
+    try {
+      const realDirectory = await exactDirectory(directory, 'release output directory');
+      if (!pathWithin(realRoot, realDirectory)) {
+        throw new Error('Release output chain escapes the caller repository.');
+      }
+    } catch (error) {
+      if (missingPath(error)) {
+        if (index < chain.length - 1) {
+          for (const child of chain.slice(index + 1)) {
+            try {
+              await lstat(child);
+              throw new Error('Release output chain is discontinuous.', { cause: error });
+            } catch (childError) {
+              if (!missingPath(childError)) throw childError;
+            }
+          }
+        }
+        return;
+      }
+      throw new Error('Release output chain contains a linked, reparse, or non-directory entry.', {
+        cause: error,
+      });
+    }
+  }
+}
+
+async function createSafeOutputDirectory(
+  callerRoot: string,
+  candidateSha: string,
+  runId: string,
+): Promise<string> {
+  await validateCallerOutputChain(callerRoot, candidateSha);
+  const realCallerRoot = await exactDirectory(resolve(callerRoot), 'caller repository root');
+  const parents = [
+    resolve(callerRoot, 'output'),
+    resolve(callerRoot, 'output/release'),
+    resolve(callerRoot, 'output/release', candidateSha),
+  ];
+  for (const directory of parents) {
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const realDirectory = await exactDirectory(directory, 'release output directory');
+    if (!pathWithin(realCallerRoot, realDirectory)) {
+      throw new Error('Release output directory resolves outside the caller repository.');
+    }
+  }
+  const outputDirectory = resolve(parents[2]!, runId);
+  try {
+    await mkdir(outputDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error('Release output UUID directory already exists.', { cause: error });
+    }
+    throw error;
+  }
+  const realOutputDirectory = await exactDirectory(outputDirectory, 'release output UUID directory');
+  if (!pathWithin(realCallerRoot, realOutputDirectory)
+    || basename(realOutputDirectory) !== runId
+    || basename(dirname(realOutputDirectory)) !== candidateSha) {
+    throw new Error('Release output UUID directory is not the exact reserved path.');
+  }
+  return outputDirectory;
+}
+
+function normalizedWorktreePath(path: string): string {
+  const normalized = resolve(path).replaceAll('\\', '/');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function registryContainsWorktree(stdout: string, candidateRoot: string): boolean {
+  const expected = normalizedWorktreePath(candidateRoot);
+  return stdout.split(/\r?\n/u)
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => normalizedWorktreePath(line.slice('worktree '.length)))
+    .includes(expected);
+}
+
+async function pathIsAbsent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    return missingPath(error);
+  }
+}
+
+async function removeValidatedRunRoot(
+  runRoot: string,
+  candidateRoot: string,
+  adapters: ReleaseBootstrapAdapters,
+): Promise<boolean> {
+  try {
+    const realTemp = await realpath(tmpdir());
+    const realRun = await exactDirectory(runRoot, 'release run root');
+    const runRelative = relative(realTemp, realRun);
+    if (runRelative.includes(sep) || !basename(realRun).startsWith('candidary-release-')
+      || !await pathIsAbsent(candidateRoot)) {
+      return false;
+    }
+    if (adapters.removeRunRoot) await adapters.removeRunRoot(runRoot);
+    else await rm(runRoot, { recursive: true, force: true });
+    return await pathIsAbsent(runRoot);
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupRegisteredWorktree(
+  callerRoot: string,
+  runRoot: string,
+  candidateRoot: string,
+  adapters: ReleaseBootstrapAdapters,
+): Promise<boolean> {
+  try {
+    const removal = await adapters.git(['worktree', 'remove', '--force', candidateRoot], callerRoot);
+    if (removal.exitCode !== 0) return false;
+    const registry = await adapters.git(['worktree', 'list', '--porcelain'], callerRoot);
+    if (registry.exitCode !== 0 || registryContainsWorktree(registry.stdout, candidateRoot)
+      || !await pathIsAbsent(candidateRoot)) {
+      return false;
+    }
+    return removeValidatedRunRoot(runRoot, candidateRoot, adapters);
+  } catch {
+    return false;
+  }
+}
+
 export async function bootstrapRelease(
   args: readonly string[],
   callerRootInput: string,
@@ -316,6 +489,7 @@ export async function bootstrapRelease(
 ): Promise<ReleaseBootstrapResult> {
   const { candidateSha, approvedBaseSha } = parseReleaseArgs(args);
   const callerRoot = resolve(callerRootInput);
+  await validateCallerOutputChain(callerRoot, candidateSha);
   const exactObject = async (sha: string): Promise<void> => {
     const result = await adapters.git(['rev-parse', '--verify', `${sha}^{commit}`], callerRoot);
     if (result.exitCode !== 0 || result.stdout !== `${sha}\n`) {
@@ -334,9 +508,9 @@ export async function bootstrapRelease(
   if (!UUID_V4_PATTERN.test(runId)) throw new Error('Release run ID must be one lowercase UUID v4.');
   const runRoot = await mkdtemp(join(tmpdir(), 'candidary-release-'));
   const candidateRoot = resolve(runRoot, 'worktree');
-  const outputDirectory = resolve(callerRoot, 'output/release', candidateSha, runId);
+  let outputDirectory = resolve(callerRoot, 'output/release', candidateSha, runId);
   let registered = false;
-  let candidateModuleAvailable = false;
+  let outputCreated = false;
   try {
     const add = await adapters.git(
       ['worktree', 'add', '--detach', candidateRoot, candidateSha],
@@ -356,7 +530,8 @@ export async function bootstrapRelease(
       || typeof candidateModule.finalizeCandidateManifest !== 'function') {
       throw new Error('Candidate release module exports are incomplete.');
     }
-    candidateModuleAvailable = true;
+    outputDirectory = await createSafeOutputDirectory(callerRoot, candidateSha, runId);
+    outputCreated = true;
     const request: ReleaseRunRequest = {
       callerRoot,
       candidateRoot,
@@ -369,24 +544,19 @@ export async function bootstrapRelease(
     if (draft.manifest.runId !== runId) throw new Error('Candidate draft run ID differs from reserved run ID.');
     return { runRoot, runId, outputDirectory, request, draft, candidateModule };
   } catch (error) {
-    let cleanupSucceeded = true;
-    if (registered) {
-      const removal = await adapters.git(['worktree', 'remove', '--force', candidateRoot], callerRoot);
-      const registry = await adapters.git(['worktree', 'list', '--porcelain'], callerRoot);
-      let diskAbsent = false;
+    let outputCleanupSucceeded = true;
+    if (outputCreated) {
       try {
-        await realpath(candidateRoot);
+        await exactDirectory(outputDirectory, 'release output UUID directory');
+        await rmdir(outputDirectory);
       } catch {
-        diskAbsent = true;
+        outputCleanupSucceeded = false;
       }
-      cleanupSucceeded = removal.exitCode === 0
-        && registry.exitCode === 0
-        && !registry.stdout.replaceAll('\\', '/').includes(candidateRoot.replaceAll('\\', '/'))
-        && diskAbsent;
     }
+    const cleanupSucceeded = outputCleanupSucceeded && (registered
+      ? await cleanupRegisteredWorktree(callerRoot, runRoot, candidateRoot, adapters)
+      : await removeValidatedRunRoot(runRoot, candidateRoot, adapters));
     if (cleanupSucceeded) {
-      await rm(runRoot, { recursive: true, force: true });
-      if (candidateModuleAvailable) throw error;
       adapters.writeStatus('bootstrap_failed');
       throw new Error('bootstrap_failed', { cause: error });
     }
@@ -1235,6 +1405,124 @@ export function finalizeCandidateManifest(
   return manifest;
 }
 
+async function assertEvidenceOutputTargetsAbsent(paths: readonly string[]): Promise<void> {
+  for (const path of paths) {
+    try {
+      await lstat(path);
+      throw new Error(`Release evidence target ${basename(path)} already exists.`);
+    } catch (error) {
+      if (!missingPath(error)) throw error;
+    }
+  }
+}
+
+async function writeExclusiveTemporaryFile(path: string, contents: string): Promise<void> {
+  const handle = await open(path, 'wx', 0o600);
+  try {
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function writeCandidateEvidence(
+  outputDirectoryInput: string,
+  manifest: CandidateManifest,
+): Promise<CandidateEvidenceWriteResult> {
+  assertRedactedCandidateManifest(manifest);
+  const outputDirectory = resolve(outputDirectoryInput);
+  const candidateOutputDirectory = dirname(outputDirectory);
+  const releaseOutputDirectory = dirname(candidateOutputDirectory);
+  const outputRoot = dirname(releaseOutputDirectory);
+  const callerRoot = dirname(outputRoot);
+  const outputSha = basename(candidateOutputDirectory);
+  if (basename(outputRoot) !== 'output' || basename(releaseOutputDirectory) !== 'release'
+    || basename(outputDirectory) !== manifest.runId || !SHA_PATTERN.test(outputSha)
+    || (manifest.candidate !== null && manifest.candidate.gitSha !== outputSha)) {
+    throw new Error('Release evidence output directory does not match the manifest identity.');
+  }
+  await validateCallerOutputChain(callerRoot, outputSha);
+  const realOutputDirectory = await exactDirectory(outputDirectory, 'release evidence output directory');
+  const realCandidateOutputDirectory = await exactDirectory(
+    candidateOutputDirectory,
+    'candidate release output directory',
+  );
+  if (dirname(realOutputDirectory) !== realCandidateOutputDirectory) {
+    throw new Error('Release evidence output directory does not match the manifest identity.');
+  }
+
+  const manifestPath = resolve(outputDirectory, 'candidate-manifest.json');
+  const sidecarPath = `${manifestPath}.sha256`;
+  const manifestTemporaryPath = resolve(
+    outputDirectory,
+    `.${manifest.runId}.candidate-manifest.json.tmp`,
+  );
+  const sidecarTemporaryPath = resolve(
+    outputDirectory,
+    `.${manifest.runId}.candidate-manifest.json.sha256.tmp`,
+  );
+  await assertEvidenceOutputTargetsAbsent([
+    manifestPath,
+    sidecarPath,
+    manifestTemporaryPath,
+    sidecarTemporaryPath,
+  ]);
+  if ((await readdir(outputDirectory)).length !== 0) {
+    throw new Error('Release evidence output directory must be empty before publication.');
+  }
+
+  const manifestBytes = `${canonicalJson(manifest)}\n`;
+  const digest = sha256(manifestBytes);
+  const sidecarBytes = `${digest}  candidate-manifest.json\n`;
+  try {
+    await writeExclusiveTemporaryFile(manifestTemporaryPath, manifestBytes);
+    await writeExclusiveTemporaryFile(sidecarTemporaryPath, sidecarBytes);
+    await assertEvidenceOutputTargetsAbsent([manifestPath, sidecarPath]);
+    await rename(sidecarTemporaryPath, sidecarPath);
+    await rename(manifestTemporaryPath, manifestPath);
+  } catch (error) {
+    await Promise.all([
+      rm(manifestTemporaryPath, { force: true }),
+      rm(sidecarTemporaryPath, { force: true }),
+    ]);
+    throw error;
+  }
+
+  await exactContainedRegularFile(outputDirectory, manifestPath, 'candidate manifest');
+  await exactContainedRegularFile(outputDirectory, sidecarPath, 'candidate manifest sidecar');
+  if (await readFile(manifestPath, 'utf8') !== manifestBytes
+    || await readFile(sidecarPath, 'utf8') !== sidecarBytes) {
+    throw new Error('Published candidate evidence bytes do not match their canonical values.');
+  }
+  return { manifestPath, sidecarPath, digest };
+}
+
+export async function executeRelease(
+  args: readonly string[],
+  callerRoot = process.cwd(),
+  adapters: ReleaseBootstrapAdapters = defaultBootstrapAdapters,
+): Promise<ReleaseExecutionResult> {
+  const bootstrap = await bootstrapRelease(args, callerRoot, adapters);
+  const cleanupSucceeded = await cleanupRegisteredWorktree(
+    bootstrap.request.callerRoot,
+    bootstrap.runRoot,
+    bootstrap.request.candidateRoot,
+    adapters,
+  );
+  const manifest = bootstrap.candidateModule.finalizeCandidateManifest(
+    bootstrap.draft,
+    cleanupSucceeded,
+  );
+  const evidence = await writeCandidateEvidence(bootstrap.outputDirectory, manifest);
+  return {
+    ...evidence,
+    outputDirectory: bootstrap.outputDirectory,
+    runRoot: bootstrap.runRoot,
+    manifest,
+  };
+}
+
 const defaultReleaseAdapters: ReleaseAdapters = {
   async run(input) {
     return new Promise((resolveResult, reject) => {
@@ -1261,3 +1549,42 @@ const defaultReleaseAdapters: ReleaseAdapters = {
   now: () => new Date().toISOString(),
   randomUUID,
 };
+
+const defaultBootstrapAdapters: ReleaseBootstrapAdapters = {
+  randomUUID,
+  git: defaultReleaseAdapters.git,
+  async importCandidate(candidateModuleUrl) {
+    return await import(candidateModuleUrl) as CandidateReleaseModule;
+  },
+  writeStatus(status) {
+    process.stderr.write(`${status}\n`);
+  },
+  async removeRunRoot(runRoot) {
+    await rm(runRoot, { recursive: true, force: true });
+  },
+};
+
+async function runReleaseCli(): Promise<void> {
+  try {
+    const result = await executeRelease(process.argv.slice(2));
+    process.stdout.write(`candidate_manifest=${result.manifestPath}\n`);
+    process.stdout.write(`candidate_manifest_sha256=${result.digest}\n`);
+    if (!result.manifest.execution.cleanupSucceeded) {
+      process.stderr.write(`cleanup_failed ${result.runRoot}\n`);
+    } else if (result.manifest.status === 'failed') {
+      process.stderr.write(`${result.manifest.failureCode}\n`);
+    }
+    if (result.manifest.status !== 'passed') process.exitCode = 1;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message !== 'bootstrap_failed' && message !== 'bootstrap_cleanup_failed') {
+      process.stderr.write('release_failed\n');
+    }
+    process.exitCode = 1;
+  }
+}
+
+if (process.argv[1]
+  && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  await runReleaseCli();
+}

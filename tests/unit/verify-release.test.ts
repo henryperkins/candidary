@@ -2,7 +2,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,14 +13,17 @@ import {
   APPROVED_RELEASE_BASE_SHA,
   assertDependencyFreeBootstrapGraph,
   bootstrapRelease,
+  executeRelease,
   finalizeCandidateManifest,
   parseReleaseArgs,
   runCandidate,
+  writeCandidateEvidence,
   type CandidateReleaseModule,
   type ReleaseBootstrapAdapters,
   type ReleaseAdapters,
   type ReleaseRunRequest,
 } from '../../scripts/verify-release';
+import { runDeployRelease } from '../../scripts/deploy-release';
 import {
   assertRedactedCandidateManifest,
   type MigrationVerification,
@@ -66,17 +69,23 @@ function independentSha(value: string | Uint8Array): string {
 function bootstrapAdapters(options: {
   importFailure?: boolean;
   cleanupFailure?: boolean;
+  registryStale?: boolean;
+  runRootRemovalFailure?: boolean;
   draftRunId?: string;
   missingExport?: 'runCandidate' | 'finalizeCandidateManifest';
+  candidateModule?: CandidateReleaseModule;
+  onImport?: () => Promise<void>;
 } = {}): ReleaseBootstrapAdapters & {
   calls: Array<{ args: string[]; cwd: string }>;
   imports: string[];
   generatedIds: number;
   statuses: string[];
+  runRootRemovals: string[];
 } {
   const calls: Array<{ args: string[]; cwd: string }> = [];
   const imports: string[] = [];
   const statuses: string[] = [];
+  const runRootRemovals: string[] = [];
   let generatedIds = 0;
   let registeredWorktree: string | null = null;
 
@@ -84,6 +93,7 @@ function bootstrapAdapters(options: {
     calls,
     imports,
     statuses,
+    runRootRemovals,
     get generatedIds() {
       return generatedIds;
     },
@@ -109,7 +119,7 @@ function bootstrapAdapters(options: {
       if (args[0] === 'worktree' && args[1] === 'remove') {
         if (options.cleanupFailure) return { exitCode: 1, stdout: '' };
         if (registeredWorktree) await rm(registeredWorktree, { force: true, recursive: true });
-        registeredWorktree = null;
+        if (!options.registryStale) registeredWorktree = null;
         return { exitCode: 0, stdout: '' };
       }
       if (args[0] === 'worktree' && args[1] === 'list') {
@@ -122,7 +132,9 @@ function bootstrapAdapters(options: {
     },
     async importCandidate(url) {
       imports.push(url);
+      await options.onImport?.();
       if (options.importFailure) throw new Error('simulated candidate import failure');
+      if (options.candidateModule) return options.candidateModule;
       const candidateModule: Partial<CandidateReleaseModule> = {
         async runCandidate(request) {
           return {
@@ -141,6 +153,11 @@ function bootstrapAdapters(options: {
     },
     writeStatus(status) {
       statuses.push(status);
+    },
+    async removeRunRoot(runRoot) {
+      runRootRemovals.push(runRoot);
+      if (options.runRootRemovalFailure) throw new Error('simulated run-root cleanup failure');
+      await rm(runRoot, { force: true, recursive: true });
     },
   };
 }
@@ -204,6 +221,7 @@ interface InnerOptions {
   invalidMigrationReport?: boolean;
   wranglerLinkEscape?: boolean;
   dryRunLinkEscape?: boolean;
+  candidateIdentityUnavailable?: boolean;
 }
 
 interface InnerFixture {
@@ -407,7 +425,9 @@ async function createInnerFixture(options: InnerOptions = {}): Promise<InnerFixt
       gitCalls.push([...args]);
       if (args[0] === '--version') return { exitCode: 0, stdout: 'git version 2.50.1.windows.1\n' };
       if (args[0] === 'rev-parse' && args[2] === `${CANDIDATE_SHA}^{commit}`) {
-        return { exitCode: 0, stdout: `${CANDIDATE_SHA}\n` };
+        return options.candidateIdentityUnavailable
+          ? { exitCode: 1, stdout: '' }
+          : { exitCode: 0, stdout: `${CANDIDATE_SHA}\n` };
       }
       if (args[0] === 'rev-parse' && args[2] === `${APPROVED_RELEASE_BASE_SHA}^{commit}`) {
         return { exitCode: 0, stdout: `${APPROVED_RELEASE_BASE_SHA}\n` };
@@ -462,6 +482,23 @@ async function createInnerFixture(options: InnerOptions = {}): Promise<InnerFixt
     playwrightReport: playwrightReportPath,
     migrationReport,
     dryRunRoot,
+  };
+}
+
+async function releaseModuleFixture(options: InnerOptions = {}): Promise<CandidateReleaseModule> {
+  const fixture = await createInnerFixture(options);
+  const draft = await runCandidate(fixture.request, fixture.adapters);
+  return {
+    async runCandidate(request) {
+      const candidateDraft = structuredClone(draft);
+      candidateDraft.manifest.runId = request.runId;
+      if (candidateDraft.manifest.candidate) {
+        candidateDraft.manifest.candidate.gitSha = request.candidateSha;
+        candidateDraft.manifest.candidate.approvedBaseSha = request.approvedBaseSha;
+      }
+      return candidateDraft;
+    },
+    finalizeCandidateManifest,
   };
 }
 
@@ -534,7 +571,8 @@ describe('release bootstrap isolation', () => {
       ['--sha', CANDIDATE_SHA, '--base-sha', APPROVED_RELEASE_BASE_SHA],
       callerRoot,
       adapters,
-    )).rejects.toThrow(/run ID/iu);
+    )).rejects.toThrow(/bootstrap_failed/iu);
+    expect(adapters.statuses).toEqual(['bootstrap_failed']);
   });
 
   it('loads a dependency-free candidate graph before node_modules exists and rejects bare imports', async () => {
@@ -651,6 +689,37 @@ describe('release bootstrap isolation', () => {
     expect(await readFile(resolve(worktreeRoot, 'scripts/verify-release.ts'), 'utf8')).toContain('candidate');
     expect(adapters.statuses).toEqual(['bootstrap_cleanup_failed']);
   });
+
+  it('preserves the registered temp worktree when bootstrap output cannot be removed safely', async () => {
+    const callerRoot = await temporaryRoot();
+    const candidateModule: CandidateReleaseModule = {
+      async runCandidate(request) {
+        const outputDirectory = resolve(
+          callerRoot,
+          'output/release',
+          request.candidateSha,
+          request.runId,
+        );
+        await writeFile(resolve(outputDirectory, 'unexpected.txt'), 'preserve\n', 'utf8');
+        return { manifest: { runId: '223e4567-e89b-42d3-a456-426614174000' } } as never;
+      },
+      finalizeCandidateManifest(draft) {
+        return draft.manifest;
+      },
+    };
+    const adapters = bootstrapAdapters({ candidateModule });
+    await expect(bootstrapRelease(
+      ['--sha', CANDIDATE_SHA, '--base-sha', APPROVED_RELEASE_BASE_SHA],
+      callerRoot,
+      adapters,
+    )).rejects.toThrow(/bootstrap_cleanup_failed/u);
+    const add = adapters.calls.find(({ args }) => args[0] === 'worktree' && args[1] === 'add')!;
+    const runRoot = dirname(add.args[3]!);
+    roots.push(runRoot);
+    expect((await lstat(add.args[3]!)).isDirectory()).toBe(true);
+    expect(adapters.runRootRemovals).toHaveLength(0);
+    expect(adapters.statuses).toEqual(['bootstrap_cleanup_failed']);
+  });
 });
 
 describe('immutable candidate command runner', () => {
@@ -664,6 +733,7 @@ describe('immutable candidate command runner', () => {
       'SESSION_COOKIE',
       'OPENAI_API_KEY',
       'CANDIDARY_UNRELATED_VALUE',
+      'NODE_PATH',
     ] as const;
     const original = new Map(changedEnvironmentNames.map((name) => [name, process.env[name]]));
     process.env.CLOUDFLARE_API_TOKEN = 'cloudflare-token';
@@ -673,6 +743,7 @@ describe('immutable candidate command runner', () => {
     process.env.SESSION_COOKIE = 'cookie';
     process.env.OPENAI_API_KEY = 'openai-key';
     process.env.CANDIDARY_UNRELATED_VALUE = 'must-not-cross-boundary';
+    process.env.NODE_PATH = resolve(fixture.request.callerRoot, 'caller-controlled-node-modules');
     let draft;
     try {
       draft = await runCandidate(fixture.request, fixture.adapters);
@@ -741,6 +812,7 @@ describe('immutable candidate command runner', () => {
       expect(call.env.TOKEN_HMAC_KEY).toBeUndefined();
       expect(call.env.OPENAI_API_KEY).toBeUndefined();
       expect(call.env.CANDIDARY_UNRELATED_VALUE).toBeUndefined();
+      expect(call.env.NODE_PATH).toBeUndefined();
     }
     expect(fixture.calls[9]!.env.PLAYWRIGHT_JSON_OUTPUT_FILE).toBe(fixture.playwrightReport);
   });
@@ -949,5 +1021,219 @@ describe('immutable candidate command runner', () => {
       claims: { localAutomated: 'failed' },
     });
     expect(() => finalizeCandidateManifest({ manifest: passed }, true)).toThrow(/finalized/iu);
+  });
+});
+
+describe('release finalization and evidence output', () => {
+  const releaseArgs = ['--sha', CANDIDATE_SHA, '--base-sha', APPROVED_RELEASE_BASE_SHA] as const;
+
+  async function executeFixture(
+    innerOptions: InnerOptions = {},
+    bootstrapOptions: Parameters<typeof bootstrapAdapters>[0] = {},
+  ) {
+    const callerRoot = await temporaryRoot();
+    const candidateModule = await releaseModuleFixture(innerOptions);
+    const adapters = bootstrapAdapters({ ...bootstrapOptions, candidateModule });
+    const result = await executeRelease(releaseArgs, callerRoot, adapters);
+    return { callerRoot, adapters, result };
+  }
+
+  it('writes a passed manifest and exact digest only after successful cleanup', async () => {
+    const { adapters, result } = await executeFixture();
+    assertRedactedCandidateManifest(result.manifest);
+    expect(result.manifest.status).toBe('passed');
+    expect(result.manifest.execution.cleanupSucceeded).toBe(true);
+    expect(result.manifest.claims).toEqual({
+      localAutomated: 'passed',
+      remoteMigration: 'not_run',
+      deployment: 'not_run',
+      physicalDevices: 'not_run',
+      runtimeCertification: 'not_run',
+    });
+    const bytes = await readFile(result.manifestPath, 'utf8');
+    expect(bytes).toBe(`${independentCanonical(result.manifest)}\n`);
+    expect(result.digest).toBe(independentSha(bytes));
+    expect(await readFile(result.sidecarPath, 'utf8')).toBe(
+      `${result.digest}  candidate-manifest.json\n`,
+    );
+    await expect(lstat(result.runRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(adapters.runRootRemovals).toEqual([result.runRoot]);
+    expect(adapters.calls.filter(({ args }) => args[0] === 'worktree' && args[1] === 'remove'))
+      .toEqual([{
+        args: ['worktree', 'remove', '--force', resolve(result.runRoot, 'worktree')],
+        cwd: expect.any(String),
+      }]);
+    expect(adapters.calls.filter(({ args }) => args[0] === 'worktree' && args[1] === 'list'))
+      .toHaveLength(1);
+  });
+
+  it.each([
+    ['precondition_failed', { attachedInitial: true }, 'precondition_failed'],
+    ['command_failed', { failCommand: 'lint' }, 'command_failed:lint'],
+    ['evidence_invalid', { invalidReport: 'unit-ui' }, 'evidence_invalid'],
+    ['artifact_drift', { artifactDrift: true }, 'artifact_drift'],
+    ['binding_drift', { bindingDrift: true }, 'binding_drift'],
+    ['status_drift', { finalStatus: '?? drift.txt\n' }, 'status_drift'],
+  ] as const)('writes schema-valid %s evidence after the safe-output boundary', async (
+    _label,
+    innerOptions,
+    failureCode,
+  ) => {
+    const { callerRoot, result } = await executeFixture(innerOptions);
+    assertRedactedCandidateManifest(result.manifest);
+    expect(result.manifest.status).toBe('failed');
+    expect(result.manifest.failureCode).toBe(failureCode);
+    expect(result.manifest.execution.cleanupSucceeded).toBe(true);
+    expect(result.manifest.claims.remoteMigration).toBe('not_run');
+    expect(result.manifest.claims.deployment).toBe('not_run');
+    expect(result.manifest.claims.physicalDevices).toBe('not_run');
+    expect(result.manifest.claims.runtimeCertification).toBe('not_run');
+    expect(() => runDeployRelease({
+      candidateRoot: callerRoot,
+      sha: CANDIDATE_SHA,
+      manifestPath: result.manifestPath,
+    })).toThrow(/complete passed candidate/iu);
+  });
+
+  it.each([
+    ['Git removal failure', { cleanupFailure: true }, 0],
+    ['stale worktree registry', { registryStale: true }, 0],
+    ['run-root removal failure', { runRootRemovalFailure: true }, 1],
+  ] as const)('emits cleanup_failed and preserves the temp root for %s', async (
+    _label,
+    bootstrapOptions,
+    expectedRunRootRemovals,
+  ) => {
+    const callerRoot = await temporaryRoot();
+    const callerOwned = resolve(callerRoot, 'caller-dirty.txt');
+    await writeFile(callerOwned, 'preserve\n', 'utf8');
+    const adapters = bootstrapAdapters({
+      ...bootstrapOptions,
+      candidateModule: await releaseModuleFixture(),
+    });
+    const result = await executeRelease(releaseArgs, callerRoot, adapters);
+    assertRedactedCandidateManifest(result.manifest);
+    expect(result.manifest.failureCode).toBe('cleanup_failed');
+    expect(result.manifest.execution.cleanupSucceeded).toBe(false);
+    expect((await lstat(result.runRoot)).isDirectory()).toBe(true);
+    expect(adapters.runRootRemovals).toHaveLength(expectedRunRootRemovals);
+    expect(JSON.stringify(adapters.calls.map(({ args }) => args))).not.toContain(callerOwned);
+    expect(adapters.calls.flatMap(({ args }) => args).some((arg) => /^(?:stash|reset|clean)$/u.test(arg))).toBe(false);
+    expect(await readFile(callerOwned, 'utf8')).toBe('preserve\n');
+    roots.push(result.runRoot);
+  });
+
+  it.each([
+    ['attached initial HEAD', { attachedInitial: true }],
+    ['unavailable candidate identity', { candidateIdentityUnavailable: true }],
+  ] as const)('lets cleanup failure supersede %s without losing schema validity', async (
+    _label,
+    innerOptions,
+  ) => {
+    const { result } = await executeFixture(innerOptions, { cleanupFailure: true });
+    assertRedactedCandidateManifest(result.manifest);
+    expect(result.manifest.failureCode).toBe('cleanup_failed');
+    expect(result.manifest.execution.cleanupSucceeded).toBe(false);
+    roots.push(result.runRoot);
+  });
+
+  it('rejects an output reparse point before reserving a run or touching Git', async () => {
+    const callerRoot = await temporaryRoot();
+    const outside = await temporaryRoot();
+    await symlink(outside, resolve(callerRoot, 'output'), process.platform === 'win32' ? 'junction' : 'dir');
+    const adapters = bootstrapAdapters({ candidateModule: await releaseModuleFixture() });
+    await expect(executeRelease(releaseArgs, callerRoot, adapters)).rejects.toThrow(/output/iu);
+    expect(adapters.generatedIds).toBe(0);
+    expect(adapters.calls).toHaveLength(0);
+  });
+
+  it('revalidates output after import and cleans bootstrap state without evidence on a new reparse point', async () => {
+    const callerRoot = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const adapters = bootstrapAdapters({
+      candidateModule: await releaseModuleFixture(),
+      async onImport() {
+        await symlink(outside, resolve(callerRoot, 'output'), process.platform === 'win32' ? 'junction' : 'dir');
+      },
+    });
+    await expect(executeRelease(releaseArgs, callerRoot, adapters)).rejects.toThrow(/bootstrap_failed/iu);
+    expect(adapters.statuses).toEqual(['bootstrap_failed']);
+    expect(adapters.calls.some(({ args }) => args[0] === 'worktree' && args[1] === 'remove')).toBe(true);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it('creates the UUID output directory exclusively and refuses an existing run', async () => {
+    const callerRoot = await temporaryRoot();
+    const collisionRoot = resolve(callerRoot, 'output/release', CANDIDATE_SHA, RUN_ID);
+    await mkdir(collisionRoot, { recursive: true });
+    await writeFile(resolve(collisionRoot, 'caller-owned.txt'), 'preserve\n', 'utf8');
+    const adapters = bootstrapAdapters({ candidateModule: await releaseModuleFixture() });
+    await expect(executeRelease(releaseArgs, callerRoot, adapters)).rejects.toThrow(/bootstrap_failed/iu);
+    expect(await readFile(resolve(collisionRoot, 'caller-owned.txt'), 'utf8')).toBe('preserve\n');
+    await expect(readFile(resolve(collisionRoot, 'candidate-manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('publishes canonical bytes through exclusive temporary files and refuses overwrite', async () => {
+    const callerRoot = await temporaryRoot();
+    const outputDirectory = resolve(callerRoot, 'output/release', CANDIDATE_SHA, RUN_ID);
+    await mkdir(outputDirectory, { recursive: true });
+    const candidateModule = await releaseModuleFixture();
+    const draft = await candidateModule.runCandidate({
+      callerRoot,
+      candidateRoot: callerRoot,
+      runRoot: callerRoot,
+      runId: RUN_ID,
+      candidateSha: CANDIDATE_SHA,
+      approvedBaseSha: APPROVED_RELEASE_BASE_SHA,
+    });
+    const manifest = candidateModule.finalizeCandidateManifest(draft, true);
+    const written = await writeCandidateEvidence(outputDirectory, manifest);
+    expect((await readdir(outputDirectory)).sort()).toEqual([
+      'candidate-manifest.json',
+      'candidate-manifest.json.sha256',
+    ]);
+    const bytes = await readFile(written.manifestPath, 'utf8');
+    expect(bytes).toBe(`${independentCanonical(manifest)}\n`);
+    expect(written.digest).toBe(independentSha(bytes));
+    expect(await readFile(written.sidecarPath, 'utf8')).toBe(
+      `${written.digest}  candidate-manifest.json\n`,
+    );
+    await expect(writeCandidateEvidence(outputDirectory, manifest)).rejects.toThrow(/already exists/iu);
+    expect(await readFile(written.manifestPath, 'utf8')).toBe(bytes);
+  });
+
+  it('refuses to publish through an output-chain reparse point introduced after reservation', async () => {
+    const callerRoot = await temporaryRoot();
+    const outsideOutput = await temporaryRoot();
+    const outsideRun = resolve(outsideOutput, 'release', CANDIDATE_SHA, RUN_ID);
+    await mkdir(outsideRun, { recursive: true });
+    await symlink(
+      outsideOutput,
+      resolve(callerRoot, 'output'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const candidateModule = await releaseModuleFixture();
+    const draft = await candidateModule.runCandidate({
+      callerRoot,
+      candidateRoot: callerRoot,
+      runRoot: callerRoot,
+      runId: RUN_ID,
+      candidateSha: CANDIDATE_SHA,
+      approvedBaseSha: APPROVED_RELEASE_BASE_SHA,
+    });
+    const manifest = candidateModule.finalizeCandidateManifest(draft, true);
+    await expect(writeCandidateEvidence(
+      resolve(callerRoot, 'output/release', CANDIDATE_SHA, RUN_ID),
+      manifest,
+    )).rejects.toThrow(/output/iu);
+    expect(await readdir(outsideRun)).toEqual([]);
+  });
+
+  it('exposes the E2E typecheck and immutable release commands without running them', async () => {
+    const packageJson = JSON.parse(await readFile(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.scripts['typecheck:e2e']).toBe('tsc -p tsconfig.e2e.json --pretty false');
+    expect(packageJson.scripts['verify:release']).toBe('node --experimental-strip-types scripts/verify-release.ts');
   });
 });
