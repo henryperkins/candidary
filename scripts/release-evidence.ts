@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
 } from 'node:fs';
 import {
   basename,
@@ -368,6 +369,31 @@ function assertRealContainment(container: string, target: string, field: string)
   if (!within(realContainer, realTarget)) throw new Error(`${field} escapes its approved root`);
 }
 
+function sameFile(left: string, right: string): boolean {
+  const leftReal = realpathSync(left);
+  const rightReal = realpathSync(right);
+  const normalizeCase = (path: string): string => sep === '\\' ? path.toLowerCase() : path;
+  if (normalizeCase(leftReal) === normalizeCase(rightReal)) return true;
+  const leftStat = statSync(left);
+  const rightStat = statSync(right);
+  return leftStat.ino !== 0 && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+}
+
+function assertDirectoryChainHasNoLinks(base: string, target: string, field: string): void {
+  const path = relative(resolve(base), resolve(target));
+  if (path === '' || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) {
+    throw new Error(`${field} is not a child directory`);
+  }
+  let current = resolve(base);
+  for (const component of path.split(sep)) {
+    current = join(current, component);
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`${field} contains a linked or non-directory component`);
+    }
+  }
+}
+
 function logicalPath(root: string, target: string): string {
   const path = relative(resolve(root), resolve(target)).replaceAll('\\', '/');
   return relativeEvidencePath(path, 'artifact path');
@@ -383,6 +409,7 @@ function hashedFile(root: string, target: string): HashedFile {
 export function collectMigrationManifest(root: string): MigrationManifest {
   const resolvedRoot = resolve(root);
   const migrationRoot = resolve(resolvedRoot, 'migrations');
+  assertDirectoryChainHasNoLinks(resolvedRoot, migrationRoot, 'migration directory');
   assertRealContainment(resolvedRoot, migrationRoot, 'migration directory');
   const entries = readdirSync(migrationRoot, { withFileTypes: true });
   if (entries.length === 0) throw new Error('migration inventory is empty');
@@ -451,6 +478,8 @@ export function collectDeployableArtifacts(root: string): {
   const workerRoot = resolve(resolvedRoot, 'dist/candidary');
   const clientRoot = resolve(resolvedRoot, 'dist/client');
   const generatedConfig = resolve(workerRoot, 'wrangler.json');
+  assertDirectoryChainHasNoLinks(resolvedRoot, workerRoot, 'Worker build root');
+  assertDirectoryChainHasNoLinks(resolvedRoot, clientRoot, 'client build root');
   assertRealContainment(resolvedRoot, workerRoot, 'Worker build root');
   assertRealContainment(resolvedRoot, clientRoot, 'client build root');
   assertRealContainment(workerRoot, generatedConfig, 'generated Wrangler config');
@@ -462,7 +491,7 @@ export function collectDeployableArtifacts(root: string): {
   const assetsTarget = resolve(dirname(generatedConfig), configPath(assets.directory, 'assets.directory'));
   if (!within(workerRoot, workerTarget)) throw new Error('Worker main escapes dist/candidary');
   if (!within(clientRoot, assetsTarget)) throw new Error('client assets escape dist/client');
-  if (resolve(workerTarget) === resolve(generatedConfig)) throw new Error('generated Wrangler JSON is not a deployable artifact');
+  if (sameFile(workerTarget, generatedConfig)) throw new Error('generated Wrangler JSON is not a deployable artifact');
   assertRealContainment(workerRoot, workerTarget, 'Worker main');
   assertRealContainment(clientRoot, assetsTarget, 'client assets');
   scanNoSecretsOrLinks(workerRoot);
@@ -597,7 +626,7 @@ export function normalizedBindingTopology(config: unknown): BindingTopology {
   return {
     compatibilityDate: calendarDate(record.compatibility_date, 'compatibility_date'),
     compatibilityFlags: sortedUnique(optionalArray(record.compatibility_flags, 'compatibility_flags').map((value, index) =>
-      safeToken(value, `compatibility_flags[${index}]`))),
+      compatibilityFlag(value, `compatibility_flags[${index}]`))),
     workersDev: requiredBoolean(record.workers_dev, 'workers_dev'),
     assets: {
       binding: safeName(assets.binding, 'assets.binding'),
@@ -781,9 +810,9 @@ function uuidV4(value: unknown, label: string): string {
   return value;
 }
 
-function safeToken(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(value) || credentialLike(value)) {
-    throw new TypeError(`${label} must be an allowlisted token`);
+function compatibilityFlag(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/u.test(value) || credentialLike(value)) {
+    throw new TypeError(`${label} must be a compatibility-flag name`);
   }
   return value;
 }
@@ -803,7 +832,8 @@ function hasControlCharacter(value: string): boolean {
 
 function versionToken(value: unknown, label: string): string {
   if (typeof value !== 'string'
-    || !/^v?\d+(?:\.(?:\d+|[A-Za-z][A-Za-z0-9-]*)){1,7}(?:[-+][0-9A-Za-z.-]+)?$/u.test(value)) {
+    || !/^v?\d+(?:\.(?:\d+|[A-Za-z][A-Za-z0-9-]*)){1,7}(?:[-+][0-9A-Za-z.-]+)?$/u.test(value)
+    || credentialLike(value)) {
     throw new TypeError(`${label} must be a parsed version token`);
   }
   return value;
@@ -875,7 +905,7 @@ function stringArray(value: unknown, label: string, validate: (candidate: unknow
 
 function routeString(value: unknown, label: string): string {
   if (typeof value !== 'string' || !/^\/[A-Za-z0-9*._~!$&'()+,;=:%/-]*$/u.test(value)
-    || value.includes('..') || credentialLike(value)) {
+    || value.includes('..') || value.includes('://') || credentialLike(value)) {
     throw new TypeError(`${label} must be a route pattern`);
   }
   return value;
@@ -886,10 +916,27 @@ function wranglerNotFoundHandling(value: unknown, label: string): string {
 }
 
 function cronExpression(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length > 128
-    || !/^(?:[0-9A-Z*/?,LW#-]+ ){4}[0-9A-Z*/?,LW#-]+$/iu.test(value)
-    || credentialLike(value)) {
+  if (typeof value !== 'string' || value.length > 128 || credentialLike(value)) {
     throw new TypeError(`${label} must be a five-field cron expression`);
+  }
+  const fields = value.split(' ');
+  if (fields.length !== 5) throw new TypeError(`${label} must be a five-field cron expression`);
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = fields;
+  const replaceAliases = (field: string, aliases: readonly string[]): string => {
+    let normalized = field.toUpperCase();
+    for (const alias of aliases) normalized = normalized.replaceAll(alias, '1');
+    return normalized;
+  };
+  const monthSyntax = replaceAliases(month!, [
+    'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC',
+  ]);
+  const daySyntax = replaceAliases(dayOfWeek!, ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']);
+  if (!/^[-0-9*/,]+$/u.test(minute!)
+    || !/^[-0-9*/,]+$/u.test(hour!)
+    || !/^[-0-9*?/,LW]+$/u.test(dayOfMonth!.toUpperCase())
+    || !/^[-0-9*?/,]+$/u.test(monthSyntax)
+    || !/^[-0-9*?/,#L]+$/u.test(daySyntax)) {
+    throw new TypeError(`${label} must use cron field syntax`);
   }
   return value;
 }
@@ -921,7 +968,7 @@ function validateTopology(value: unknown): BindingTopology {
   const compatibilityDate = calendarDate(record.compatibilityDate, 'compatibilityDate');
   return {
     compatibilityDate,
-    compatibilityFlags: stringArray(record.compatibilityFlags, 'compatibilityFlags', safeToken),
+    compatibilityFlags: stringArray(record.compatibilityFlags, 'compatibilityFlags', compatibilityFlag),
     workersDev: requiredBoolean(record.workersDev, 'workersDev'),
     assets: {
       binding: safeName(assets.binding, 'asset binding'),
@@ -1022,7 +1069,7 @@ function validateCommand(value: unknown, expectedId: ReleaseCommandId): CommandR
   const startedAt = utcInstant(record.startedAt, 'command.startedAt');
   const finishedAt = utcInstant(record.finishedAt, 'command.finishedAt');
   if (finishedAt < startedAt) throw new TypeError('command finishes before it starts');
-  const durationMs = nonnegativeInteger(record.durationMs, 'command.durationMs');
+  const durationMs = nonnegativeFiniteNumber(record.durationMs, 'command.durationMs');
   if (status === 'passed') {
     if (record.exitCode !== 0) throw new TypeError('passed command must exit zero');
     return { id, status, startedAt, finishedAt, durationMs, exitCode: 0 };
@@ -1108,7 +1155,8 @@ function validateArtifacts(value: unknown): NonNullable<CandidateManifest['artif
     throw new TypeError('client artifacts must remain under dist/client');
   }
   const worker = parseHashedFile(record.worker, 'Worker artifact');
-  if (!worker.path.startsWith('dist/candidary/') || worker.path === 'dist/candidary/wrangler.json') {
+  if (!worker.path.startsWith('dist/candidary/')
+    || worker.path.toLowerCase() === 'dist/candidary/wrangler.json') {
     throw new TypeError('Worker artifact must remain under dist/candidary and exclude generated config');
   }
   return {
@@ -1403,7 +1451,7 @@ export function assertRedactedCandidateManifest(value: unknown): asserts value i
     if ((precondition === 'candidate_identity_unavailable') !== (candidate === null)) {
       throw new TypeError('candidate identity availability does not match the precondition observation');
     }
-  } else if (code !== 'cleanup_failed') {
+  } else {
     if (!candidate || execution.initialDetachedHead !== true
       || execution.initialHeadSha !== candidate.gitSha
       || execution.initialHeadTree !== candidate.gitTree

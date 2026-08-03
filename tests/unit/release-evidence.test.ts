@@ -304,6 +304,22 @@ describe('migration manifests', () => {
     for (const name of names) await put(root, `migrations/${name}`, 'select 1;');
     expect(() => collectMigrationManifest(root)).toThrow();
   });
+
+  it('rejects a migration root that is itself a directory link', async () => {
+    const root = await temporaryRoot();
+    await put(root, 'linked-migrations/0001_initial.sql', 'select 1;');
+    try {
+      await symlink(
+        join(root, 'linked-migrations'),
+        join(root, 'migrations'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === 'EPERM') return;
+      throw error;
+    }
+    expect(() => collectMigrationManifest(root)).toThrow();
+  });
 });
 
 describe('deployable artifacts', () => {
@@ -340,6 +356,7 @@ describe('deployable artifacts', () => {
     { main: 'C:\\outside.js', assets: { directory: '../client' } },
     { main: '/outside.js', assets: { directory: '../client' } },
     { main: 'wrangler.json', assets: { directory: '../client' } },
+    { main: 'WRANGLER.JSON', assets: { directory: '../client' } },
     { main: 'index.js', assets: { directory: '../../client-evil' } },
   ])('rejects paths outside approved build roots %#', async (config) => {
     const root = await temporaryRoot();
@@ -365,6 +382,28 @@ describe('deployable artifacts', () => {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
     }
+  });
+
+  it('rejects an approved build root that is itself a directory link', async () => {
+    const root = await temporaryRoot();
+    await put(
+      root,
+      'dist/candidary/wrangler.json',
+      JSON.stringify({ main: 'index.js', assets: { directory: '../client' } }),
+    );
+    await put(root, 'dist/candidary/index.js', 'worker');
+    await put(root, 'linked-client/index.html', 'linked client');
+    try {
+      await symlink(
+        join(root, 'linked-client'),
+        join(root, 'dist/client'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === 'EPERM') return;
+      throw error;
+    }
+    expect(() => collectDeployableArtifacts(root)).toThrow();
   });
 });
 
@@ -423,6 +462,10 @@ describe('binding topology', () => {
     changed.d1_databases[0]!.binding = 'OTHER_DB';
     expect(normalizedBindingTopology(changed)).not.toEqual(normalizedBindingTopology(base));
     expect(() => normalizedBindingTopology({ ...base, workers_dev: 'true' })).toThrow();
+    expect(() => normalizedBindingTopology({
+      ...base,
+      assets: { ...base.assets, run_worker_first: ['/https://example.com/private-token'] },
+    })).toThrow();
     expect(() =>
       normalizedBindingTopology({
         ...base,
@@ -435,6 +478,25 @@ describe('binding topology', () => {
         d1_databases: [{ binding: 'DB', migrations_dir: '../../../migrations' }],
       }),
     ).toThrow();
+  });
+
+  it('rejects free-form cron evidence', () => {
+    expect(() => normalizedBindingTopology({
+      compatibility_date: '2026-07-21',
+      workers_dev: true,
+      assets: { binding: 'ASSETS', not_found_handling: '404-page', run_worker_first: [] },
+      d1_databases: [{ binding: 'DB', migrations_dir: 'migrations' }],
+      triggers: { crons: ['SECRET TOKEN VALUE LEAK HERE'] },
+      observability: { enabled: true },
+    })).toThrow();
+    expect(() => normalizedBindingTopology({
+      compatibility_date: '2026-07-21',
+      compatibility_flags: ['eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature'],
+      workers_dev: true,
+      assets: { binding: 'ASSETS', not_found_handling: '404-page', run_worker_first: [] },
+      d1_databases: [{ binding: 'DB', migrations_dir: 'migrations' }],
+      observability: { enabled: true },
+    })).toThrow();
   });
 });
 
@@ -590,6 +652,16 @@ describe('strict redacted candidate manifests', () => {
     absolute.artifacts!.worker.path = 'C:\\secret\\worker.js';
     expectInvalid(absolute);
 
+    const generatedConfigAlias = passedManifest();
+    generatedConfigAlias.artifacts!.worker.path = 'dist/candidary/WRANGLER.JSON';
+    const aliasedTreeHash = independentSha(independentCanonical({
+      worker: generatedConfigAlias.artifacts!.worker,
+      client: generatedConfigAlias.artifacts!.client,
+    }));
+    generatedConfigAlias.artifacts!.firstTreeSha256 = aliasedTreeHash;
+    generatedConfigAlias.artifacts!.secondTreeSha256 = aliasedTreeHash;
+    expectInvalid(generatedConfigAlias);
+
     const credentialPlatform = passedManifest();
     credentialPlatform.execution.platform = 'ghp_abcdefghijklmnopqrstuvwxyz';
     expectInvalid(credentialPlatform);
@@ -626,6 +698,10 @@ describe('strict redacted candidate manifests', () => {
   });
 
   it('enforces command failure, cleanup supersession, and relabel prevention', () => {
+    const fractionalPass = passedManifest();
+    fractionalPass.commands[0].durationMs = 1_000.5;
+    expect(() => assertRedactedCandidateManifest(fractionalPass)).not.toThrow();
+
     const failed = passedManifest();
     failed.status = 'failed';
     failed.failureCode = 'command_failed:lint';
@@ -646,6 +722,7 @@ describe('strict redacted candidate manifests', () => {
     failed.migrations = null;
     failed.bindings = null;
     failed.artifacts = null;
+    failed.commands[4].durationMs = 1_000.5;
     expect(() => assertRedactedCandidateManifest(failed)).not.toThrow();
 
     for (const relabel of ['precondition_failed', 'evidence_invalid', 'artifact_drift', 'binding_drift', 'status_drift'] as const) {
@@ -660,6 +737,33 @@ describe('strict redacted candidate manifests', () => {
     cleanup.failureCode = 'cleanup_failed';
     cleanup.execution.cleanupSucceeded = false;
     expect(() => assertRedactedCandidateManifest(cleanup)).not.toThrow();
+
+    const cleanupWithoutInitialIdentity = passedManifest();
+    cleanupWithoutInitialIdentity.status = 'failed';
+    cleanupWithoutInitialIdentity.failureCode = 'cleanup_failed';
+    cleanupWithoutInitialIdentity.claims.localAutomated = 'failed';
+    cleanupWithoutInitialIdentity.candidate = null;
+    cleanupWithoutInitialIdentity.execution.initialDetachedHead = null;
+    cleanupWithoutInitialIdentity.execution.initialHeadSha = null;
+    cleanupWithoutInitialIdentity.execution.initialHeadTree = null;
+    cleanupWithoutInitialIdentity.execution.initialStatusSha256 = null;
+    cleanupWithoutInitialIdentity.execution.finalDetachedHead = null;
+    cleanupWithoutInitialIdentity.execution.finalHeadSha = null;
+    cleanupWithoutInitialIdentity.execution.finalHeadTree = null;
+    cleanupWithoutInitialIdentity.execution.finalStatusSha256 = null;
+    cleanupWithoutInitialIdentity.execution.cleanupSucceeded = false;
+    cleanupWithoutInitialIdentity.execution.tools = {
+      node: null, npm: null, git: null, typescript: null, eslint: null,
+      vite: null, vitest: null, playwright: null, wrangler: null,
+    };
+    cleanupWithoutInitialIdentity.commands = commandIds.map((id) => ({
+      id, status: 'not_run', startedAt: null, finishedAt: null, durationMs: null, exitCode: null,
+    })) as CandidateManifest['commands'];
+    cleanupWithoutInitialIdentity.tests = { unitUi: null, worker: null, playwright: null };
+    cleanupWithoutInitialIdentity.migrations = null;
+    cleanupWithoutInitialIdentity.bindings = null;
+    cleanupWithoutInitialIdentity.artifacts = null;
+    expectInvalid(cleanupWithoutInitialIdentity);
 
     const falseCleanupLabel = structuredClone(failed);
     falseCleanupLabel.failureCode = 'cleanup_failed';
@@ -750,6 +854,10 @@ describe('strict redacted candidate manifests', () => {
     const jwtVersion = passedManifest();
     jwtVersion.execution.tools.node = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature';
     expectInvalid(jwtVersion);
+
+    const credentialVersion = passedManifest();
+    credentialVersion.execution.tools.node = '1.sk-live-51ABCDEF12345678';
+    expectInvalid(credentialVersion);
 
     const failedInstallWithDependencyTools = passedManifest();
     failedInstallWithDependencyTools.status = 'failed';
