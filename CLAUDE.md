@@ -8,11 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev            # Vite + @cloudflare/vite-plugin — SPA and Worker run together
 npm run build          # tsc -b (both projects) then vite build
 npm run typecheck      # tsc -b --pretty false
+npm run typecheck:e2e  # tests/e2e + shared + Playwright config
 npm run lint           # eslint . --max-warnings=0
 npm test               # test:unit + test:worker
 npm run test:unit      # jsdom: tests/unit + tests/ui
 npm run test:worker    # workerd (vitest-pool-workers): tests/worker
 npm run test:e2e       # Playwright against a built `vite preview`
+npm run verify:bindings    # fail if generated Worker binding types drift
+npm run verify:fresh-d1 -- --run-root <absolute-temp-root> --report-file <root>/migration-verification.json
+npm run verify:release -- --sha <full-commit> --base-sha 0b92387d2e237d568d2514373dcc3044e7960d4b
 npm run test:load:wedding   # dry-run plan unless CANDIDARY_LOAD_CONFIRM is set
 npm run test:load:rsvp      # dry-run plan unless CANDIDARY_RSVP_CONFIRM is set
 npm run cf-typegen     # regenerate worker-configuration.d.ts after binding changes
@@ -45,7 +49,10 @@ Two build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests
 `tsconfig.worker.json` (`worker`, `tests/worker`). Both include `shared/`, which is imported by relative
 path (`../../shared/constants`) from either side — there are no path aliases. The separate
 `tsconfig.e2e.json` covers `tests/e2e`, `shared`, and `playwright.config.ts`; run
-`npx tsc -p tsconfig.e2e.json --pretty false` because `npm run typecheck` does not include it.
+`npm run typecheck:e2e` because `npm run typecheck` does not include it. `verify:release` is the
+immutable aggregate candidate gate: it imports the target commit's own dependency-free runner in a
+detached temporary worktree and leaves the caller checkout, including dirty or untracked files,
+untouched. It creates local evidence only; deployment and remote migration remain separate authority.
 
 ### Authorization
 

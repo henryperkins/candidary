@@ -67,12 +67,89 @@ account authentication, and `RSVP_LOOKUP_RATE_LIMIT` at 30 requests per 60 secon
 lookup. Confirm both exist in the target account before an event opens; the D1 budgets behind them are
 defense in depth, not a replacement.
 
-## Migrate and deploy
+## Build immutable local candidate evidence
+
+Commit the complete candidate before running the aggregate gate. The SHA and approved base must be
+full lowercase commit IDs; a branch name, `HEAD`, shortened SHA, or another ancestor is refused.
 
 ```powershell
-npx wrangler d1 migrations apply candidary-core --remote
-npm run deploy
+$reviewedSha = git rev-parse HEAD
+$approvedBaseSha = '0b92387d2e237d568d2514373dcc3044e7960d4b'
+if ($reviewedSha -notmatch '^[0-9a-f]{40}$') { throw 'Expected a full lowercase commit SHA.' }
+npm run verify:release -- --sha $reviewedSha --base-sha $approvedBaseSha
 ```
+
+`verify:release` creates a detached `candidary-release-` worktree under the OS temporary directory,
+imports that commit's own dependency-free runner, installs dependencies there, and removes the
+worktree through Git before finalizing evidence. Dirty or untracked files in the caller checkout are
+irrelevant and untouched. Its command plan is local-only: binding generation, application and E2E
+typechecks, lint, unit/UI and Worker tests, two production builds with PWA checks around Playwright,
+a strict Wrangler **dry run**, a new local D1 containing every migration, diff hygiene, and final
+detached-SHA/tree/status checks. It never uses `--remote` and never writes remote D1, R2, bindings,
+secrets, or a Worker version.
+
+Successful bootstrap writes exactly:
+
+```text
+output/release/<candidate-sha>/<run-id>/candidate-manifest.json
+output/release/<candidate-sha>/<run-id>/candidate-manifest.json.sha256
+```
+
+The manifest includes the candidate SHA, approved base, Git tree, guest-journey version, lockfile and
+source-Wrangler hashes, tool versions, command IDs/times/durations/exit codes, exact Vitest and
+Playwright counts, fresh-D1 results, normalized binding topology, and Worker/client artifact hashes.
+The content-bound `migrationManifestSha256` is SHA-256 over canonical JSON of the ordered migration
+`{ path, sha256 }` pairs. The fresh-D1 report's separate `ledgerSha256` hashes canonical JSON of the
+ordered filenames only; the two digests are deliberately not interchangeable.
+
+Artifact evidence covers the generated Worker main and every regular client asset selected by the
+generated Vite/Wrangler config. First build, Playwright rebuild, and dry-run Worker hashes must agree.
+The Worker contains the exact candidate and migration literals; client JS/HTML contains neither.
+Secret-file names, links, unexpected dry-run files, report output, environment values, command output,
+absolute temporary paths, and unsafe free-form strings are never serialized.
+
+The adjacent sidecar is exactly `<sha256>  candidate-manifest.json\n`, hashing the final canonical
+manifest bytes including their trailing newline. This unkeyed SHA-256 is an integrity checksum, not
+an authenticity signature. Bootstrap failures before safe output creation write no manifest; closed
+candidate failures after that boundary write a schema-valid failed manifest.
+
+The five claims are intentionally separate. Only `claims.localAutomated` can become `passed`; the
+`remoteMigration`, `deployment`, `physicalDevices`, and `runtimeCertification` claims remain
+`not_run`. Candidate evidence has no Worker version ID. It must not be described as migrated,
+deployed, physically verified, certified, wedding-ready, or production-ready.
+
+## Migrate and deploy only with separate authorization
+
+Local candidate evidence does not authorize a remote migration or deployment. Inventory the remote
+ledger and follow the migration-specific runbook first, under its own approval. Do not apply every
+pending migration merely because it is checked in: `0010_event_start.sql` has the data-aware procedure
+below, while `0011_release_certifications.sql` is a distinct, later schema operation and does not
+certify anything by being applied.
+
+After the approved remote migration state is compatible, select the passed manifest for the exact
+clean checkout and request deployment authorization separately:
+
+```powershell
+$reviewedSha = git rev-parse HEAD
+$candidateManifest = Get-ChildItem -LiteralPath "output/release/$reviewedSha" -Recurse -Filter 'candidate-manifest.json' |
+  Where-Object { (Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json).status -eq 'passed' } |
+  Sort-Object LastWriteTimeUtc |
+  Select-Object -Last 1 -ExpandProperty FullName
+if (-not $candidateManifest) { throw 'No passed candidate manifest exists for the reviewed SHA.' }
+$candidateManifest = (Resolve-Path -LiteralPath $candidateManifest).Path
+npm run deploy -- --sha $reviewedSha --manifest $candidateManifest
+```
+
+The guarded wrapper requires an exact clean SHA/tree, validates the manifest and sidecar, runs
+`npm ci`, rebuilds, rechecks PWA assets, and requires artifact/binding identity to match before it can
+reach Wrangler. The Vite plugin's generated `dist/candidary/wrangler.json` is the deploy source. The
+only live deploy command is strict and tags the Worker version with the full reviewed SHA. Cloudflare
+Worker Version Metadata supplies the runtime version ID, tag, and timestamp through
+`CF_VERSION_METADATA`; runtime identity fails closed unless the tag equals the embedded build SHA.
+The wrapper does not migrate D1 and does not create a certification row.
+
+The following migration note and numbered runbooks remain authoritative when their exact migration
+is separately approved.
 
 > **`migrations apply --remote` failed on 0008 (wrangler 4.113.0).** It returned
 > `incomplete input: SQLITE_ERROR [code: 7500]` and applied nothing — the ledger stayed at 0007 and no
@@ -94,24 +171,18 @@ npm run deploy
 > The export contains real event, guest, and message data — keep it outside the repository and delete
 > it once the deploy is confirmed.
 
-This applies every pending migration, including the private-delivery/publication split,
-partitioned-export schema, host accounts, and canonical per-event theme configuration. The deploy
-then publishes the export Workflow, Images binding, private asset routing, the daily cleanup
-trigger, and the hourly notification-dispatch trigger. Confirm `APP_ORIGIN` exactly matches the
-HTTPS origin before printing a QR code.
-
-The two commands are in that order for a reason, and from `0005_media_stored_at.sql` onward the
-order is load-bearing rather than tidy: the manager's intake queries select and order by
+Migration-before-compatible-Worker order is load-bearing rather than tidy: the manager's intake
+queries select and order by
 `media.stored_at` (`worker/db/media.ts`), so Worker code deployed against a database without that
 column fails the manager's first request. The opposite order strands nobody — `0005` carries a
 compatibility trigger that stamps `stored_at` for any finalization performed by Worker code older
 than the column, so a migrated database serving the previous deployment is a state the schema was
 written to sit in.
 
-Production is migrated through `0007_event_theme.sql` as of 2026-07-29, confirmed by the apply
-command reporting nothing to do. The apply command is the only thing that answers what is true of
-the database you are actually pointed at, so run it before every deploy regardless of what this
-paragraph remembers.
+Production was read-only verified through `0010_event_start.sql` on 2026-08-02, with
+`0011_release_certifications.sql` pending. This dated statement is not authority: re-read the exact
+remote ledger before every release. A pending migration blocks claims about remote convergence but
+does not alter a local manifest's `remoteMigration: not_run` claim.
 
 ### 0008 is a clean-launch migration with no backfill
 
@@ -190,6 +261,14 @@ or connect to D1. **Any nonzero release-tool exit blocks the migration, SQL appl
 follows it.** In particular, plan mode exits nonzero and emits no new SQL when a deadline is not
 strictly before the expected local-midnight start.
 
+Run the immutable local candidate gate above before starting this remote procedure, and retain its
+`$reviewedSha`. Immediately before step 4, repeat the guarded passed-manifest selection so
+`$candidateManifest` still names evidence for that exact SHA. The local result does not replace any
+inventory or authorize any write. If an environment is still behind `0010`, the approved migration source must
+present **exactly** `0010_event_start.sql` as pending at step 2; do not run the command from a source
+that would also apply `0011_release_certifications.sql`. Apply `0011` only as its own separately
+reviewed and authorized operation.
+
 1. **Before applying `0010`, inventory and plan every non-deleted event.** Start with a fresh artifact
    directory, capture Wrangler's machine-readable envelope, then let the Node tool resolve each local
    midnight through `instantForLocalDateTime`. Review both artifacts before continuing. A blocked row
@@ -212,10 +291,11 @@ strictly before the expected local-midnight start.
    if ($LASTEXITCODE -ne 0) { throw 'Schedule-freeze artifact generation failed; release is blocked.' }
    ```
 
-2. **Apply `0010` while the old Worker is still serving.** Its UTC-midnight values are not yet
+2. **Apply only `0010` while the old Worker is still serving.** Its UTC-midnight values are not yet
    interpreted as lifecycle starts, so the approximation is inert for as long as this step lasts.
 
    ```powershell
+   # Proceed only after the remote pending set and reviewed source prove 0010 is the sole apply.
    npx wrangler d1 migrations apply candidary-core --remote
    if ($LASTEXITCODE -ne 0) { throw 'Migration apply failed; release is blocked.' }
    ```
@@ -261,7 +341,14 @@ strictly before the expected local-midnight start.
    not really have.
 
    ```powershell
-   npm run deploy
+   $reviewedSha = git rev-parse HEAD
+   $candidateManifest = Get-ChildItem -LiteralPath "output/release/$reviewedSha" -Recurse -Filter 'candidate-manifest.json' |
+     Where-Object { (Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json).status -eq 'passed' } |
+     Sort-Object LastWriteTimeUtc |
+     Select-Object -Last 1 -ExpandProperty FullName
+   if (-not $candidateManifest) { throw 'No passed candidate manifest exists for the reviewed SHA.' }
+   $candidateManifest = (Resolve-Path -LiteralPath $candidateManifest).Path
+   npm run deploy -- --sha $reviewedSha --manifest $candidateManifest
    if ($LASTEXITCODE -ne 0) { throw 'Worker deploy failed; the schedule freeze remains installed. Retry deploy or use the explicit abort procedure below.' }
 
    $freezeStateAfterDeploy = Join-Path $eventStartGate 'freeze-state-after-deploy.json'
@@ -340,6 +427,20 @@ strictly before the expected local-midnight start.
 The epoch value is therefore an intermediate migration sentinel and never a live start. Corrected
 legacy rows and events created by the new Worker use the new lifecycle immediately; a deploy-gap row
 stays safely on the old behavior only until step 5.
+
+### 0011 creates a certification ledger; it does not certify a release
+
+`0011_release_certifications.sql` is the next migration after the lifecycle rollout. The local
+candidate gate applies it only to a disposable local D1 so schema and upgrade invariants can be
+proved. Applying it to remote D1 is a separate operation requiring explicit authorization after the
+`0010` state has converged; never let a generic pending-migration apply silently combine the two
+procedures.
+
+The migration creates storage for a later certification record. Neither `verify:release`, the guarded
+deploy wrapper, nor any HTTP route or checked-in command inserts that record. A deployed Worker is
+therefore still uncertified until a future, explicitly designed physical-evidence workflow records an
+exact matching Worker version, build SHA, journey version, migration digest, evidence-manifest digest,
+and redacted physical references. See [operations.md](operations.md) for the fail-closed contract.
 
 ## Wedding rehearsal gate
 

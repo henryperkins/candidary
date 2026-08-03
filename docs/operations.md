@@ -17,6 +17,63 @@ The daily `17 3 * * *` handler performs five idempotent jobs:
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 
+## Release identity and certification boundary
+
+The build embeds two Worker-only literals: the full clean Git SHA and the content-bound migration
+manifest SHA-256. `config/release.json` supplies the positive `guestJourneyVersion` (currently 1),
+and the `CF_VERSION_METADATA` binding supplies Cloudflare's Worker version ID, deployment tag, and
+timestamp. Runtime identity is available only when all values are well formed and the version tag is
+exactly the embedded build SHA. A missing metadata binding, empty ID or tag, tag/SHA mismatch,
+unreplaced build literal, or malformed digest produces `null`; it must never degrade to a partial or
+"probably current" identity.
+
+`0011_release_certifications.sql` defines one row per Worker version with these exact columns:
+
+- `worker_version_id` — trimmed Cloudflare Worker version ID and primary key.
+- `build_sha` — 40 lowercase hexadecimal characters.
+- `guest_journey_version` — positive integer matching `config/release.json`.
+- `migration_manifest_sha256` — 64 lowercase hexadecimal characters for the checked-in migration
+  contents, not the filename-only fresh-D1 ledger digest.
+- `evidence_manifest_sha256` — SHA-256 of the exact canonical local candidate-manifest bytes.
+- `physical_evidence_refs_json` — a nonempty JSON array of redacted evidence references.
+- `certified_at` — canonical UTC instant with millisecond precision.
+
+Each physical reference has exactly this safe shape:
+
+```json
+{
+  "category": "printed-entry-ios",
+  "evidenceId": "123e4567-e89b-42d3-a456-426614174000",
+  "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capturedAt": "2026-08-02T12:00:00.000Z"
+}
+```
+
+Categories are allowlisted and unique within the row. `evidenceId` is a UUID and
+`manifestSha256` identifies a separate redacted evidence manifest. Never store a raw invitation or
+management URL, credential, cookie, submitted name, device identifier, screenshot path, free-form
+note, or secret in this array.
+
+There is deliberately no HTTP route, public command, scheduled job, deploy hook, or migration hook
+that writes a certification. The repository class can validate and persist a record for a future
+explicit workflow, but it has no remotely reachable caller. `verify:release` writes only local
+candidate evidence, the guarded deploy writes only a tagged Worker version, and applying `0011`
+creates only the empty table. Do not insert a row by hand and do not document an ad hoc write command.
+
+A future readiness decision must fail closed unless all of the following are true at the same time:
+
+1. the remote migration ledger has no unapproved or pending migration;
+2. runtime identity is non-null, including an exact nonempty tag/build-SHA match;
+3. one certification matches Worker version ID, build SHA, journey version, and migration digest
+   exactly;
+4. its evidence-manifest digest matches the retained local manifest and checksum sidecar; and
+5. every required physical category has a valid redacted reference.
+
+Missing bindings, malformed metadata or evidence, an unknown certification, a pending migration, or
+any identity mismatch means **not certified**. Candidate evidence itself keeps
+`remoteMigration`, `deployment`, `physicalDevices`, and `runtimeCertification` at `not_run` and
+contains no Worker version ID, so it cannot be used to claim deployment or wedding readiness.
+
 ## Delivery and publication
 
 A finalized `stored` media row is a private host delivery. Its `publication_status` is independently `unpublished`, `published`, or `hidden`; changing publication never changes private retention or export eligibility. Originals are never guest-readable. Cached previews use separate R2 keys and can be regenerated without changing the original.
