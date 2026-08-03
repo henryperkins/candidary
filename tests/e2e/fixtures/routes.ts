@@ -6,6 +6,7 @@ import type {
   EventThemePresetId,
   EventView,
   GuestEventView,
+  PhotoIntakeState,
   RsvpHouseholdDetail,
   RsvpHouseholdListPage,
   RsvpHouseholdView,
@@ -44,17 +45,29 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
   galleryVisible: true,
   moderationRequired: true,
   eventTimezone: 'America/Chicago',
+  // 5 pm on the event date in the event's own zone, which is UTC-5 that week.
+  // Every guest fixture below is an event that has already begun.
+  eventStartAt: '2026-09-19T22:00:00.000Z',
   // The existing photo fixtures are explicitly photos-primary with RSVP off, so
   // no upload or receipt baseline picks up an RSVP disclosure it never had.
   rsvpDeadlineAt: null,
   rsvpDeadlineDate: null,
   phase: 'photos-primary',
   rsvpState: 'disabled',
+  // At or after the start RSVP has left the guest experience, and no boundary
+  // remains to wake for. A partial that moves the phase moves both of these.
+  rsvpAccess: 'unavailable',
+  lifecycleRecheckAfterMs: null,
   theme: eventTheme('candidary-default'),
 };
 
 export const EVENT_FIXTURE: EventView = {
   ...GUEST_EVENT_FIXTURE,
+  eventStartTime: '17:00',
+  // Permitted and past its start, which is the state every manager fixture is in.
+  photosOpen: true,
+  photoIntakeState: 'open',
+  photoIntakeRecheckAfterMs: null,
   reservedMediaCount: 0,
   storedMediaCount: 1,
   reservedBytes: 0,
@@ -265,6 +278,13 @@ export interface RsvpRosterBatchRequestLog {
 // The one durable entry URL every browser test scans. It is a fixture string, not
 // a credential: the real exchange is proved in `tests/worker/event-entry-api`.
 export const EVENT_ENTRY_FIXTURE_TOKEN = `entry-fixture-id.${'entry-fixture-secret'.repeat(2)}`;
+
+const PHOTO_INTAKE_TRANSITIONS: Record<string, PhotoIntakeState> = {
+  open_early: 'open-early',
+  return_to_schedule: 'scheduled',
+  pause: 'paused',
+  reopen: 'open',
+};
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
   const event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
@@ -647,6 +667,27 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       requestId: 'request-a',
     },
   }));
+  // Photo delivery left the settings payload and became four explicit actions.
+  // The stub answers each with the state it reaches, never a client timestamp;
+  // which transition is legal from the current row is the Worker's decision and
+  // is proved in `tests/worker/photo-intake-api`.
+  await page.route(`${base}/photo-intake`, (route) => {
+    const { action } = route.request().postDataJSON() as { action: string };
+    const reached = PHOTO_INTAKE_TRANSITIONS[action] ?? event.photoIntakeState;
+    return route.fulfill({
+      json: {
+        data: {
+          event: {
+            ...event,
+            uploadsEnabled: reached !== 'paused',
+            photosOpen: reached === 'open' || reached === 'open-early',
+            photoIntakeState: reached,
+          },
+        },
+        requestId: 'request-a',
+      },
+    });
+  });
   await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { messages: options.messages ?? [] }, requestId: 'request-a' },
   }));

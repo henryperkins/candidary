@@ -40,10 +40,13 @@ const baseGuestEvent: Omit<GuestEventView, 'theme'> = {
   galleryVisible: true,
   moderationRequired: true,
   eventTimezone: 'America/Chicago',
+  eventStartAt: '2026-09-19T22:00:00.000Z',
   rsvpDeadlineAt: null,
   rsvpDeadlineDate: null,
   phase: 'photos-primary' as const,
   rsvpState: 'disabled' as const,
+  rsvpAccess: 'unavailable' as const,
+  lifecycleRecheckAfterMs: null,
 };
 
 function json(data: unknown) {

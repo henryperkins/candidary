@@ -2,6 +2,8 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
+import { RsvpAuthService } from '../../worker/auth/rsvp';
+import { RsvpService } from '../../worker/services/rsvp';
 import {
   eventAccess,
   importRoster,
@@ -33,6 +35,9 @@ interface Household {
 interface Session {
   cookie: string;
   csrf: string;
+  // The raw `id.secret`, kept so a test can resolve this household itself and
+  // reach the service without the route in front of it.
+  token: string;
   household: Household;
 }
 
@@ -65,6 +70,7 @@ async function opened(name = 'Maya & Theo'): Promise<{ access: Access; session: 
     session: {
       cookie: `candidary_rsvp=${sessionCookie}; candidary_rsvp_csrf=${csrf}`,
       csrf,
+      token: sessionCookie,
       household: (await response.json<any>()).data.household,
     },
   };
@@ -318,12 +324,92 @@ describe('deadlines and pauses', () => {
     const renewed: Session = {
       cookie: `candidary_rsvp=${/candidary_rsvp=([^;,]+)/u.exec(value)![1]}; candidary_rsvp_csrf=${/candidary_rsvp_csrf=([^;,]+)/u.exec(value)![1]}`,
       csrf: /candidary_rsvp_csrf=([^;,]+)/u.exec(value)![1]!,
+      token: /candidary_rsvp=([^;,]+)/u.exec(value)![1]!,
       household: (await again.json<any>()).data.household,
     };
     const accepted = await submit(access, renewed, {
       version: 1, idempotencyKey: 'extended-retry', invitees: answers(renewed.household, 'declined'),
     });
     expect(accepted.status).toBe(200);
+  });
+});
+
+describe('the event start', () => {
+  /**
+   * Moves the event's own start behind the server clock.
+   *
+   * The deadline is deliberately left open and RSVP left on, so the only thing
+   * that can refuse anything below is the start itself.
+   */
+  async function startTheEvent(access: Access) {
+    await env.DB.prepare('UPDATE events SET event_start_at = ? WHERE id = ?')
+      .bind('2020-01-01T00:00:00.000Z', access.event.id).run();
+  }
+
+  it('refuses a household read and a household write once the event has started', async () => {
+    const { access, session } = await opened();
+    await startTheEvent(access);
+
+    const read = await createApp().request(
+      `/api/event/${access.event.slug}/rsvp/household`,
+      { headers: { cookie: session.cookie } },
+      testEnv,
+    );
+    const written = await submit(access, session, {
+      version: 1, idempotencyKey: 'after-start', invitees: answers(session.household, 'declined'),
+    });
+
+    expect([read.status, written.status]).toEqual([409, 409]);
+    expect((await read.json<any>()).code).toBe('RSVP_CLOSED');
+    expect((await written.json<any>()).code).toBe('RSVP_CLOSED');
+    expect((await storedAttendance(session.household.id)).every((row) => row[2] === 'pending')).toBe(true);
+  });
+
+  it('replays a committed key before the start and refuses the same key after it', async () => {
+    const { access, session } = await opened();
+    const request = {
+      version: 1,
+      idempotencyKey: 'sent-just-before-the-start',
+      invitees: answers(session.household, 'attending', 'Sam Rivera'),
+    };
+    await submit(access, session, request);
+
+    const replayed = await submit(access, session, request);
+    expect(replayed.status).toBe(200);
+    expect((await replayed.json<any>()).data.replayed).toBe(true);
+
+    await startTheEvent(access);
+    const refused = await submit(access, session, request);
+
+    // The service would have answered this exact key with a replayed success,
+    // so a closure is proof the route refused before ever reaching it. RSVP has
+    // left the guest experience entirely, replays included.
+    expect(refused.status).toBe(409);
+    expect((await refused.json<any>()).code).toBe('RSVP_CLOSED');
+    expect(await env.DB.prepare('SELECT version FROM rsvp_households WHERE id = ?')
+      .bind(session.household.id).first('version')).toBe(2);
+  });
+
+  it('refuses the household write in SQL rather than only at the route', async () => {
+    const { access, session } = await opened();
+    await startTheEvent(access);
+    // Straight to the service, past the route's own check. A submission that
+    // passed that check microseconds before the start would otherwise commit
+    // after it, and closing that race is the whole reason the guard is in SQL.
+    const auth = await new RsvpAuthService(testEnv).resolve(session.token);
+
+    await expect(new RsvpService(testEnv).submitHousehold(auth, {
+      version: 1,
+      idempotencyKey: 'past-the-route',
+      invitees: answers(session.household, 'attending', 'Sam Rivera'),
+    })).rejects.toMatchObject({ code: 'RSVP_HOUSEHOLD_CONFLICT' });
+
+    expect((await storedAttendance(session.household.id)).every((row) => row[2] === 'pending')).toBe(true);
+    expect(await env.DB.prepare('SELECT version FROM rsvp_households WHERE id = ?')
+      .bind(session.household.id).first('version')).toBe(1);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM rsvp_submission_receipts WHERE household_id = ?
+    `).bind(session.household.id).first('count')).toBe(0);
   });
 });
 

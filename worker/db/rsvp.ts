@@ -310,6 +310,12 @@ export const SUBMIT_INVITEES_SQL = `
         AND deleted_at IS NULL
         AND rsvp_enabled = 1
         AND rsvp_deadline_at >= ?
+        -- The event has not begun. A route-level check alone would reopen the
+        -- race this guarded write exists to close: a submission that passed it
+        -- microseconds before the start would otherwise commit after it. The
+        -- second value is EVENT_START_MIGRATION_SENTINEL from shared/rsvp.ts —
+        -- a row still holding it keeps the pre-0010 rules, including this one.
+        AND (event_start_at > ? OR event_start_at = ?)
     )
     AND EXISTS (
       SELECT 1 FROM rsvp_sessions

@@ -28,7 +28,10 @@ const EVENT: EventView = {
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
-  eventTimezone: 'America/Chicago', rsvpEnabled: false,
+  eventTimezone: 'America/Chicago',
+  eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
+  photosOpen: true, photoIntakeState: 'open', photoIntakeRecheckAfterMs: null,
+  rsvpEnabled: false,
   rsvpDeadlineAt: '2026-09-06T04:59:59.999Z', rsvpDeadlineDate: '2026-09-05',
   rsvpRosterVersion: 7,
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
@@ -41,11 +44,13 @@ function Harness({
   rosterVersion,
   synchronousResponses = false,
   onEventRead = (request) => request(),
+  onSettingsMetadata = () => undefined,
 }: {
   initial?: EventView;
   rosterVersion?: number;
   synchronousResponses?: boolean;
   onEventRead?: <T>(request: () => Promise<T>) => Promise<T>;
+  onSettingsMetadata?: (metadata: { scheduleChanged: boolean }) => void;
 }) {
   const [event, setEvent] = useState(initial);
   const [state, setState] = useState<DomainAutosaveState | null>(null);
@@ -58,7 +63,8 @@ function Harness({
       event={applied}
       onEventWrite={(request) => request()}
       onEventRead={onEventRead}
-      onSettingsSaved={(updated) => {
+      onSettingsSaved={(updated, metadata) => {
+        onSettingsMetadata(metadata);
         const applyResponse = () => setEvent((current) => mergeSettingsResponse(current, updated));
         if (synchronousResponses) flushSync(applyResponse);
         else applyResponse();
@@ -101,9 +107,12 @@ describe('event settings editor', () => {
     expect(screen.getByLabelText('Event name')).toHaveValue('Maya & Theo');
     expect(screen.getByLabelText('Welcome message')).toHaveValue('Welcome.');
     expect(screen.getByLabelText('Event time zone')).toHaveValue('America/Chicago');
+    expect(screen.getByLabelText('Event start time')).toHaveValue('17:00');
     expect(screen.getByLabelText('RSVP deadline')).toHaveValue('2026-09-05');
     expect(screen.getByLabelText('Accept RSVPs')).not.toBeChecked();
-    expect(screen.getByLabelText('Accept private photo deliveries')).toBeChecked();
+    // Photo delivery is an explicit action now, and a stale autosave draft that
+    // meant "pause until the start" must have no way to destroy capability.
+    expect(screen.queryByLabelText('Accept private photo deliveries')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save settings' })).not.toBeInTheDocument();
     expect(screen.getByText('Event settings saved')).toBeInTheDocument();
   });
@@ -143,11 +152,51 @@ describe('event settings editor', () => {
     expect(settingsWrites()).toHaveLength(1);
     expect(settingsWrites()[0]).toEqual({
       name: 'Maya & Theo', welcomeMessage: 'Welcome.', eventTimezone: 'America/Chicago',
-      rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, uploadsEnabled: true,
+      eventStartTime: '17:00',
+      rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false,
       galleryVisible: false, moderationRequired: true, rsvpRosterVersion: 7,
     });
     await settleMicrotasks();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saved');
+  });
+
+  it.each([
+    ['Event time zone', 'America/New_York'],
+    ['Event start time', '18:30'],
+    ['RSVP deadline', '2026-09-03'],
+  ])('reports a confirmed %s change as schedule-changing', async (label, value) => {
+    const metadata = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ event: { ...EVENT, ...payload } });
+    }));
+    render(<Harness onSettingsMetadata={metadata} />);
+
+    const field = screen.getByLabelText(label);
+    fireEvent.change(field, { target: { value } });
+    fireEvent.blur(field);
+    await settleMicrotasks();
+
+    expect(metadata).toHaveBeenCalledWith({ scheduleChanged: true });
+  });
+
+  it.each([
+    ['Event name', 'Maya and Theo'],
+    ['Welcome message', 'Welcome, friends.'],
+  ])('reports a confirmed %s change as schedule-neutral', async (label, value) => {
+    const metadata = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ event: { ...EVENT, ...payload } });
+    }));
+    render(<Harness onSettingsMetadata={metadata} />);
+
+    const field = screen.getByLabelText(label);
+    fireEvent.change(field, { target: { value } });
+    fireEvent.blur(field);
+    await settleMicrotasks();
+
+    expect(metadata).toHaveBeenCalledWith({ scheduleChanged: false });
   });
 
   it('debounces typing into one request and flushes on blur', async () => {
@@ -296,7 +345,7 @@ describe('event settings editor', () => {
   it('turns a current server field error into invalid state with no Retry', async () => {
     vi.stubGlobal('fetch', vi.fn(() => errorJson({
       code: 'VALIDATION_FAILED', message: 'Check the event settings.',
-      fieldErrors: { rsvpDeadlineDate: 'The RSVP deadline must be on or before the event date.' },
+      fieldErrors: { rsvpDeadlineDate: 'The RSVP deadline must be before the event starts.' },
       requestId: 'request-a',
     }, 422)));
     render(<Harness />);
@@ -307,7 +356,7 @@ describe('event settings editor', () => {
 
     await settleMicrotasks();
     expect(screen.getByLabelText(/^RSVP deadline/))
-      .toHaveAccessibleDescription('The RSVP deadline must be on or before the event date.');
+      .toHaveAccessibleDescription('The RSVP deadline must be before the event starts.');
     // A background refusal announces itself; it does not take the caret away
     // from whatever the host is typing in.
     expect(screen.getByLabelText('Event name')).toHaveFocus();

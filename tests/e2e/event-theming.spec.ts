@@ -252,6 +252,12 @@ test('guest event fixture omits every manager-only event field', async ({ page }
     'purgeAfter',
     'createdAt',
     'deletedAt',
+    // The guest is told its phase, never the host controls that produced it: the
+    // editable local start time and every part of the photo-intake state.
+    'eventStartTime',
+    'photosOpen',
+    'photoIntakeState',
+    'photoIntakeRecheckAfterMs',
   ];
   expect(managerOnlyFields.filter((field) => field in payload.data.event)).toEqual([]);
 });
@@ -277,6 +283,7 @@ const RSVP_PRIMARY_EVENT = {
   uploadsEnabled: false,
   phase: 'rsvp-primary' as const,
   rsvpState: 'open' as const,
+  rsvpAccess: 'editable' as const,
   rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
   rsvpDeadlineDate: '2026-09-05',
 };

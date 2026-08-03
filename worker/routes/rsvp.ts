@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { MAX_HOUSEHOLD_CAPACITY, MAX_RSVP_TEXT_LENGTH } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import { eventStartHasPassed } from '../../shared/rsvp';
 import { RsvpAuthService } from '../auth/rsvp';
 import { AuthService } from '../auth/service';
 import { RsvpRepository } from '../db/rsvp';
@@ -124,6 +125,13 @@ async function householdForSlug(context: Context<AppBindings>, write: boolean) {
     .resolve(getSessionCookie(context, 'rsvp'));
   if (auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This invitation belongs to a different event.', 403);
+  }
+  // At and after the start, every guest RSVP route is unavailable — reads and
+  // idempotent replays included, because RSVP has left the guest experience
+  // entirely. Not mounting a component is not the security boundary. A manager
+  // may still correct this household; that path is elsewhere and unaffected.
+  if (eventStartHasPassed(auth.event.eventStartAt)) {
+    throw new ApiError('RSVP_CLOSED', 'RSVP closed when the event started.', 409);
   }
   if (write) await assertCsrf(context, 'rsvp', auth.session.csrfDigest);
   return auth;

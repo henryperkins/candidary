@@ -30,24 +30,18 @@ async function guestAccess() {
   const body = await created.json<any>();
   const exchange = await exchangeEventEntry(body.data.eventLink);
   const manager = cookiesFrom(created);
-  // New events start with intake paused, so the fixture opens it as a host would.
-  const opened = await createApp().request(`/api/manage/events/${body.data.event.id}/settings`, {
-    method: 'PATCH',
+  // Photo delivery is permitted from creation but opens on the schedule, and
+  // this event has not reached its own start, so the fixture opens it early as
+  // a host would.
+  const opened = await createApp().request(`/api/manage/events/${body.data.event.id}/photo-intake`, {
+    method: 'POST',
     headers: {
       'content-type': 'application/json',
       cookie: manager.cookie,
       origin,
       'x-candidary-csrf': manager.csrf,
     },
-    body: JSON.stringify({
-      uploadsEnabled: true,
-      galleryVisible: body.data.event.galleryVisible,
-      moderationRequired: body.data.event.moderationRequired,
-      eventTimezone: body.data.event.eventTimezone,
-      rsvpDeadlineDate: body.data.event.rsvpDeadlineDate,
-      rsvpEnabled: false,
-      rsvpRosterVersion: body.data.event.rsvpRosterVersion,
-    }),
+    body: JSON.stringify({ action: 'open_early' }),
   }, testEnv);
   return {
     ...cookiesFrom(exchange),

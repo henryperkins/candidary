@@ -8,6 +8,7 @@ import { DEFAULT_EVENT_THEME_CONFIG } from '../../shared/event-theme';
 import { guestEventView } from '../../worker/http/event-view';
 import {
   applySettings,
+  cookiesFrom,
   eventAccess,
   origin,
   resetDatabase,
@@ -34,9 +35,9 @@ describe('complete private event journey', () => {
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
       body: JSON.stringify({
-        galleryVisible: true, uploadsEnabled: true, moderationRequired: true,
-        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
-        rsvpEnabled: false, rsvpRosterVersion: 0,
+        galleryVisible: true, moderationRequired: true,
+        eventTimezone: 'America/Chicago', eventStartTime: '00:00',
+        rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,
       }),
     }, testEnv);
     const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
@@ -97,8 +98,33 @@ describe('server-owned event configuration and phase', () => {
       rsvpDeadlineDate: '2026-09-05',
       rsvpEnabled: false,
       rsvpRosterVersion: 0,
-      // A new event opens nothing until the host decides.
-      uploadsEnabled: false,
+      // Photo delivery is permitted from the start, and the schedule decides
+      // when it opens. This event has not reached its own start yet.
+      uploadsEnabled: true,
+      photosOpen: false,
+      photoIntakeState: 'scheduled',
+    });
+  });
+
+  it('resolves an omitted start time as local midnight on the event date', async () => {
+    const body = await (await create()).json<any>();
+
+    expect(body.data.event).toMatchObject({
+      eventStartAt: '2026-09-19T05:00:00.000Z',
+      eventStartTime: '00:00',
+    });
+  });
+
+  it('resolves the host start time through the event zone, never a browser offset', async () => {
+    const body = await (await create({
+      eventStartTime: '17:30',
+      // Ignored: only the date, the local time, and the zone are inputs.
+      eventStartAt: '1999-01-01T00:00:00.000Z',
+    })).json<any>();
+
+    expect(body.data.event).toMatchObject({
+      eventStartAt: '2026-09-19T22:30:00.000Z',
+      eventStartTime: '17:30',
     });
   });
 
@@ -113,6 +139,21 @@ describe('server-owned event configuration and phase', () => {
     ['an impossible date', { rsvpDeadlineDate: '2026-02-30' }, 'rsvpDeadlineDate'],
     ['a malformed date', { rsvpDeadlineDate: '2026-9-5' }, 'rsvpDeadlineDate'],
     ['a deadline after the event', { rsvpDeadlineDate: '2026-09-20' }, 'rsvpDeadlineDate'],
+    // The deadline is the last millisecond of its local day, so no start time on
+    // the event date can be later than a deadline on that same date.
+    ['a deadline on the event date', { rsvpDeadlineDate: '2026-09-19' }, 'rsvpDeadlineDate'],
+    [
+      'a deadline on the event date under the latest start',
+      { rsvpDeadlineDate: '2026-09-19', eventStartTime: '23:59' },
+      'rsvpDeadlineDate',
+    ],
+    ['a malformed start time', { eventStartTime: '24:00' }, 'eventStartTime'],
+    // 2027-03-14 is the spring-forward Sunday in Chicago: 02:30 never happens.
+    [
+      'a start time the zone skips',
+      { eventDate: '2027-03-14', eventStartTime: '02:30' },
+      'eventStartTime',
+    ],
   ])('refuses %s against its own field', async (_label, patch, field) => {
     const response = await create(patch);
     expect(response.status).toBe(422);
@@ -139,17 +180,73 @@ describe('server-owned event configuration and phase', () => {
 
   it('changes phase at the exact server deadline, not a millisecond earlier', async () => {
     const record = {
-      uploadsEnabled: false,
+      uploadsEnabled: true,
       rsvpEnabled: true,
       rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpRosterVersion: 1,
+      eventStartAt: '2026-09-19T05:00:00.000Z',
+      photosOpenFrom: null,
       eventTimezone: 'America/Chicago',
       themeConfig: DEFAULT_EVENT_THEME_CONFIG,
     } as never;
 
     expect(guestEventView(record, new Date('2026-09-06T04:59:59.999Z')))
-      .toMatchObject({ phase: 'rsvp-primary', rsvpState: 'open' });
+      .toMatchObject({ phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable' });
+    // A shut RSVP before the start is its own surface now, not the leftover the
+    // old two-boolean model called `waiting`.
     expect(guestEventView(record, new Date('2026-09-06T05:00:00.000Z')))
-      .toMatchObject({ phase: 'waiting', rsvpState: 'closed' });
+      .toMatchObject({ phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only' });
+  });
+
+  it('opens photo delivery at the start with no host action, and closes RSVP there', async () => {
+    const record = {
+      uploadsEnabled: true,
+      rsvpEnabled: true,
+      rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpRosterVersion: 1,
+      eventStartAt: '2026-09-19T05:00:00.000Z',
+      photosOpenFrom: null,
+      eventTimezone: 'America/Chicago',
+      themeConfig: DEFAULT_EVENT_THEME_CONFIG,
+    } as never;
+
+    expect(guestEventView(record, new Date('2026-09-19T04:59:59.999Z')))
+      .toMatchObject({ phase: 'before-start', rsvpAccess: 'read-only' });
+    expect(guestEventView(record, new Date('2026-09-19T05:00:00.000Z')))
+      .toMatchObject({ phase: 'photos-primary', rsvpAccess: 'unavailable' });
+  });
+
+  it('keeps valid-deadline RSVP unavailable until a roster is configured', () => {
+    const record = {
+      uploadsEnabled: true,
+      rsvpEnabled: false,
+      rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpRosterVersion: 0,
+      eventStartAt: '2026-09-19T05:00:00.000Z',
+      photosOpenFrom: null,
+      eventTimezone: 'America/Chicago',
+      themeConfig: DEFAULT_EVENT_THEME_CONFIG,
+    };
+
+    const unconfigured = guestEventView(
+      record as never,
+      new Date('2026-09-05T12:00:00.000Z'),
+    );
+    expect(unconfigured).toMatchObject({
+      phase: 'before-start',
+      rsvpState: 'paused',
+      rsvpAccess: 'unavailable',
+    });
+    expect(unconfigured).not.toHaveProperty('rsvpConfigured');
+
+    expect(guestEventView(
+      { ...record, rsvpRosterVersion: 1 } as never,
+      new Date('2026-09-05T12:00:00.000Z'),
+    )).toMatchObject({
+      phase: 'before-start',
+      rsvpState: 'paused',
+      rsvpAccess: 'read-only',
+    });
   });
 
   it('refuses to open RSVP with no guest list, and leaves the event untouched', async () => {
@@ -162,13 +259,15 @@ describe('server-owned event configuration and phase', () => {
       .bind(access.event.id).first('rsvp_enabled')).toBe(0);
   });
 
-  it('lets photo intake open independently of RSVP', async () => {
+  it('opens photo delivery early without opening RSVP', async () => {
     const access = await eventAccess('Photos Only');
-    const response = await applySettings(access, { uploadsEnabled: true, rsvpEnabled: false });
-    const event = (await response.json<any>()).data.event;
 
-    expect(response.status).toBe(200);
-    expect(event).toMatchObject({ uploadsEnabled: true, rsvpEnabled: false });
+    expect(access.event).toMatchObject({
+      uploadsEnabled: true,
+      photosOpen: true,
+      photoIntakeState: 'open-early',
+      rsvpEnabled: false,
+    });
   });
 
   it('refuses a settings write from a stale roster view', async () => {
@@ -191,5 +290,68 @@ describe('server-owned event configuration and phase', () => {
     expect(response.status).toBe(200);
     expect(event.rsvpDeadlineAt).toBe('2026-09-11T04:59:59.999Z');
     expect(event.rsvpDeadlineDate).toBe('2026-09-10');
+  });
+
+  it('recomputes both instants together when the time zone moves', async () => {
+    const access = await eventAccess();
+    const response = await applySettings(access, { eventTimezone: 'America/New_York' });
+    expect(response.status).toBe(200);
+
+    // One guarded write carries both. Recomputing the deadline on its own could
+    // push it past a start the same edit was meant to move with it.
+    expect(await testEnv.DB.prepare(
+      'SELECT event_start_at, rsvp_deadline_at FROM events WHERE id = ?',
+    ).bind(access.event.id).first()).toEqual({
+      event_start_at: '2026-09-19T04:00:00.000Z',
+      rsvp_deadline_at: '2026-09-06T03:59:59.999Z',
+    });
+  });
+
+  it('retimes the start without disturbing the deadline', async () => {
+    const access = await eventAccess();
+    const response = await applySettings(access, { eventStartTime: '17:30' });
+    const event = (await response.json<any>()).data.event;
+
+    expect(response.status).toBe(200);
+    expect(event).toMatchObject({
+      eventStartAt: '2026-09-19T22:30:00.000Z',
+      eventStartTime: '17:30',
+      rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+    });
+  });
+
+  it.each<[string, string]>([
+    ['on the event date', '2026-09-19'],
+    ['after the event', '2026-09-20'],
+  ])('refuses a settings deadline %s and stores nothing', async (_label, rsvpDeadlineDate) => {
+    const access = await eventAccess();
+    const response = await applySettings(access, { rsvpDeadlineDate });
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).fieldErrors).toMatchObject({
+      rsvpDeadlineDate: 'The RSVP deadline must be before the event starts.',
+    });
+    expect(await testEnv.DB.prepare('SELECT rsvp_deadline_at FROM events WHERE id = ?')
+      .bind(access.event.id).first('rsvp_deadline_at')).toBe('2026-09-06T04:59:59.999Z');
+  });
+
+  it('refuses a settings start time the zone skips and stores nothing', async () => {
+    // 2027-03-14 is the spring-forward Sunday in Chicago, and the host retimes
+    // the event onto the hour that does not happen on it.
+    const created = await create({ eventDate: '2027-03-14', eventStartTime: '01:00' });
+    const body = await created.json<any>();
+    const access = {
+      event: body.data.event,
+      manager: { ...cookiesFrom(created), csrf: body.data.csrfToken as string },
+    };
+
+    const response = await applySettings(access, { eventStartTime: '02:30' });
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).fieldErrors).toMatchObject({
+      eventStartTime: 'Choose a start time that exists on the event date.',
+    });
+    expect(await testEnv.DB.prepare('SELECT event_start_at FROM events WHERE id = ?')
+      .bind(access.event.id).first('event_start_at')).toBe('2027-03-14T07:00:00.000Z');
   });
 });

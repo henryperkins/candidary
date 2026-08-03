@@ -59,6 +59,31 @@ async function ready(name = 'Maya & Theo') {
   return access;
 }
 
+/**
+ * Closes the deadline and leaves the event ahead of its own start: the window
+ * where a household may still read the response it already sent.
+ *
+ * Both boundaries are single server-owned instants, so the only way to test
+ * either side of one is to move it.
+ */
+async function readOnlyWindow(access: Access) {
+  await env.DB.prepare('UPDATE events SET rsvp_deadline_at = ? WHERE id = ?')
+    .bind('2020-01-01T00:00:00.000Z', access.event.id).run();
+}
+
+async function startTheEvent(access: Access) {
+  await env.DB.prepare('UPDATE events SET event_start_at = ? WHERE id = ?')
+    .bind('2020-01-01T00:00:00.000Z', access.event.id).run();
+}
+
+async function respond(householdKey: string) {
+  await env.DB.prepare(`
+    UPDATE rsvp_households
+    SET first_responded_at = ?, latest_responded_at = ?, latest_actor_kind = 'household'
+    WHERE household_key = ?
+  `).bind('2026-07-21T12:00:00.000Z', '2026-07-21T12:00:00.000Z', householdKey).run();
+}
+
 beforeEach(resetDatabase);
 
 describe('exact-name household lookup', () => {
@@ -181,22 +206,22 @@ describe('exact-name household lookup', () => {
 
   it('hides a household that never answered once RSVP closes', async () => {
     const access = await ready();
-    await env.DB.prepare('UPDATE events SET rsvp_deadline_at = ? WHERE id = ?')
-      .bind('2020-01-01T00:00:00.000Z', access.event.id).run();
+    await readOnlyWindow(access);
 
-    const response = await lookup(access, { firstName: 'Avery Rivera' });
-    expect((await response.json<any>()).data.status).toBe('not_available');
+    const missed = await lookup(access, { firstName: 'Nobody At All' });
+    const unanswered = await lookup(access, { firstName: 'Avery Rivera' });
+
+    // An invited name with nothing saved behind it is indistinguishable from a
+    // name that was never on the list, so the read-only window cannot be turned
+    // into a roster-enumeration surface.
+    expect((await unanswered.json<any>()).data).toEqual((await missed.json<any>()).data);
+    expect(unanswered.headers.get('set-cookie')).toBeNull();
   });
 
   it('still opens a household that already answered once RSVP closes', async () => {
     const access = await ready();
-    await env.DB.prepare(`
-      UPDATE rsvp_households
-      SET first_responded_at = ?, latest_responded_at = ?, latest_actor_kind = 'household'
-      WHERE household_key = 'rivera'
-    `).bind('2026-07-21T12:00:00.000Z', '2026-07-21T12:00:00.000Z').run();
-    await env.DB.prepare('UPDATE events SET rsvp_deadline_at = ? WHERE id = ?')
-      .bind('2020-01-01T00:00:00.000Z', access.event.id).run();
+    await respond('rivera');
+    await readOnlyWindow(access);
 
     const response = await lookup(access, { firstName: 'Avery Rivera' });
     const body = await response.json<any>();
@@ -204,6 +229,22 @@ describe('exact-name household lookup', () => {
     expect(body.data.status).toBe('matched');
     // Readable, but past the deadline nobody may change it.
     expect(body.data.household.editable).toBe(false);
+  });
+
+  it('answers a lookup after the event starts exactly as it answers a miss', async () => {
+    const access = await ready();
+    // A household that has answered, so nothing but the start could be hiding
+    // it: before the start this exact name opens the invitation.
+    await respond('rivera');
+    const missed = await lookup(access, { firstName: 'Nobody At All' });
+    await startTheEvent(access);
+
+    const started = await lookup(access, { firstName: 'Avery Rivera' });
+
+    // One uniform refusal, so the boundary is not an oracle either.
+    expect(started.status).toBe(missed.status);
+    expect((await started.json<any>()).data).toEqual((await missed.json<any>()).data);
+    expect(started.headers.get('set-cookie')).toBeNull();
   });
 
   it('refuses lookup entirely when RSVP was never configured', async () => {
@@ -396,6 +437,99 @@ describe('lookup abuse boundaries', () => {
       'x-forwarded-for': '198.51.100.7',
       forwarded: 'for=198.51.100.8',
     });
+    expect(refused.status).toBe(429);
+  });
+});
+
+// The window this design added is the one where a stranger has the least to
+// lose by guessing: nothing here can be written, so nothing here refuses them
+// for a reason a lookup would. Every boundary therefore has to hold exactly as
+// it does while RSVP is open.
+describe('lookup abuse boundaries in the read-only window', () => {
+  async function readOnly(name = 'Maya & Theo') {
+    const access = await ready(name);
+    await readOnlyWindow(access);
+    return access;
+  }
+
+  it('spends the edge budget before parsing a body or reading a session', async () => {
+    const access = await readOnly();
+    const charged: string[] = [];
+    const exhaustedEdge = {
+      ...testEnv,
+      RSVP_LOOKUP_RATE_LIMIT: {
+        limit: async (options: { key: string }) => {
+          charged.push(options.key);
+          return { success: false };
+        },
+      },
+    };
+
+    // No session at all, and a body no parser would accept. Neither is reached.
+    // The edge budget's whole value is being cheap: a flood of guesses should
+    // cost a key derivation and nothing else.
+    const response = await createApp().request(`/api/event/${access.event.slug}/rsvp/lookup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, 'cf-connecting-ip': '203.0.113.10' },
+      body: 'not json at all',
+    }, exhaustedEdge);
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe('60');
+    expect((await response.json<any>()).code).toBe('RATE_LIMITED');
+    expect(charged).toHaveLength(1);
+    // The durable budgets sit behind the edge and were never charged.
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM rsvp_lookup_rate_limits')
+      .first('count')).toBe(0);
+  });
+
+  it('charges the IP and every submitted name before reading the roster', async () => {
+    const access = await readOnly();
+    // Neither household can be opened in this window, so nothing but the order
+    // of the work explains these rows.
+    await lookup(access, { firstName: 'Alex Lee', secondName: 'Sam Lee' });
+
+    const rows = await env.DB.prepare(`
+      SELECT action, COUNT(*) AS rows_for_action, SUM(attempts) AS attempts
+      FROM rsvp_lookup_rate_limits GROUP BY action ORDER BY action
+    `).all<{ action: string; rows_for_action: number; attempts: number }>();
+
+    expect(rows.results).toEqual([
+      { action: 'lookup_ip', rows_for_action: 1, attempts: 1 },
+      { action: 'lookup_name', rows_for_action: 2, attempts: 2 },
+    ]);
+  });
+
+  it('still refuses past the durable per-address budget', async () => {
+    const access = await readOnly();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const allowed = await lookup(access, { firstName: `Guess Number ${attempt}` });
+      expect(allowed.status).toBe(200);
+    }
+
+    const refused = await lookup(access, { firstName: 'Henry Perkins' });
+
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('retry-after')).toBe('900');
+    expect((await refused.json<any>()).code).toBe('RATE_LIMITED');
+  });
+
+  it('still refuses past the per-name budget without exhausting the address budget', async () => {
+    const access = await readOnly();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const allowed = await lookup(
+        access,
+        { firstName: 'Henry Perkins' },
+        { 'cf-connecting-ip': `203.0.113.${attempt}` },
+      );
+      expect(allowed.status).toBe(200);
+    }
+
+    const refused = await lookup(
+      access,
+      { firstName: 'Henry Perkins' },
+      { 'cf-connecting-ip': '203.0.113.200' },
+    );
     expect(refused.status).toBe(429);
   });
 });

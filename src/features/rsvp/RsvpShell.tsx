@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { GuestEventView } from '../../../shared/contracts';
 import { GuestEventHero } from '../../components/GuestEventHero';
 
-type Presentation = 'primary' | 'secondary' | 'read-only';
+type Presentation = 'primary' | 'secondary' | 'embedded';
 
 interface RsvpShellProps {
   event: GuestEventView;
@@ -12,10 +12,12 @@ interface RsvpShellProps {
   children: ReactNode;
 }
 
-/* Primary and waiting (read-only) are full-page guest surfaces — same hero the photo drop uses.
-   Secondary sits inside the photos-primary disclosure and keeps the compact text identity. */
+/* Layout only — authority over what a household may do comes from `rsvpAccess`. Primary is the
+   full-page RSVP surface and owns the hero the photo drop uses. Secondary sits inside the
+   photos-primary disclosure, and embedded sits inside the before-start page, which already drew
+   that hero and owns the level-one heading; neither may draw a second one. */
 export function RsvpShell({ event, presentation, className, children }: RsvpShellProps) {
-  const withHero = presentation === 'primary' || presentation === 'read-only';
+  const withHero = presentation === 'primary';
   const classes = [
     'rsvp-flow',
     `rsvp-flow--${presentation}`,

@@ -30,6 +30,7 @@ const RSVP_PRIMARY = {
   uploadsEnabled: false,
   phase: 'rsvp-primary' as const,
   rsvpState: 'open' as const,
+  rsvpAccess: 'editable' as const,
   rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
   rsvpDeadlineDate: '2026-09-05',
 };
@@ -175,12 +176,13 @@ test('the RSVP lookup, household, and receipt hold their composition', async ({ 
   await expect(page.locator('.rsvp-receipt')).toHaveScreenshot('rsvp-receipt-390.png');
 });
 
-test('the closed RSVP keeps its saved response readable without an action', async ({ page }) => {
+test('the before-start surface keeps its saved response readable without an action', async ({ page }) => {
   await stubGuestRoutes(page, {
     event: {
-      uploadsEnabled: false,
-      phase: 'waiting',
+      uploadsEnabled: true,
+      phase: 'before-start',
       rsvpState: 'closed',
+      rsvpAccess: 'read-only',
       rsvpDeadlineAt: RSVP_HOUSEHOLD_FIXTURE.deadlineAt,
       rsvpDeadlineDate: '2026-09-05',
     },
@@ -200,10 +202,13 @@ test('the closed RSVP keeps its saved response readable without an action', asyn
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await expect(page.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
   await settle(page);
-  await expect(page.locator('.rsvp-receipt')).toHaveScreenshot('rsvp-closed-390.png');
+  // The whole surface, not the card alone: the start line and the appreciation
+  // copy are the two things this state exists to say, and both sit above it.
+  await expect(page.locator('.guest-before-start')).toHaveScreenshot('rsvp-before-start-390.png');
 });
 
 test('the manager guest list holds its totals, filters, and household rows', async ({ page }) => {

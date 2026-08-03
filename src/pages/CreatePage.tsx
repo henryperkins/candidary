@@ -14,7 +14,18 @@ import { HostAccountPanel } from '../components/HostAccountPanel';
 import { hostRegisterHref } from '../app/recovery';
 
 interface Created {
-  event: { id: string; name: string; slug: string };
+  // `eventStartAt` is the instant the Worker resolved from the date, the local
+  // start time, and the zone. The receipt reads it back rather than leaving a
+  // defaulted midnight as something the host never saw.
+  event: {
+    id: string;
+    name: string;
+    slug: string;
+    eventDate: string;
+    eventStartAt: string;
+    eventStartTime: string;
+    eventTimezone: string;
+  };
   // The permanent printed credential. It never changes for the life of the
   // event, which is what lets a host print it on invitations and signs.
   eventLink: string;
@@ -29,6 +40,7 @@ interface Created {
 const CREATE_FIELDS = [
   'name',
   'eventDate',
+  'eventStartTime',
   'eventTimezone',
   'rsvpDeadlineDate',
   'welcomeMessage',
@@ -51,6 +63,19 @@ function knownTimeZones(): string[] {
   } catch {
     return [];
   }
+}
+
+// Always the event's own zone, never this device's: a host in another zone must
+// read back the start they actually chose, not the one their laptop would show.
+function formatEventStart(instant: string, timeZone: string): string {
+  const at = new Date(instant);
+  const date = new Intl.DateTimeFormat('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric', timeZone,
+  }).format(at);
+  const time = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone,
+  }).format(at);
+  return `${date} at ${time}`;
 }
 
 export function CreatePage() {
@@ -86,7 +111,8 @@ export function CreatePage() {
     try {
       const result = await api<Created>('/api/events', { method: 'POST', body: JSON.stringify({
         name: data.get('name'), eventDate: data.get('eventDate'), welcomeMessage: data.get('welcomeMessage'),
-        eventTimezone: data.get('eventTimezone'), rsvpDeadlineDate: data.get('rsvpDeadlineDate'),
+        eventStartTime: data.get('eventStartTime'), eventTimezone: data.get('eventTimezone'),
+        rsvpDeadlineDate: data.get('rsvpDeadlineDate'),
         theme: { version: EVENT_THEME_VERSION, presetId: themePresetId, overrides: {} },
       }) });
       setCreated(result);
@@ -114,7 +140,11 @@ export function CreatePage() {
           is saved to an account it stops being true, and leaving it up would talk a
           host out of the recovery they just set up. */}
       <div className="warning"><LockKeyhole aria-hidden="true" /><p><strong>Keep your management link private.</strong><br />{saved ? 'Anyone who has it can manage this event.' : 'Without an account, it cannot be recovered.'}</p></div>
-      <p className="form-note">RSVP is paused until you add and validate the guest list, and photo delivery is paused until you open it.</p>
+      {/* The schedule the Worker resolved, said out loud in the event's own zone.
+          A defaulted midnight is a choice the host made rather than an
+          assumption they never saw. */}
+      <p className="form-note">{created.event.name} begins {formatEventStart(created.event.eventStartAt, created.event.eventTimezone)} ({created.event.eventTimezone}).</p>
+      <p className="form-note">RSVP is paused until you add and validate the guest list. Photo delivery opens by itself when the event starts.</p>
       <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
       <div className="button-row">
         <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
@@ -144,6 +174,9 @@ export function CreatePage() {
       {/* The error sits outside the label: a name identifies the field, an error describes it. */}
       <div className="create-field"><label>Event name<input name="name" maxLength={80} required aria-invalid={Boolean(fields.name)} aria-describedby={fields.name ? 'name-error' : undefined} /></label>{fields.name && <small id="name-error">{fields.name}</small>}</div>
       <div className="create-field"><label>Event date<input name="eventDate" type="date" required aria-invalid={Boolean(fields.eventDate)} aria-describedby={fields.eventDate ? 'eventDate-error' : undefined} /></label>{fields.eventDate && <small id="eventDate-error">{fields.eventDate}</small>}</div>
+      {/* Prefilled to midnight so a start time is not a new completion hurdle, and
+          visible so it never becomes an invisible server assumption. */}
+      <div className="create-field"><label>Event start time<input name="eventStartTime" type="time" defaultValue="00:00" required aria-invalid={Boolean(fields.eventStartTime)} aria-describedby={fields.eventStartTime ? 'eventStartTime-error' : undefined} /></label>{fields.eventStartTime && <small id="eventStartTime-error">{fields.eventStartTime}</small>}</div>
       <div className="create-field"><label>Event time zone<input name="eventTimezone" list="event-time-zones" value={timeZone} onChange={(changed) => setTimeZone(changed.target.value)} required autoComplete="off" spellCheck={false} aria-invalid={Boolean(fields.eventTimezone)} aria-describedby={fields.eventTimezone ? 'eventTimezone-error' : 'eventTimezone-hint'} /></label><small id="eventTimezone-hint">RSVP deadlines close at the end of this day, in this zone.</small>{fields.eventTimezone && <small id="eventTimezone-error">{fields.eventTimezone}</small>}{zoneOptions.length > 0 && <datalist id="event-time-zones">{zoneOptions.map((zone) => <option key={zone} value={zone} />)}</datalist>}</div>
       <div className="create-field"><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" required aria-invalid={Boolean(fields.rsvpDeadlineDate)} aria-describedby={fields.rsvpDeadlineDate ? 'rsvpDeadlineDate-error' : undefined} /></label>{fields.rsvpDeadlineDate && <small id="rsvpDeadlineDate-error">{fields.rsvpDeadlineDate}</small>}</div>
       <div className="create-field"><label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." aria-invalid={Boolean(fields.welcomeMessage)} aria-describedby={fields.welcomeMessage ? 'welcomeMessage-error' : undefined} /></label>{fields.welcomeMessage && <small id="welcomeMessage-error">{fields.welcomeMessage}</small>}</div>

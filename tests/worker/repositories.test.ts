@@ -53,10 +53,15 @@ async function seedEvent(id = 'event-a', slug = 'maya-theo') {
     themeConfig: serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG),
     eventTimezone: 'America/Chicago',
     rsvpDeadlineAt: '2026-09-13T04:59:59.999Z',
+    // Local midnight in Chicago on the event date, resolved the way the route
+    // resolves it. The repository never converts a date itself.
+    eventStartAt: '2026-09-19T05:00:00.000Z',
   });
-  // New events open nothing; these cases are about quota and idempotency, so
-  // intake is switched on directly rather than through the manager route.
-  await env.DB.prepare('UPDATE events SET uploads_enabled = 1 WHERE id = ?').bind(id).run();
+  // Photo delivery is permitted from creation but opens on the schedule, and
+  // these cases are about quota and idempotency rather than the clock, so the
+  // early-open stamp is written directly rather than through the manager route.
+  await env.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
+    .bind(now, id).run();
   return events;
 }
 
@@ -302,7 +307,7 @@ describe('event, token, and session repositories', () => {
     expect((await events.getById('event-a'))?.galleryVisible).toBe(false);
   });
 
-  it('refuses to reopen either intake while the printed entry is disabled', async () => {
+  it('refuses to reopen RSVP while the printed entry is disabled', async () => {
     const events = new EventsRepository(env.DB);
     const created = await events.create({
       id: 'event-entry-guard', slug: 'entry-guard', name: 'Maya & Theo',
@@ -310,10 +315,12 @@ describe('event, token, and session repositories', () => {
       guestAccessExpiresAt: now, managementAccessExpiresAt: now, purgeAfter: now,
       createdAt: now, themeConfig: serializeEventThemeConfig(DEFAULT_EVENT_THEME_CONFIG),
       eventTimezone: 'America/Chicago', rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      eventStartAt: '2026-09-19T05:00:00.000Z',
     });
     const settings = {
       galleryVisible: true, moderationRequired: false,
       eventTimezone: 'America/Chicago', rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      eventStartAt: '2026-09-19T05:00:00.000Z',
       expectedRosterVersion: 0,
     };
     const entries = new EventEntriesRepository(env.DB);
@@ -322,28 +329,27 @@ describe('event, token, and session repositories', () => {
       createdAt: now,
     }).run();
 
-    // Open entry: reopening intake is allowed.
+    // Open entry: reopening RSVP is allowed.
     expect(await events.updateSettings(created.id, {
-      ...settings, uploadsEnabled: true, rsvpEnabled: false,
+      ...settings, rsvpEnabled: true,
     })).not.toBeNull();
 
     await entries.disableForEvent(created.id, now);
     await env.DB.prepare('UPDATE events SET uploads_enabled = 0, rsvp_enabled = 0 WHERE id = ?')
       .bind(created.id).run();
 
-    // A disabled entry refuses either intake, atomically, whatever the caller checked first.
+    // A disabled entry refuses the reopen atomically, whatever the caller checked first.
     expect(await events.updateSettings(created.id, {
-      ...settings, uploadsEnabled: true, rsvpEnabled: false,
-    })).toBeNull();
-    expect(await events.updateSettings(created.id, {
-      ...settings, uploadsEnabled: false, rsvpEnabled: true,
+      ...settings, rsvpEnabled: true,
     })).toBeNull();
 
     // Every other setting still saves, because the host has to keep managing the event.
     const kept = await events.updateSettings(created.id, {
-      ...settings, name: 'Renamed', uploadsEnabled: false, rsvpEnabled: false,
+      ...settings, name: 'Renamed', rsvpEnabled: false,
     });
     expect(kept?.name).toBe('Renamed');
+    // Photo delivery left the settings payload entirely, so nothing this write
+    // carries can restore the capability the entry stop withdrew.
     expect(kept?.uploadsEnabled).toBe(false);
   });
 });

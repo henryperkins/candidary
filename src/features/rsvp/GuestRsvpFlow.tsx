@@ -18,7 +18,7 @@ import {
   submissionInvitees,
 } from './rsvp-form';
 
-type Presentation = 'primary' | 'secondary' | 'read-only';
+type Presentation = 'primary' | 'secondary' | 'embedded';
 
 type Screen =
   | { kind: 'restoring' }
@@ -27,21 +27,28 @@ type Screen =
   | { kind: 'saving'; household: RsvpHouseholdView; draft: RsvpDraft }
   | { kind: 'receipt'; household: RsvpHouseholdView }
   | { kind: 'read-only'; household: RsvpHouseholdView }
+  | { kind: 'before-start'; household: RsvpHouseholdView }
   | { kind: 'paused'; household: RsvpHouseholdView | null };
 
 interface GuestRsvpFlowProps {
   event: GuestEventView;
   presentation: Presentation;
 }
+/* `presentation` decides layout and nothing else. What a household may do comes from `rsvpAccess`,
+   the same sentence the guest RSVP routes enforce, so the interface and the boundary can never
+   disagree about a window the browser has no clock to resolve. */
 function screenForHousehold(
   event: GuestEventView,
-  presentation: Presentation,
   household: RsvpHouseholdView,
 ): Screen {
+  // Read-only is the pre-start window: the deadline has gone, the event has not begun, and the
+  // household reads back what it already sent. It outranks the paused wording, because before the
+  // start a paused roster still says the same thing to a household — nothing more is coming.
+  if (event.rsvpAccess === 'read-only') return { kind: 'before-start', household };
   if (event.rsvpState === 'paused' || event.rsvpState === 'disabled') {
     return { kind: 'paused', household };
   }
-  if (event.rsvpState !== 'open' || presentation === 'read-only' || !household.editable) {
+  if (event.rsvpState !== 'open' || !household.editable) {
     return { kind: 'read-only', household };
   }
   if (household.renewalRequired) return { kind: 'read-only', household };
@@ -50,7 +57,9 @@ function screenForHousehold(
 }
 
 function screenWithoutHousehold(event: GuestEventView): Screen {
-  return event.rsvpState === 'open'
+  // Lookup is offered wherever the server still answers one — including the read-only window, which
+  // is the whole point of it: a household arriving on a new device may still read its response.
+  return event.rsvpAccess === 'editable' || event.rsvpAccess === 'read-only'
     ? { kind: 'lookup', secondNameRequired: false }
     : { kind: 'paused', household: null };
 }
@@ -67,11 +76,10 @@ function screenWithoutHousehold(event: GuestEventView): Screen {
  */
 function screenAfterConflict(
   event: GuestEventView,
-  presentation: Presentation,
   household: RsvpHouseholdView,
   draft: RsvpDraft,
 ): Screen {
-  const settled = screenForHousehold(event, presentation, household);
+  const settled = screenForHousehold(event, household);
   // A household that may still write goes back to the form even if it has
   // answered before, because the point of the conflict is to review and resend.
   if (settled.kind !== 'receipt' && settled.kind !== 'editing') return settled;
@@ -96,14 +104,20 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
   const idempotencyKey = useRef<string | null>(null);
 
   useEffect(() => {
-    let active = true;
     setScreen({ kind: 'restoring' });
     setLookupMessage('');
     setSaveError('');
     setReviewUpdated(false);
+    // No access, no request. A caller is not supposed to mount this at all here, but a household
+    // read is itself an act on the guest's behalf, and the server would only refuse it.
+    if (event.rsvpAccess === 'unavailable') {
+      setScreen({ kind: 'paused', household: null });
+      return;
+    }
+    let active = true;
     void api<{ household: RsvpHouseholdView }>(`/api/event/${event.slug}/rsvp/household`)
       .then(({ household }) => {
-        if (active) setScreen(screenForHousehold(event, presentation, household));
+        if (active) setScreen(screenForHousehold(event, household));
       })
       .catch((caught: unknown) => {
         if (!active) return;
@@ -115,7 +129,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
         setScreen(screenWithoutHousehold(event));
       });
     return () => { active = false; };
-  }, [event.rsvpState, event.slug, presentation]);
+  }, [event.rsvpAccess, event.rsvpState, event.slug]);
 
   async function lookup(firstName: string, secondName?: string) {
     setLookupBusy(true);
@@ -139,7 +153,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
       }
       rememberGuestName(firstName.trim());
       setReviewUpdated(false);
-      setScreen(screenForHousehold(event, presentation, result.household));
+      setScreen(screenForHousehold(event, result.household));
     } catch (caught) {
       setLookupMessage(caught instanceof Error ? caught.message : 'We could not find that invitation.');
     } finally {
@@ -172,7 +186,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
         try {
           const current = await readCurrentHousehold();
           idempotencyKey.current = null;
-          const next = screenAfterConflict(event, presentation, current.household, draft);
+          const next = screenAfterConflict(event, current.household, draft);
           // The review banner is an instruction, so it belongs only where the
           // guest can still act on it.
           setReviewUpdated(next.kind === 'editing');
@@ -286,6 +300,17 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
     />;
   }
 
+  if (screen.kind === 'before-start') {
+    return <RsvpReceipt
+      event={event}
+      presentation={presentation}
+      household={screen.household}
+      mode="before-start"
+      onChange={() => undefined}
+      onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
+    />;
+  }
+
   if (screen.household) {
     return <RsvpReceipt
       event={event}
@@ -297,10 +322,11 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
     />;
   }
 
+  const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
   return <RsvpShell event={event} presentation={presentation}>
     <div className="rsvp-card rsvp-unavailable" aria-live="polite">
-      <p className="rsvp-eyebrow">{event.name}</p>
-      <h1>{event.rsvpState === 'paused' ? 'RSVP is paused' : 'RSVP is closed'}</h1>
+      {presentation !== 'embedded' && <p className="rsvp-eyebrow">{event.name}</p>}
+      <HeadingTag>{event.rsvpState === 'paused' ? 'RSVP is paused' : 'RSVP is closed'}</HeadingTag>
       <p>{event.rsvpState === 'paused'
         ? 'The host has paused RSVP for now. Try again later.'
         : 'The response deadline has passed.'}</p>

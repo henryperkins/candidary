@@ -22,6 +22,7 @@ test('RSVP lookup keeps identity, deadline, privacy, and its complete action in 
       uploadsEnabled: false,
       phase: 'rsvp-primary',
       rsvpState: 'open',
+      rsvpAccess: 'editable',
       rsvpDeadlineAt: '2026-09-05T23:59:59.999Z',
       rsvpDeadlineDate: '2026-09-05',
     },

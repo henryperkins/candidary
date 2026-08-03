@@ -112,15 +112,6 @@ describe('durable event entry', () => {
 
   it('ends the entry irreversibly, taking RSVP, uploads, and every guest with it', async () => {
     const access = await eventAccess();
-    await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
-      method: 'PATCH',
-      headers: writeHeaders(access.manager),
-      body: JSON.stringify({
-        uploadsEnabled: true, galleryVisible: true, moderationRequired: false,
-        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
-        rsvpEnabled: false, rsvpRosterVersion: 0,
-      }),
-    }, testEnv);
 
     const disabled = await createApp().request(
       `/api/manage/events/${access.event.id}/entry/disable`,
@@ -181,7 +172,7 @@ describe('durable event entry', () => {
     expect(second.data.disabledAt).toBe(first.data.disabledAt);
   });
 
-  it('will not let rotation or settings reopen a disabled entry', async () => {
+  it('will not let rotation, settings, or photo intake reopen a disabled entry', async () => {
     const access = await eventAccess();
     await createApp().request(
       `/api/manage/events/${access.event.id}/entry/disable`,
@@ -209,13 +200,27 @@ describe('durable event entry', () => {
       method: 'PATCH',
       headers: writeHeaders(access.manager),
       body: JSON.stringify({
-        uploadsEnabled: true, galleryVisible: true, moderationRequired: false,
-        eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
-        rsvpEnabled: false, rsvpRosterVersion: 0,
+        galleryVisible: true, moderationRequired: false,
+        eventTimezone: 'America/Chicago', eventStartTime: '00:00',
+        rsvpDeadlineDate: '2026-09-05', rsvpEnabled: true, rsvpRosterVersion: 0,
       }),
     }, testEnv);
     expect(reopened.status).toBe(410);
     expect((await reopened.json<any>()).code).toBe('EVENT_ENTRY_UNAVAILABLE');
+
+    // Photo delivery left the settings payload, so its own action is where the
+    // stop has to hold instead.
+    const reopenedPhotos = await createApp().request(
+      `/api/manage/events/${access.event.id}/photo-intake`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ action: 'reopen' }),
+      },
+      testEnv,
+    );
+    expect(reopenedPhotos.status).toBe(410);
+    expect((await reopenedPhotos.json<any>()).code).toBe('EVENT_ENTRY_UNAVAILABLE');
 
     // Recovery stops offering a link it can no longer honour.
     const recovered = await createApp().request(

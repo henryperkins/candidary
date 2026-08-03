@@ -152,6 +152,28 @@ recorded as passed on the strength of the automated suite or of the gate above:
 - **degraded-network** retry of an RSVP submission; and
 - the **emergency-disable rehearsal** on a disposable event.
 
+## Date-driven guest phase
+
+Specified on 2026-08-01 in
+`docs/superpowers/specs/2026-08-01-date-driven-guest-phase-design.md`, which moves the guest between
+RSVP, before-start, photo delivery, and paused waiting from the event's own schedule rather than a
+host flipping a checkbox on the morning of the event.
+
+**No browser evidence exists for any row below.** They are recorded at the strength of an accepted
+direction and nothing more; the Browser result column names what the responsive pass owes rather
+than what it produced. `design-qa.md` carries the same list under "Awaiting verification".
+
+| Contract point | Accepted direction | Browser result | Disposition |
+| --- | --- | --- | --- |
+| A designed pre-event surface | The post-deadline, pre-event window gets a page of its own instead of a fallback that talks about a deadline the guest can no longer act on | Owed at 320 × 568 and 390 × 844: first-fold composition, one `<h1>` with the embedded household content beneath it at `<h2>`, and 44 px lookup targets | **Not yet evidenced.** No baseline, no geometry run, no axe pass. |
+| Recognizing a saved response | A household that answered is thanked, including on a device that never held an RSVP session; one that never answered is neither thanked nor scolded and reads exactly like a miss | Owed at 320 and 390, together with the case where `rsvpAccess` is `unavailable` and no RSVP request is issued at all | **Not yet evidenced.** |
+| Waiting means one thing | Once the event has started and photo capability is withheld, `Photo delivery is paused` is the whole primary | Owed at 320 and 390, with no RSVP lookup, receipt, or disclosure in the document | **Not yet evidenced.** |
+| The page changes itself | The phase moves with the schedule and with no user action, driven by a server-computed relative delay so a wrong browser clock cannot switch early or late | Owed as a stubbed phase sequence at 390 × 844 and 320 × 844, including a quiet refresh failure leaving the surface intact | **Not yet evidenced.** |
+| Manager photo intake | One server-derived state and the one action legal from it, never a browser clock comparison; a pre-start pause never withdraws capability | Owed at 320 × 844 and 390 × 844, including the quiet refetch across the start | **Not yet evidenced.** |
+
+No screenshot is tracked for this feature. Adding one is part of the responsive pass, not of this
+entry.
+
 ## Intentional adaptations
 
 - The approved three-state concept used a schematic 260 px phone. The implementation expands naturally to the real 390 px mobile viewport and uses a compact centered panel on desktop without adding workflow steps.

@@ -1936,3 +1936,70 @@ describe('manager roster batch intake', () => {
     }));
   });
 });
+
+// Hosts correct households after the deadline as a matter of course — `RsvpActor`
+// exists for exactly that — and an export that stopped working when the event
+// began would be useless. Only the guest routes close at the start.
+describe('manager RSVP after the event starts', () => {
+  // The start is one server-owned instant, so the only way to test the far side
+  // of it is to move it, after the roster and RSVP are already in place: a
+  // settings write recomputes the start from the host's own local time.
+  async function startTheEvent(access: Access) {
+    await testEnv.DB.prepare('UPDATE events SET event_start_at = ? WHERE id = ?')
+      .bind('2020-01-01T00:00:00.000Z', access.event.id).run();
+  }
+
+  it('still corrects, edits, and archives a household', async () => {
+    const access = await eventAccess();
+    await importRoster(access, BASE_ROSTER);
+    await openRsvp(access);
+    await startTheEvent(access);
+    const listed = await getList(access);
+    const rivera = listed.households.find((row) => row.householdKey === 'rivera');
+    const detail = await getDetail(access, rivera.id);
+
+    const corrected = await correctHousehold(access, detail.id, {
+      expectedVersion: detail.version,
+      expectedRosterVersion: 1,
+      invitees: hostAnswers(detail, 'attending'),
+    });
+    const correctedBody = await corrected.json<any>();
+
+    expect(corrected.status).toBe(200);
+    expect(correctedBody.data.household.latestActor).toBe('host');
+    expect(correctedBody.data.household.invitees.every((invitee: Invitee) => (
+      invitee.attendance === 'attending'
+    ))).toBe(true);
+
+    const created = await createHousehold(access, {
+      householdKey: 'late-arrival',
+      label: 'Late arrival household',
+      plusOneSlots: 0,
+      namedInvitees: ['Robin Stone'],
+      expectedRosterVersion: 2,
+    });
+    expect(created.status).toBe(201);
+
+    const archived = await archiveHousehold(
+      access,
+      (await created.json<any>()).data.household.id,
+      1,
+      3,
+    );
+    expect(archived.status).toBe(200);
+  });
+
+  it('still imports a guest list and exports the roster', async () => {
+    const access = await eventAccess();
+    await startTheEvent(access);
+
+    const imported = await importRoster(access, BASE_ROSTER);
+    const exported = await manage(access, '/export.csv');
+    const csv = await exported.text();
+
+    expect(imported.rosterVersion).toBe(1);
+    expect(exported.status).toBe(200);
+    expect(csv).toContain('Henry Perkins');
+    expect(csv).toContain('Sam Rivera');
+  });
+});
