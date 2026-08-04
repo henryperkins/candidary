@@ -50,3 +50,59 @@ export const MAX_RSVP_CSV_BYTES = 256 * 1024;
 // envelopes. This is separate from the source-file limit above.
 export const MAX_RSVP_BATCH_BYTES = 512 * 1024;
 export const MANAGER_RSVP_PAGE_SIZE = 50;
+
+// Event cover limits. `shared/event-cover.ts` re-exports what its domain reads,
+// on the same terms as `shared/rsvp.ts`: this file is still the only place a
+// number changes.
+//
+// Every one of these is a DECIMAL literal, and that is load-bearing rather than
+// stylistic. The Images binding accepts at most 20 MB at `.input()`, so the
+// binary `MAX_IMAGE_BYTES` above (20 * 1024 * 1024 = 20,971,520) is over the
+// ceiling and would fail at the transform instead of at reservation. Cover
+// intake therefore has its own number and must never borrow that one.
+export const COVER_UPLOAD_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+] as const;
+
+export type CoverUploadMimeType = (typeof COVER_UPLOAD_MIME_TYPES)[number];
+
+export const MAX_COVER_UPLOAD_BYTES = 19_000_000;
+export const MAX_COVER_MASTER_BYTES = 12_000_000;
+// After orientation. Enough to produce every 1x profile without upscaling,
+// which is exactly the widest and tallest profile in the registry.
+export const MIN_COVER_SOURCE_WIDTH = 620;
+export const MIN_COVER_SOURCE_HEIGHT = 420;
+export const MAX_COVER_MANUAL_ZOOM = 2.0;
+// The fixed paper matte composited under every cover transform, so a
+// transparent PNG or WebP cannot produce format-dependent edges. It is
+// server-owned and never follows the event theme.
+export const COVER_PAPER_MATTE = '#fffaf3';
+
+export const MAX_LIVE_COVER_DRAFTS_PER_EVENT = 3;
+export const MAX_LIVE_COVER_RAW_BYTES_PER_EVENT = 57_000_000;
+export const MAX_COVER_PREVIEW_FILES_PER_DRAFT = 5;
+export const MAX_COVER_PREVIEW_BYTES = 1_000_000;
+export const MAX_COVER_PREVIEW_BYTES_PER_DRAFT = 5_000_000;
+
+export const MAX_PREPARING_COVER_PUBLICATIONS_PER_EVENT = 1;
+export const MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT = 32;
+export const MAX_RETAINED_COVER_RECEIPTS_PER_EVENT = 1_024;
+
+// Fixed hourly windows, counted in D1 rather than in a rate-limit binding, so
+// every count and non-counting replay is reconstructable after a restart.
+export const MAX_COVER_RESERVATIONS_PER_HOUR = 12;
+export const MAX_COVER_INSPECTIONS_PER_HOUR = 12;
+export const MAX_COVER_PREVIEWS_PER_HOUR = 30;
+export const MAX_COVER_PUBLICATIONS_PER_HOUR = 6;
+
+export const MAX_COVER_BACKFILL_PAGE_SIZE = 100;
+export const MAX_COVER_BACKFILL_CREATE_BATCH = 25;
+export const MAX_COVER_BACKFILL_IN_FLIGHT = 25;
+export const MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE = 25;
+
+export const MAX_COVER_PURGE_FENCES_PER_PASS = 10;
+export const MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS = 5;
+export const COVER_CLEANUP_ROWS_PER_CLASS = 100;

@@ -63,6 +63,20 @@ const LOAD_FAILURE_DECISION = {
   RSVP_ROSTER_BATCH_TOO_LARGE: decision('retry'),
   RSVP_ROSTER_BATCH_CONFLICT: decision('retry'),
   RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT: decision('retry'),
+  // Every cover code is Manager-only. None is reachable from a guest load, so
+  // none of `latest-link`, `ended-event`, or `sign-in` describes what happened —
+  // a manager whose upload was rejected corrects it and tries again. This is the
+  // classification, not a placeholder, and `offerSignIn` stays off deliberately.
+  COVER_SOURCE_UNSUPPORTED: decision('retry'),
+  COVER_SOURCE_TOO_SMALL: decision('retry'),
+  COVER_MASTER_BUDGET_EXHAUSTED: decision('retry'),
+  COVER_PREVIEW_BUDGET_EXHAUSTED: decision('retry'),
+  COVER_OUTPUT_BUDGET_EXHAUSTED: decision('retry'),
+  COVER_DRAFT_LIMIT: decision('retry'),
+  COVER_RAW_STORAGE_LIMIT: decision('retry'),
+  COVER_DRAFT_STATE_CONFLICT: decision('retry'),
+  COVER_PUBLICATION_CONFLICT: decision('retry'),
+  COVER_RENDER_UNAVAILABLE: decision('retry'),
   INTERNAL_ERROR: decision('retry'),
 } as const satisfies Record<ApiErrorCode, LoadFailureDecision>;
 

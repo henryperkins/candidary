@@ -45,6 +45,25 @@ export type ApiErrorCode =
   | 'RSVP_ROSTER_BATCH_TOO_LARGE'
   | 'RSVP_ROSTER_BATCH_CONFLICT'
   | 'RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT'
+  // Event cover. `FILE_TYPE_UNSUPPORTED` is deliberately not reused: the
+  // preview route already returns it when the Images binding is unavailable,
+  // so its name contradicts its meaning and a cover failure needs its own.
+  //
+  // A lost `cover_revision` compare-and-swap deliberately gets no code here.
+  // The house precedent for a lost optimistic guard is `VALIDATION_FAILED` 409
+  // (`worker/routes/manage.ts`, recorded in `docs/operations.md`), and cover
+  // conflicts carry their recovery view in the response envelope rather than in
+  // `ApiErrorDetails`.
+  | 'COVER_SOURCE_UNSUPPORTED'
+  | 'COVER_SOURCE_TOO_SMALL'
+  | 'COVER_MASTER_BUDGET_EXHAUSTED'
+  | 'COVER_PREVIEW_BUDGET_EXHAUSTED'
+  | 'COVER_OUTPUT_BUDGET_EXHAUSTED'
+  | 'COVER_DRAFT_LIMIT'
+  | 'COVER_RAW_STORAGE_LIMIT'
+  | 'COVER_DRAFT_STATE_CONFLICT'
+  | 'COVER_PUBLICATION_CONFLICT'
+  | 'COVER_RENDER_UNAVAILABLE'
   | 'INTERNAL_ERROR';
 
 export interface RsvpRosterBatchConflictTarget {
