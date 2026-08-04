@@ -11,11 +11,13 @@ import {
 } from '../../worker/workflows/cleanup';
 import worker from '../../worker/index';
 import {
+  EVENT_COVER_TABLES,
   eventAccess,
   importRoster,
   openRsvp,
   png,
   resetDatabase,
+  seedEventCoverGraph,
   testEnv,
   writeHeaders,
 } from './helpers';
@@ -379,5 +381,123 @@ describe('lifecycle cleanup', () => {
     expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
       .bind(access.event.id).first()).toBeNull();
     expect(await foreignKeyCheck()).toEqual([]);
+  });
+  // Every cover table's `event_id` is ON DELETE RESTRICT, inverting the fifteen
+  // CASCADE relationships this schema had before 0012. Without the explicit
+  // child-before-parent order, the first event that ever owned a cover fails its
+  // purge with a foreign-key error and the scheduled pass retries it forever.
+  describe('event cover inventory', () => {
+    // All four cover key shapes, so the claim that the existing
+    // `events/{id}/` prefix already covers them is asserted rather than assumed.
+    async function seedCoverObjects(eventId: string, setId: string, draftId: string) {
+      const keys = [
+        `events/${eventId}/cover/raw/${draftId}`,
+        `events/${eventId}/cover/masters/master-a.webp`,
+        `events/${eventId}/cover/previews/${draftId}/natural-1.webp`,
+        `events/${eventId}/cover/rendered/${setId}/wide-expanded-1x.jpeg`,
+      ];
+      for (const key of keys) await testEnv.MEDIA_BUCKET.put(key, png());
+      return keys;
+    }
+
+    async function coverPrefixKeys(eventId: string) {
+      const listed = await testEnv.MEDIA_BUCKET.list({ prefix: `events/${eventId}/` });
+      return listed.objects.map(({ key }) => key).sort();
+    }
+
+    it('deletes every cover row before the event and leaves no foreign-key violation', async () => {
+      const access = await eventAccess();
+      const ids = await seedEventCoverGraph(testEnv.DB, access.event.id);
+      const keys = await seedCoverObjects(access.event.id, ids.renderSetId, ids.draftId);
+      expect(await coverPrefixKeys(access.event.id)).toEqual([...keys].sort());
+
+      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z'));
+
+      expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+        .bind(access.event.id).first()).toBeNull();
+      for (const table of EVENT_COVER_TABLES) {
+        expect(await countRows(table, access.event.id), `${table} rows after purge`).toBe(0);
+      }
+      // The run has no event foreign key, so it never blocked this purge. It
+      // survives with counters recomputed from what actually remains — zero —
+      // because it is not yet expiry-eligible; ledger retention is the scheduled
+      // cover sweep's job, not the purge's.
+      expect(await testEnv.DB.prepare(`
+        SELECT total_count, applied_count FROM event_cover_backfill_runs WHERE id = ?
+      `).bind(ids.runId).first()).toEqual({ total_count: 0, applied_count: 0 });
+      expect(await foreignKeyCheck()).toEqual([]);
+      expect(await coverPrefixKeys(access.event.id)).toEqual([]);
+    });
+
+    it('removes an emptied backfill run only once it is also past its own expiry', async () => {
+      const access = await eventAccess();
+      const ids = await seedEventCoverGraph(testEnv.DB, access.event.id);
+      await testEnv.DB.prepare('UPDATE event_cover_backfill_runs SET expires_at = ? WHERE id = ?')
+        .bind('2026-08-01T00:00:00.000Z', ids.runId).run();
+
+      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z'));
+
+      expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM event_cover_backfill_runs')
+        .first<{ count: number }>()).toEqual({ count: 0 });
+      expect(await foreignKeyCheck()).toEqual([]);
+    });
+
+    // The fence has no event foreign key on purpose: it must outlive the row it
+    // protected so a late dispatcher cannot do cover work for a purged event.
+    it('leaves workflow fences to age out on their own schedule', async () => {
+      const access = await eventAccess();
+      await seedEventCoverGraph(testEnv.DB, access.event.id);
+      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z'));
+      expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(1);
+    });
+
+    it('keeps a backfill run alive while another event still owns a job', async () => {
+      const first = await eventAccess('First');
+      const second = await eventAccess('Second');
+      const shared = await seedEventCoverGraph(testEnv.DB, first.event.id);
+      const other = await seedEventCoverGraph(testEnv.DB, second.event.id);
+      // Re-home the second event's job onto the first run, so the run is shared.
+      await testEnv.DB.prepare('UPDATE event_cover_backfill_jobs SET run_id = ? WHERE id = ?')
+        .bind(shared.runId, other.jobId).run();
+      await testEnv.DB.prepare('DELETE FROM event_cover_backfill_runs WHERE id = ?')
+        .bind(other.runId).run();
+
+      await deleteEventData(testEnv, first.event.id, new Date('2026-08-04T12:00:00.000Z'));
+
+      const run = await testEnv.DB.prepare(`
+        SELECT total_count, applied_count FROM event_cover_backfill_runs WHERE id = ?
+      `).bind(shared.runId).first<{ total_count: number; applied_count: number }>();
+      // Survives with counters recomputed from the one job that remains, rather
+      // than decremented by hand or left claiming work that no longer exists.
+      expect(run).toEqual({ total_count: 1, applied_count: 1 });
+      expect(await foreignKeyCheck()).toEqual([]);
+    });
+
+    it('keeps every cover row when object deletion fails, and completes on a second pass', async () => {
+      const access = await eventAccess();
+      const ids = await seedEventCoverGraph(testEnv.DB, access.event.id);
+      await seedCoverObjects(access.event.id, ids.renderSetId, ids.draftId);
+      const failing = vi.spyOn(testEnv.MEDIA_BUCKET, 'delete')
+        .mockRejectedValueOnce(new Error('R2 unavailable'));
+
+      await expect(deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z')))
+        .rejects.toThrow();
+      failing.mockRestore();
+
+      const event = await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+        .bind(access.event.id).first<{ deleted_at: string | null }>();
+      expect(event?.deleted_at).toBeTruthy();
+      // Nothing is removed ahead of its object: the inventory is the only record
+      // that the object exists, so it has to survive for the retry to find it.
+      for (const table of EVENT_COVER_TABLES) {
+        expect(await countRows(table, access.event.id), `${table} rows after failure`).toBeGreaterThan(0);
+      }
+
+      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:05:00.000Z'));
+      expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+        .bind(access.event.id).first()).toBeNull();
+      expect(await coverPrefixKeys(access.event.id)).toEqual([]);
+      expect(await foreignKeyCheck()).toEqual([]);
+    });
   });
 });

@@ -4,7 +4,12 @@ import { MediaRepository } from '../db/media';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
 
-async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<void> {
+/**
+ * Exported rather than duplicated: the cover storage service needs exactly this
+ * paging delete, and a second copy is a second place for the truncation loop to
+ * be got wrong.
+ */
+export async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<void> {
   let cursor: string | undefined;
   do {
     const page = await bucket.list({ prefix, cursor });
@@ -162,6 +167,34 @@ async function sweepRsvpScratch(
   };
 }
 
+const CANONICAL_NONE_COVER_CONFIG = '{"version":1,"source":{"kind":"none"}}';
+
+/**
+ * Child before parent, and every position is load-bearing.
+ *
+ * Receipts reference drafts and render sets; backfill jobs reference masters,
+ * render sets, and runs; render objects reference sets; sets reference masters
+ * and drafts; previews reference drafts; drafts reference masters. Moving any
+ * line fails the batch rather than corrupting anything, which is the point of
+ * the RESTRICT inversion.
+ *
+ * `event_cover_workflow_fences` is deliberately absent: it has no event foreign
+ * key because it must outlive the row it protected, and it ages out on its own
+ * 31-day schedule.
+ */
+const COVER_PURGE_ORDER = [
+  'event_cover_rate_events',
+  'event_cover_publish_receipts',
+  'event_cover_backfill_jobs',
+  'event_cover_render_objects',
+  'event_cover_render_sets',
+  'event_cover_draft_previews',
+  'event_cover_drafts',
+  'event_cover_retired_legacy_objects',
+  'event_cover_masters',
+  'event_cover_purge_progress',
+] as const;
+
 /**
  * Retires one event completely.
  *
@@ -183,12 +216,67 @@ export async function deleteEventData(env: AppEnv, eventId: string, now = new Da
       UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?
     `).bind(timestamp, eventId),
   ]);
+  // The existing prefix already covers all four cover key shapes — raw, masters,
+  // previews, rendered — because every one of them is built beneath
+  // `events/{eventId}/cover/`. `cleanup.test.ts` asserts that rather than
+  // assuming it.
   await deletePrefix(env.MEDIA_BUCKET, `events/${eventId}/`);
+
+  // Read before the jobs go, so their run counters can be recomputed from what
+  // actually remains rather than decremented by hand.
+  const runs = await env.DB.prepare(
+    'SELECT DISTINCT run_id AS id FROM event_cover_backfill_jobs WHERE event_id = ?',
+  ).bind(eventId).all<{ id: string }>();
+  const affectedRuns = JSON.stringify(runs.results.map((row) => row.id));
+
+  // One transaction, and the order inside it is enforced by the schema rather
+  // than by convention: every cover `event_id` is ON DELETE RESTRICT, and the
+  // inventory tables reference each other the same way, so a statement out of
+  // place fails the whole batch with a foreign-key error.
+  //
   // `media` and `guest_messages` reference `event_sessions` with ON DELETE
-  // RESTRICT, so a populated event cannot be removed by the event cascade alone.
-  // Clearing those two first lets the remaining CASCADE relationships — entry,
-  // households, invitees, receipts, RSVP sessions, rate windows, exports — run.
+  // RESTRICT for the same reason, and clearing them lets the remaining CASCADE
+  // relationships — entry, households, invitees, receipts, RSVP sessions, rate
+  // windows, exports — run when the event row finally goes.
   await env.DB.batch([
+    // The pointers first, on the row that is already soft-deleted. Nothing may
+    // still name an object whose inventory is about to be removed.
+    env.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL
+      WHERE id = ? AND deleted_at IS NOT NULL
+    `).bind(CANONICAL_NONE_COVER_CONFIG, eventId),
+    ...COVER_PURGE_ORDER.map((table) => env.DB
+      .prepare(`DELETE FROM ${table} WHERE event_id = ?`).bind(eventId)),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_runs SET
+        total_count = (SELECT count(*) FROM event_cover_backfill_jobs j WHERE j.run_id = event_cover_backfill_runs.id),
+        queued_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'queued'),
+        applied_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'applied'),
+        skipped_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'skipped'),
+        resolved_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'resolved'),
+        failed_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'failed'),
+        needs_replacement_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'needs_replacement'),
+        updated_at = ?
+      WHERE id IN (SELECT value FROM json_each(?))
+    `).bind(timestamp, affectedRuns),
+    // A run has no event foreign key, so it never blocks this purge. It is
+    // removed here only when it is both empty and already past its own expiry;
+    // ledger retention otherwise belongs to the scheduled cover sweep.
+    env.DB.prepare(`
+      DELETE FROM event_cover_backfill_runs
+      WHERE id IN (SELECT value FROM json_each(?))
+        AND expires_at IS NOT NULL AND expires_at <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_backfill_jobs j WHERE j.run_id = event_cover_backfill_runs.id
+        )
+    `).bind(affectedRuns, timestamp),
     env.DB.prepare('DELETE FROM media WHERE event_id = ?').bind(eventId),
     env.DB.prepare('DELETE FROM guest_messages WHERE event_id = ?').bind(eventId),
     env.DB.prepare('DELETE FROM events WHERE id = ?').bind(eventId),
