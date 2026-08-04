@@ -523,6 +523,54 @@ async function requirePreview(
 }
 
 /* ------------------------------------------------------------------ *
+ * Render objects
+ * ------------------------------------------------------------------ */
+
+export interface AdoptCoverRenderObjectInput {
+  renderSetId: string;
+  eventId: string;
+  profileId: string;
+  density: string;
+  format: string;
+  objectKey: string;
+  contentType: string;
+  byteSize: number;
+  width: number;
+  height: number;
+  qualityRung: number;
+  sha256: string;
+  now: Date;
+}
+
+/**
+ * Adopts one slot into the manifest, or confirms the one already there.
+ *
+ * The compound key is what makes a duplicate slot unrepresentable, so a replayed
+ * Workflow step lands on `DO UPDATE` rather than creating a second row that a
+ * later count would have to reconcile. Only a valid object reaches here.
+ */
+export async function adoptCoverRenderObject(
+  db: D1Database,
+  input: AdoptCoverRenderObjectInput,
+): Promise<void> {
+  const timestamp = input.now.toISOString();
+  await db.prepare(`
+    INSERT INTO event_cover_render_objects (
+      id, render_set_id, event_id, profile_id, density, format, object_key, content_type,
+      byte_size, width, height, quality_rung, sha256, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (render_set_id, profile_id, density, format) DO UPDATE SET
+      object_key = excluded.object_key, content_type = excluded.content_type,
+      byte_size = excluded.byte_size, width = excluded.width, height = excluded.height,
+      quality_rung = excluded.quality_rung, sha256 = excluded.sha256
+  `).bind(
+    crypto.randomUUID(), input.renderSetId, input.eventId, input.profileId, input.density,
+    input.format, input.objectKey, input.contentType, input.byteSize, input.width,
+    input.height, input.qualityRung, input.sha256, timestamp,
+  ).run();
+}
+
+/* ------------------------------------------------------------------ *
  * Persisted mutation budgets
  * ------------------------------------------------------------------ */
 

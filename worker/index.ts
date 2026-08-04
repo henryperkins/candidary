@@ -5,8 +5,14 @@ import type { AppEnv } from './env';
 import { NotificationService } from './services/notifications';
 import { processExport } from './workflows/export';
 import { scheduledCleanup } from './workflows/cleanup';
+import { EVENT_COVER_PROFILES } from '../shared/event-cover';
 import type { CoverBackfillPayload } from './workflows/cover-backfill';
-import type { CoverRenderPayload } from './workflows/cover-render';
+import {
+  coverRenderFinalize,
+  coverRenderPreflight,
+  coverRenderProfileStep,
+  type CoverRenderPayload,
+} from './workflows/cover-render';
 
 const app = createApp();
 
@@ -26,11 +32,25 @@ export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }
  */
 export class CoverRenderWorkflow extends WorkflowEntrypoint<AppEnv, CoverRenderPayload> {
   async run(event: WorkflowEvent<CoverRenderPayload>, step: WorkflowStep) {
-    return step.do('preflight cover publication', async () => ({
-      eventId: event.payload.eventId,
-      operationId: event.payload.operationId,
-      shouldRender: false,
-    }));
+    const preflight = await step.do(
+      'preflight cover publication',
+      async () => coverRenderPreflight(this.env, event.payload),
+    );
+    if (!preflight.shouldRender) return preflight.outcome;
+    // Eight deterministically named steps, so a retry resumes at the profile
+    // that failed rather than re-transforming every image. Each step records
+    // only a small inventory summary; image bytes stay in R2, and no cross-step
+    // state comes from mutable top-level memory.
+    for (const profile of EVENT_COVER_PROFILES) {
+      await step.do(
+        `render cover profile ${profile.id}`,
+        async () => coverRenderProfileStep(this.env, event.payload, profile.id),
+      );
+    }
+    return step.do(
+      'finalize cover publication',
+      async () => coverRenderFinalize(this.env, event.payload),
+    );
   }
 }
 
