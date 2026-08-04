@@ -3,12 +3,21 @@ import { describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import type { AppEnv } from '../../worker/env';
-import worker, { ExportWorkflow } from '../../worker/index';
+import worker, { CoverBackfillWorkflow, CoverRenderWorkflow, ExportWorkflow } from '../../worker/index';
 
 describe('Worker entrypoint', () => {
-  it('exports the fetch handler and export workflow', () => {
+  it('exports the fetch handler and every workflow class', () => {
     expect(worker.fetch).toBeTypeOf('function');
     expect(ExportWorkflow).toBeTypeOf('function');
+    // A wrangler entry whose class is not exported fails at the build stage, and
+    // `cf-typegen` resolves each binding type by the class's exact exported name.
+    expect(CoverRenderWorkflow).toBeTypeOf('function');
+    expect(CoverBackfillWorkflow).toBeTypeOf('function');
+  });
+
+  it('binds both cover workflows', () => {
+    expect(env.COVER_RENDER_WORKFLOW).toBeDefined();
+    expect(env.COVER_BACKFILL_WORKFLOW).toBeDefined();
   });
 
   it('serves the SPA for clean manager routes after token exchange', async () => {

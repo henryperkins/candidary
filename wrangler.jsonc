@@ -64,6 +64,20 @@
       "name": "candidary-export",
       "binding": "EXPORT_WORKFLOW",
       "class_name": "ExportWorkflow"
+    },
+    // Both binding names become persisted D1 data in
+    // `event_cover_workflow_fences`, so they are immutable release constants
+    // from 0012 onward: renaming one later orphans every fence row that still
+    // protects an instance.
+    {
+      "name": "candidary-cover-render",
+      "binding": "COVER_RENDER_WORKFLOW",
+      "class_name": "CoverRenderWorkflow"
+    },
+    {
+      "name": "candidary-cover-backfill",
+      "binding": "COVER_BACKFILL_WORKFLOW",
+      "class_name": "CoverBackfillWorkflow"
     }
   ],
   "triggers": {

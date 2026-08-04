@@ -5,12 +5,44 @@ import type { AppEnv } from './env';
 import { NotificationService } from './services/notifications';
 import { processExport } from './workflows/export';
 import { scheduledCleanup } from './workflows/cleanup';
+import type { CoverBackfillPayload } from './workflows/cover-backfill';
+import type { CoverRenderPayload } from './workflows/cover-render';
 
 const app = createApp();
 
 export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }> {
   async run(event: WorkflowEvent<{ jobId: string }>, step: WorkflowStep) {
     return step.do('prepare private event export', async () => processExport(this.env, event.payload.jobId));
+  }
+}
+
+/**
+ * Materializes one uploaded cover's bounded render set.
+ *
+ * Deliberately not `ExportWorkflow`'s single-giant-step shape: this runs a
+ * preflight, one deterministically named step per layout profile, and a
+ * finalize, so a retry resumes at the profile that failed rather than
+ * re-transforming every image. The bodies land with the driver they call.
+ */
+export class CoverRenderWorkflow extends WorkflowEntrypoint<AppEnv, CoverRenderPayload> {
+  async run(event: WorkflowEvent<CoverRenderPayload>, step: WorkflowStep) {
+    return step.do('preflight cover publication', async () => ({
+      eventId: event.payload.eventId,
+      operationId: event.payload.operationId,
+      shouldRender: false,
+    }));
+  }
+}
+
+/** Release-only. Converts one pre-0012 legacy original onto the new pipeline. */
+export class CoverBackfillWorkflow extends WorkflowEntrypoint<AppEnv, CoverBackfillPayload> {
+  async run(event: WorkflowEvent<CoverBackfillPayload>, step: WorkflowStep) {
+    return step.do('preflight cover backfill job', async () => ({
+      runId: event.payload.runId,
+      jobId: event.payload.jobId,
+      eventId: event.payload.eventId,
+      shouldRender: false,
+    }));
   }
 }
 
