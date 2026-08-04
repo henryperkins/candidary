@@ -70,10 +70,10 @@
     "crons": ["17 3 * * *", "47 * * * *"]
   },
   "vars": {
-    "APP_ORIGIN": "https://candidary.online",
+    "APP_ORIGIN": "https://candidary.app",
     "R2_ACCOUNT_ID": "a77e479f6736120eadd99973dbeb705e",
     "R2_BUCKET_NAME": "candidary-media",
-    "EMAIL_FROM": "hello@candidary.online"
+    "EMAIL_FROM": "hello@candidary.app"
   },
   "secrets": {
     "required": [

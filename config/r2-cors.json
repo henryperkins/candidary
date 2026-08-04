@@ -3,6 +3,7 @@
     {
       "allowed": {
         "origins": [
+          "https://candidary.app",
           "https://candidary.online"
         ],
         "methods": [

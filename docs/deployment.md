@@ -18,7 +18,53 @@ Copy-Item config/r2-cors.example.json config/r2-cors.json
 npx wrangler r2 bucket cors set candidary-media --file config/r2-cors.json
 ```
 
+The committed policy currently lists `candidary.app` and `candidary.online` while the origin cutover completes; narrow it to the canonical origin alone once the old one no longer serves pages.
+
 The bucket remains private. CORS permits signed browser PUT requests from the application origin with the signed `content-type` header. Originals are manager-only; previews are authorization-checked; export links are short-lived and manager-only.
+
+## Canonical origin
+
+`candidary.app` is the application origin, and `APP_ORIGIN` is the one place that says so. A single
+value has to serve every purpose: `worker/http/csrf.ts` compares the `Origin` header of every write
+against it exactly, and the printed guest credential, the management link, host mail, and notification
+links are all built from it (`services/event-entry.ts`, `services/links.ts`, `services/events.ts`,
+`services/host-auth.ts`, `services/notifications.ts`). A second hostname attached to the same Worker is
+therefore not a second front door. It renders the SPA and then fails every write with
+`ORIGIN_FORBIDDEN` — a failure mode that looks like a working deployment until someone tries to create
+an event, upload a photo, RSVP, or sign in.
+
+`candidary.online` is the origin printed before 2026-08-04. It stays attached to the Worker as a Custom
+Domain, because a QR already on a sign cannot be recalled, but it must not serve the application. A
+zone Redirect Rule sends it to `candidary.app` with `301`, path and query preserved. The browser
+reattaches the fragment because the `Location` carries none, so `https://candidary.online/join#<id.secret>`
+arrives as `https://candidary.app/join#<id.secret>` with the credential intact and still out of the
+request line, and the pre-0008 `/join/<token>` path form carries over unchanged.
+
+The rule's expression has to name the host rather than match everything:
+
+```
+(http.host eq "candidary.online")
+```
+
+with target `concat("https://candidary.app", http.request.uri)`, status `301`, query string preserved.
+`forum.candidary.online` is a Custom Domain for a different Worker on the same zone; an unscoped `true`
+expression would swallow it.
+
+The redirect cannot live in the Worker. `/` is not in `assets.run_worker_first`, so the `ASSETS` binding
+answers the homepage before any Worker code runs — the surface most first visits land on is exactly the
+one Worker middleware cannot reach. Redirect Rules run ahead of both.
+
+Sequence a change of `APP_ORIGIN` deliberately, because between the deploy and the redirect every page
+still open on the old origin has a working read path and a dead write path:
+
+1. Widen the R2 CORS policy to both origins. This is additive and cannot break either one.
+2. Deploy the new `APP_ORIGIN`.
+3. Enable the redirect rule, staged in advance so that gap is seconds rather than minutes.
+4. Narrow CORS back to the canonical origin.
+
+Cookies are scoped to a host, so the cutover ends every live guest session, host login, and RSVP session
+on the old origin. Hosts sign in again and guests re-scan. Nothing in D1 or R2 is touched and no
+persisted-data key moves, so every printed credential still resolves.
 
 ## Transport security
 
@@ -28,11 +74,12 @@ Both response surfaces send `Strict-Transport-Security: max-age=31536000; includ
 
 The value is pinned once per surface — `tests/unit/static-headers.test.ts` reads `public/_headers` off disk, and `tests/worker/security-headers.test.ts` exercises the middleware in workerd. Neither test can see the other's surface, so a green `npm run test:unit` says nothing about the Worker's copy; only `npm test` covers both.
 
-Before changing the apex, confirm no subdomain is expected to answer over plain HTTP. `includeSubDomains` commits every subdomain to HTTPS for a year and cannot be withdrawn from browsers that already saw it. The 2026-07-28 audit found only the mail return-path subdomain `cf-bounce`, which carried DNS records rather than an HTTP service; recheck the zone before any later policy change. `preload` is omitted on purpose.
+Both zones carry the policy, and both need the same two switches. Before changing either apex, confirm no subdomain is expected to answer over plain HTTP. `includeSubDomains` commits every subdomain to HTTPS for a year and cannot be withdrawn from browsers that already saw it. The 2026-07-28 audit found only the mail return-path subdomain `cf-bounce`, which carried DNS records rather than an HTTP service. The 2026-08-04 recheck adds `cf-bounce.candidary.app`, also DNS-only, and `forum.candidary.online`, which is an HTTP service — a Custom Domain for a different Worker — but one Cloudflare already serves over HTTPS, so the commitment costs it nothing. Recheck both zones before any later policy change. `preload` is omitted on purpose.
 
-After deploying, confirm exactly one policy is in force:
+After deploying, confirm exactly one policy is in force on each origin:
 
 ```powershell
+(curl.exe -sSI https://candidary.app/ | Select-String 'strict-transport-security').Count
 (curl.exe -sSI https://candidary.online/ | Select-String 'strict-transport-security').Count
 ```
 
@@ -544,7 +591,9 @@ The event-creation endpoint is suitable for a controlled deployment. Before unre
 
 Host accounts send confirmation codes, password resets, and lifecycle notifications through the `EMAIL` binding (Cloudflare Email Service).
 
-`candidary.online` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.online`, set in `EMAIL_FROM`. The account quota is 1,000 messages per day.
+`candidary.app` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.app`, set in `EMAIL_FROM`, and Email Routing forwards replies. The account quota is 1,000 messages per day. `candidary.online` remains onboarded and `ready` on the same terms, so it can be reverted to without waiting on DNS.
+
+The sending domain and `APP_ORIGIN` are independent settings that should not be allowed to drift apart. Mail whose `From` domain differs from the domain of the links inside it still passes SPF, DKIM, and DMARC, so nothing fails loudly — it just reads as a phishing attempt to the host being asked to click a login code.
 
 Setting up a different domain means repeating three things:
 
