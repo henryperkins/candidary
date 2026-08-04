@@ -15,6 +15,8 @@ const garden = resolveEventTheme({ version: 1, presetId: 'garden-party', overrid
 const current: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.', coverObjectKey: 'events/event-a/cover/new.jpg',
+  coverPreparation: null,
+  coverRevision: 0,
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',

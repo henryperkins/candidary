@@ -1,4 +1,5 @@
 import type { EventView, GuestEventView } from '../../shared/contracts';
+import type { EventCoverPreparationView } from '../../shared/event-cover';
 import {
   localDateForInstant,
   localTimeForInstant,
@@ -30,7 +31,33 @@ function startTime(event: EventRecord): string {
   return localTimeForInstant(event.eventStartAt, event.eventTimezone);
 }
 
-export function eventView(event: EventRecord, now = new Date()): EventView {
+/**
+ * The one place the presence sentinel is introduced.
+ *
+ * `cover_object_key` now holds a private normalized master for a published
+ * upload, so projecting the column would be worse than the status quo: it would
+ * hand out the key of a high-resolution original rather than a legacy one. Both
+ * audiences use this field for presence only and then request the authorized
+ * route, so a constant truthy value says everything either of them needs.
+ *
+ * It belongs here and not in `mapEvent`, because delivery reads
+ * `auth.event.coverObjectKey` from the record — sentinelling there would make
+ * the cover route fetch an object literally named `cover-present`.
+ */
+const COVER_PRESENT_SENTINEL = 'cover-present';
+
+function coverPresence(event: EventRecord): string | null {
+  return event.coverObjectKey || event.coverRenderSetId ? COVER_PRESENT_SENTINEL : null;
+}
+
+export function eventView(
+  event: EventRecord,
+  now = new Date(),
+  // Resolved by the caller and passed in, because it needs a D1 read and this
+  // projection stays pure and synchronous. The default keeps all eight existing
+  // call sites compiling.
+  coverPreparation: EventCoverPreparationView | null = null,
+): EventView {
   const intake = resolvePhotoIntake(event, now);
   return {
     id: event.id,
@@ -38,7 +65,7 @@ export function eventView(event: EventRecord, now = new Date()): EventView {
     name: event.name,
     eventDate: event.eventDate,
     welcomeMessage: event.welcomeMessage,
-    coverObjectKey: event.coverObjectKey,
+    coverObjectKey: coverPresence(event),
     uploadsEnabled: event.uploadsEnabled,
     galleryVisible: event.galleryVisible,
     moderationRequired: event.moderationRequired,
@@ -62,6 +89,8 @@ export function eventView(event: EventRecord, now = new Date()): EventView {
     rsvpDeadlineDate: deadlineDate(event),
     rsvpRosterVersion: event.rsvpRosterVersion,
     theme: resolvedThemeView(event.themeConfig),
+    coverPreparation,
+    coverRevision: event.coverRevision,
   };
 }
 
@@ -80,7 +109,7 @@ export function guestEventView(event: EventRecord, now = new Date()): GuestEvent
     name: event.name,
     eventDate: event.eventDate,
     welcomeMessage: event.welcomeMessage,
-    coverObjectKey: event.coverObjectKey,
+    coverObjectKey: coverPresence(event),
     uploadsEnabled: event.uploadsEnabled,
     galleryVisible: event.galleryVisible,
     moderationRequired: event.moderationRequired,

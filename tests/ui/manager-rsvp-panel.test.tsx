@@ -32,6 +32,8 @@ const event: EventView = {
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
   coverObjectKey: null,
+  coverPreparation: null,
+  coverRevision: 0,
   uploadsEnabled: false,
   galleryVisible: false,
   moderationRequired: true,

@@ -35,6 +35,8 @@ const event: EventView = {
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
   coverObjectKey: 'events/event-a/cover/private-photo.jpg',
+  coverPreparation: null,
+  coverRevision: 0,
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,

@@ -47,6 +47,10 @@ const EVENT_VIEW_KEYS = [
   'rsvpDeadlineDate',
   'rsvpRosterVersion',
   'theme',
+  // Manager-only. The guest list below is deliberately untouched, and is the
+  // guard proving neither field reaches a guest.
+  'coverPreparation',
+  'coverRevision',
 ] as const;
 
 const GUEST_EVENT_VIEW_KEYS = [

@@ -6,6 +6,7 @@ import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { eventView, guestEventView } from '../http/event-view';
+import { selectEventCoverPreparation } from '../services/event-cover-publication';
 
 export const eventRoutes = new Hono<AppBindings>();
 
@@ -25,6 +26,16 @@ eventRoutes.get('/event/:slug', async (context) => {
 
 eventRoutes.get('/manage/events/:eventId', async (context) => {
   const auth = await requireManager(context);
-  return context.json({ data: { event: eventView(auth.event) }, requestId: context.get('requestId') });
+  // The Manager event read is in a third route file no other cover task
+  // touches, and it is exactly the read the whole recovery story depends on:
+  // §8's "clearing session storage cannot cancel or hide accepted work" is only
+  // true if this response carries the server-selected receipt. One `now` for
+  // both, so the selection and the projection cannot disagree.
+  const now = new Date();
+  const preparation = await selectEventCoverPreparation(context.env, auth.event.id, now);
+  return context.json({
+    data: { event: eventView(auth.event, now, preparation) },
+    requestId: context.get('requestId'),
+  });
 });
 

@@ -63,6 +63,9 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
 
 export const EVENT_FIXTURE: EventView = {
   ...GUEST_EVENT_FIXTURE,
+  // Manager-only. The guest fixture it spreads deliberately has neither.
+  coverPreparation: null,
+  coverRevision: 0,
   eventStartTime: '17:00',
   // Permitted and past its start, which is the state every manager fixture is in.
   photosOpen: true,

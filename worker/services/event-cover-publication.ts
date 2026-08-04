@@ -35,6 +35,14 @@ const RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
 /** How long a `creating`/`resuming`/`restarting` claim may sit before purge reconciles it. */
 export const STALE_DISPATCH_CLAIM_MS = 2 * 60 * 1000;
 
+/**
+ * The wrangler binding name, and an immutable release constant from 0012 onward.
+ *
+ * It is written into every `event_cover_workflow_fences` row, so renaming it
+ * later orphans every fence still protecting an instance. (The reasoning lives
+ * here rather than in `wrangler.jsonc`, which despite its extension must stay
+ * comment-free — `tests/unit/static-headers.test.ts` JSON.parses it.)
+ */
 export const COVER_RENDER_BINDING = 'COVER_RENDER_WORKFLOW';
 
 /* ------------------------------------------------------------------ *
