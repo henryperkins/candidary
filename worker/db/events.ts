@@ -85,6 +85,101 @@ export function mapEvent(row: EventRow): EventRecord {
   };
 }
 
+export interface CoverPointerMove {
+  eventId: string;
+  expectedRevision: number;
+  expectedCurrentKey: string | null;
+  expectedCurrentRenderSetId: string | null;
+  nextConfig: string;
+  nextObjectKey: string | null;
+  nextRenderSetId: string | null;
+  retiredAt: string;
+  cleanupAfter: string;
+  /**
+   * A lowercase SHA-256 of `expectedCurrentKey`, from `coverKeyFingerprint`.
+   *
+   * Passed in rather than computed here because the digest is asynchronous and
+   * this is a statement builder. Ignored when nothing is displaced.
+   */
+  retiredKeyFingerprint: string;
+}
+
+/**
+ * The guarded cover-pointer move, as statements rather than as a method.
+ *
+ * A method that ran its own batch could not participate in the one transaction
+ * publication actually needs: the pointer flip, the retirement insert, the
+ * previous set's retirement, the new set's activation, the draft's `published`
+ * flip, and the receipt's `applied` flip all have to commit together or not at
+ * all. So this returns the two statements the caller composes into its own
+ * `db.batch`.
+ *
+ * Order follows the house convention exactly — guard first — and here that
+ * ordering fixes two things the naive shape gets wrong:
+ *
+ *  - A D1 batch rolls back only when a statement *errors*. A zero-change UPDATE
+ *    does not error, so a retirement insert placed first would happily commit a
+ *    row naming a cover that is still current after the guard was lost.
+ *  - On the first cover an event ever gets, `expectedCurrentKey` is null. An
+ *    unconditional insert would write NULL into a NOT NULL UNIQUE column and
+ *    fail every first publication.
+ *
+ * `changes() = 1` plus the two null tests cover both. The caller checks
+ * `results[0].meta.changes === 1` and raises the house 409 for a lost optimistic
+ * guard; a plain `Error` would surface as INTERNAL_ERROR 500, which is the wrong
+ * signal for a revision conflict.
+ *
+ * No R2 delete happens here. Only bounded cleanup may delete a retired object,
+ * and only after its recovery window.
+ */
+export function coverPointerStatements(
+  db: D1Database,
+  input: CoverPointerMove,
+): D1PreparedStatement[] {
+  return [
+    db.prepare(`
+      UPDATE events SET
+        cover_config = ?,
+        cover_object_key = ?,
+        cover_render_set_id = ?,
+        cover_revision = cover_revision + 1
+      WHERE id = ?
+        AND deleted_at IS NULL
+        AND cover_revision = ?
+        AND cover_object_key IS ?
+        AND cover_render_set_id IS ?
+    `).bind(
+      input.nextConfig,
+      input.nextObjectKey,
+      input.nextRenderSetId,
+      input.eventId,
+      input.expectedRevision,
+      input.expectedCurrentKey,
+      input.expectedCurrentRenderSetId,
+    ),
+    db.prepare(`
+      INSERT INTO event_cover_retired_legacy_objects (
+        id, event_id, object_key, key_fingerprint, reason, retired_at, cleanup_after
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?
+      WHERE changes() = 1 AND ? IS NOT NULL AND ? IS NULL
+    `).bind(
+      crypto.randomUUID(),
+      input.eventId,
+      input.expectedCurrentKey,
+      input.retiredKeyFingerprint,
+      input.nextObjectKey === null ? 'removed' : 'replaced',
+      input.retiredAt,
+      input.cleanupAfter,
+      // A key was actually displaced...
+      input.expectedCurrentKey,
+      // ...and it was a legacy original rather than a normalized master, which
+      // is what a non-null current render set would mean.
+      input.expectedCurrentRenderSetId,
+    ),
+  ];
+}
+
 export class EventsRepository {
   constructor(private readonly db: D1Database) {}
 
