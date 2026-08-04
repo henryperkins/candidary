@@ -78,6 +78,87 @@ export function hostWriteHeaders(host: { cookie: string; csrf: string }, extraCo
   };
 }
 
+export interface RecordedImagesCall {
+  input: { byteLength: number };
+  transforms: unknown[];
+  output: unknown;
+}
+
+export interface RecordingImagesOptions {
+  /** Source dimensions `IMAGES.info()` reports, before any transform. */
+  source?: { width: number; height: number };
+  encode?(call: RecordedImagesCall): {
+    bytes: Uint8Array;
+    width: number;
+    height: number;
+    contentType: string;
+  };
+}
+
+/**
+ * The one Images fake.
+ *
+ * The pre-existing inline fake discarded every `transform()` argument and
+ * returned a fixed 400x300 PNG, which cannot support an assertion about the
+ * exact parameters a recipe requests or about a rung missing its byte ceiling.
+ * This records every call and lets a test choose the encoded size, so ladder
+ * exhaustion is provoked deliberately rather than hoped for.
+ */
+export function withRecordingImages(
+  options: RecordingImagesOptions = {},
+): { env: AppEnv; calls: RecordedImagesCall[] } {
+  const calls: RecordedImagesCall[] = [];
+  const source = options.source ?? { width: 2400, height: 1600 };
+  const encode = options.encode ?? ((call: RecordedImagesCall) => {
+    // Deterministic and dimension-proportional, so a smaller rung really does
+    // produce fewer bytes and a quality step really does matter.
+    const last = call.transforms.at(-1) as { width?: number; height?: number } | undefined;
+    const width = last?.width ?? source.width;
+    const height = last?.height ?? source.height;
+    const quality = (call.output as { quality?: number }).quality ?? 82;
+    const format = (call.output as { format?: string }).format ?? 'image/webp';
+    const byteLength = Math.max(16, Math.round((width * height * quality) / 4_000));
+    return { bytes: new Uint8Array(byteLength).fill(7), width, height, contentType: format };
+  });
+
+  const images = {
+    info(stream: ReadableStream) {
+      void stream;
+      return Promise.resolve({ format: 'image/jpeg', ...source });
+    },
+    input(stream: ReadableStream) {
+      const call: RecordedImagesCall = { input: { byteLength: 0 }, transforms: [], output: {} };
+      void stream;
+      const transformer = {
+        transform(transform: unknown) {
+          call.transforms.push(transform);
+          return transformer;
+        },
+        draw() { return transformer; },
+        output(output: unknown) {
+          call.output = output;
+          calls.push(call);
+          const encoded = encode(call);
+          // `.buffer` rather than the view: workerd's BodyInit does not accept a
+          // generically-parameterized Uint8Array.
+          const body = () => encoded.bytes.buffer.slice(
+            encoded.bytes.byteOffset,
+            encoded.bytes.byteOffset + encoded.bytes.byteLength,
+          ) as ArrayBuffer;
+          return Promise.resolve({
+            image: () => new Response(body()).body!,
+            contentType: () => encoded.contentType,
+            response: () => new Response(body()),
+          });
+        },
+      };
+      return transformer;
+    },
+  };
+
+  return { env: { ...testEnv, IMAGES: images } as unknown as AppEnv, calls };
+}
+
 const HEX_64 = 'a'.repeat(64);
 
 export interface SeededCoverGraph {

@@ -6,7 +6,7 @@ import { createApp } from '../../worker/app';
 import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
 import { getOrCreatePreview } from '../../worker/storage/previews';
-import { exchangeEventEntry } from './helpers';
+import { exchangeEventEntry, withRecordingImages } from './helpers';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -69,12 +69,14 @@ function png(width: number, height: number, size = 64) {
   return bytes;
 }
 
+// The one Images fake, shared with the cover suites. The previous inline pair
+// discarded every transform argument, so neither could support an assertion
+// about the parameters a recipe actually requests.
 function withImages(): AppEnv {
-  const transformer = {
-    transform() { return this; },
-    async output() { return { image: () => new Response(png(400, 300)).body! }; },
-  };
-  return { ...testEnv, IMAGES: { input: () => transformer } } as unknown as AppEnv;
+  return withRecordingImages({
+    source: { width: 400, height: 300 },
+    encode: () => ({ bytes: png(400, 300), width: 400, height: 300, contentType: 'image/webp' }),
+  }).env;
 }
 
 beforeEach(async () => {
@@ -314,20 +316,14 @@ describe('upload finalization and private delivery', () => {
     }, testEnv);
     const finalized = (await finalizedResponse.json<any>()).data.media;
 
-    let transforms = 0;
     const transformedBytes = new TextEncoder().encode('deterministic-webp-preview');
-    const transformer = {
-      transform() { return this; },
-      async output() {
-        transforms += 1;
-        return { image: () => new Response(transformedBytes).body! };
-      },
-    };
-    const previewEnv = {
-      DB: env.DB,
-      MEDIA_BUCKET: env.MEDIA_BUCKET,
-      IMAGES: { input: () => transformer },
-    } as unknown as AppEnv;
+    const recording = withRecordingImages({
+      encode: () => ({
+        bytes: transformedBytes, width: 1600, height: 1200, contentType: 'image/webp',
+      }),
+    });
+    const previewEnv = recording.env;
+    const transforms = () => recording.calls.length;
     const repository = new MediaRepository(env.DB);
     const first = await getOrCreatePreview(previewEnv, finalized, repository);
     const cachedMedia = await repository.getById(finalized.id);
@@ -337,7 +333,7 @@ describe('upload finalization and private delivery', () => {
     expect(await first.text()).toBe('deterministic-webp-preview');
     expect(await second.text()).toBe('deterministic-webp-preview');
     expect(cachedMedia?.previewObjectKey).toMatch(/\/previews\/.+\.webp$/u);
-    expect(transforms).toBe(1);
+    expect(transforms()).toBe(1);
   });
 
   it('never copies an original into the preview cache when Images is unavailable', async () => {
