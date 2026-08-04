@@ -2,13 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as EventTheme from '../../shared/event-theme';
 import { createApp } from '../../worker/app';
-import { AuthService } from '../../worker/auth/service';
-import { AccountsRepository } from '../../worker/db/accounts';
 import { EventsRepository } from '../../worker/db/events';
 import {
   cookiesFrom,
   eventAccess,
   exchangeEventEntry,
+  hostAccess,
+  hostWriteHeaders,
   origin,
   png,
   resetDatabase,
@@ -146,38 +146,6 @@ async function createdEvent(extra: Record<string, unknown> = {}) {
 }
 
 type EventAccess = Awaited<ReturnType<typeof eventAccess>>;
-
-async function hostAccess(events: readonly EventAccess[] = []) {
-  const email = `host-${crypto.randomUUID()}@example.com`;
-  const account = await new AccountsRepository(testEnv.DB).create({
-    email,
-    passwordHash: 'test-password-hash',
-    displayName: null,
-    createdAt: new Date().toISOString(),
-  });
-  if (!account) throw new Error('Expected a new host account.');
-  for (const access of events) {
-    await testEnv.DB.prepare(`
-      INSERT INTO event_hosts (event_id, account_id, role, created_at)
-      VALUES (?, ?, 'owner', ?)
-    `).bind(access.event.id, account.id, new Date().toISOString()).run();
-  }
-  const session = await new AuthService(testEnv).createHostSession(account.id, account.authVersion);
-  return {
-    account,
-    cookie: `candidary_host=${session.sessionToken.token}; candidary_host_csrf=${session.csrfToken}`,
-    csrf: session.csrfToken,
-  };
-}
-
-function hostWriteHeaders(host: { cookie: string; csrf: string }, extraCookie = '') {
-  return {
-    'content-type': 'application/json',
-    cookie: [host.cookie, extraCookie].filter(Boolean).join('; '),
-    origin,
-    'x-candidary-host-csrf': host.csrf,
-  };
-}
 
 function putTheme(
   eventId: string,

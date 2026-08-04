@@ -4,34 +4,20 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { EVENT_START_MIGRATION_SENTINEL } from '../../shared/rsvp';
 import { createApp } from '../../worker/app';
-import type { AppEnv } from '../../worker/env';
 import {
   eventAccess,
   importRoster,
+  migrationOnly,
+  migrationsUpTo,
   openRsvp,
+  orderedMigrations,
   origin,
   testEnv,
   writeHeaders,
 } from './helpers';
 
-interface Migration { name: string; queries: string[] }
-
-const migrationEnv = env as AppEnv & { TEST_MIGRATIONS: string };
-const migrations = JSON.parse(migrationEnv.TEST_MIGRATIONS) as Migration[];
 const now = '2026-07-21T12:00:00.000Z';
 const ISO_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
-
-function upTo(name: string): Migration[] {
-  const index = migrations.findIndex((migration) => migration.name.startsWith(name));
-  if (index === -1) throw new Error(`No migration named ${name}.`);
-  return migrations.slice(0, index);
-}
-
-function only(name: string): Migration {
-  const found = migrations.find((migration) => migration.name.startsWith(name));
-  if (!found) throw new Error(`No migration named ${name}.`);
-  return found;
-}
 
 async function seedEvent(
   id: string,
@@ -61,12 +47,12 @@ beforeEach(reset);
 
 describe('migration 0010', () => {
   it('backfills a start from each event date and stamps only permitted intake', async () => {
-    await applyD1Migrations(env.DB, upTo('0010'));
+    await applyD1Migrations(env.DB, migrationsUpTo('0010'));
     await seedEvent('event-a', 'maya-theo', '2026-09-19', 1);
     await seedEvent('event-b', 'other-event', '2027-01-02', 1);
     await seedEvent('event-c', 'quiet-event', '2026-11-30', 0);
 
-    await applyD1Migrations(env.DB, [only('0010')]);
+    await applyD1Migrations(env.DB, [migrationOnly('0010')]);
     const backfilled = (await schedule()).results;
 
     expect(backfilled.map((row) => [row.id, row.event_start_at])).toEqual([
@@ -92,9 +78,9 @@ describe('migration 0010', () => {
   });
 
   it('holds the start column non-null and leaves the sentinel for a deploy-gap row', async () => {
-    await applyD1Migrations(env.DB, upTo('0010'));
+    await applyD1Migrations(env.DB, migrationsUpTo('0010'));
     await seedEvent('event-a', 'maya-theo', '2026-09-19', 1);
-    await applyD1Migrations(env.DB, [only('0010')]);
+    await applyD1Migrations(env.DB, [migrationOnly('0010')]);
 
     // NOT NULL with a constant default is available on ADD COLUMN, so the
     // column is genuinely non-nullable rather than policed by a trigger.
@@ -113,7 +99,7 @@ describe('migration 0010', () => {
   });
 
   it('keeps a sentinel row on the pre-0010 lifecycle with its guest RSVP intact', async () => {
-    await applyD1Migrations(env.DB, migrations);
+    await applyD1Migrations(env.DB, orderedMigrations);
     const access = await eventAccess('Deploy gap', false);
     await importRoster(
       access,

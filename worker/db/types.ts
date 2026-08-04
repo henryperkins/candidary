@@ -46,6 +46,267 @@ export interface EventRecord {
   rsvpEnabled: boolean;
   rsvpDeadlineAt: string | null;
   rsvpRosterVersion: number;
+  // The semantic cover recipe, kept as the stored string rather than parsed.
+  // Every publish digest is taken over a canonical serialization, so the bytes
+  // that were committed are the thing a later replay has to compare against;
+  // parsing here would make the record's copy a different artifact from the
+  // row's. `parseStoredCoverConfig` is the reader, at the boundary that needs it.
+  coverConfig: string;
+  // Compare-and-swapped by every publication, and the number a Manager sends
+  // back as `expectedRevision`.
+  coverRevision: number;
+  // The active uploaded render set, or null for `none`, `preset`, and every
+  // not-yet-backfilled legacy row.
+  coverRenderSetId: string | null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Event cover inventory (0012)
+ *
+ * Hand-maintained projections of the cover tables, on the same terms as
+ * `EventRow`: a column added to the schema is invisible to `SELECT *` until it
+ * is named here too.
+ * ------------------------------------------------------------------ */
+
+export type CoverDraftSource = 'new_upload' | 'existing_upload';
+
+export type CoverDraftState =
+  | 'reserved' | 'transferred' | 'inspected' | 'ready'
+  | 'publishing' | 'published' | 'failed' | 'expired';
+
+export type CoverPreviewState = 'rendering' | 'ready' | 'failed';
+
+export type CoverRenderSetState = 'staging' | 'ready' | 'active' | 'retired' | 'abandoned';
+
+export type CoverReceiptStatus =
+  | 'queued' | 'rendering' | 'finalizing' | 'applied' | 'conflict' | 'failed';
+
+export type CoverDispatchState =
+  | 'pending' | 'creating' | 'confirmed' | 'resuming' | 'restarting' | 'failed' | 'blocked';
+
+export type CoverRateAction = 'reservation' | 'inspection' | 'preview' | 'publication';
+
+export type CoverFenceState = 'open' | 'deletion-blocked';
+
+export type CoverPurgePhase = 'fences' | 'r2' | 'relational';
+
+export type CoverBackfillRunStatus = 'inventorying' | 'executing' | 'verified' | 'failed';
+
+export type CoverBackfillJobStatus =
+  | 'queued' | 'normalizing' | 'rendering' | 'finalizing' | 'applied'
+  | 'skipped' | 'resolved' | 'needs_replacement' | 'failed';
+
+export interface CoverMasterRow {
+  id: string;
+  event_id: string;
+  object_key: string;
+  mime_type: string;
+  byte_size: number;
+  width: number;
+  height: number;
+  sha256: string;
+  normalization_version: number;
+  normalization_rung: number;
+  auto_focus_x: number | null;
+  auto_focus_y: number | null;
+  composition_model_version: number | null;
+  created_at: string;
+  cleanup_after: string | null;
+}
+
+export interface CoverDraftRow {
+  id: string;
+  event_id: string;
+  source: CoverDraftSource;
+  state: CoverDraftState;
+  draft_intent_id: string;
+  request_sha256: string;
+  draft_revision: number;
+  raw_object_key: string | null;
+  declared_filename: string | null;
+  declared_mime_type: string | null;
+  declared_byte_size: number | null;
+  verified_raw_byte_size: number | null;
+  raw_etag: string | null;
+  master_id: string | null;
+  focus_x: number | null;
+  focus_y: number | null;
+  composition_model_version: number | null;
+  inspection_json: string | null;
+  failure_code: string | null;
+  created_at: string;
+  updated_at: string;
+  reservation_expires_at: string | null;
+  expires_at: string;
+}
+
+export interface CoverDraftPreviewRow {
+  id: string;
+  draft_id: string;
+  event_id: string;
+  effect_id: string;
+  recipe_version: number;
+  state: CoverPreviewState;
+  object_key: string | null;
+  mime_type: string | null;
+  byte_size: number | null;
+  width: number | null;
+  height: number | null;
+  ladder_rung: number | null;
+  sha256: string | null;
+  failure_code: string | null;
+  retryable: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CoverRenderSetRow {
+  id: string;
+  event_id: string;
+  master_id: string;
+  draft_id: string | null;
+  recipe_json: string;
+  recipe_sha256: string;
+  state: CoverRenderSetState;
+  required_slots: number;
+  manifest_sha256: string | null;
+  published_revision: number | null;
+  created_at: string;
+  ready_at: string | null;
+  published_at: string | null;
+  retired_at: string | null;
+  abandoned_reason: string | null;
+  abandoned_at: string | null;
+  cleanup_after: string | null;
+}
+
+export interface CoverRenderObjectRow {
+  id: string;
+  render_set_id: string;
+  event_id: string;
+  profile_id: string;
+  density: string;
+  format: string;
+  object_key: string;
+  content_type: string;
+  byte_size: number;
+  width: number;
+  height: number;
+  quality_rung: number;
+  sha256: string;
+  created_at: string;
+}
+
+export interface CoverPublishReceiptRow {
+  event_id: string;
+  operation_id: string;
+  draft_id: string | null;
+  render_set_id: string | null;
+  request_sha256: string;
+  action: 'publish' | 'remove';
+  expected_revision: number;
+  status: CoverReceiptStatus;
+  workflow_instance_id: string | null;
+  dependency_versions_json: string;
+  completed_profiles: number;
+  required_profiles: number;
+  applied_revision: number | null;
+  result_cover_json: string | null;
+  failure_code: string | null;
+  retryable: number;
+  dispatch_state: CoverDispatchState;
+  dispatch_generation: number;
+  last_dispatch_at: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+}
+
+export interface CoverWorkflowFenceRow {
+  workflow_binding: string;
+  workflow_instance_id: string;
+  event_id: string;
+  dispatch_generation: number;
+  state: CoverFenceState;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+}
+
+export interface CoverRateEventRow {
+  id: string;
+  event_id: string;
+  action: CoverRateAction;
+  replay_key: string;
+  request_sha256: string;
+  window_start: number;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface CoverRetiredLegacyObjectRow {
+  id: string;
+  event_id: string;
+  object_key: string;
+  key_fingerprint: string;
+  reason: 'replaced' | 'removed' | 'backfilled';
+  retired_at: string;
+  cleanup_after: string;
+  deleted_at: string | null;
+}
+
+export interface CoverPurgeProgressRow {
+  event_id: string;
+  phase: CoverPurgePhase;
+  workflow_binding: string | null;
+  workflow_instance_id: string | null;
+  fences_resolved: number;
+  platform_mutations: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CoverBackfillRunRow {
+  id: string;
+  mode: 'inventory' | 'execute' | 'verify';
+  cursor: string | null;
+  inventory_sha256: string | null;
+  total_count: number;
+  queued_count: number;
+  applied_count: number;
+  skipped_count: number;
+  resolved_count: number;
+  failed_count: number;
+  needs_replacement_count: number;
+  status: CoverBackfillRunStatus;
+  created_at: string;
+  updated_at: string;
+  verified_at: string | null;
+  expires_at: string | null;
+}
+
+export interface CoverBackfillJobRow {
+  id: string;
+  run_id: string;
+  event_id: string;
+  expected_revision: number;
+  legacy_key_fingerprint: string;
+  master_id: string | null;
+  render_set_id: string | null;
+  workflow_instance_id: string;
+  dispatch_state: CoverDispatchState;
+  dispatch_generation: number;
+  status: CoverBackfillJobStatus;
+  dependency_versions_json: string;
+  manifest_json: string | null;
+  manifest_sha256: string | null;
+  failure_code: string | null;
+  retryable: number;
+  terminal_at: string | null;
+  reference_release_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // The credential printed on the invitation. It outlives guest-grant rotation,

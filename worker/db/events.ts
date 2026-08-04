@@ -27,6 +27,9 @@ export interface EventRow {
   rsvp_enabled: number;
   rsvp_deadline_at: string | null;
   rsvp_roster_version: number;
+  cover_config: string;
+  cover_revision: number;
+  cover_render_set_id: string | null;
 }
 
 export interface CreateEventRecord {
@@ -76,6 +79,9 @@ export function mapEvent(row: EventRow): EventRecord {
     rsvpEnabled: row.rsvp_enabled === 1,
     rsvpDeadlineAt: row.rsvp_deadline_at,
     rsvpRosterVersion: row.rsvp_roster_version,
+    coverConfig: row.cover_config,
+    coverRevision: row.cover_revision,
+    coverRenderSetId: row.cover_render_set_id,
   };
 }
 
