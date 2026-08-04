@@ -46,7 +46,9 @@ The rule's expression has to name the host rather than match everything:
 (http.host eq "candidary.online")
 ```
 
-with target `concat("https://candidary.app", http.request.uri)`, status `301`, query string preserved.
+with target `concat("https://candidary.app", http.request.uri)` and status `301`. Leave **preserve query
+string off**: `http.request.uri` already carries the query, and the setting appends it a second time.
+Turn it on only with the `http.request.uri.path` form of the target, which does not.
 `forum.candidary.online` is a Custom Domain for a different Worker on the same zone; an unscoped `true`
 expression would swallow it.
 
@@ -199,6 +201,14 @@ and tags the Worker version with the full reviewed SHA. Cloudflare
 Worker Version Metadata supplies the runtime version ID, tag, and timestamp through
 `CF_VERSION_METADATA`; runtime identity fails closed unless the tag equals the embedded build SHA.
 The wrapper does not migrate D1 and does not create a certification row.
+
+`placement.mode` is `smart`, and it is in `wrangler.jsonc` because anything the live Worker has that the
+repository does not declare is silently dropped by the next deploy. It arrived the other way around: an
+account API token named `Clouder-App-d4911219-1785224589` patched the Worker's settings directly on
+2026-08-04, which created version 77 and made Wrangler refuse the next strict upload rather than
+discard the setting. That refusal is the guard behaving correctly — a Worker whose live configuration
+and whose repository disagree cannot be deployed from the repository without losing the difference.
+Settle such a difference by declaring it here, not by weakening the upload.
 
 The following migration note and numbered runbooks remain authoritative when their exact migration
 is separately approved.
