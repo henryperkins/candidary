@@ -30,6 +30,12 @@ const EVIDENCE_SHA = 'b'.repeat(64);
 const PHYSICAL_SHA = 'c'.repeat(64);
 const temporaryRoots: string[] = [];
 
+// The fixtures below build real Git repositories, so each one costs several process spawns rather
+// than the microseconds a pure unit test takes. Under the full suite on Windows that overruns
+// Vitest's 5s default and fails the release gate on timing alone — a gate that flakes is worse than
+// one that runs slowly, and the failure reads as candidate dirt rather than as a loaded machine.
+const GIT_FIXTURE_TIMEOUT_MS = 30_000;
+
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
 });
@@ -127,7 +133,7 @@ describe('release contract', () => {
     const untracked = await releaseCandidateRepository();
     await writeFile(join(untracked.root, 'notes.txt'), 'untracked\n', 'utf8');
     expect(resolveBuildCandidate(untracked.root).buildSha).toBe('');
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 
   // Production break caught: ordinary ignored dependency/build/tool output prevents a clean candidate identity.
   it('does not count ignored dependency, build, Wrangler, or release output', async () => {
@@ -144,7 +150,7 @@ describe('release contract', () => {
     }
 
     expect(resolveBuildCandidate(candidate.root).buildSha).toBe(candidate.sha);
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 
   // Production break caught: a fresh Windows worktree rewrites generated binding types to CRLF,
   // so Wrangler rejects the otherwise clean immutable candidate before any substantive gate runs.
@@ -181,7 +187,7 @@ describe('release contract', () => {
     const checkedOutTypes = await readFile(join(checkout, 'worker-configuration.d.ts'));
     expect(checkedOutTypes.includes(Buffer.from('\r\n'))).toBe(false);
     expect(git(checkout, 'status', '--porcelain=v1', '--untracked-files=all')).toBe('');
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 
   // Production break caught: an evidence-format knob in the runtime config relabels an unchanged manifest.
   it('keeps evidence schema versioning in the evidence contract', () => {
