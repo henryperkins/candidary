@@ -244,6 +244,47 @@ describe('the dispatch batch', () => {
     expect(batch.commands[0]).not.toContain('cover_object_key');
   });
 
+  /**
+   * Read off `wrangler workflows --help` at 4.113.0, not inferred.
+   *
+   * The first version of this suite asserted the launcher's own invented string,
+   * which is exactly how it shipped emitting `workflows instances create` — a
+   * subcommand that does not exist. These assertions pin the emitted command
+   * against the documented vocabulary instead: creation is `trigger`, the params
+   * are positional, and `--id` is the only way to give an instance the
+   * deterministic ID its fence is keyed by.
+   */
+  it('emits the creation command wrangler actually has', () => {
+    const job = plannedJob(3);
+    const batch = buildDispatchBatch({ runId: RUN, queued: [job], nonterminal: 0, now: NOW });
+
+    expect(batch.commands[0]).toBe(
+      "npx wrangler workflows trigger candidary-cover-backfill "
+      + `'{"runId":"${RUN}","jobId":"${job.jobId}","eventId":"${job.eventId}"}'`
+      + ` --id ${job.workflowInstanceId}`,
+    );
+    expect(batch.commands[0]).not.toContain('instances create');
+    expect(batch.commands[0]).not.toContain('--params');
+  });
+
+  it('emits a PowerShell-quoted form beside it, because that is the shell here', () => {
+    const job = plannedJob(4);
+    const batch = buildDispatchBatch({ runId: RUN, queued: [job], nonterminal: 0, now: NOW });
+
+    // A single-quoted JSON payload survives POSIX and is eaten by PowerShell, so
+    // the operator gets the doubled-quote form rather than an instance created
+    // with no parameters at all.
+    expect(batch.powershellCommands[0]).toContain('""runId""');
+    expect(batch.powershellCommands[0]).toContain(`--id ${job.workflowInstanceId}`);
+    expect(batch.powershellCommands[0]).not.toContain("'{");
+    expect(JSON.parse(
+      batch.powershellCommands[0]!.slice(
+        batch.powershellCommands[0]!.indexOf('"{'),
+        batch.powershellCommands[0]!.lastIndexOf('}"') + 2,
+      ).slice(1, -1).replace(/""/gu, '"'),
+    )).toEqual({ runId: RUN, jobId: job.jobId, eventId: job.eventId });
+  });
+
   it('refuses a negative in-flight count rather than inventing headroom', () => {
     expect(() => buildDispatchBatch({ runId: RUN, queued, nonterminal: -1, now: NOW }))
       .toThrow(/negative/u);

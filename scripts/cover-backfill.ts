@@ -84,7 +84,10 @@ export interface BackfillRunPlan {
 
 export interface DispatchBatch {
   create: PlannedJob[];
+  /** POSIX-quoted `wrangler workflows trigger` invocations. */
   commands: string[];
+  /** The same invocations quoted for PowerShell, which this repository uses. */
+  powershellCommands: string[];
   fenceStatements: string[];
   withheldForInFlight: number;
   withheldForBatch: number;
@@ -335,6 +338,7 @@ export function buildDispatchBatch(input: {
     return {
       create: [],
       commands: [],
+      powershellCommands: [],
       fenceStatements: [],
       withheldForInFlight: input.queued.length,
       withheldForBatch: 0,
@@ -357,15 +361,38 @@ export function buildDispatchBatch(input: {
     + ' ON CONFLICT (workflow_binding, workflow_instance_id) DO NOTHING;'
   ));
 
-  const commands = create.map((job) => (
-    `npx wrangler workflows instances create ${COVER_BACKFILL_WORKFLOW_NAME}`
-    + ` --id ${job.workflowInstanceId}`
-    + ` --params '${JSON.stringify({ runId: input.runId, jobId: job.jobId, eventId: job.eventId })}'`
-  ));
+  // Read off `wrangler workflows --help` at 4.113.0 rather than assumed: there is
+  // no `workflows instances create`. The instance subcommands are list, describe,
+  // send-event, terminate, restart, pause, and resume; creation is `trigger`,
+  // whose params are a positional JSON string and whose `--id` is the only way to
+  // give an instance the deterministic ID the fence is keyed by.
+  const commands = create.map((job) => {
+    const params = JSON.stringify({
+      runId: input.runId,
+      jobId: job.jobId,
+      eventId: job.eventId,
+    });
+    // Single-quoted for POSIX; PowerShell needs the doubled-quote form, so both
+    // are emitted rather than leaving an operator to discover that their shell
+    // silently ate the payload and created an instance with no parameters.
+    return `npx wrangler workflows trigger ${COVER_BACKFILL_WORKFLOW_NAME} '${params}'`
+      + ` --id ${job.workflowInstanceId}`;
+  });
+
+  const powershellCommands = create.map((job) => {
+    const params = JSON.stringify({
+      runId: input.runId,
+      jobId: job.jobId,
+      eventId: job.eventId,
+    }).replace(/"/gu, '""');
+    return `npx wrangler workflows trigger ${COVER_BACKFILL_WORKFLOW_NAME} "${params}"`
+      + ` --id ${job.workflowInstanceId}`;
+  });
 
   return {
     create,
     commands,
+    powershellCommands,
     fenceStatements,
     withheldForInFlight: 0,
     withheldForBatch: input.queued.length - create.length,
@@ -526,6 +553,7 @@ export function runCli(
       cursor: plan.cursor,
       statements: [...plan.statements, ...batch.fenceStatements],
       commands: batch.commands,
+      powershellCommands: batch.powershellCommands,
       withheldForBatch: batch.withheldForBatch,
     }, null, 2)}\n`,
     'utf8',
