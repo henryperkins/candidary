@@ -850,3 +850,284 @@ describe('cover publication status and restart', () => {
     }
   });
 });
+
+describe('cover ingress and inspection boundaries', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  it('accepts the byte at the ceiling and aborts the one past it', async () => {
+    const access = await eventAccess();
+    // Declared at the ceiling, because the schema refuses anything larger. The
+    // only way byte 19,000,001 can arrive is a client that lied.
+    const reserved = await reserve(access, {
+      draftIntentId: INTENT_A,
+      byteSize: MAX_COVER_UPLOAD_BYTES,
+    });
+    const draft = (await reserved.json<any>()).data.draft;
+
+    const overflowing = await putRaw(access, draft.id, {
+      revision: draft.revision,
+      contentLength: String(MAX_COVER_UPLOAD_BYTES),
+      body: new Uint8Array(MAX_COVER_UPLOAD_BYTES + 1),
+    });
+    expect(overflowing.status).toBe(413);
+    expect(await testEnv.MEDIA_BUCKET.head(
+      `events/${access.event.id}/cover/raw/${draft.id}`,
+    )).toBeNull();
+
+    // Confirmed absent, so the same draft retries at its current revision.
+    const current = await testEnv.DB
+      .prepare('SELECT draft_revision FROM event_cover_drafts WHERE id = ?')
+      .bind(draft.id).first<{ draft_revision: number }>();
+    const exact = await putRaw(access, draft.id, {
+      revision: current!.draft_revision,
+      contentLength: String(MAX_COVER_UPLOAD_BYTES),
+      body: new Uint8Array(MAX_COVER_UPLOAD_BYTES),
+    });
+    expect(exact.status).toBe(200);
+    const stored = await testEnv.MEDIA_BUCKET.head(
+      `events/${access.event.id}/cover/raw/${draft.id}`,
+    );
+    expect(stored?.size).toBe(MAX_COVER_UPLOAD_BYTES);
+  }, 60_000);
+
+  it('keeps a partial charged when its deletion fails', async () => {
+    const access = await eventAccess();
+    const draft = (await (await reserve(access)).json<any>()).data.draft;
+    // R2 refuses to delete: the bytes may still be there, so the accounting must
+    // keep counting them rather than optimistically forgiving the charge.
+    // Bound explicitly rather than layered with `Object.create`: the R2 binding
+    // is native, and a derived receiver makes its own methods throw.
+    const bucket = testEnv.MEDIA_BUCKET;
+    const refusing: AppEnv = {
+      ...testEnv,
+      MEDIA_BUCKET: {
+        put: bucket.put.bind(bucket),
+        get: bucket.get.bind(bucket),
+        head: bucket.head.bind(bucket),
+        list: bucket.list.bind(bucket),
+        delete: () => Promise.reject(new Error('R2 refused')),
+      } as unknown as R2Bucket,
+    };
+
+    const response = await putRaw(access, draft.id, {
+      revision: draft.revision,
+      body: new Uint8Array(RAW_BYTES + 512).fill(3),
+      env: refusing,
+    });
+    expect(response.status).toBe(413);
+
+    const row = await testEnv.DB
+      .prepare('SELECT state, raw_object_key FROM event_cover_drafts WHERE id = ?')
+      .bind(draft.id).first<{ state: string; raw_object_key: string | null }>();
+    expect(row?.state).toBe('failed');
+    // Inventory intact for a later bounded pass to retry.
+    expect(row?.raw_object_key).not.toBeNull();
+  });
+
+  it('replays a verified transfer without allocating another raw slot', async () => {
+    const access = await eventAccess();
+    const draft = (await (await reserve(access)).json<any>()).data.draft;
+    const first = await putRaw(access, draft.id, { revision: draft.revision });
+    expect(first.status).toBe(200);
+    const transferred = (await first.json<any>()).data.draft;
+
+    // The same bytes again at the revision the transfer left behind.
+    const replay = await putRaw(access, draft.id, { revision: transferred.revision });
+    expect(replay.status).toBe(200);
+    const drafts = await testEnv.DB
+      .prepare('SELECT count(*) AS count FROM event_cover_drafts WHERE event_id = ?')
+      .bind(access.event.id).first<{ count: number }>();
+    expect(drafts?.count).toBe(1);
+  });
+
+  it('refuses a reservation that would pass the event raw-byte aggregate', async () => {
+    const access = await eventAccess();
+    // Three at the ceiling is 57,000,000 exactly; the fourth cannot fit.
+    for (const [index, intent] of [INTENT_A, INTENT_B, INTENT_C].entries()) {
+      const response = await reserve(access, {
+        draftIntentId: intent,
+        byteSize: MAX_COVER_UPLOAD_BYTES,
+      });
+      expect([index, response.status]).toEqual([index, 201]);
+    }
+    const fourth = await reserve(access, {
+      draftIntentId: INTENT_D,
+      byteSize: MAX_COVER_UPLOAD_BYTES,
+    });
+    // The live-draft cap of three is reached first, which is itself the answer:
+    // whichever bound binds, the host is told which one and how to clear it.
+    expect(fourth.status).toBe(409);
+    expect(['COVER_DRAFT_LIMIT', 'COVER_RAW_STORAGE_LIMIT'])
+      .toContain((await fourth.json<any>()).code);
+  });
+
+  it('refuses bytes whose decoded type contradicts the declaration', async () => {
+    const access = await eventAccess();
+    const recording = withRecordingImages({ source: { width: 2400, height: 1600 } });
+    // The reservation says JPEG; the decoder says PNG.
+    const info = recording.env.IMAGES.info.bind(recording.env.IMAGES);
+    const contradicting: AppEnv = {
+      ...recording.env,
+      IMAGES: Object.create(recording.env.IMAGES, {
+        info: {
+          value: async (stream: ReadableStream) => ({
+            ...(await info(stream)),
+            format: 'image/png',
+          }),
+        },
+      }) as ImagesBinding,
+    };
+    const draft = (await (await reserve(access, {}, contradicting)).json<any>()).data.draft;
+    await putRaw(access, draft.id, { revision: draft.revision, env: contradicting });
+
+    const response = await inspect(access, draft.id, contradicting);
+    // §10.1: the detected type is rechecked before bytes reach Images.
+    expect(response.status).toBe(415);
+    expect((await response.json<any>()).code).toBe('COVER_SOURCE_UNSUPPORTED');
+  });
+
+  it('fails inspection when no normalization rung fits the master ceiling', async () => {
+    const access = await eventAccess();
+    const recording = withRecordingImages({
+      source: { width: 4000, height: 3000 },
+      // Every rung encodes above MAX_COVER_MASTER_BYTES.
+      encode: () => ({
+        bytes: new Uint8Array(13_000_000),
+        width: 4000,
+        height: 3000,
+        contentType: 'image/webp',
+      }),
+    });
+    const draft = (await (await reserve(access, {}, recording.env)).json<any>()).data.draft;
+    await putRaw(access, draft.id, { revision: draft.revision, env: recording.env });
+
+    const response = await inspect(access, draft.id, recording.env);
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).code).toBe('COVER_MASTER_BUDGET_EXHAUSTED');
+    // The failure never waits until `Done`, and it never touches the cover.
+    const event = await testEnv.DB
+      .prepare('SELECT cover_revision FROM events WHERE id = ?')
+      .bind(access.event.id).first<{ cover_revision: number }>();
+    expect(event?.cover_revision).toBe(0);
+  }, 30_000);
+
+  it('writes the automatic point onto the master exactly once', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const master = await testEnv.DB
+      .prepare('SELECT auto_focus_x, auto_focus_y FROM event_cover_masters WHERE event_id = ?')
+      .bind(access.event.id).first<{ auto_focus_x: number; auto_focus_y: number }>();
+    expect(master?.auto_focus_x).toBe(0.5);
+    expect(master?.auto_focus_y).toBe(0.4);
+
+    // A later edit must still be able to reset to the composition Candidary
+    // originally proposed for these exact bytes, so the master's point is
+    // written once and never moved by a subsequent composition write.
+    await compose(access, draft.id, { expectedDraftRevision: draft.revision, y: 0.9 }, env);
+    const after = await testEnv.DB
+      .prepare('SELECT auto_focus_y FROM event_cover_masters WHERE event_id = ?')
+      .bind(access.event.id).first<{ auto_focus_y: number }>();
+    expect(after?.auto_focus_y).toBe(0.4);
+  });
+});
+
+describe('cover publication replay and restart eligibility', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  it('replays an in-progress upload publication as the same operation', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+
+    const first = await publish(access, body, env);
+    expect(first.status).toBe(202);
+    const replay = await publish(access, body, env);
+    // The same digest replays into the same receipt rather than allocating a
+    // second one, which the one-preparing-per-event index would refuse anyway.
+    expect([200, 202]).toContain(replay.status);
+    expect((await replay.json<any>()).data.operation.operationId).toBe(operationId);
+
+    const receipts = await testEnv.DB
+      .prepare('SELECT count(*) AS count FROM event_cover_publish_receipts WHERE event_id = ?')
+      .bind(access.event.id).first<{ count: number }>();
+    expect(receipts?.count).toBe(1);
+  });
+
+  it('refuses an upload operation ID reused with different bytes', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, env);
+
+    const collision = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      // A different style is different bytes, and the digest says so.
+      effect: 'film',
+    }, env);
+    expect(collision.status).toBe(409);
+    expect((await collision.json<any>()).code).toBe('COVER_PUBLICATION_CONFLICT');
+  });
+
+  it('refuses to restart a permanently failed receipt', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, env);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 0, failure_code = 'COVER_OUTPUT_BUDGET_EXHAUSTED'
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, operationId).run();
+
+    const response = await createApp().request(
+      coverPath(access.event.id, `/publications/${operationId}/restart`),
+      { method: 'POST', headers: jsonHeaders(access), body: JSON.stringify({}) },
+      env,
+    );
+    // A permanent failure needs a corrected draft and a new operation, whatever
+    // the platform says about the instance.
+    expect(response.status).toBe(409);
+  });
+
+  it('refuses a restart from a manager of another event', async () => {
+    const access = await eventAccess();
+    const other = await eventAccess('Other Event');
+    const operationId = crypto.randomUUID();
+    await publish(access, { operationId, expectedRevision: 0, source: { kind: 'none' } });
+
+    const response = await createApp().request(
+      coverPath(other.event.id, `/publications/${operationId}/restart`),
+      { method: 'POST', headers: jsonHeaders(other), body: JSON.stringify({}) },
+      testEnv,
+    );
+    // Event-scoped by the receipt read: another event's operation resolves to
+    // nothing here rather than to someone else's cover.
+    expect(response.status).toBe(409);
+  });
+});

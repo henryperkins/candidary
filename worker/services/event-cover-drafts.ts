@@ -395,10 +395,22 @@ export async function inspectCoverDraft(
   const masterId = crypto.randomUUID();
   let master;
   try {
+    // The stored object is rechecked before its bytes reach Images: the size
+    // against what the transfer verified, and the decoded type against what the
+    // reservation declared.
+    const stored = await env.MEDIA_BUCKET.head(draft.raw_object_key);
+    if (!stored || (draft.verified_raw_byte_size !== null && stored.size !== draft.verified_raw_byte_size)) {
+      throw new ApiError(
+        'COVER_SOURCE_UNSUPPORTED',
+        'That upload could not be verified. Choose the photo again.',
+        409,
+      );
+    }
     master = await normalizeCoverMaster(env, {
       eventId: event.id,
       masterId,
       rawKey: draft.raw_object_key,
+      declaredMimeType: draft.declared_mime_type,
     });
   } catch (error) {
     // A rejected source never waits until `Done`, and it never touches the

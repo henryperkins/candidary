@@ -44,9 +44,15 @@ import { coverMasterKey, coverPreviewKey, coverRenderKey } from './event-cover-k
  * the WebP and JPEG members of the same slot.
  */
 
-export interface CoverSourceInfo {
+/** Pixels only, for the geometry that does not care what decoded them. */
+export interface CoverPixelBounds {
   width: number;
   height: number;
+}
+
+export interface CoverSourceInfo extends CoverPixelBounds {
+  /** What the decoder actually found, which the declaration must match. */
+  format: string;
 }
 
 export interface CoverMasterResult {
@@ -141,6 +147,7 @@ export async function readCoverSourceInfo(env: AppEnv, bytes: ArrayBuffer): Prom
   const info = await requireImages(env).info(new Response(bytes).body!);
   const width = 'width' in info ? info.width : 0;
   const height = 'height' in info ? info.height : 0;
+  const format = 'format' in info ? String(info.format) : '';
   if (!width || !height) {
     throw new ApiError(
       'COVER_SOURCE_UNSUPPORTED',
@@ -148,7 +155,7 @@ export async function readCoverSourceInfo(env: AppEnv, bytes: ArrayBuffer): Prom
       422,
     );
   }
-  return { width, height };
+  return { width, height, format };
 }
 
 /**
@@ -159,9 +166,9 @@ export async function readCoverSourceInfo(env: AppEnv, bytes: ArrayBuffer): Prom
  * panoramic source can sit inside the edge cap while blowing the area budget.
  */
 function rungTarget(
-  source: CoverSourceInfo,
+  source: CoverPixelBounds,
   rung: { longEdge: number; area?: number },
-): CoverSourceInfo {
+): CoverPixelBounds {
   const longEdge = Math.max(source.width, source.height);
   const edgeScale = Math.min(1, rung.longEdge / longEdge);
   const areaScale = rung.area
@@ -184,11 +191,28 @@ function rungTarget(
  */
 export async function normalizeCoverMaster(
   env: AppEnv,
-  input: { eventId: string; masterId: string; rawKey: string },
+  input: {
+    eventId: string;
+    masterId: string;
+    rawKey: string;
+    /** What the reservation declared, rechecked against the decoded bytes. */
+    declaredMimeType?: string | null;
+  },
 ): Promise<CoverMasterResult> {
   const images = requireImages(env);
   const raw = await sourceBytes(env, input.rawKey);
   const source = await readCoverSourceInfo(env, raw);
+
+  // §10.1: inspection rechecks the detected type before passing bytes to
+  // Images. A declaration is a claim; this is the only place the file itself
+  // gets to contradict it.
+  if (input.declaredMimeType && source.format && source.format !== input.declaredMimeType) {
+    throw new ApiError(
+      'COVER_SOURCE_UNSUPPORTED',
+      'That file is not the kind of photo it claimed to be. Choose it again.',
+      415,
+    );
+  }
 
   if (source.width < MIN_COVER_SOURCE_WIDTH || source.height < MIN_COVER_SOURCE_HEIGHT) {
     throw new ApiError(
@@ -337,7 +361,7 @@ export async function renderCoverProfileObject(
     eventId: string;
     renderSetId: string;
     masterKey: string;
-    master: CoverSourceInfo;
+    master: CoverPixelBounds;
     focus: CoverFocusPoint;
     effect: EventCoverEffectId;
     profile: EventCoverProfileId;

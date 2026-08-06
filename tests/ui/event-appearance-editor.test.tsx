@@ -34,7 +34,7 @@ const event: EventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
-  coverObjectKey: 'events/event-a/cover/private-photo.jpg',
+  coverObjectKey: 'cover-present',
   coverPreparation: null,
   coverRevision: 0,
   uploadsEnabled: true,

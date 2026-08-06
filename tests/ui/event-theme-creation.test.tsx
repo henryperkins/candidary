@@ -44,6 +44,12 @@ it('selects a theme during creation and submits its canonical configuration', as
   const welcomeMessage = screen.getByLabelText('Welcome message');
   const coverPhoto = screen.getByText('Cover photo').closest('label');
   expect(coverPhoto).not.toBeNull();
+  // The copy states the formats and ceiling the server actually enforces. It
+  // said "JPEG, PNG, or WebP · 10 MB max" while the route took four types at
+  // 19,000,000 bytes, and HEIC — what an iPhone hands over — was refused in the
+  // browser before any server saw it.
+  expect(coverPhoto).toHaveTextContent('Optional · JPEG, PNG, WebP, or HEIC · 19 MB max');
+  expect(coverPhoto!.querySelector('input')!.accept).toBe('image/jpeg,image/png,image/webp,image/heic');
   expect(welcomeMessage.compareDocumentPosition(themeSelector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(themeSelector.compareDocumentPosition(coverPhoto!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 

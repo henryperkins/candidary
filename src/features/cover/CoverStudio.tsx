@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -250,7 +250,7 @@ export function CoverStudio({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [open, requestClose]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const host = hostRef.current;
     if (!open || !host) return;
     document.body.append(host);

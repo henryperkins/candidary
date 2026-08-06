@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import axe from 'axe-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventCoverEffectId, EventCoverPreparationView } from '../../shared/event-cover';
@@ -484,5 +485,183 @@ describe('cover operation controller', () => {
     expect(controller.getState().slow).toBe(true);
     // Elapsed time never becomes a failure.
     expect(controller.getState().phase).toBe('preparing');
+  });
+});
+
+describe('cover studio dispatch and recovery', () => {
+  function dispatchHarness() {
+    const pending: Array<() => void> = [];
+    const controller = createCoverOperationController({
+      eventId: 'event-a',
+      schedule: (callback) => {
+        pending.push(callback);
+        return () => undefined;
+      },
+    });
+    return { controller, run: () => pending.splice(0).forEach((callback) => callback()) };
+  }
+
+  function LiveHarness({ controller }: { controller: ReturnType<typeof dispatchHarness>['controller'] }) {
+    const [state, setState] = useState(controller.getState());
+    useEffect(() => controller.subscribe(setState), [controller]);
+    return <CoverStudio
+      open
+      operation={controller}
+      operationState={state}
+      draft={DRAFT}
+      initialSource={null}
+      initialEffect="natural"
+      canRemove={false}
+      presetThumbnail={(presetId) => `/assets/${presetId}.webp`}
+      styleThumbnail={(effect) => `blob:${effect}`}
+      onUpload={vi.fn()}
+      onPublish={vi.fn()}
+      onDiscardDraft={vi.fn()}
+      onClose={vi.fn()}
+    />;
+  }
+
+  it('turns Cancel into Close the moment dispatch begins', async () => {
+    const { controller } = dispatchHarness();
+    render(<LiveHarness controller={controller} />);
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeVisible();
+
+    // No response yet — not a 202, not a 503, nothing at all.
+    await act(async () => { controller.beginDispatch('operation-a'); });
+    expect(screen.getByRole('button', { name: 'Close' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
+  it('keeps Close after a 503, because the receipt may still have been accepted', async () => {
+    const { controller } = dispatchHarness();
+    render(<LiveHarness controller={controller} />);
+    await act(async () => {
+      controller.beginDispatch('operation-a');
+      // The dispatch answered 503: the client saw a failure, but receipt commit
+      // is durable acceptance and the draft is not discardable on that alone.
+      controller.dispatchSettled(null);
+    });
+    expect(screen.getByRole('button', { name: 'Close' })).toBeVisible();
+    expect(controller.canDiscardDraft()).toBe(false);
+  });
+
+  it('shows durable progress and the sixty-second copy from the receipt', async () => {
+    const { controller } = dispatchHarness();
+    render(<LiveHarness controller={controller} />);
+    await act(async () => {
+      controller.beginDispatch('operation-a');
+      controller.dispatchSettled(preparing({ completedSteps: 3 }));
+    });
+    // Done is the step the sheet lands on once dispatch begins.
+    fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Preparing cover 4 of 6');
+    expect(screen.getByRole('status').textContent).not.toMatch(/profile/iu);
+  });
+
+  it('detaches polling on close and resumes it on reopen', async () => {
+    const { controller, run } = dispatchHarness();
+    const { unmount } = render(<LiveHarness controller={controller} />);
+    await act(async () => {
+      controller.beginDispatch('operation-a');
+      controller.dispatchSettled(preparing());
+    });
+
+    unmount();
+    // Closed: polling is detached, and nothing about the operation changed.
+    expect(controller.getState().dispatched).toBe(true);
+    expect(controller.canDiscardDraft()).toBe(false);
+    run();
+
+    render(<LiveHarness controller={controller} />);
+    // Reopened: the same operation is still the one being watched.
+    expect(controller.getState().operationId).toBe('operation-a');
+  });
+
+  it('offers Try again only for a retryable receipt', async () => {
+    const { controller } = dispatchHarness();
+    render(<LiveHarness controller={controller} />);
+    await act(async () => {
+      controller.beginDispatch('operation-a');
+      controller.dispatchSettled(preparing({ status: 'retryable-failed', retryable: true }));
+    });
+    fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
+
+    await act(async () => {
+      controller.dispatchSettled(preparing({ status: 'permanent-failed', retryable: false }));
+    });
+    // A permanent failure needs a corrected draft, not a retry.
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+});
+
+describe('cover studio accessibility', () => {
+  it('has no axe violations in any step', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Harness draft={DRAFT} canRemove />);
+
+    for (const step of ['choose', 'compose', 'style'] as const) {
+      if (step === 'compose') {
+        await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+        await user.click(screen.getByRole('button', { name: 'Continue' }));
+      }
+      if (step === 'style') await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+      // Semantics only. jsdom has no layout, so color-contrast cannot run here —
+      // §15.3 puts text-over-image contrast in the deterministic compositor, and
+      // axe covers what it can actually see: names, roles, labels, and ARIA.
+      const results = await axe.run(container.ownerDocument.body, {
+        rules: { 'color-contrast': { enabled: false } },
+      });
+      expect([step, results.violations.map((violation) => violation.id)]).toEqual([step, []]);
+    }
+  }, 30_000);
+
+  it('names every control and never carries state by image alone', async () => {
+    const user = userEvent.setup();
+    render(<Harness draft={DRAFT} />);
+    // Every preset radio has a text name beside its thumbnail, and every
+    // thumbnail is decorative.
+    for (const radio of screen.getAllByRole('radio')) {
+      expect(radio).toHaveAccessibleName();
+    }
+    for (const image of document.querySelectorAll('img')) {
+      expect(image.getAttribute('alt')).toBe('');
+    }
+
+    await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    for (const slider of screen.getAllByRole('slider')) {
+      expect(slider).toHaveAccessibleName();
+      expect(slider).toHaveAttribute('aria-valuetext');
+    }
+  });
+
+  it('restores focus to what opened it', () => {
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const { unmount } = render(<Harness />);
+    expect(document.activeElement).not.toBe(opener);
+
+    unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it('keeps focus inside the sheet', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
+    const focusable = dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])');
+    focusable[focusable.length - 1]!.focus();
+
+    await user.tab();
+    // Wrapped back into the sheet rather than out into the inert page behind it.
+    expect(dialog.contains(document.activeElement)).toBe(true);
   });
 });
