@@ -1,7 +1,9 @@
+import { COVER_CLEANUP_ROWS_PER_CLASS } from '../../shared/constants';
 import type { AppEnv } from '../env';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
+import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
 
 /**
@@ -167,6 +169,313 @@ async function sweepRsvpScratch(
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * Cover storage
+ * ------------------------------------------------------------------ */
+
+export interface CoverCleanupSummary {
+  draftsExpired: number;
+  previewsDeleted: number;
+  receiptsExpired: number;
+  backfillJobsReleased: number;
+  rateEventsDeleted: number;
+  fencesDeleted: number;
+  setsAbandoned: number;
+  renderObjectsDeleted: number;
+  setsDeleted: number;
+  legacyObjectsDeleted: number;
+  mastersDeleted: number;
+  /** True when any class filled its per-pass bound and has more waiting. */
+  remainder: boolean;
+}
+
+/** The same window publication gives a set it abandons or retires. */
+const COVER_RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
+
+const LIVE_COVER_DRAFT_STATES = "('reserved', 'transferred', 'inspected', 'ready', 'publishing')";
+const EXPIRABLE_COVER_DRAFT_STATES = "('reserved', 'transferred', 'inspected', 'ready', 'failed')";
+const TERMINAL_COVER_DRAFT_STATES = "('failed', 'expired', 'published')";
+
+/**
+ * Deletes an object and proves it is gone before its inventory row may go.
+ *
+ * The ordering is the whole point. A row removed before its object leaves bytes
+ * in the bucket that nothing can ever discover again — there is no listing that
+ * would find them, because every cover key sits beneath an opaque identifier
+ * that only the row held. A failed delete therefore leaves the row in place and
+ * the next pass retries exactly this object.
+ */
+async function deleteObjectFirst(bucket: R2Bucket, key: string): Promise<boolean> {
+  try {
+    await bucket.delete(key);
+    return await bucket.head(key) === null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bounded cover sweep, in the one order the foreign keys permit.
+ *
+ * Every cover table's `event_id` is `ON DELETE RESTRICT` and the inventory
+ * tables reference each other the same way, so this is not a matter of taste:
+ * receipts and backfill jobs release their references before the sets and
+ * masters they name, render objects go before their sets, and masters go last.
+ * A phase out of place fails on a foreign key rather than corrupting anything.
+ *
+ * Each class processes at most `COVER_CLEANUP_ROWS_PER_CLASS` rows and reports
+ * `remainder` when it filled that bound, so a large backlog drains across
+ * passes instead of turning one scheduled run into an unbounded one.
+ */
+export async function cleanupEventCovers(
+  env: AppEnv,
+  now = new Date(),
+): Promise<CoverCleanupSummary> {
+  const timestamp = now.toISOString();
+  const limit = COVER_CLEANUP_ROWS_PER_CLASS;
+  const summary: CoverCleanupSummary = {
+    draftsExpired: 0,
+    previewsDeleted: 0,
+    receiptsExpired: 0,
+    backfillJobsReleased: 0,
+    rateEventsDeleted: 0,
+    fencesDeleted: 0,
+    setsAbandoned: 0,
+    renderObjectsDeleted: 0,
+    setsDeleted: 0,
+    legacyObjectsDeleted: 0,
+    mastersDeleted: 0,
+    remainder: false,
+  };
+  const note = (count: number) => {
+    if (count >= limit) summary.remainder = true;
+    return count;
+  };
+
+  // 1. Reservations and unpublished drafts at their own expiry. A `publishing`
+  // draft is absent from the state list entirely: its receipt may still be
+  // nonterminal or inside its retryable restart window, and publication
+  // ownership is what returns it to `ready` — never a sweep.
+  const expired = await env.DB.prepare(`
+    UPDATE event_cover_drafts
+    SET state = 'expired', draft_revision = draft_revision + 1, updated_at = ?1
+    WHERE id IN (
+      SELECT id FROM event_cover_drafts
+      WHERE state IN ${EXPIRABLE_COVER_DRAFT_STATES}
+        AND (expires_at <= ?1
+          OR (state = 'reserved' AND reservation_expires_at IS NOT NULL
+              AND reservation_expires_at <= ?1))
+      ORDER BY expires_at LIMIT ?2
+    )
+  `).bind(timestamp, limit).run();
+  summary.draftsExpired = note(expired.meta.changes);
+
+  // Raw bytes stay charged against the event's aggregate until R2 absence is
+  // verified, so a discard can stop future ingress but cannot subtract
+  // cleanup-pending bytes on its own say-so.
+  const raws = await env.DB.prepare(`
+    SELECT id, raw_object_key AS objectKey FROM event_cover_drafts
+    WHERE raw_object_key IS NOT NULL AND state IN ${TERMINAL_COVER_DRAFT_STATES}
+    ORDER BY updated_at LIMIT ?
+  `).bind(limit).all<{ id: string; objectKey: string }>();
+  for (const draft of raws.results) {
+    if (!await deleteObjectFirst(env.MEDIA_BUCKET, draft.objectKey)) continue;
+    await releaseCoverRawBytes(env.DB, { draftId: draft.id, now });
+  }
+
+  // 2. Preview files, which only ever belong to a draft that is over.
+  const previews = await env.DB.prepare(`
+    SELECT p.id, p.object_key AS objectKey FROM event_cover_draft_previews p
+    JOIN event_cover_drafts d ON d.id = p.draft_id
+    WHERE p.object_key IS NOT NULL AND d.state IN ${TERMINAL_COVER_DRAFT_STATES}
+    ORDER BY p.updated_at LIMIT ?
+  `).bind(limit).all<{ id: string; objectKey: string }>();
+  for (const preview of previews.results) {
+    if (!await deleteObjectFirst(env.MEDIA_BUCKET, preview.objectKey)) continue;
+    const removed = await env.DB.prepare('DELETE FROM event_cover_draft_previews WHERE id = ?')
+      .bind(preview.id).run();
+    summary.previewsDeleted += removed.meta.changes;
+  }
+  note(previews.results.length);
+
+  // 3. Receipts, which reference both a draft and a render set. Their own
+  // `expires_at` already encodes the deadline their status earns: seven days
+  // for `applied`, twenty-four hours for a conflict or permanent failure, and
+  // the restart window for a retryable one.
+  const receipts = await env.DB.prepare(`
+    DELETE FROM event_cover_publish_receipts
+    WHERE rowid IN (
+      SELECT rowid FROM event_cover_publish_receipts
+      WHERE expires_at IS NOT NULL AND expires_at <= ?1
+        AND status IN ('applied', 'conflict', 'failed')
+      ORDER BY expires_at LIMIT ?2
+    )
+  `).bind(timestamp, limit).run();
+  summary.receiptsExpired = note(receipts.meta.changes);
+
+  // 4. Backfill jobs release their master and set references only once an active
+  // event pointer or abandoned-set inventory owns those objects, then the rows
+  // themselves expire, then an emptied run summary does.
+  const released = await env.DB.prepare(`
+    UPDATE event_cover_backfill_jobs
+    SET master_id = NULL, render_set_id = NULL, updated_at = ?1
+    WHERE id IN (
+      SELECT id FROM event_cover_backfill_jobs
+      WHERE reference_release_at IS NOT NULL AND reference_release_at <= ?1
+        AND (master_id IS NOT NULL OR render_set_id IS NOT NULL)
+      ORDER BY reference_release_at LIMIT ?2
+    )
+  `).bind(timestamp, limit).run();
+  summary.backfillJobsReleased = note(released.meta.changes);
+
+  await env.DB.batch([
+    env.DB.prepare(`
+      DELETE FROM event_cover_backfill_jobs
+      WHERE rowid IN (
+        SELECT rowid FROM event_cover_backfill_jobs
+        WHERE expires_at IS NOT NULL AND expires_at <= ?1
+          AND master_id IS NULL AND render_set_id IS NULL
+        ORDER BY expires_at LIMIT ?2
+      )
+    `).bind(timestamp, limit),
+    env.DB.prepare(`
+      DELETE FROM event_cover_backfill_runs
+      WHERE expires_at IS NOT NULL AND expires_at <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_backfill_jobs j WHERE j.run_id = event_cover_backfill_runs.id
+        )
+    `).bind(timestamp),
+  ]);
+
+  // 5-6. Persisted budgets and dispatch fences, both of which age out on their
+  // own recorded expiry. A fence deliberately outlives the event it protected.
+  const scratch = await env.DB.batch([
+    env.DB.prepare(`
+      DELETE FROM event_cover_rate_events
+      WHERE rowid IN (
+        SELECT rowid FROM event_cover_rate_events WHERE expires_at <= ?1
+        ORDER BY expires_at LIMIT ?2
+      )
+    `).bind(timestamp, limit),
+    env.DB.prepare(`
+      DELETE FROM event_cover_workflow_fences
+      WHERE rowid IN (
+        SELECT rowid FROM event_cover_workflow_fences WHERE expires_at <= ?1
+        ORDER BY expires_at LIMIT ?2
+      )
+    `).bind(timestamp, limit),
+  ]);
+  summary.rateEventsDeleted = note(scratch[0]?.meta.changes ?? 0);
+  summary.fencesDeleted = note(scratch[1]?.meta.changes ?? 0);
+
+  // 7. A staging or ready set whose owning receipt and job are both gone can
+  // never activate — nothing is left that could run its final transaction — so
+  // it becomes collectable rather than sitting in the bucket indefinitely. It
+  // gets the same seven-day recovery window a retired set gets, which is also
+  // what keeps discovery and deletion in different passes: an orphan noticed
+  // today is not swept today.
+  const recoveryDeadline = new Date(now.getTime() + COVER_RETIRED_RECOVERY_MS).toISOString();
+  const abandoned = await env.DB.prepare(`
+    UPDATE event_cover_render_sets
+    SET state = 'abandoned', abandoned_reason = 'orphaned', abandoned_at = ?1, cleanup_after = ?3
+    WHERE id IN (
+      SELECT s.id FROM event_cover_render_sets s
+      WHERE s.state IN ('staging', 'ready')
+        AND s.id IS NOT (SELECT cover_render_set_id FROM events WHERE id = s.event_id)
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_publish_receipts r WHERE r.render_set_id = s.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_backfill_jobs j WHERE j.render_set_id = s.id
+        )
+      ORDER BY s.created_at LIMIT ?2
+    )
+  `).bind(timestamp, limit, recoveryDeadline).run();
+  summary.setsAbandoned = note(abandoned.meta.changes);
+
+  // 8-9. Render objects before their sets, and only for a set that is past its
+  // recovery window and is not the one the event still points at.
+  const collectableSets = await env.DB.prepare(`
+    SELECT id FROM event_cover_render_sets
+    WHERE state IN ('retired', 'abandoned')
+      AND cleanup_after IS NOT NULL AND cleanup_after <= ?1
+      AND id IS NOT (SELECT cover_render_set_id FROM events WHERE id = event_cover_render_sets.event_id)
+      AND NOT EXISTS (SELECT 1 FROM event_cover_publish_receipts r WHERE r.render_set_id = event_cover_render_sets.id)
+      AND NOT EXISTS (SELECT 1 FROM event_cover_backfill_jobs j WHERE j.render_set_id = event_cover_render_sets.id)
+    ORDER BY cleanup_after LIMIT ?2
+  `).bind(timestamp, limit).all<{ id: string }>();
+  note(collectableSets.results.length);
+
+  for (const set of collectableSets.results) {
+    const objects = await env.DB.prepare(
+      'SELECT id, object_key AS objectKey FROM event_cover_render_objects WHERE render_set_id = ?',
+    ).bind(set.id).all<{ id: string; objectKey: string }>();
+    let cleared = true;
+    for (const object of objects.results) {
+      if (!await deleteObjectFirst(env.MEDIA_BUCKET, object.objectKey)) {
+        cleared = false;
+        continue;
+      }
+      const removed = await env.DB.prepare('DELETE FROM event_cover_render_objects WHERE id = ?')
+        .bind(object.id).run();
+      summary.renderObjectsDeleted += removed.meta.changes;
+    }
+    // Only once every object of this set is proven gone. A partially swept set
+    // keeps its row so the next pass finds the rest.
+    if (!cleared) continue;
+    const removed = await env.DB.prepare('DELETE FROM event_cover_render_sets WHERE id = ?')
+      .bind(set.id).run();
+    summary.setsDeleted += removed.meta.changes;
+  }
+
+  // 10. Displaced legacy originals, past their own recovery deadline and proven
+  // not to be the key the event still serves.
+  const legacy = await env.DB.prepare(`
+    SELECT id, object_key AS objectKey FROM event_cover_retired_legacy_objects
+    WHERE deleted_at IS NULL AND cleanup_after <= ?1
+      AND object_key IS NOT (SELECT cover_object_key FROM events WHERE id = event_id)
+    ORDER BY cleanup_after LIMIT ?2
+  `).bind(timestamp, limit).all<{ id: string; objectKey: string }>();
+  note(legacy.results.length);
+  for (const object of legacy.results) {
+    if (!await deleteObjectFirst(env.MEDIA_BUCKET, object.objectKey)) continue;
+    const removed = await env.DB.prepare('DELETE FROM event_cover_retired_legacy_objects WHERE id = ?')
+      .bind(object.id).run();
+    summary.legacyObjectsDeleted += removed.meta.changes;
+  }
+
+  // 11. Masters last, because a draft, a set, a receipt, and a backfill job can
+  // all reference one. §9.1 makes a *live* draft blocking, but the foreign key
+  // cannot tell live from finished — so a terminal draft's pointer is released
+  // in the same transaction that removes the row it was holding.
+  const masters = await env.DB.prepare(`
+    SELECT m.id, m.object_key AS objectKey FROM event_cover_masters m
+    WHERE m.cleanup_after IS NOT NULL AND m.cleanup_after <= ?1
+      AND m.object_key IS NOT (SELECT cover_object_key FROM events WHERE id = m.event_id)
+      AND NOT EXISTS (
+        SELECT 1 FROM event_cover_drafts d
+        WHERE d.master_id = m.id AND d.state IN ${LIVE_COVER_DRAFT_STATES}
+      )
+      AND NOT EXISTS (SELECT 1 FROM event_cover_render_sets s WHERE s.master_id = m.id)
+      AND NOT EXISTS (SELECT 1 FROM event_cover_backfill_jobs j WHERE j.master_id = m.id)
+    ORDER BY m.cleanup_after LIMIT ?2
+  `).bind(timestamp, limit).all<{ id: string; objectKey: string }>();
+  note(masters.results.length);
+  for (const master of masters.results) {
+    if (!await deleteObjectFirst(env.MEDIA_BUCKET, master.objectKey)) continue;
+    const results = await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE event_cover_drafts SET master_id = NULL, updated_at = ?
+        WHERE master_id = ? AND state NOT IN ${LIVE_COVER_DRAFT_STATES}
+      `).bind(timestamp, master.id),
+      env.DB.prepare('DELETE FROM event_cover_masters WHERE id = ?').bind(master.id),
+    ]);
+    summary.mastersDeleted += results[1]?.meta.changes ?? 0;
+  }
+
+  return summary;
+}
+
 const CANONICAL_NONE_COVER_CONFIG = '{"version":1,"source":{"kind":"none"}}';
 
 /**
@@ -288,6 +597,12 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   await cleanupRsvpScratch(env, now);
   await cleanupExpiredReservations(env, now);
   await cleanupExpiredExports(env, now);
+  // Before the purge, not after: an event whose retention is due may own cover
+  // rows this sweep is the only thing that removes, and a purge that ran first
+  // would meet them as foreign-key failures instead of finding them already
+  // collected. Its own bound means a large backlog drains across passes rather
+  // than making one scheduled run unbounded.
+  await cleanupEventCovers(env, now);
   // Notification delivery is no longer part of this run. It has its own hourly
   // trigger and its own durable state, so a mail failure and a retention purge no
   // longer share a failure boundary in either direction.
