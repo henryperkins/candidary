@@ -252,8 +252,14 @@ export async function claimCoverRawIngress(
   const expectedKey = coverRawKey(input.eventId, input.draftId);
   const current = await requireDraft(db, input.draftId, input.eventId);
   // A retry after a confirmed-absent partial re-enters the same slot rather
-  // than allocating another.
-  if (current.raw_object_key === expectedKey && current.state === 'reserved') {
+  // than allocating another — but only while it still holds the current
+  // revision. Without that, two in-flight PUTs that both read revision N both
+  // "replay" into the same key: the winner clears the pointer that charged for
+  // it, and the loser's completed object is orphaned in R2 with no inventory
+  // row behind it.
+  if (current.raw_object_key === expectedKey
+    && current.state === 'reserved'
+    && current.draft_revision === input.expectedDraftRevision) {
     return { objectKey: expectedKey, replayed: true };
   }
   const result = await db.prepare(`
@@ -379,13 +385,33 @@ export async function failCoverDraft(
  */
 export async function clearCoverRawPointer(
   db: D1Database,
-  input: { draftId: string; eventId: string; state: 'reserved' | 'inspected'; now: Date },
+  input: {
+    draftId: string;
+    eventId: string;
+    state: 'reserved' | 'inspected';
+    /** The exact key the caller proved absent, never whatever is there now. */
+    objectKey: string;
+    now: Date;
+  },
 ): Promise<void> {
   await db.prepare(`
     UPDATE event_cover_drafts
     SET raw_object_key = NULL, verified_raw_byte_size = NULL, updated_at = ?
-    WHERE id = ? AND event_id = ? AND state = ?
-  `).bind(input.now.toISOString(), input.draftId, input.eventId, input.state).run();
+    WHERE id = ? AND event_id = ? AND state = ? AND raw_object_key = ?
+  `).bind(
+    input.now.toISOString(), input.draftId, input.eventId, input.state, input.objectKey,
+  ).run();
+}
+
+/** Makes a master cleanup-eligible once nothing can reference it again. */
+export async function scheduleCoverMasterCleanup(
+  db: D1Database,
+  input: { masterId: string; cleanupAfter: Date },
+): Promise<void> {
+  await db.prepare(`
+    UPDATE event_cover_masters SET cleanup_after = ?
+    WHERE id = ? AND cleanup_after IS NULL
+  `).bind(input.cleanupAfter.toISOString(), input.masterId).run();
 }
 
 /**

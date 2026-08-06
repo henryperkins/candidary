@@ -679,6 +679,74 @@ describe('cover publication', () => {
   });
 });
 
+describe('cover review regressions', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  it('carries Retry-After on a cover rate rejection', async () => {
+    const access = await eventAccess();
+    // The hourly reservation window is 12; the thirteenth first-seen intent is
+    // the one that must say when to come back.
+    let last: Response | null = null;
+    for (let index = 0; index < 13; index += 1) {
+      last = await reserve(access, {
+        draftIntentId: `0000000${index.toString(16)}-1111-4111-8111-111111111111`,
+        byteSize: RAW_BYTES,
+      });
+      if (last.status === 429) break;
+    }
+    expect(last?.status).toBe(429);
+    const retryAfter = Number(last?.headers.get('retry-after'));
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(3_600);
+  });
+
+  it('fails the draft and releases the raw when the natural preview is exhausted', async () => {
+    const access = await eventAccess();
+    // A master that normalizes, then a preview ladder that cannot fit any rung.
+    const recording = withRecordingImages({
+      source: { width: 2400, height: 1600 },
+      encode: (call) => {
+        const output = call.output as { format?: string; quality?: number };
+        const last = call.transforms.at(-1) as { width?: number } | undefined;
+        // The master transform is the one without an effect recipe behind it.
+        const isPreview = call.transforms.length > 1;
+        const byteLength = isPreview ? 4_000_000 : 900_000;
+        return {
+          bytes: new Uint8Array(byteLength).fill(7),
+          width: last?.width ?? 2400,
+          height: 1600,
+          contentType: output.format ?? 'image/webp',
+        };
+      },
+    });
+    const draft = (await (await reserve(access, {}, recording.env)).json<any>()).data.draft;
+    await putRaw(access, draft.id, { revision: draft.revision, env: recording.env });
+
+    const response = await inspect(access, draft.id, recording.env);
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).code).toBe('COVER_PREVIEW_BUDGET_EXHAUSTED');
+
+    const row = await testEnv.DB
+      .prepare('SELECT state, raw_object_key FROM event_cover_drafts WHERE id = ?')
+      .bind(draft.id).first<{ state: string; raw_object_key: string | null }>();
+    // §10.1: the failure is permanent, and its raw and master become eligible
+    // for cleanup rather than sitting charged against the event's budget.
+    expect(row?.state).toBe('failed');
+    expect(row?.raw_object_key).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(
+      `events/${access.event.id}/cover/raw/${draft.id}`,
+    )).toBeNull();
+    const master = await testEnv.DB
+      .prepare('SELECT cleanup_after FROM event_cover_masters WHERE event_id = ?')
+      .bind(access.event.id).first<{ cleanup_after: string | null }>();
+    expect(master?.cleanup_after).not.toBeNull();
+  });
+
+});
+
 describe('cover publication status and restart', () => {
   beforeEach(async () => {
     await resetDatabase();

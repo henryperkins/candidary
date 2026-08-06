@@ -550,6 +550,37 @@ describe('event appearance editor', () => {
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
   });
 
+  it('reads the recovery view out of a 409 envelope instead of reporting a generic error', async () => {
+    const winner = { ...event, coverObjectKey: null, coverRevision: 5 };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (path === '/api/manage/events/event-a/cover/publications' && method === 'POST') {
+        // §11's recovery view travels in the response envelope, not in an error
+        // body — so it carries no `code` and no `message`.
+        return Promise.resolve(new Response(JSON.stringify({
+          data: {
+            applied: false,
+            operation: { operationId: 'operation-a', status: 'conflict', completedSteps: 0, requiredSteps: 0, retryable: false, safeFailureCode: null, updatedAt: '2026-08-04T00:00:00Z' },
+            event: winner,
+          },
+          requestId: 'request-a',
+        }), { status: 409, headers: { 'content-type': 'application/json' } }));
+      }
+      throw new Error('Unexpected request ' + method + ' ' + path);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={{ ...event, coverRevision: 1 }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeVisible());
+    // Not "Something went wrong."
+    expect(screen.getByRole('alert')).toHaveTextContent(/changed somewhere else/u);
+    // And the page is rebased onto the winning revision, so the next change
+    // sends an expectedRevision the server will accept.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+  });
+
   it('refuses an unsupported type before any request', async () => {
     const fetchMock = vi.fn(() => { throw new Error('No request should be made.'); });
     vi.stubGlobal('fetch', fetchMock);

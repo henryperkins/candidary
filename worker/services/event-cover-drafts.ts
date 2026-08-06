@@ -20,6 +20,7 @@ import {
 import {
   adoptCoverInspection,
   adoptCoverPreview,
+  scheduleCoverMasterCleanup,
   chargeCoverRateEvent,
   claimCoverRawIngress,
   clearCoverRawPointer,
@@ -359,7 +360,9 @@ async function discardPartialRaw(
   }
   // Confirmed absent: the same draft may be retried rather than forcing the
   // host back through a fresh reservation.
-  await clearCoverRawPointer(env.DB, { draftId, eventId, state: 'reserved', now });
+  await clearCoverRawPointer(env.DB, {
+    draftId, eventId, state: 'reserved', objectKey, now,
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -436,25 +439,65 @@ export async function inspectCoverDraft(
     now,
   });
 
+  const rawKey = coverRawKey(event.id, draft.id);
+
   // The natural preview is what the browser composition worker decodes, so it
   // is produced here rather than on a later request the host would wait for.
-  await renderAndAdoptPreview(env, event.id, inspected, masterId, 'natural', now);
+  try {
+    await renderAndAdoptPreview(env, event.id, inspected, masterId, 'natural', now);
+  } catch (error) {
+    // §10.1: a natural-preview exhaustion permanently fails inspection and makes
+    // its new master and raw eligible for cleanup. Leaving the draft `inspected`
+    // would keep both charged against the event's budget for a photo that can
+    // never be published, and three of them would exhaust the draft cap.
+    await releaseInspectionArtifacts(env, event.id, draft.id, masterId, rawKey, 'inspected', now);
+    await failCoverDraft(env.DB, {
+      draftId: draft.id,
+      eventId: event.id,
+      failureCode: error instanceof ApiError ? error.code : 'COVER_PREVIEW_BUDGET_EXHAUSTED',
+      now,
+    });
+    throw error;
+  }
 
   // Only now is the raw disposable: the master is durable and verified. The
   // pointer stops charging only after R2 absence is confirmed, so a failed
   // delete leaves the bytes counted rather than silently forgiven.
-  const rawKey = coverRawKey(event.id, draft.id);
   await env.MEDIA_BUCKET.delete(rawKey).catch(() => undefined);
   if (!(await env.MEDIA_BUCKET.head(rawKey))) {
     await clearCoverRawPointer(env.DB, {
       draftId: draft.id,
       eventId: event.id,
       state: 'inspected',
+      objectKey: rawKey,
       now,
     });
   }
 
   return loadCoverDraft(env.DB, draft.id, event.id);
+}
+
+/**
+ * Deletes an inspection's own artifacts, then stops charging for them.
+ *
+ * Absence is proven before the pointer is cleared, in that order, so a failed
+ * delete leaves the bytes counted for a later bounded pass rather than silently
+ * forgiven.
+ */
+async function releaseInspectionArtifacts(
+  env: AppEnv,
+  eventId: string,
+  draftId: string,
+  masterId: string,
+  rawKey: string,
+  state: 'reserved' | 'inspected',
+  now: Date,
+): Promise<void> {
+  await env.MEDIA_BUCKET.delete(rawKey).catch(() => undefined);
+  if (!(await env.MEDIA_BUCKET.head(rawKey))) {
+    await clearCoverRawPointer(env.DB, { draftId, eventId, state, objectKey: rawKey, now });
+  }
+  await scheduleCoverMasterCleanup(env.DB, { masterId, cleanupAfter: now });
 }
 
 /* ------------------------------------------------------------------ *

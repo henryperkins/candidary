@@ -39,11 +39,33 @@ export function ManagerCoverPreparationStatus({
   const [dismissed, setDismissed] = useState(false);
   const resolvedRef = useRef(onResolved);
   resolvedRef.current = onResolved;
+  const settledRef = useRef<string | null>(null);
 
   useEffect(() => {
     setLive(preparation);
     setDismissed(false);
   }, [preparation]);
+
+  /**
+   * Releases a terminal operation however it was observed.
+   *
+   * The poll below only runs while a receipt is `preparing`, so a reload during
+   * preparation lands on an already-terminal receipt and no poll ever runs. The
+   * operation key would then outlive its receipt, and the next cover change
+   * would reuse that ID with different bytes — a `409` no host action caused,
+   * for as long as the tab stays open. A retryable failure is deliberately not
+   * released, because the same operation is what restarts.
+   */
+  useEffect(() => {
+    const view = live;
+    if (!view || view.status === 'preparing') return;
+    if (view.status === 'retryable-failed' && view.retryable) return;
+    if (settledRef.current === view.operationId) return;
+    settledRef.current = view.operationId;
+    forgetCoverOperation(eventId);
+    // A permanent failure changed nothing on the event, so it needs no read.
+    if (view.status === 'applied' || view.status === 'conflict') resolvedRef.current();
+  }, [eventId, live]);
 
   const operationId = live?.operationId ?? null;
   const status = live?.status ?? null;
@@ -77,15 +99,9 @@ export function ManagerCoverPreparationStatus({
         if (stopped) return;
         if (next) {
           setLive(next);
-          if (next.status === 'applied' || next.status === 'conflict') {
-            forgetCoverOperation(eventId);
-            resolvedRef.current();
-            return;
-          }
-          if (next.status === 'permanent-failed') {
-            forgetCoverOperation(eventId);
-            return;
-          }
+          // Terminal outcomes are released by the effect above, which is the
+          // one place that decides, whether the answer arrived by poll or was
+          // already on the event view at mount.
           if (next.status !== 'preparing') return;
         }
       } catch {

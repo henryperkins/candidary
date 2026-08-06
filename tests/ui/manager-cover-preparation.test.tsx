@@ -142,6 +142,48 @@ describe('manager cover preparation status', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
+  it('settles a terminal receipt that was already terminal at mount', async () => {
+    sessionStorage.setItem('candidary.cover.operation.event-a', 'operation-a');
+    const onResolved = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+    render(<ManagerCoverPreparationStatus
+      eventId="event-a"
+      preparation={preparation({ status: 'applied', completedSteps: 6 })}
+      onResolved={onResolved}
+    />);
+
+    // A reload during preparation lands here: the receipt is already terminal,
+    // so no poll ever runs. The operation must still be released, or the next
+    // cover change reuses its ID with different bytes and 409s forever.
+    await waitFor(() => expect(sessionStorage.getItem('candidary.cover.operation.event-a')).toBeNull());
+    expect(onResolved).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a conflict and a permanent failure seen at mount', async () => {
+    for (const status of ['conflict', 'permanent-failed'] as const) {
+      sessionStorage.setItem('candidary.cover.operation.event-a', 'operation-a');
+      vi.stubGlobal('fetch', vi.fn());
+      render(<ManagerCoverPreparationStatus
+        eventId="event-a"
+        preparation={preparation({ status, retryable: false })}
+        onResolved={vi.fn()}
+      />);
+      await waitFor(() => expect(sessionStorage.getItem('candidary.cover.operation.event-a')).toBeNull());
+      cleanup();
+    }
+  });
+
+  it('keeps a retryable receipt operation, because the same one restarts', async () => {
+    sessionStorage.setItem('candidary.cover.operation.event-a', 'operation-a');
+    vi.stubGlobal('fetch', vi.fn());
+    render(<ManagerCoverPreparationStatus
+      eventId="event-a"
+      preparation={preparation({ status: 'retryable-failed', retryable: true })}
+      onResolved={vi.fn()}
+    />);
+    expect(sessionStorage.getItem('candidary.cover.operation.event-a')).toBe('operation-a');
+  });
+
   it('shows nothing when there is no receipt', () => {
     vi.stubGlobal('fetch', vi.fn());
     const { container } = render(<ManagerCoverPreparationStatus

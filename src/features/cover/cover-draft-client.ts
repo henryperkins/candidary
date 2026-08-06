@@ -4,7 +4,7 @@ import {
 } from '../../../shared/constants';
 import type { EventCoverPreparationView } from '../../../shared/event-cover';
 import type { EventView } from '../../../shared/contracts';
-import { api, apiBinary, apiBytes, ClientApiError } from '../../app/api';
+import { api, apiBinary, apiBytes, apiEnvelope, ClientApiError } from '../../app/api';
 
 /**
  * The sequence both upload controls share.
@@ -40,6 +40,8 @@ export interface CoverDraftView {
 }
 
 export interface CoverPublicationResult {
+  /** 200 applied, 202 preparing, 409 conflict, 503 retryable dispatch failure. */
+  status: number;
   applied: boolean;
   appliedRevision?: number | null;
   operation: EventCoverPreparationView | null;
@@ -196,35 +198,62 @@ export async function publishCoverUpload(
   // from becoming a second publication.
   const operationKey = coverOperationKey(eventId);
   const operationId = persistedId(operationKey);
-  return api<CoverPublicationResult>(`${base}/publications`, {
-    method: 'POST',
-    body: JSON.stringify({
-      operationId,
-      expectedRevision,
-      source: { kind: 'upload', draftId: draft.id },
-      // Phase 1 publishes the automatic composition and the faithful style. The
-      // manual focus, the six designs, and the other four styles arrive with
-      // Cover Studio; nothing shipped can select them.
-      focus: { mode: 'auto' },
-      effect: 'natural',
-    }),
-  });
+  const answered = await apiEnvelope<Omit<CoverPublicationResult, 'status'>>(
+    `${base}/publications`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        operationId,
+        expectedRevision,
+        source: { kind: 'upload', draftId: draft.id },
+        // Phase 1 publishes the automatic composition and the faithful style. The
+        // manual focus, the six designs, and the other four styles arrive with
+        // Cover Studio; nothing shipped can select them.
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }),
+    },
+  );
+  return settle(eventId, { status: answered.status, ...answered.data });
+}
+
+/**
+ * Releases the operation once its outcome is settled.
+ *
+ * A single per-event key is what makes a lost `202` replay into its own receipt
+ * rather than a second publication — but only while that operation is still
+ * unresolved. Held past a terminal outcome it becomes the opposite: the next
+ * cover change reuses the ID with different bytes and takes a permanent 409.
+ * A retryable failure is deliberately not settled, because the same operation
+ * is what restarts.
+ */
+function settle(eventId: string, result: CoverPublicationResult): CoverPublicationResult {
+  const status = result.operation?.status;
+  const terminal = result.applied
+    || status === 'applied'
+    || status === 'conflict'
+    || (status === 'permanent-failed')
+    || (status === 'retryable-failed' && result.operation?.retryable === false)
+    || result.status === 409;
+  if (terminal) clearStored(coverOperationKey(eventId));
+  return result;
 }
 
 export async function publishCoverRemoval(
   eventId: string,
   expectedRevision: number,
 ): Promise<CoverPublicationResult> {
-  const operationKey = coverOperationKey(eventId);
-  const operationId = persistedId(operationKey);
-  const result = await api<CoverPublicationResult>(`${coverBase(eventId)}/publications`, {
-    method: 'POST',
-    body: JSON.stringify({ operationId, expectedRevision, source: { kind: 'none' } }),
-  });
+  const operationId = persistedId(coverOperationKey(eventId));
+  const answered = await apiEnvelope<Omit<CoverPublicationResult, 'status'>>(
+    `${coverBase(eventId)}/publications`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ operationId, expectedRevision, source: { kind: 'none' } }),
+    },
+  );
   // Removal applies synchronously, so its operation is resolved the moment it
-  // answers and must not be replayed by the next change.
-  clearStored(operationKey);
-  return result;
+  // answers — including when it answers `409`, which the envelope now carries.
+  return settle(eventId, { status: answered.status, ...answered.data });
 }
 
 export function forgetCoverOperation(eventId: string): void {

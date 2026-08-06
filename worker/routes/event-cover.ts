@@ -11,7 +11,12 @@ import {
   eventCoverPublishSchema,
 } from '../../shared/event-cover';
 import { requireManager } from '../auth/manager';
-import { loadCoverDraft, writeCoverComposition, discardCoverDraft } from '../db/event-covers';
+import {
+  coverRateRetryAfterSeconds,
+  discardCoverDraft,
+  loadCoverDraft,
+  writeCoverComposition,
+} from '../db/event-covers';
 import { EventsRepository } from '../db/events';
 import type { CoverDraftRow, EventRecord } from '../db/types';
 import type { AppBindings } from '../env';
@@ -31,6 +36,7 @@ import {
   coverRequestDigest,
   coverWorkflowInstanceId,
   defaultCoverWorkflowAccessor,
+  mapPlatformStatus,
   markDispatchFailed,
   readCoverPublication,
   restartCoverPublication,
@@ -56,6 +62,29 @@ import {
 export const eventCoverRoutes = new Hono<AppBindings>();
 
 const emptyBodySchema = z.strictObject({});
+
+/**
+ * Attaches `Retry-After` to a cover rate rejection.
+ *
+ * §9.4 requires it and §14 restates it. The precedent is `routes/rsvp.ts`,
+ * which sets the header immediately before its throw; this wraps the call
+ * instead, because only the service knows whether a window was actually
+ * charged or the request replayed into an existing row.
+ */
+async function withRateRetryAfter<T>(
+  context: Context<AppBindings>,
+  now: Date,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'RATE_LIMITED') {
+      context.header('Retry-After', String(coverRateRetryAfterSeconds(now)));
+    }
+    throw error;
+  }
+}
 
 function coverBase(eventId: string): string {
   return `/api/manage/events/${eventId}/cover`;
@@ -134,12 +163,14 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/drafts', async (context) =>
     );
   }
 
-  const reservation = await reserveCoverDraft(context.env, {
+  const now = new Date();
+  const requestDigest = await coverRequestDigest(canonicalCoverDraftCreate(parsed.data));
+  const reservation = await withRateRetryAfter(context, now, () => reserveCoverDraft(context.env, {
     event: auth.event,
     request: parsed.data,
-    requestDigest: await coverRequestDigest(canonicalCoverDraftCreate(parsed.data)),
-    now: new Date(),
-  });
+    requestDigest,
+    now,
+  }));
 
   // The ingress route is named rather than signed. A presigned R2 PUT cannot
   // enforce a byte ceiling, and this one aborts mid-stream.
@@ -215,7 +246,12 @@ eventCoverRoutes.delete('/manage/events/:eventId/cover/drafts/:draftId', async (
 
 eventCoverRoutes.post('/manage/events/:eventId/cover/drafts/:draftId/inspect', async (context) => {
   const { event, draft } = await managerDraft(context, true);
-  const inspected = await inspectCoverDraft(context.env, { event, draft, now: new Date() });
+  const now = new Date();
+  const inspected = await withRateRetryAfter(
+    context,
+    now,
+    () => inspectCoverDraft(context.env, { event, draft, now }),
+  );
   return draftResponse(context, inspected);
 });
 
@@ -255,12 +291,13 @@ eventCoverRoutes.post(
   '/manage/events/:eventId/cover/drafts/:draftId/previews/:effect',
   async (context) => {
     const { event, draft } = await managerDraft(context, true);
-    const preview = await readCoverDraftPreview(context.env, {
+    const now = new Date();
+    const preview = await withRateRetryAfter(context, now, () => readCoverDraftPreview(context.env, {
       event,
       draft,
       effect: context.req.param('effect'),
-      now: new Date(),
-    });
+      now,
+    }));
     // Bytes, not a URL: the composition worker decodes this response directly,
     // and no cover derivative is ever addressable without authorization.
     return new Response(preview.body, {
@@ -302,12 +339,12 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
 
   const now = new Date();
   const requestDigest = await coverRequestDigest(canonicalCoverRequest(request));
-  const acceptance = await acceptCoverPublication(context.env, {
+  const acceptance = await withRateRetryAfter(context, now, () => acceptCoverPublication(context.env, {
     event: auth.event,
     request,
     requestDigest,
     now,
-  });
+  }));
 
   if (acceptance.receipt.status === 'conflict') {
     return context.json({
@@ -462,8 +499,13 @@ async function dispatchCoverRender(
   try {
     await accessor.create(workflowInstanceId, { eventId, operationId });
   } catch {
+    // `create()` refuses an ID a live instance already holds, which is the same
+    // fenced operation rather than a failure. Anything else is a failed
+    // dispatch: a single `!== 'unknown'` compare treated `errored`,
+    // `terminated`, and `complete` as success and answered 202 for work that
+    // was never running.
     const platform = await accessor.status(workflowInstanceId).catch(() => 'unknown');
-    if (platform === 'unknown') {
+    if (mapPlatformStatus(platform).kind !== 'active') {
       await markDispatchFailed(context.env, eventId, operationId, now);
       return false;
     }

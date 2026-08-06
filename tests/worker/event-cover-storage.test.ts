@@ -499,3 +499,58 @@ describe('coverPointerStatements', () => {
     expect((await eventPointers()).cover_render_set_id).toBe('set-new');
   });
 });
+
+describe('concurrent raw ingress', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  it('refuses a second claim holding the revision the first already moved', async () => {
+    const access = await eventAccess();
+    const { draft } = await createCoverDraft(testEnv.DB, draftInput(access));
+
+    // Two in-flight PUTs both read revision 0 before either lands.
+    const first = await claimCoverRawIngress(testEnv.DB, {
+      draftId: draft.id,
+      eventId: access.event.id,
+      expectedDraftRevision: 0,
+      now,
+    });
+    expect(first.replayed).toBe(false);
+
+    // Without a revision guard this returns `replayed: true` and both requests
+    // stream to the same key: the loser's object is then orphaned in R2 with no
+    // inventory row, because the winner clears the pointer that charged for it.
+    await expect(claimCoverRawIngress(testEnv.DB, {
+      draftId: draft.id,
+      eventId: access.event.id,
+      expectedDraftRevision: 0,
+      now,
+    })).rejects.toThrow();
+  });
+
+  it('replays a claim that still holds the current revision', async () => {
+    const access = await eventAccess();
+    const { draft } = await createCoverDraft(testEnv.DB, draftInput(access));
+    const claimed = await claimCoverRawIngress(testEnv.DB, {
+      draftId: draft.id,
+      eventId: access.event.id,
+      expectedDraftRevision: 0,
+      now,
+    });
+    const current = await testEnv.DB
+      .prepare('SELECT draft_revision FROM event_cover_drafts WHERE id = ?')
+      .bind(draft.id).first<{ draft_revision: number }>();
+
+    // A genuine retry after a confirmed-absent partial re-enters the same slot
+    // rather than allocating another.
+    const replayed = await claimCoverRawIngress(testEnv.DB, {
+      draftId: draft.id,
+      eventId: access.event.id,
+      expectedDraftRevision: current!.draft_revision,
+      now,
+    });
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.objectKey).toBe(claimed.objectKey);
+  });
+});

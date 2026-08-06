@@ -70,6 +70,10 @@ const SYNTAX_ERROR = 'Enter a six-digit hex color, such as #245c46.';
 // over, so §15.4's HEIC acceptance was blocked in the browser before any server
 // saw it.
 const COVER_ACCEPT = COVER_UPLOAD_MIME_TYPES.join(',');
+// The recovery view travels in the response envelope rather than an error body,
+// so these two are the client's own prose over a payload it can actually read.
+const COVER_MOVED_ON = 'This cover changed somewhere else, so that change was not applied. The page is up to date now — try again.';
+const COVER_PREPARE_UNAVAILABLE = 'That cover could not be started just now. Your current cover is still live — try again in a moment.';
 const COVER_MAX_MB = Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000);
 
 function rawColors(theme: ResolvedEventTheme) {
@@ -345,6 +349,8 @@ export function EventAppearanceEditor({
       // owns the rest, and the current cover stays exactly as it was.
       if (result.event) onCoverSaved(result.event);
       else await refreshEvent();
+      if (result.status === 409) setCoverError(COVER_MOVED_ON);
+      if (result.status === 503) setCoverError(COVER_PREPARE_UNAVAILABLE);
     } catch (caught) {
       setCoverError(describeCoverFailure(caught, 'The cover photo could not be saved. Try again.'));
     } finally {
@@ -361,8 +367,11 @@ export function EventAppearanceEditor({
       // Removal is a publication like any other: one of exactly two configs this
       // release can publish, through the same revision guard and receipt.
       const result = await onEventWrite(() => publishCoverRemoval(event.id, event.coverRevision));
+      // A `409` carries the winning event, so adopting it rebases this page onto
+      // the revision the next change has to send.
       if (result.event) onCoverSaved(result.event);
       else await refreshEvent();
+      if (result.status === 409) setCoverError(COVER_MOVED_ON);
     } catch (caught) {
       setCoverError(describeCoverFailure(caught, 'The cover photo could not be removed. Try again.'));
     } finally {
