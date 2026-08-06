@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventCoverEffectId, EventCoverPreparationView } from '../../shared/event-cover';
@@ -37,6 +38,7 @@ function preparing(patch: Partial<EventCoverPreparationView> = {}): EventCoverPr
 }
 
 function Harness({
+  canvas,
   draft = null,
   canRemove = false,
   onPublish = vi.fn(),
@@ -45,6 +47,7 @@ function Harness({
   onUpload = vi.fn(),
   initialEffect = 'natural' as EventCoverEffectId,
 }: {
+  canvas?: ReactNode;
   draft?: CoverStudioDraft | null;
   canRemove?: boolean;
   onPublish?: (intent: unknown) => void;
@@ -67,6 +70,7 @@ function Harness({
 
   return <CoverStudio
     open
+    canvas={canvas}
     operation={live}
     operationState={state}
     draft={draft}
@@ -243,6 +247,43 @@ describe('cover studio', () => {
     vi.useRealTimers();
   });
 
+  it('says nothing until the host has actually adjusted something', async () => {
+    vi.useFakeTimers();
+    render(<Harness draft={DRAFT} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    // §13: the polite summary fires after an interaction settles. Firing on
+    // mount reads a crop summary at a host who has not touched anything.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByRole('status').textContent).toBe('');
+    vi.useRealTimers();
+  });
+
+  it('drags by delta rather than jumping to the pressed point', () => {
+    render(<Harness draft={DRAFT} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const surface = document.querySelector('.cover-composer__surface')!;
+    surface.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0,
+      toJSON: () => ({}),
+    });
+    (surface as HTMLElement).setPointerCapture = () => undefined;
+    (surface as HTMLElement).releasePointerCapture = () => undefined;
+
+    // Pressing well away from the current focal point must not move it at all.
+    fireEvent.pointerDown(surface, { clientX: 180, clientY: 90, pointerId: 1 });
+    expect(screen.getByRole('slider', { name: 'Horizontal focus' }))
+      .toHaveAttribute('aria-valuetext', '50 percent from left');
+
+    // Only the movement moves it, and by the distance travelled.
+    fireEvent.pointerMove(surface, { clientX: 160, clientY: 90, pointerId: 1 });
+    expect(screen.getByRole('slider', { name: 'Horizontal focus' }))
+      .toHaveAttribute('aria-valuetext', '60 percent from left');
+  });
+
   it('resets to the automatic composition', async () => {
     const user = userEvent.setup();
     render(<Harness draft={DRAFT} />);
@@ -285,6 +326,91 @@ describe('cover studio', () => {
     }
     // No intensity slider anywhere in this step.
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
+  });
+});
+
+describe('cover studio environment', () => {
+  function setVisualViewport(height: number, offsetTop = 0) {
+    vi.stubGlobal('visualViewport', {
+      height,
+      offsetTop,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+  }
+
+  it('inerts and scroll-locks the page behind it, and restores both on close', () => {
+    // A sibling standing in for the Manager page. The studio portals to the
+    // body, so its own subtree is not among the siblings being inerted.
+    const behind = document.createElement('main');
+    document.body.append(behind);
+    const { unmount } = render(<Harness />);
+
+    expect(behind.hasAttribute('inert')).toBe(true);
+    expect(document.body.style.overflow).toBe('hidden');
+
+    unmount();
+    expect(behind.hasAttribute('inert')).toBe(false);
+    expect(document.body.style.overflow).not.toBe('hidden');
+    behind.remove();
+  });
+
+  it('dismisses from the backdrop through the same confirmation as Close', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+
+    await user.click(screen.getByTestId('cover-studio-backdrop'));
+    expect(screen.getByRole('alertdialog', { name: 'Discard cover changes' })).toBeVisible();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('takes browser Back through the dirty-draft path', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    await user.click(screen.getByRole('radio', { name: /Pressed Paper/u }));
+
+    // Back is a dismissal like any other; it must not leave the sheet behind on
+    // the previous route.
+    fireEvent.popState(window);
+    expect(screen.getByRole('alertdialog', { name: 'Discard cover changes' })).toBeVisible();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('binds its box to the visible rectangle rather than the layout viewport', () => {
+    setVisualViewport(520, 40);
+    render(<Harness />);
+    const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
+    // With a keyboard open these differ, and a footer pinned to the layout
+    // viewport sits underneath it where nothing can reach it.
+    expect(dialog.style.top).toBe('40px');
+    expect(dialog.style.height).toBe('520px');
+  });
+
+  it.each([
+    [844, 'default'],
+    [500, 'default'],
+    [499, 'compact'],
+    [421, 'compact'],
+    [420, 'short'],
+    [180, 'short'],
+  ])('resolves a %ipx visible height to %s geometry', (height, mode) => {
+    setVisualViewport(height);
+    render(<Harness />);
+    expect(screen.getByRole('dialog', { name: 'Cover Studio' }).dataset.viewport).toBe(mode);
+  });
+
+  it('keeps the canvas above the controls without a second scroller', () => {
+    setVisualViewport(844);
+    render(<Harness canvas={<div data-testid="studio-canvas">canvas</div>} />);
+    const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
+    const canvas = screen.getByTestId('studio-canvas').parentElement!;
+    const controls = dialog.querySelector('.cover-studio__controls')!;
+    // The canvas precedes the control pane, and only the control pane scrolls.
+    expect(canvas.className).toContain('cover-studio__canvas');
+    expect(canvas.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

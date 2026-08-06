@@ -1052,3 +1052,100 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .management-recovery-page > section { padding: 40px; }
   .management-recovery-page__method .button--secondary { width: auto; }
 }
+
+/* The one cover surface phase 1 actually renders: a status beside the cover
+   summary, in neutral Manager chrome. It never takes event colors, because a
+   host's palette must not decide what a warning looks like. */
+.cover-preparation { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--muted); font-size: .85rem; }
+.cover-preparation--warning { border-color: rgb(181 64 51 / 35%); color: var(--danger); }
+.cover-preparation .button { margin-top: 10px; min-height: 44px; }
+
+/* Cover Studio. Unwired in this release: nothing opens it, and these rules ship
+   with the modules so the sheet is a real environment rather than a shape the
+   phase-3 candidate has to invent under time pressure. */
+.cover-studio-shell { position: fixed; inset: 0; z-index: 40; }
+.cover-studio__backdrop { position: absolute; inset: 0; background: rgb(43 29 23 / 45%); }
+.cover-studio { position: absolute; inset: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--paper); color: var(--ink); }
+/* 100dvh, not 100vh: a mobile browser's dynamic toolbars make them different,
+   and the difference is exactly the footer. */
+@media (max-width: 760px) { .cover-studio { height: 100dvh; } }
+@media (min-width: 761px) { .cover-studio { inset: auto 50% auto 50%; top: 50%; translate: 50% -50%; width: min(720px, 92vw); max-height: min(88dvh, 900px); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 30px 80px rgb(43 29 23 / 25%); overflow: hidden; } }
+.cover-studio__header { position: sticky; top: 0; z-index: 2; min-height: 56px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--paper); }
+.cover-studio__header h2 { grid-column: 1 / -1; margin: 0; font-size: 1.35rem; }
+.cover-studio__header h2:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.cover-studio__close { min-width: 44px; min-height: 44px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--chestnut); cursor: pointer; }
+.cover-studio__step { margin: 0; color: var(--muted); font-size: .8rem; font-weight: 600; }
+/* The same canvas, sticky above the controls: 144 at 320x568, compacting to 96
+   when an onscreen keyboard shortens the visible rectangle. The already
+   selected crop simply scales; no new composition is requested. */
+.cover-studio__canvas { position: sticky; top: 56px; z-index: 1; min-height: 144px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--paper); }
+.cover-studio[data-viewport='compact'] .cover-studio__canvas { min-height: 96px; }
+/* min-height: 0 is load-bearing: without it this grid row refuses to shrink and
+   the footer leaves the visible rectangle. */
+.cover-studio__controls { min-height: 0; overflow-y: auto; padding: 16px; }
+.cover-studio__footer { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: flex-end; gap: 10px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--paper); }
+.cover-studio__footer .button { min-height: 44px; }
+/* Short-height mode: below 421 visual pixels, including an approximately
+   320x180 viewport at 400% page zoom, sticky geometry would leave nothing for
+   the controls. Header, canvas, and footer become in-flow children of one
+   dialog-level scroller, and no second nested scroller is introduced. */
+.cover-studio[data-viewport='short'] { display: block; overflow-y: auto; }
+.cover-studio[data-viewport='short'] .cover-studio__header,
+.cover-studio[data-viewport='short'] .cover-studio__canvas,
+.cover-studio[data-viewport='short'] .cover-studio__footer { position: static; }
+.cover-studio[data-viewport='short'] .cover-studio__canvas { min-height: 96px; }
+.cover-studio[data-viewport='short'] .cover-studio__controls { overflow: visible; }
+.cover-studio__confirm { position: absolute; inset: auto 16px calc(16px + env(safe-area-inset-bottom)); z-index: 3; display: grid; gap: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); box-shadow: 0 20px 50px rgb(43 29 23 / 25%); }
+.cover-studio__confirm .button { min-height: 44px; }
+
+.cover-source-picker fieldset { border: 0; padding: 0; margin: 0; }
+.cover-source-picker legend { margin-bottom: 10px; font-weight: 600; }
+.cover-source-picker__upload { min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+.cover-source-picker__presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; padding: 0; list-style: none; }
+@media (min-width: 761px) { .cover-source-picker__presets { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.cover-source-picker__presets label { min-height: 44px; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+/* Selection is never carried by color alone: the border thickens and the name
+   is always present beside the thumbnail. */
+.cover-source-picker__presets label:has(input:checked) { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }
+.cover-source-picker__presets img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 5px; background: #eee4d8; }
+.cover-source-picker__name { font-weight: 600; }
+.cover-source-picker__note { color: var(--muted); font-size: .78rem; }
+.cover-source-picker__remove { margin-top: 16px; min-height: 44px; }
+
+.cover-composer__surface { aspect-ratio: 620 / 265; border: 1px solid var(--border); border-radius: 7px; background-repeat: no-repeat; background-color: #eee4d8; touch-action: pan-y; cursor: grab; }
+.cover-composer__note { margin-top: 10px; color: var(--muted); font-size: .82rem; }
+.cover-composer__controls { display: grid; gap: 14px; margin-top: 16px; }
+.cover-composer__controls label { display: grid; gap: 6px; }
+.cover-composer__controls input[type='range'] { min-height: 44px; accent-color: var(--chestnut); }
+.cover-composer__controls .button { min-height: 44px; }
+
+.cover-style-picker { border: 0; padding: 0; margin: 0; }
+.cover-style-picker legend { margin-bottom: 10px; font-weight: 600; }
+.cover-style-picker ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 0; list-style: none; }
+@media (min-width: 561px) { .cover-style-picker ul { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+.cover-style-picker label { min-height: 44px; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+.cover-style-picker label:has(input:checked) { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }
+.cover-style-picker img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 5px; background: #eee4d8; }
+.cover-style-picker__name { font-weight: 600; font-size: .85rem; }
+.cover-style-picker__note { color: var(--muted); font-size: .75rem; }
+
+/* The responsive reader. Layer order is image, grain, scrim, then content, and
+   every layer above the image is runtime CSS: none is baked into a rendered
+   derivative, so changing a theme re-renders nothing. */
+.responsive-cover { position: relative; overflow: hidden; background: linear-gradient(145deg, var(--event-hero-start) 0%, var(--event-hero-mid) 53%, var(--event-hero-end) 100%); }
+.responsive-cover__image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.responsive-cover__treatment, .responsive-cover__scrim { position: absolute; inset: 0; pointer-events: none; }
+.responsive-cover--film-grain .responsive-cover__treatment { background-image: var(--cover-film-grain); background-repeat: repeat; opacity: .18; }
+.responsive-cover__scrim { background: linear-gradient(180deg, var(--event-cover-overlay-top), var(--event-cover-overlay-bottom)); }
+@media (prefers-reduced-motion: reduce) { .cover-studio, .cover-studio__backdrop { transition: none; } }
+
+.event-appearance-canvas { display: grid; gap: 12px; }
+.event-appearance-canvas__guest { position: relative; width: min(100%, 620px); min-height: 144px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }
+.event-appearance-canvas__copy { position: relative; z-index: 1; padding: 16px; color: var(--event-fullscreen-foreground); }
+.event-appearance-canvas__event { font-size: .8rem; opacity: .9; }
+.event-appearance-canvas__welcome { margin-top: 6px; font-size: 1.05rem; }
+.event-appearance-canvas__actions { position: relative; z-index: 1; display: flex; gap: 8px; padding: 0 16px 16px; }
+.event-appearance-canvas__action { padding: 8px 14px; border-radius: var(--event-action-radius); background: var(--event-raised-surface); color: var(--event-card-text); font-size: .8rem; }
+.event-appearance-canvas__action--primary { background: var(--event-primary); color: var(--event-primary-foreground); }
+/* Manager chrome, deliberately outside the themed layer above. */
+.event-appearance-canvas__summary, .event-appearance-canvas__controls { color: var(--ink); }

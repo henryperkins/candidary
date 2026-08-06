@@ -49,13 +49,18 @@ export function CoverComposer({
   disabled = false,
 }: CoverComposerProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const draggingRef = useRef(false);
+  const dragOriginRef = useRef<{ x: number; y: number; from: CoverFocusValue } | null>(null);
   const [summary, setSummary] = useState('');
   const settleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Nothing is announced until the host has actually done something. Without
+  // this the effect below fires on mount and reads out a crop summary 400 ms
+  // after the step opens, with no interaction behind it.
+  const interactedRef = useRef(false);
 
   // Announced when an interaction settles, never for every intermediate value:
   // a range that speaks on each arrow key makes a screen reader unusable.
   useEffect(() => {
+    if (!interactedRef.current) return;
     if (settleRef.current) clearTimeout(settleRef.current);
     settleRef.current = setTimeout(() => {
       setSummary(
@@ -67,18 +72,27 @@ export function CoverComposer({
     };
   }, [value.x, value.y, value.zoom]);
 
+  function change(next: CoverFocusValue) {
+    interactedRef.current = true;
+    onChange(next);
+  }
+
   const ceiling = Math.min(safeZoomMaximum, MAX_COVER_MANUAL_ZOOM);
 
+  // A delta from where the drag started, so the subject follows the pointer.
+  // Jumping the focal point to wherever the surface was first touched would
+  // move the crop before the host had asked for anything.
   function move(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!draggingRef.current || disabled) return;
+    const origin = dragOriginRef.current;
+    if (!origin || disabled) return;
     const surface = surfaceRef.current;
     if (!surface) return;
     const bounds = surface.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return;
-    onChange({
-      ...value,
-      x: clamp01((event.clientX - bounds.left) / bounds.width),
-      y: clamp01((event.clientY - bounds.top) / bounds.height),
+    change({
+      ...origin.from,
+      x: clamp01(origin.from.x - (event.clientX - origin.x) / bounds.width),
+      y: clamp01(origin.from.y - (event.clientY - origin.y) / bounds.height),
     });
   }
 
@@ -95,13 +109,12 @@ export function CoverComposer({
       // the viewport never sets `user-scalable=no`.
       onPointerDown={(event) => {
         if (disabled) return;
-        draggingRef.current = true;
+        dragOriginRef.current = { x: event.clientX, y: event.clientY, from: value };
         event.currentTarget.setPointerCapture(event.pointerId);
-        move(event);
       }}
       onPointerMove={move}
       onPointerUp={(event) => {
-        draggingRef.current = false;
+        dragOriginRef.current = null;
         event.currentTarget.releasePointerCapture(event.pointerId);
       }}
     />
@@ -124,7 +137,7 @@ export function CoverComposer({
           value={percent(value.x)}
           disabled={disabled}
           aria-valuetext={`${percent(value.x)} percent from left`}
-          onChange={(event) => onChange({ ...value, x: Number(event.target.value) / 100 })}
+          onChange={(event) => change({ ...value, x: Number(event.target.value) / 100 })}
         />
       </label>
       <label>
@@ -137,7 +150,7 @@ export function CoverComposer({
           value={percent(value.y)}
           disabled={disabled}
           aria-valuetext={`${percent(value.y)} percent from top`}
-          onChange={(event) => onChange({ ...value, y: Number(event.target.value) / 100 })}
+          onChange={(event) => change({ ...value, y: Number(event.target.value) / 100 })}
         />
       </label>
       <label>
@@ -150,12 +163,17 @@ export function CoverComposer({
           value={percent(value.zoom)}
           disabled={disabled}
           aria-valuetext={`${percent(value.zoom)} percent zoom`}
-          onChange={(event) => onChange({ ...value, zoom: Number(event.target.value) / 100 })}
+          onChange={(event) => change({ ...value, zoom: Number(event.target.value) / 100 })}
         />
       </label>
       {/* Immediately after the ranges in focus order, so the way back is where
           a host who has just over-adjusted will reach for it. */}
-      <button type="button" className="button button--secondary" disabled={disabled} onClick={onReset}>
+      <button
+        type="button"
+        className="button button--secondary"
+        disabled={disabled}
+        onClick={() => { interactedRef.current = true; onReset(); }}
+      >
         Reset to automatic
       </button>
     </div>

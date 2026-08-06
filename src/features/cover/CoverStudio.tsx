@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { EventCoverEffectId, EventCoverPresetId } from '../../../shared/event-cover';
 import { CoverComposer, type CoverFocusValue } from './CoverComposer';
@@ -29,6 +31,8 @@ export interface CoverStudioDraft {
 
 export interface CoverStudioProps {
   open: boolean;
+  /** The same live canvas the host is already looking at, not a second preview. */
+  canvas?: ReactNode;
   operation: CoverOperationController;
   operationState: CoverOperationState;
   /** Null until an upload has been inspected and its composition stored. */
@@ -55,8 +59,27 @@ const STEP_TITLES: Record<CoverStudioStep, string> = {
   done: 'Save this cover',
 };
 
+/**
+ * The geometry mode, measured rather than assumed.
+ *
+ * `short` is §6's short-height mode: below 421 visual pixels — which is also
+ * what an approximately 320x180 viewport at 400% page zoom produces — sticky
+ * geometry is abandoned for one dialog-level scroller, because a sticky header,
+ * canvas, and footer would leave nothing for the controls.
+ */
+type CoverStudioViewport = 'default' | 'compact' | 'short';
+
+function readViewportMode(height: number): CoverStudioViewport {
+  if (height <= 420) return 'short';
+  // An onscreen keyboard is open: the canvas compacts to 96 rather than pushing
+  // the active control out of the visible rectangle.
+  if (height < 500) return 'compact';
+  return 'default';
+}
+
 export function CoverStudio({
   open,
+  canvas,
   operation,
   operationState,
   draft,
@@ -77,8 +100,16 @@ export function CoverStudio({
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [dirty, setDirty] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  if (hostRef.current === null && typeof document !== 'undefined') {
+    hostRef.current = document.createElement('div');
+    hostRef.current.className = 'cover-studio-host';
+  }
+  const [viewport, setViewport] = useState<CoverStudioViewport>('default');
+  const [visualRect, setVisualRect] = useState<{ top: number; height: number } | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const returnFocusRef = useRef<Element | null>(null);
+  const poppedRef = useRef(false);
   const originRef = useRef<Partial<Record<CoverStudioStep, HTMLElement | null>>>({});
 
   // An upload takes four steps; a built-in design takes the accurate three.
@@ -95,14 +126,53 @@ export function CoverStudio({
     if (!open) return;
     returnFocusRef.current = document.activeElement;
     operation.attach();
+
+    // The Manager page behind the sheet is genuinely inert and scroll-locked,
+    // rather than merely described as such. The studio is portalled to the body
+    // so its own subtree is not among the siblings being inerted.
+    const host = hostRef.current;
+    const inerted: HTMLElement[] = [];
+    for (const sibling of Array.from(document.body.children)) {
+      if (sibling === host || !(sibling instanceof HTMLElement)) continue;
+      if (sibling.hasAttribute('inert')) continue;
+      sibling.setAttribute('inert', '');
+      inerted.push(sibling);
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
     return () => {
       // Detaching stops polling and nothing else. It never cancels or discards
       // work an accepted receipt may still be doing.
       operation.detach();
+      for (const sibling of inerted) sibling.removeAttribute('inert');
+      document.body.style.overflow = previousOverflow;
       const target = returnFocusRef.current;
       if (target instanceof HTMLElement) target.focus();
     };
   }, [open, operation]);
+
+  // Bound to the visible rectangle, not the layout viewport: with a keyboard
+  // open they are different, and a footer pinned to the layout viewport sits
+  // underneath the keyboard where nothing can reach it.
+  useEffect(() => {
+    if (!open) return;
+    const visual = window.visualViewport;
+    const apply = () => {
+      const height = visual?.height ?? window.innerHeight;
+      setViewport(readViewportMode(height));
+      setVisualRect(visual ? { top: visual.offsetTop, height: visual.height } : null);
+    };
+    apply();
+    visual?.addEventListener('resize', apply);
+    visual?.addEventListener('scroll', apply);
+    window.addEventListener('resize', apply);
+    return () => {
+      visual?.removeEventListener('resize', apply);
+      visual?.removeEventListener('scroll', apply);
+      window.removeEventListener('resize', apply);
+    };
+  }, [open]);
 
   // After Continue, focus moves to the new step heading rather than staying on
   // a button that has just changed meaning.
@@ -123,6 +193,34 @@ export function CoverStudio({
     }
     setConfirmingDiscard(true);
   }, [dispatched, dirty, onClose]);
+
+  // Browser Back is a dismissal like any other, so it takes the same
+  // confirmation rather than leaving the sheet behind on the previous route.
+  //
+  // The handler reads `requestClose` through a ref rather than depending on it.
+  // As a dependency, every change of `dirty` would tear the effect down — and
+  // its cleanup pushes history back, which fires `popstate` against the closure
+  // that was just replaced.
+  const closeRef = useRef(requestClose);
+  closeRef.current = requestClose;
+  useEffect(() => {
+    if (!open) return;
+    history.pushState({ coverStudio: true }, '');
+    poppedRef.current = false;
+    const onPopState = () => {
+      poppedRef.current = true;
+      closeRef.current();
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      // Only unwind the entry this sheet pushed, and only if Back did not
+      // already consume it.
+      if (!poppedRef.current && (history.state as { coverStudio?: boolean } | null)?.coverStudio) {
+        history.back();
+      }
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -152,7 +250,14 @@ export function CoverStudio({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [open, requestClose]);
 
-  if (!open) return null;
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!open || !host) return;
+    document.body.append(host);
+    return () => host.remove();
+  }, [open]);
+
+  if (!open || !hostRef.current) return null;
 
   function choose(choice: CoverSourceChoice) {
     setSource(choice);
@@ -194,13 +299,18 @@ export function CoverStudio({
   const preparing = operationState.phase === 'preparing';
   const stepLabel = `Step ${stepIndex + 1} of ${steps.length}`;
 
-  return <div
-    className="cover-studio"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Cover Studio"
-    ref={dialogRef}
-  >
+  return createPortal(<div className="cover-studio-shell">
+    {/* Dismissal here takes the same confirmation as Close, Escape, and Back. */}
+    <div className="cover-studio__backdrop" onClick={requestClose} data-testid="cover-studio-backdrop" />
+    <div
+      className="cover-studio"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Cover Studio"
+      data-viewport={viewport}
+      style={visualRect ? { top: `${visualRect.top}px`, height: `${visualRect.height}px` } : undefined}
+      ref={dialogRef}
+    >
     <header className="cover-studio__header">
       <button type="button" className="cover-studio__close" onClick={requestClose}>
         {dispatched ? 'Close' : 'Cancel'}
@@ -208,6 +318,11 @@ export function CoverStudio({
       <p className="cover-studio__step">{stepLabel}</p>
       <h2 tabIndex={-1} ref={headingRef}>{STEP_TITLES[step]}</h2>
     </header>
+
+    {/* The same canvas, sticky above the controls — not a second preview. It
+        compacts with the visible rectangle rather than requesting a new
+        composition because the editor chrome got shorter. */}
+    {canvas && <div className="cover-studio__canvas">{canvas}</div>}
 
     <div className="cover-studio__controls">
       {step === 'choose' && <CoverSourcePicker
@@ -294,5 +409,6 @@ export function CoverStudio({
         Discard
       </button>
     </div>}
-  </div>;
+    </div>
+  </div>, hostRef.current);
 }
