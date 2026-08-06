@@ -619,21 +619,25 @@ describe('authorized event theme updates', () => {
     }
   });
 
-  it('uses the explicit event view for cover finalize, settings, and theme update responses', async () => {
+  it('uses the explicit event view for cover publication, settings, and theme update responses', async () => {
     const access = await eventAccess();
-    const initiated = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      method: 'POST',
-      headers: writeHeaders(access.manager),
-      body: JSON.stringify({ filename: 'cover.png', mimeType: 'image/png', byteSize: 64 }),
-    }, testEnv);
-    const objectKey = (await initiated.json<any>()).data.objectKey as string;
-    await testEnv.MEDIA_BUCKET.put(objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
-    const finalized = await createApp().request(`/api/manage/events/${access.event.id}/cover/finalize`, {
-      method: 'POST',
-      headers: writeHeaders(access.manager),
-      body: JSON.stringify({ objectKey, mimeType: 'image/png' }),
-    }, testEnv);
-    expect(Object.keys((await finalized.json<any>()).data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
+    // A `none` publication is the one cover write that applies synchronously and
+    // returns the full Manager event view, so it is what pins the key set here.
+    const published = await createApp().request(
+      `/api/manage/events/${access.event.id}/cover/publications`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedRevision: 0,
+          source: { kind: 'none' },
+        }),
+      },
+      testEnv,
+    );
+    expect(published.status).toBe(200);
+    expect(Object.keys((await published.json<any>()).data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
 
     const settings = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH',

@@ -23,17 +23,12 @@ import {
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
-  MAX_IMAGE_BYTES,
   MIN_EVENT_CALENDAR_YEAR,
-  SUPPORTED_IMAGE_TYPES,
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
 import { resolveEventSchedule } from '../http/event-schedule';
 import { eventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
-import { sanitizeFilename } from '../security/filenames';
-import { inspectImageHeader } from '../security/image-metadata';
-import { presignUpload } from '../storage/presign';
 import { deleteEventData } from '../workflows/cleanup';
 
 const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
@@ -82,10 +77,6 @@ const bulkActionSchema = z.object({
 const deleteSchema = z.object({ confirmation: z.string() });
 const mediaLimitSchema = z.coerce.number().int().min(1).max(MANAGER_MEDIA_MAX_PAGE_SIZE)
   .default(MANAGER_MEDIA_PAGE_SIZE);
-const coverSchema = z.object({
-  filename: z.string().min(1).max(255), mimeType: z.enum(SUPPORTED_IMAGE_TYPES),
-  byteSize: z.number().int().positive().max(MAX_IMAGE_BYTES),
-});
 
 function managerForEvent(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
@@ -142,49 +133,13 @@ manageRoutes.post('/manage/events/:eventId/entry/disable', async (context) => {
   return context.json({ data: result, requestId: context.get('requestId') });
 });
 
-manageRoutes.post('/manage/events/:eventId/cover', async (context) => {
-  const auth = await managerForEvent(context, true);
-  const parsed = coverSchema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Choose a JPG, PNG, WebP, HEIC, or HEIF image up to 20 MB.', 422);
-  const objectKey = `events/${auth.event.id}/cover/${crypto.randomUUID()}-${sanitizeFilename(parsed.data.filename)}`;
-  const signed = await presignUpload(context.env, objectKey, parsed.data.mimeType);
-  return context.json({ data: { objectKey, ...signed }, requestId: context.get('requestId') }, 201);
-});
-
-manageRoutes.post('/manage/events/:eventId/cover/finalize', async (context) => {
-  const auth = await managerForEvent(context, true);
-  const parsed = z.object({ objectKey: z.string(), mimeType: z.enum(SUPPORTED_IMAGE_TYPES) }).safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success || !parsed.data.objectKey.startsWith(`events/${auth.event.id}/cover/`)) {
-    throw new ApiError('RESOURCE_FORBIDDEN', 'This cover belongs to a different event.', 403);
-  }
-  const object = await context.env.MEDIA_BUCKET.get(parsed.data.objectKey);
-  if (!object || object.size > MAX_IMAGE_BYTES || object.httpMetadata?.contentType !== parsed.data.mimeType) {
-    await context.env.MEDIA_BUCKET.delete(parsed.data.objectKey);
-    throw new ApiError('UPLOAD_OBJECT_MISSING', 'The cover upload could not be verified.', 409);
-  }
-  const bytes = new Uint8Array(await object.arrayBuffer());
-  let metadata;
-  try { metadata = inspectImageHeader(bytes); } catch {
-    await context.env.MEDIA_BUCKET.delete(parsed.data.objectKey);
-    throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The cover is not a supported image.', 415);
-  }
-  if (metadata.mimeType !== parsed.data.mimeType) {
-    await context.env.MEDIA_BUCKET.delete(parsed.data.objectKey);
-    throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The cover type does not match its content.', 415);
-  }
-  const previousKey = auth.event.coverObjectKey;
-  const event = await new EventsRepository(context.env.DB).setCover(auth.event.id, parsed.data.objectKey);
-  if (previousKey && previousKey !== parsed.data.objectKey) await context.env.MEDIA_BUCKET.delete(previousKey);
-  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
-});
-
-manageRoutes.delete('/manage/events/:eventId/cover', async (context) => {
-  const auth = await managerForEvent(context, true);
-  const previousKey = auth.event.coverObjectKey;
-  const event = await new EventsRepository(context.env.DB).setCover(auth.event.id, null);
-  if (previousKey) await context.env.MEDIA_BUCKET.delete(previousKey);
-  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
-});
+// The cover mutation surface lives in `routes/event-cover.ts`. The presigned
+// trio that stood here let a client name its own object key, PUT unbounded
+// bytes straight to R2, and eagerly deleted the displaced original with no
+// inventory row behind it — none of which survives §9.5. Removing it also
+// closes the dead path where `image/heic-sequence` and `image/heif-sequence`
+// could be reserved but could never finalize, because cover finalize never
+// applied the aliasing `finalizeStoredMedia` applies.
 
 manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
   const auth = await requireManager(context, { write: true });

@@ -329,38 +329,48 @@ describe('manager settings and private photo intake', () => {
     }
   });
 
-  it('uploads and serves an event cover only to event sessions', async () => {
+  it('no longer exposes the presigned cover trio', async () => {
     const access = await eventAccess();
-    const initiated = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      method: 'POST', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ filename: 'cover.png', mimeType: 'image/png', byteSize: 64 }),
-    }, testEnv);
-    expect(initiated.status).toBe(201);
-    const upload = (await initiated.json<any>()).data;
-    await testEnv.MEDIA_BUCKET.put(upload.objectKey, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 2, 0]), { httpMetadata: { contentType: 'image/png' } });
-    const finalized = await createApp().request(`/api/manage/events/${access.event.id}/cover/finalize`, {
-      method: 'POST', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ objectKey: upload.objectKey, mimeType: 'image/png' }),
-    }, testEnv);
-    expect(finalized.status).toBe(200);
-    const cover = await createApp().request(`/api/event/${access.event.slug}/cover`, {
-      headers: { cookie: access.guest.cookie },
-    }, testEnv);
-    expect(cover.status).toBe(200);
-    expect(cover.headers.get('cache-control')).toBe('private, no-store');
+    // The draft-and-publish surface in `routes/event-cover.ts` replaced these.
+    // Removing them also closes the dead path where `image/heic-sequence` and
+    // `image/heif-sequence` could be reserved but could never finalize, because
+    // cover finalize never applied the aliasing `finalizeStoredMedia` applies.
+    const retired = [
+      ['POST', `/api/manage/events/${access.event.id}/cover`],
+      ['POST', `/api/manage/events/${access.event.id}/cover/finalize`],
+      ['DELETE', `/api/manage/events/${access.event.id}/cover`],
+    ] as const;
+    for (const [method, path] of retired) {
+      const response = await createApp().request(path, {
+        method,
+        headers: writeHeaders(access.manager),
+        body: method === 'DELETE' ? undefined : JSON.stringify({}),
+      }, testEnv);
+      expect([method, response.status]).toEqual([method, 404]);
+    }
+  });
 
-    const managerCover = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: access.manager.cookie },
-    }, testEnv);
-    expect(managerCover.status).toBe(200);
-    expect(managerCover.headers.get('content-type')).toBe('image/png');
-    expect(managerCover.headers.get('cache-control')).toBe('private, no-store');
-
-    const removed = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      method: 'DELETE', headers: writeHeaders(access.manager),
-    }, testEnv);
+  it('removes a cover through one guarded publication', async () => {
+    const access = await eventAccess();
+    const removed = await createApp().request(
+      `/api/manage/events/${access.event.id}/cover/publications`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedRevision: 0,
+          source: { kind: 'none' },
+        }),
+      },
+      testEnv,
+    );
     expect(removed.status).toBe(200);
-    expect((await removed.json<any>()).data.event.coverObjectKey).toBeNull();
+    const data = (await removed.json<any>()).data;
+    expect(data.event.coverObjectKey).toBeNull();
+    // Exactly once, and only because the expected revision still matched.
+    expect(data.event.coverRevision).toBe(1);
+
     const gone = await createApp().request(`/api/event/${access.event.slug}/cover`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);

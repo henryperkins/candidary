@@ -296,6 +296,98 @@ export async function recordVerifiedCoverRaw(
   return requireDraft(db, input.draftId, input.eventId);
 }
 
+/** The event-scoped read every cover route resolves ownership through. */
+export async function loadCoverDraft(
+  db: D1Database,
+  draftId: string,
+  eventId: string,
+): Promise<CoverDraftRow> {
+  return requireDraft(db, draftId, eventId);
+}
+
+/**
+ * Adopts a verified master and moves `transferred -> inspected`.
+ *
+ * The master is written first and adopted here, so a crash between the two
+ * leaves an unreferenced master for cleanup rather than a draft pointing at
+ * bytes that were never verified. The automatic focal point is deliberately not
+ * set here: it arrives from the browser composition worker through the guarded
+ * composition write, which is the only thing that may move the draft to `ready`.
+ */
+export async function adoptCoverInspection(
+  db: D1Database,
+  input: {
+    draftId: string;
+    eventId: string;
+    expectedDraftRevision: number;
+    masterId: string;
+    inspection: unknown;
+    now: Date;
+  },
+): Promise<CoverDraftRow> {
+  const current = await requireDraft(db, input.draftId, input.eventId);
+  // An identical replay returns the inspected draft rather than normalizing a
+  // second time; inspection is the most expensive step in the pipeline.
+  if (current.state === 'inspected' && current.master_id === input.masterId) return current;
+
+  const result = await db.prepare(`
+    UPDATE event_cover_drafts
+    SET state = 'inspected', master_id = ?, inspection_json = ?,
+        draft_revision = draft_revision + 1, updated_at = ?
+    WHERE id = ? AND event_id = ? AND draft_revision = ?
+      AND state = 'transferred' AND master_id IS NULL
+  `).bind(
+    input.masterId, JSON.stringify(input.inspection), input.now.toISOString(),
+    input.draftId, input.eventId, input.expectedDraftRevision,
+  ).run();
+  if ((result.meta.changes ?? 0) !== 1) {
+    throw draftConflict('That cover upload has moved on since this page loaded. Reload and try again.');
+  }
+  return requireDraft(db, input.draftId, input.eventId);
+}
+
+/**
+ * Records a terminal draft failure without touching the active cover.
+ *
+ * The raw pointer is left in place on purpose: it is still charging for bytes
+ * that may be sitting in R2, and only verified absence may release them.
+ */
+export async function failCoverDraft(
+  db: D1Database,
+  input: { draftId: string; eventId: string; failureCode: string; now: Date },
+): Promise<void> {
+  await db.prepare(`
+    UPDATE event_cover_drafts
+    SET state = 'failed', failure_code = ?, draft_revision = draft_revision + 1, updated_at = ?
+    WHERE id = ? AND event_id = ? AND state NOT IN ('publishing', 'published')
+  `).bind(input.failureCode, input.now.toISOString(), input.draftId, input.eventId).run();
+}
+
+/**
+ * Clears a raw pointer whose object the caller has proven absent from R2.
+ *
+ * Separate from `releaseCoverRawBytes` because these are the two *live* states
+ * where releasing is correct, and each is narrow. `reserved` is an interrupted
+ * transfer whose partial was deleted and verified gone, which is what makes a
+ * same-draft retry possible rather than forcing a new reservation. `inspected`
+ * is a successful normalization: the master is durable and the raw is gone, and
+ * continuing to charge for it would let three ordinary uploads exhaust an
+ * event's 57,000,000-byte budget with nothing in the bucket.
+ *
+ * The state travels as a bound parameter rather than as interpolated SQL, so the
+ * guard stays a guard.
+ */
+export async function clearCoverRawPointer(
+  db: D1Database,
+  input: { draftId: string; eventId: string; state: 'reserved' | 'inspected'; now: Date },
+): Promise<void> {
+  await db.prepare(`
+    UPDATE event_cover_drafts
+    SET raw_object_key = NULL, verified_raw_byte_size = NULL, updated_at = ?
+    WHERE id = ? AND event_id = ? AND state = ?
+  `).bind(input.now.toISOString(), input.draftId, input.eventId, input.state).run();
+}
+
 /**
  * Releases charged raw bytes, and only after R2 absence has been verified.
  *

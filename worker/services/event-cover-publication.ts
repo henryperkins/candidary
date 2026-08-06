@@ -186,6 +186,18 @@ export interface CoverPublicationRestartResult {
   retryAfterSeconds: number | null;
 }
 
+/**
+ * The digest a receipt is pinned to, over the canonical request string.
+ *
+ * Taken over the canonical serialization rather than the raw body, so a client
+ * that reorders keys or reformats whitespace on a retry still replays into its
+ * own receipt instead of colliding with it.
+ */
+export async function coverRequestDigest(canonical: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 /** A bounded lowercase-hex ID, unique within `CoverRenderWorkflow`. */
 export async function coverWorkflowInstanceId(
   eventId: string,
