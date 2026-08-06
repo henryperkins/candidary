@@ -250,6 +250,58 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `RATE_LIMITED` on a lookup — the edge budget (30/IP/minute, `Retry-After: 60`) or a D1 budget (20/event/IP or 8/event/name per 15 minutes, `Retry-After: 900`) is spent. The body is deliberately generic.
 - `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED` — inspect the active job and its persisted parts.
 
+Cover codes are Manager-only. None is reachable from a guest load, which is why all ten classify as
+`retry` in `shared/load-failure.ts` — none of `latest-link`, `ended-event`, or `sign-in` describes a
+host whose upload was refused.
+
+- `COVER_SOURCE_UNSUPPORTED` — the file is not one of JPEG, PNG, WebP, or HEIC, or the bytes are not
+  the kind of image the reservation declared. Generic HEIF and HEIC/HEIF *sequence* types are refused
+  on purpose in v1; they cannot be advertised until a deployed Images conformance gate adds them.
+- `COVER_SOURCE_TOO_SMALL` — after orientation the photo is under 620 × 420, which is the floor for
+  producing every 1x layout without upscaling. It is refused at inspection, never at `Done`.
+- `COVER_MASTER_BUDGET_EXHAUSTED` — no rung of the five-attempt normalization ladder produced a valid
+  master inside 12,000,000 bytes. Usually a very large or very panoramic source; ask for a smaller or
+  less wide photo. The active cover is untouched.
+- `COVER_PREVIEW_BUDGET_EXHAUSTED` — the four-rung preview ladder could not fit a style preview inside
+  1,000,000 bytes. Recorded per draft, effect, and recipe version, so an identical request replays that
+  result rather than re-encoding a dense image forever. The draft stays usable; another style or photo
+  will work.
+- `COVER_OUTPUT_BUDGET_EXHAUSTED` — a required profile could not be encoded inside its byte ceiling, or
+  the final manifest verification found a slot missing. Publication fails permanently, the staged
+  render set is abandoned, the draft returns to `ready`, and the previous cover stays live.
+- `COVER_DRAFT_LIMIT`, `COVER_RAW_STORAGE_LIMIT` — three live drafts, or 57,000,000 declared/verified
+  raw bytes, are already outstanding for this event. The error identifies which drafts the host may
+  resume or discard. Note that discarding stops future ingress but does not release the bytes: they
+  stay charged until R2 absence is verified by the scheduled sweep.
+- `COVER_DRAFT_STATE_CONFLICT` — the draft moved on since the page loaded, or a discard was attempted
+  while it was publishing. Reload; a publishing draft is released by its own receipt, never by a retry.
+- `COVER_PUBLICATION_CONFLICT` — an operation ID was reused with different request bytes, or another
+  preparation is already outstanding for this event.
+- `COVER_RENDER_UNAVAILABLE` — the Images binding is unavailable, or a Workflow dispatch failed. Always
+  retryable, and deliberately distinct from `FILE_TYPE_UNSUPPORTED`, whose name would contradict its
+  meaning here. The active cover is unchanged and the same operation can be restarted.
+
+A lost `cover_revision` race deliberately gets **no** new code: it is the existing `VALIDATION_FAILED`
+envelope at HTTP 409 with cover-appropriate prose, following the precedent recorded above for a stale
+photo-delivery transition.
+
+Two cover behaviours have no error code and will still generate questions:
+
+- **The compatibility reader serves three different things behind one URL.** An event with an active
+  render set gets the `wide-expanded` 1x JPEG derivative; a legacy row with no set still gets its
+  original; and a `none` or `preset` row gets a 404. All three respond `private, no-store` with
+  `nosniff`. A host reporting that their cover "looks slightly different" after a replacement is
+  seeing the derivative, not a bug.
+- **A replaced cover becomes visible only after a reload.** `useEventCover` keys its effect on the
+  path, and the current cover URL carries no revision, so nothing in the client can detect a
+  replacement. This is a known limitation of the compatibility contract and is fixed by the
+  revision-scoped delivery routes, not by a client change.
+
+Displaced cover originals are no longer deleted when they are replaced. Each is inventoried in
+`event_cover_retired_legacy_objects` with a seven-day `cleanup_after`, and only the bounded daily
+sweep removes it — R2 first, absence verified, then the row. Within that window the previous original
+is still recoverable by key from the inventory; after it, nothing is.
+
 ## Recovery boundaries
 
 The application does not promise recovery for a lost management link, explicit deletion, or retention purge. There is also no recovery for a disabled printed entry or an archived household: both are irreversible in v1 and both are confirmed by typing the exact name before they run. Do not restore an object without its matching D1 lifecycle state. Preview generation can be retried safely; an unavailable preview does not mean the original failed delivery. Never copy an original into the preview key as a fallback: every served derivative must pass through the Images binding so original metadata is not exposed.
