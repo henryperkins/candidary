@@ -704,3 +704,144 @@ export function coverSurfaceTreatment(config: StoredEventCoverConfigV1): EventCo
 export function coverHasSource(config: StoredEventCoverConfigV1): boolean {
   return config.source.kind !== 'none';
 }
+
+/* ------------------------------------------------------------------ *
+ * Deterministic contrast compositor
+ * ------------------------------------------------------------------ */
+
+/**
+ * The runtime layer stack over a cover, as arithmetic.
+ *
+ * `ResponsiveEventCover` and `.photo-drop__hero--cover` compose the same four
+ * layers in the same order — image, grain, theme overlay, text scrim — and put
+ * white copy on top. Because none of them is ever baked into a rendered
+ * derivative, the legibility of a cover is a property of these numbers rather
+ * than of any file, and it can be proven without rendering anything.
+ *
+ * Everything here composites in sRGB, not linear light: CSS `background` alpha
+ * compositing is defined that way, so linearizing first would model a browser
+ * that does not exist. Relative luminance is the WCAG definition and is applied
+ * only at the end, to the composited channels.
+ */
+
+export interface CoverRgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface CoverRgba extends CoverRgb {
+  /** 0 through 1. */
+  a: number;
+}
+
+/** Accepts `#rrggbb` and the `rgb(R G B / P%)` form the theme tokens use. */
+export function parseCoverLayerColor(value: string): CoverRgba {
+  const hex = /^#([0-9a-f]{6})$/iu.exec(value.trim());
+  if (hex) {
+    const packed = Number.parseInt(hex[1]!, 16);
+    return { r: (packed >> 16) & 0xff, g: (packed >> 8) & 0xff, b: packed & 0xff, a: 1 };
+  }
+  const parts = value.match(/[\d.]+/gu);
+  if (!parts || parts.length < 3) throw new Error(`Unreadable layer color: ${value}`);
+  const [r, g, b, alpha] = parts.map(Number) as [number, number, number, number?];
+  return {
+    r: r!,
+    g: g!,
+    b: b!,
+    // `rgb(R G B / 62%)` carries a percentage; a bare fourth value is already 0-1.
+    a: alpha === undefined ? 1 : (value.includes('%') ? alpha / 100 : alpha),
+  };
+}
+
+/** One `source-over` composite in sRGB. */
+export function coverSourceOver(base: CoverRgb, layer: CoverRgba): CoverRgb {
+  return {
+    r: layer.r * layer.a + base.r * (1 - layer.a),
+    g: layer.g * layer.a + base.g * (1 - layer.a),
+    b: layer.b * layer.a + base.b * (1 - layer.a),
+  };
+}
+
+function linearChannel(channel: number): number {
+  const ratio = channel / 255;
+  return ratio <= 0.04045 ? ratio / 12.92 : ((ratio + 0.055) / 1.055) ** 2.4;
+}
+
+export function coverRelativeLuminance(color: CoverRgb): number {
+  return 0.2126 * linearChannel(color.r)
+    + 0.7152 * linearChannel(color.g)
+    + 0.0722 * linearChannel(color.b);
+}
+
+export function coverContrastRatio(first: CoverRgb, second: CoverRgb): number {
+  const a = coverRelativeLuminance(first);
+  const b = coverRelativeLuminance(second);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/**
+ * Where the scrimmed copy box starts, as a fraction of the frame height.
+ *
+ * The guest hero justifies its content to the flex end, so the copy box always
+ * sits against the bottom. This band is a deliberate over-approximation of it:
+ * a taller band can only admit *brighter* pixels and a lower overlay alpha, so
+ * every figure derived from it is a lower bound on the real contrast.
+ */
+export const COVER_COPY_BAND_TOP = 0.4;
+
+/** The `film-grain-v1` tile's maximum texel alpha, before its layer opacity. */
+export const COVER_GRAIN_TEXEL_ALPHA = 96 / 255;
+export const COVER_GRAIN_LAYER_OPACITY = 0.18;
+
+export interface CoverContrastInput {
+  /** The worst-case source pixel for this region, straight out of the output. */
+  source: CoverRgb;
+  /** True only for `film`, whose surface treatment is the grain tile. */
+  grain: boolean;
+  overlayTop: string;
+  overlayBottom: string;
+  /** Null models a region with no scrim behind it. */
+  scrim: string | null;
+  foreground: string;
+  /** 0 at the top of the frame, 1 at the bottom. */
+  position: number;
+}
+
+/**
+ * The contrast the copy actually gets over a cover, given its worst pixel.
+ *
+ * The grain is modelled at its lightest texel rather than its average, because
+ * white copy is hardest to read over the brightest thing beneath it. That is
+ * also why a black texel is never the worst case here and why the proof only
+ * has to bound one direction — a premise the accompanying test checks rather
+ * than assumes, by asserting every theme's cover foreground is white.
+ */
+export function coverTextContrast(input: CoverContrastInput): number {
+  let composited: CoverRgb = input.source;
+
+  if (input.grain) {
+    composited = coverSourceOver(composited, {
+      r: 255,
+      g: 255,
+      b: 255,
+      a: COVER_GRAIN_TEXEL_ALPHA * COVER_GRAIN_LAYER_OPACITY,
+    });
+  }
+
+  // A CSS gradient between two stops of the same colour is that colour with a
+  // linearly interpolated alpha, so the overlay reduces to one composite.
+  const top = parseCoverLayerColor(input.overlayTop);
+  const bottom = parseCoverLayerColor(input.overlayBottom);
+  composited = coverSourceOver(composited, {
+    r: top.r,
+    g: top.g,
+    b: top.b,
+    a: top.a + (bottom.a - top.a) * Math.min(1, Math.max(0, input.position)),
+  });
+
+  if (input.scrim) composited = coverSourceOver(composited, parseCoverLayerColor(input.scrim));
+
+  const foreground = parseCoverLayerColor(input.foreground);
+  return coverContrastRatio(composited, foreground);
+}

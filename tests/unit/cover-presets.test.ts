@@ -130,6 +130,10 @@ describe('the checked-in preset matrix', () => {
     expect(current.master).toEqual({ width: 2400, height: 1600 });
     expect(current.files).toHaveLength(720);
     expect(current.surfaceTreatment.id).toBe('film-grain-v1');
+    // The contrast evidence's input: one measured region per preset, effect, and
+    // profile. `tests/unit/cover-contrast.test.ts` composites them.
+    expect(current.regions).toHaveLength(180);
+    expect(current.copyBandTop).toBe(0.4);
   });
 
   it('matches every checked-in file to its manifest row, ceiling, and decoded size', () => {

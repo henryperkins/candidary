@@ -207,6 +207,48 @@ export async function verifyCoverPresets(options: {
   }
   for (const extra of claimed.keys()) failures.push(`Manifest lists an unregistered path ${extra}.`);
 
+  // The region samples are the input to the contrast proof, so they are checked
+  // for internal consistency here rather than trusted: a luminance that does not
+  // follow from its own channels would make every derived figure a fiction, and
+  // a band brighter than the frame that contains it is arithmetically impossible.
+  if (manifest.copyBandTop !== build.COVER_COPY_BAND_TOP) {
+    failures.push(`Manifest copy band starts at ${manifest.copyBandTop}.`);
+  }
+  const expectedRegions = build.COVER_PRESET_IDS.length
+    * build.COVER_EFFECT_IDS.length
+    * build.COVER_PRESET_PROFILES.length;
+  if (manifest.regions.length !== expectedRegions) {
+    failures.push(`Manifest has ${manifest.regions.length} region samples; ${expectedRegions} are required.`);
+  }
+  const sampled = new Set<string>();
+  for (const region of manifest.regions) {
+    const key = `${region.presetId}/${region.effect}/${region.profile}`;
+    if (sampled.has(key)) failures.push(`Duplicate region sample for ${key}.`);
+    sampled.add(key);
+    for (const [name, pixel] of [['copy', region.copy], ['frame', region.frame]] as const) {
+      const channels = [pixel.r, pixel.g, pixel.b];
+      if (channels.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) {
+        failures.push(`${key} ${name} sample has an out-of-range channel.`);
+        continue;
+      }
+      const derived = build.relativeLuminance(pixel);
+      if (Math.abs(derived - pixel.luminance) > 1e-9) {
+        failures.push(`${key} ${name} sample luminance does not follow from its channels.`);
+      }
+    }
+    if (region.copy.luminance > region.frame.luminance + 1e-9) {
+      failures.push(`${key} copy band is brighter than the frame containing it.`);
+    }
+  }
+  for (const presetId of build.COVER_PRESET_IDS) {
+    for (const effect of build.COVER_EFFECT_IDS) {
+      for (const profile of build.COVER_PRESET_PROFILES) {
+        const key = `${presetId}/${effect}/${profile.id}`;
+        if (!sampled.has(key)) failures.push(`Missing region sample for ${key}.`);
+      }
+    }
+  }
+
   const treatment = manifest.surfaceTreatment;
   if (treatment.id !== build.COVER_SURFACE_TREATMENT_ID
     || treatment.path !== build.presetGrainTilePath(build.PRESET_ASSET_VERSION)) {

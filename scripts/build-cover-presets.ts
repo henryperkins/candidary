@@ -159,7 +159,23 @@ export const COVER_PRESET_MASTER = { width: 2400, height: 1600 } as const;
 export const COVER_PRESET_COMPOSITION = 'center';
 
 export const COVER_SURFACE_TREATMENT_ID = 'film-grain-v1';
-export const COVER_GRAIN_TILE = { width: 128, height: 128, seed: 0x9e3779b9 } as const;
+export const COVER_GRAIN_TILE = {
+  width: 128,
+  height: 128,
+  seed: 0x9e3779b9,
+  /** The tile's maximum texel alpha. `COVER_GRAIN_TEXEL_ALPHA` is this over 255. */
+  maxAlpha: 96,
+} as const;
+
+/**
+ * Where the scrimmed copy band starts, as a fraction of frame height.
+ *
+ * Restated from `COVER_COPY_BAND_TOP` in `shared/event-cover.ts` for the same
+ * reason as the rest of this file's registry, and pinned against it by
+ * `tests/unit/cover-contrast.test.ts`. Measuring a band the compositor does not
+ * believe in would produce contrast figures about nothing.
+ */
+export const COVER_COPY_BAND_TOP = 0.4;
 
 export const COVER_PRESET_MANIFEST_KIND = 'candidary-cover-preset-manifest';
 
@@ -300,6 +316,30 @@ export interface CoverPresetManifestTreatment {
   sha256: string;
 }
 
+export interface CoverSamplePixel {
+  r: number;
+  g: number;
+  b: number;
+  luminance: number;
+}
+
+/**
+ * The worst pixel each rendered profile offers white copy.
+ *
+ * One row per preset, effect, and profile — 180 of them — measured off the toned
+ * canvas at 1x. The runtime layers are identical at 2x, so a second density
+ * would restate the same figure at a different resolution.
+ */
+export interface CoverPresetRegionSample {
+  presetId: CoverPresetId;
+  effect: CoverEffectId;
+  profile: string;
+  /** Brightest pixel inside the scrimmed copy band. */
+  copy: CoverSamplePixel;
+  /** Brightest pixel anywhere in the frame. */
+  frame: CoverSamplePixel;
+}
+
 export interface CoverPresetManifest {
   kind: typeof COVER_PRESET_MANIFEST_KIND;
   assetVersion: number;
@@ -311,12 +351,29 @@ export interface CoverPresetManifest {
     outputQualityLadder: number;
     presetAsset: number;
   };
+  copyBandTop: number;
   surfaceTreatment: CoverPresetManifestTreatment;
   files: CoverPresetManifestFile[];
+  regions: CoverPresetRegionSample[];
 }
 
 export function sha256Hex(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+/**
+ * The WCAG relative luminance of an sRGB pixel.
+ *
+ * Restated here so the verifier can re-derive a recorded sample's luminance from
+ * its own channels without reaching into `shared/`, which it cannot load. The
+ * unit test pins it against `coverRelativeLuminance`.
+ */
+export function relativeLuminance(pixel: { r: number; g: number; b: number }): number {
+  const channel = (value: number) => {
+    const ratio = value / 255;
+    return ratio <= 0.04045 ? ratio / 12.92 : ((ratio + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(pixel.r) + 0.7152 * channel(pixel.g) + 0.0722 * channel(pixel.b);
 }
 
 /* ------------------------------------------------------------------ *
@@ -383,6 +440,45 @@ window.__candidaryCoverPresets = (function () {
     return bases.size;
   }
 
+  function linearChannel(channel) {
+    var ratio = channel / 255;
+    return ratio <= 0.04045 ? ratio / 12.92 : Math.pow((ratio + 0.055) / 1.055, 2.4);
+  }
+
+  function relativeLuminance(red, green, blue) {
+    return 0.2126 * linearChannel(red) + 0.7152 * linearChannel(green) + 0.0722 * linearChannel(blue);
+  }
+
+  /**
+   * The brightest pixel of the whole frame and of the scrimmed copy band.
+   *
+   * Brightest rather than average, because white copy is hardest to read over
+   * the lightest thing beneath it — so this is the only pixel the contrast proof
+   * needs from each region.
+   */
+  function worstPixels(context, width, height, bandTop) {
+    var pixels = context.getImageData(0, 0, width, height).data;
+    var bandStart = Math.floor(height * bandTop);
+    var frame = null;
+    var copy = null;
+    for (var y = 0; y < height; y += 1) {
+      for (var x = 0; x < width; x += 1) {
+        var offset = (y * width + x) * 4;
+        var red = pixels[offset];
+        var green = pixels[offset + 1];
+        var blue = pixels[offset + 2];
+        var luminance = relativeLuminance(red, green, blue);
+        if (!frame || luminance > frame.luminance) {
+          frame = { r: red, g: green, b: blue, luminance: luminance };
+        }
+        if (y >= bandStart && (!copy || luminance > copy.luminance)) {
+          copy = { r: red, g: green, b: blue, luminance: luminance };
+        }
+      }
+    }
+    return { frame: frame, copy: copy || frame };
+  }
+
   function encode(request) {
     var results = [];
     for (var index = 0; index < request.slots.length; index += 1) {
@@ -407,6 +503,12 @@ window.__candidaryCoverPresets = (function () {
       }
       if (!chosen) {
         throw new Error('Output quality ladder exhausted for ' + slot.path + '.');
+      }
+      // Measured once per profile, off the toned canvas rather than a decoded
+      // file: this is the exact surface the runtime layers composite over.
+      if (slot.sample) {
+        var worst = worstPixels(toned.context, slot.width, slot.height, request.bandTop);
+        chosen.sample = { profile: slot.profile, copy: worst.copy, frame: worst.frame };
       }
       results.push(chosen);
     }
@@ -451,6 +553,7 @@ interface EncodedSlot {
   path: string;
   rung: number;
   base64: string;
+  sample?: { profile: string; copy: CoverSamplePixel; frame: CoverSamplePixel };
 }
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -492,6 +595,7 @@ export async function buildCoverPresets(options: {
   await rm(outputRoot, { recursive: true, force: true });
 
   const files: CoverPresetManifestFile[] = [];
+  const regions: CoverPresetRegionSample[] = [];
   let totalBytes = 0;
   const browser = await chromium.launch();
   try {
@@ -513,16 +617,22 @@ export async function buildCoverPresets(options: {
       for (const effect of COVER_EFFECT_IDS) {
         const request = {
           filter: COVER_EFFECT_CANVAS_FILTERS[effect],
+          bandTop: COVER_COPY_BAND_TOP,
           slots: slots
             .filter((slot) => slot.presetId === presetId && slot.effect === effect)
             .map((slot) => ({
               key: baseKey(slot.profile, slot.density),
               path: slot.path,
+              profile: slot.profile,
               width: slot.width,
               height: slot.height,
               mime: COVER_OUTPUT_MIME[slot.format],
               qualities: COVER_OUTPUT_QUALITIES[slot.format],
               byteCeiling: slot.byteCeiling,
+              // One measurement per profile, off the 1x canvas the WebP slot
+              // tones first. Every other slot of that profile is the same
+              // surface at another resolution or in another codec.
+              sample: slot.density === '1x' && slot.format === 'webp',
             })),
         };
         const encoded = await page.evaluate<EncodedSlot[]>(
@@ -531,6 +641,15 @@ export async function buildCoverPresets(options: {
 
         for (const result of encoded) {
           const slot = slots.find((candidate) => candidate.path === result.path)!;
+          if (result.sample) {
+            regions.push({
+              presetId,
+              effect,
+              profile: result.sample.profile,
+              copy: result.sample.copy,
+              frame: result.sample.frame,
+            });
+          }
           const bytes = Buffer.from(result.base64, 'base64');
           if (bytes.byteLength > slot.byteCeiling) {
             throw new Error(`${slot.path} is ${bytes.byteLength} bytes, above its ${slot.byteCeiling}-byte ceiling.`);
@@ -582,6 +701,7 @@ export async function buildCoverPresets(options: {
         outputQualityLadder: 1,
         presetAsset: PRESET_ASSET_VERSION,
       },
+      copyBandTop: COVER_COPY_BAND_TOP,
       surfaceTreatment: {
         id: COVER_SURFACE_TREATMENT_ID,
         path: presetGrainTilePath(PRESET_ASSET_VERSION),
@@ -591,6 +711,7 @@ export async function buildCoverPresets(options: {
         sha256: sha256Hex(grainBytes),
       },
       files,
+      regions,
     };
     await writeFile(
       resolve(projectRoot, `public${presetManifestPath(PRESET_ASSET_VERSION)}`),

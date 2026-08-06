@@ -12,6 +12,7 @@
     "outputQualityLadder": 1,
     "presetAsset": 1
   },
+  "copyBandTop": 0.4,
   "surfaceTreatment": {
     "id": "film-grain-v1",
     "path": "/assets/event-covers/v1/film-grain-v1.png",
@@ -9380,6 +9381,3068 @@
       "byteSize": 69211,
       "rung": 1,
       "sha256": "59146a7c6a249e481ba2694f9c81074d87de031c9480977e288f8535aa2661e4"
+    }
+  ],
+  "regions": [
+    {
+      "presetId": "warm-linen",
+      "effect": "natural",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 217,
+        "g": 205,
+        "b": 190,
+        "luminance": 0.6213206241326468
+      },
+      "frame": {
+        "r": 237,
+        "g": 229,
+        "b": 218,
+        "luminance": 0.7910510341160901
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "natural",
+      "profile": "compact-default",
+      "copy": {
+        "r": 219,
+        "g": 208,
+        "b": 192,
+        "luminance": 0.6397759067956965
+      },
+      "frame": {
+        "r": 237,
+        "g": 229,
+        "b": 217,
+        "luminance": 0.7905290186838111
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "natural",
+      "profile": "standard-default",
+      "copy": {
+        "r": 218,
+        "g": 207,
+        "b": 191,
+        "luminance": 0.6329266147363188
+      },
+      "frame": {
+        "r": 233,
+        "g": 224,
+        "b": 212,
+        "luminance": 0.7538841337240043
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "natural",
+      "profile": "framed-default",
+      "copy": {
+        "r": 218,
+        "g": 206,
+        "b": 191,
+        "luminance": 0.6280962760528389
+      },
+      "frame": {
+        "r": 237,
+        "g": 230,
+        "b": 218,
+        "luminance": 0.7966010925424536
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "natural",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 221,
+        "g": 211,
+        "b": 196,
+        "luminance": 0.6594620554806353
+      },
+      "frame": {
+        "r": 237,
+        "g": 229,
+        "b": 218,
+        "luminance": 0.7910510341160901
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "natural",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 222,
+        "g": 211,
+        "b": 196,
+        "luminance": 0.6610364884150338
+      },
+      "frame": {
+        "r": 238,
+        "g": 230,
+        "b": 218,
+        "luminance": 0.79832727201067
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "warm",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 223,
+        "g": 211,
+        "b": 195,
+        "luminance": 0.6621663708986683
+      },
+      "frame": {
+        "r": 244,
+        "g": 235,
+        "b": 223,
+        "luminance": 0.8397747130581825
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "warm",
+      "profile": "compact-default",
+      "copy": {
+        "r": 225,
+        "g": 214,
+        "b": 197,
+        "luminance": 0.6813190372743263
+      },
+      "frame": {
+        "r": 244,
+        "g": 235,
+        "b": 222,
+        "luminance": 0.8392368469793149
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "warm",
+      "profile": "standard-default",
+      "copy": {
+        "r": 224,
+        "g": 213,
+        "b": 196,
+        "luminance": 0.6742131538689338
+      },
+      "frame": {
+        "r": 240,
+        "g": 230,
+        "b": 217,
+        "luminance": 0.8012864776328431
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "warm",
+      "profile": "framed-default",
+      "copy": {
+        "r": 224,
+        "g": 212,
+        "b": 196,
+        "luminance": 0.6691978274557143
+      },
+      "frame": {
+        "r": 244,
+        "g": 236,
+        "b": 223,
+        "luminance": 0.8455171503859268
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "warm",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 228,
+        "g": 217,
+        "b": 200,
+        "luminance": 0.7028981950893363
+      },
+      "frame": {
+        "r": 244,
+        "g": 235,
+        "b": 223,
+        "luminance": 0.8397747130581825
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "warm",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 229,
+        "g": 217,
+        "b": 200,
+        "luminance": 0.7045385259535207
+      },
+      "frame": {
+        "r": 245,
+        "g": 236,
+        "b": 223,
+        "luminance": 0.8473109580816492
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "film",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 226,
+        "g": 214,
+        "b": 199,
+        "luminance": 0.6838540682374691
+      },
+      "frame": {
+        "r": 249,
+        "g": 241,
+        "b": 230,
+        "luminance": 0.8876350192556713
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "film",
+      "profile": "compact-default",
+      "copy": {
+        "r": 228,
+        "g": 217,
+        "b": 201,
+        "luminance": 0.7033673490620576
+      },
+      "frame": {
+        "r": 249,
+        "g": 241,
+        "b": 229,
+        "luminance": 0.8870747365118467
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "film",
+      "profile": "standard-default",
+      "copy": {
+        "r": 227,
+        "g": 216,
+        "b": 200,
+        "luminance": 0.696127577157577
+      },
+      "frame": {
+        "r": 244,
+        "g": 235,
+        "b": 224,
+        "luminance": 0.8403157654736073
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "film",
+      "profile": "framed-default",
+      "copy": {
+        "r": 227,
+        "g": 215,
+        "b": 200,
+        "luminance": 0.6910190159854295
+      },
+      "frame": {
+        "r": 249,
+        "g": 242,
+        "b": 230,
+        "luminance": 0.8935716949106765
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "film",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 231,
+        "g": 221,
+        "b": 206,
+        "luminance": 0.7315805841135546
+      },
+      "frame": {
+        "r": 249,
+        "g": 241,
+        "b": 230,
+        "luminance": 0.8876350192556713
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "film",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 232,
+        "g": 221,
+        "b": 206,
+        "luminance": 0.7332493919921741
+      },
+      "frame": {
+        "r": 250,
+        "g": 242,
+        "b": 230,
+        "luminance": 0.8954142601019964
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "soft",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 219,
+        "g": 208,
+        "b": 193,
+        "luminance": 0.6402207510892952
+      },
+      "frame": {
+        "r": 238,
+        "g": 230,
+        "b": 220,
+        "luminance": 0.7993807861496772
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "soft",
+      "profile": "compact-default",
+      "copy": {
+        "r": 221,
+        "g": 210,
+        "b": 195,
+        "luminance": 0.6540546950650985
+      },
+      "frame": {
+        "r": 238,
+        "g": 230,
+        "b": 219,
+        "luminance": 0.7988524467212891
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "soft",
+      "profile": "standard-default",
+      "copy": {
+        "r": 220,
+        "g": 209,
+        "b": 194,
+        "luminance": 0.6471161415948842
+      },
+      "frame": {
+        "r": 234,
+        "g": 226,
+        "b": 214,
+        "luminance": 0.7674017730607641
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "soft",
+      "profile": "framed-default",
+      "copy": {
+        "r": 220,
+        "g": 208,
+        "b": 194,
+        "luminance": 0.6422243612291162
+      },
+      "frame": {
+        "r": 238,
+        "g": 231,
+        "b": 220,
+        "luminance": 0.8049627774516853
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "soft",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 223,
+        "g": 213,
+        "b": 199,
+        "luminance": 0.6739999613239274
+      },
+      "frame": {
+        "r": 238,
+        "g": 230,
+        "b": 220,
+        "luminance": 0.7993807861496772
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "soft",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 224,
+        "g": 213,
+        "b": 199,
+        "luminance": 0.6755931433671312
+      },
+      "frame": {
+        "r": 239,
+        "g": 231,
+        "b": 220,
+        "luminance": 0.8066985725448154
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "monochrome",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 209,
+        "g": 209,
+        "b": 209,
+        "luminance": 0.6375968739940326
+      },
+      "frame": {
+        "r": 235,
+        "g": 235,
+        "b": 235,
+        "luminance": 0.8307698767746545
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "monochrome",
+      "profile": "compact-default",
+      "copy": {
+        "r": 213,
+        "g": 213,
+        "b": 213,
+        "luminance": 0.665387298282272
+      },
+      "frame": {
+        "r": 235,
+        "g": 235,
+        "b": 235,
+        "luminance": 0.8307698767746545
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "monochrome",
+      "profile": "standard-default",
+      "copy": {
+        "r": 212,
+        "g": 212,
+        "b": 212,
+        "luminance": 0.6583748172794485
+      },
+      "frame": {
+        "r": 229,
+        "g": 229,
+        "b": 229,
+        "luminance": 0.7835377915261935
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "monochrome",
+      "profile": "framed-default",
+      "copy": {
+        "r": 210,
+        "g": 210,
+        "b": 210,
+        "luminance": 0.6444796819705821
+      },
+      "frame": {
+        "r": 236,
+        "g": 236,
+        "b": 236,
+        "luminance": 0.8387990117407399
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "monochrome",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 216,
+        "g": 216,
+        "b": 216,
+        "luminance": 0.6866853124353136
+      },
+      "frame": {
+        "r": 235,
+        "g": 235,
+        "b": 235,
+        "luminance": 0.8307698767746545
+      }
+    },
+    {
+      "presetId": "warm-linen",
+      "effect": "monochrome",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 216,
+        "g": 216,
+        "b": 216,
+        "luminance": 0.6866853124353136
+      },
+      "frame": {
+        "r": 236,
+        "g": 236,
+        "b": 236,
+        "luminance": 0.8387990117407399
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "natural",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 240,
+        "g": 233,
+        "b": 220,
+        "luminance": 0.8197039887271877
+      },
+      "frame": {
+        "r": 243,
+        "g": 237,
+        "b": 226,
+        "luminance": 0.8511404689407756
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "natural",
+      "profile": "compact-default",
+      "copy": {
+        "r": 240,
+        "g": 233,
+        "b": 220,
+        "luminance": 0.8197039887271877
+      },
+      "frame": {
+        "r": 244,
+        "g": 237,
+        "b": 226,
+        "luminance": 0.8529245700889649
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "natural",
+      "profile": "standard-default",
+      "copy": {
+        "r": 241,
+        "g": 234,
+        "b": 221,
+        "luminance": 0.8276686734307411
+      },
+      "frame": {
+        "r": 244,
+        "g": 238,
+        "b": 227,
+        "luminance": 0.8592821918372804
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "natural",
+      "profile": "framed-default",
+      "copy": {
+        "r": 241,
+        "g": 233,
+        "b": 220,
+        "luminance": 0.8214590607638764
+      },
+      "frame": {
+        "r": 245,
+        "g": 238,
+        "b": 227,
+        "luminance": 0.8610759995330028
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "natural",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 242,
+        "g": 235,
+        "b": 223,
+        "luminance": 0.8362162022443301
+      },
+      "frame": {
+        "r": 245,
+        "g": 238,
+        "b": 227,
+        "luminance": 0.8610759995330028
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "natural",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 242,
+        "g": 235,
+        "b": 222,
+        "luminance": 0.8356783361654625
+      },
+      "frame": {
+        "r": 245,
+        "g": 238,
+        "b": 227,
+        "luminance": 0.8610759995330028
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "warm",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 247,
+        "g": 239,
+        "b": 224,
+        "luminance": 0.868889791481805
+      },
+      "frame": {
+        "r": 249,
+        "g": 243,
+        "b": 231,
+        "luminance": 0.900104428927394
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "warm",
+      "profile": "compact-default",
+      "copy": {
+        "r": 247,
+        "g": 239,
+        "b": 224,
+        "luminance": 0.868889791481805
+      },
+      "frame": {
+        "r": 249,
+        "g": 243,
+        "b": 231,
+        "luminance": 0.900104428927394
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "warm",
+      "profile": "standard-default",
+      "copy": {
+        "r": 248,
+        "g": 240,
+        "b": 226,
+        "luminance": 0.8776762187586828
+      },
+      "frame": {
+        "r": 249,
+        "g": 244,
+        "b": 232,
+        "luminance": 0.9066729946377484
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "warm",
+      "profile": "framed-default",
+      "copy": {
+        "r": 248,
+        "g": 239,
+        "b": 224,
+        "luminance": 0.870712808861337
+      },
+      "frame": {
+        "r": 249,
+        "g": 244,
+        "b": 232,
+        "luminance": 0.9066729946377484
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "warm",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 249,
+        "g": 241,
+        "b": 228,
+        "luminance": 0.8865176721261734
+      },
+      "frame": {
+        "r": 249,
+        "g": 244,
+        "b": 232,
+        "luminance": 0.9066729946377484
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "warm",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 249,
+        "g": 241,
+        "b": 227,
+        "luminance": 0.8859638207949254
+      },
+      "frame": {
+        "r": 249,
+        "g": 244,
+        "b": 232,
+        "luminance": 0.9066729946377484
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "film",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 252,
+        "g": 245,
+        "b": 233,
+        "luminance": 0.9188345470153584
+      },
+      "frame": {
+        "r": 254,
+        "g": 250,
+        "b": 239,
+        "luminance": 0.9567403989016758
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "film",
+      "profile": "compact-default",
+      "copy": {
+        "r": 252,
+        "g": 245,
+        "b": 233,
+        "luminance": 0.9188345470153584
+      },
+      "frame": {
+        "r": 254,
+        "g": 250,
+        "b": 239,
+        "luminance": 0.9567403989016758
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "film",
+      "profile": "standard-default",
+      "copy": {
+        "r": 253,
+        "g": 246,
+        "b": 234,
+        "luminance": 0.9273469420777535
+      },
+      "frame": {
+        "r": 255,
+        "g": 251,
+        "b": 240,
+        "luminance": 0.9654563105002746
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "film",
+      "profile": "framed-default",
+      "copy": {
+        "r": 253,
+        "g": 245,
+        "b": 233,
+        "luminance": 0.9207065452774766
+      },
+      "frame": {
+        "r": 255,
+        "g": 251,
+        "b": 240,
+        "luminance": 0.9654563105002746
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "film",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 254,
+        "g": 247,
+        "b": 236,
+        "luminance": 0.9364848804041846
+      },
+      "frame": {
+        "r": 255,
+        "g": 251,
+        "b": 240,
+        "luminance": 0.9654563105002746
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "film",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 254,
+        "g": 247,
+        "b": 235,
+        "luminance": 0.9359051768596334
+      },
+      "frame": {
+        "r": 255,
+        "g": 251,
+        "b": 240,
+        "luminance": 0.9654563105002746
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "soft",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 241,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8282033585570985
+      },
+      "frame": {
+        "r": 242,
+        "g": 238,
+        "b": 227,
+        "luminance": 0.855723681023428
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "soft",
+      "profile": "compact-default",
+      "copy": {
+        "r": 241,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8282033585570985
+      },
+      "frame": {
+        "r": 242,
+        "g": 238,
+        "b": 227,
+        "luminance": 0.855723681023428
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "soft",
+      "profile": "standard-default",
+      "copy": {
+        "r": 242,
+        "g": 235,
+        "b": 223,
+        "luminance": 0.8362162022443301
+      },
+      "frame": {
+        "r": 242,
+        "g": 239,
+        "b": 228,
+        "luminance": 0.8621168580865979
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "soft",
+      "profile": "framed-default",
+      "copy": {
+        "r": 242,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8299680918404515
+      },
+      "frame": {
+        "r": 242,
+        "g": 239,
+        "b": 228,
+        "luminance": 0.8621168580865979
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "soft",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 242,
+        "g": 236,
+        "b": 225,
+        "luminance": 0.843043936109916
+      },
+      "frame": {
+        "r": 242,
+        "g": 239,
+        "b": 228,
+        "luminance": 0.8621168580865979
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "soft",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 242,
+        "g": 236,
+        "b": 224,
+        "luminance": 0.8424996919874992
+      },
+      "frame": {
+        "r": 242,
+        "g": 239,
+        "b": 228,
+        "luminance": 0.8621168580865979
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "monochrome",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 239,
+        "g": 239,
+        "b": 239,
+        "luminance": 0.8631572134541022
+      },
+      "frame": {
+        "r": 242,
+        "g": 242,
+        "b": 242,
+        "luminance": 0.8879231178819662
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "monochrome",
+      "profile": "compact-default",
+      "copy": {
+        "r": 239,
+        "g": 239,
+        "b": 239,
+        "luminance": 0.8631572134541022
+      },
+      "frame": {
+        "r": 243,
+        "g": 243,
+        "b": 243,
+        "luminance": 0.8962693533742663
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "monochrome",
+      "profile": "standard-default",
+      "copy": {
+        "r": 240,
+        "g": 240,
+        "b": 240,
+        "luminance": 0.8713671191987972
+      },
+      "frame": {
+        "r": 243,
+        "g": 243,
+        "b": 243,
+        "luminance": 0.8962693533742663
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "monochrome",
+      "profile": "framed-default",
+      "copy": {
+        "r": 239,
+        "g": 239,
+        "b": 239,
+        "luminance": 0.8631572134541022
+      },
+      "frame": {
+        "r": 244,
+        "g": 244,
+        "b": 244,
+        "luminance": 0.9046611743911496
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "monochrome",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 241,
+        "g": 241,
+        "b": 241,
+        "luminance": 0.8796223968878317
+      },
+      "frame": {
+        "r": 244,
+        "g": 244,
+        "b": 244,
+        "luminance": 0.9046611743911496
+      }
+    },
+    {
+      "presetId": "botanical-shadow",
+      "effect": "monochrome",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 241,
+        "g": 241,
+        "b": 241,
+        "luminance": 0.8796223968878317
+      },
+      "frame": {
+        "r": 244,
+        "g": 244,
+        "b": 244,
+        "luminance": 0.9046611743911496
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "natural",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 233,
+        "g": 227,
+        "b": 216,
+        "luminance": 0.7721967613223898
+      },
+      "frame": {
+        "r": 233,
+        "g": 227,
+        "b": 216,
+        "luminance": 0.7721967613223898
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "natural",
+      "profile": "compact-default",
+      "copy": {
+        "r": 233,
+        "g": 227,
+        "b": 216,
+        "luminance": 0.7721967613223898
+      },
+      "frame": {
+        "r": 234,
+        "g": 228,
+        "b": 216,
+        "luminance": 0.7793709814831009
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "natural",
+      "profile": "standard-default",
+      "copy": {
+        "r": 234,
+        "g": 228,
+        "b": 216,
+        "luminance": 0.7793709814831009
+      },
+      "frame": {
+        "r": 234,
+        "g": 228,
+        "b": 218,
+        "luminance": 0.7804118585228319
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "natural",
+      "profile": "framed-default",
+      "copy": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      },
+      "frame": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "natural",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      },
+      "frame": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "natural",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      },
+      "frame": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "warm",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 239,
+        "g": 233,
+        "b": 221,
+        "luminance": 0.8184900723374638
+      },
+      "frame": {
+        "r": 239,
+        "g": 233,
+        "b": 221,
+        "luminance": 0.8184900723374638
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "warm",
+      "profile": "compact-default",
+      "copy": {
+        "r": 239,
+        "g": 233,
+        "b": 221,
+        "luminance": 0.8184900723374638
+      },
+      "frame": {
+        "r": 240,
+        "g": 234,
+        "b": 221,
+        "luminance": 0.8259136013940525
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "warm",
+      "profile": "standard-default",
+      "copy": {
+        "r": 240,
+        "g": 234,
+        "b": 221,
+        "luminance": 0.8259136013940525
+      },
+      "frame": {
+        "r": 240,
+        "g": 234,
+        "b": 223,
+        "luminance": 0.8269861525992774
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "warm",
+      "profile": "framed-default",
+      "copy": {
+        "r": 240,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8264482865204098
+      },
+      "frame": {
+        "r": 240,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8264482865204098
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "warm",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 240,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8264482865204098
+      },
+      "frame": {
+        "r": 240,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8264482865204098
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "warm",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 240,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8264482865204098
+      },
+      "frame": {
+        "r": 240,
+        "g": 234,
+        "b": 222,
+        "luminance": 0.8264482865204098
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "film",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 244,
+        "g": 238,
+        "b": 228,
+        "luminance": 0.8598360431685284
+      },
+      "frame": {
+        "r": 244,
+        "g": 238,
+        "b": 228,
+        "luminance": 0.8598360431685284
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "film",
+      "profile": "compact-default",
+      "copy": {
+        "r": 244,
+        "g": 238,
+        "b": 228,
+        "luminance": 0.8598360431685284
+      },
+      "frame": {
+        "r": 245,
+        "g": 240,
+        "b": 228,
+        "luminance": 0.8733409011847786
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "film",
+      "profile": "standard-default",
+      "copy": {
+        "r": 245,
+        "g": 240,
+        "b": 228,
+        "luminance": 0.8733409011847786
+      },
+      "frame": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "film",
+      "profile": "framed-default",
+      "copy": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      },
+      "frame": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "film",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      },
+      "frame": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "film",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      },
+      "frame": {
+        "r": 245,
+        "g": 240,
+        "b": 229,
+        "luminance": 0.8738979655704519
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "soft",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      },
+      "frame": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "soft",
+      "profile": "compact-default",
+      "copy": {
+        "r": 234,
+        "g": 228,
+        "b": 217,
+        "luminance": 0.7798898430905529
+      },
+      "frame": {
+        "r": 235,
+        "g": 229,
+        "b": 217,
+        "luminance": 0.7871054454671068
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "soft",
+      "profile": "standard-default",
+      "copy": {
+        "r": 235,
+        "g": 229,
+        "b": 217,
+        "luminance": 0.7871054454671068
+      },
+      "frame": {
+        "r": 235,
+        "g": 229,
+        "b": 220,
+        "luminance": 0.7886809750383931
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "soft",
+      "profile": "framed-default",
+      "copy": {
+        "r": 235,
+        "g": 229,
+        "b": 219,
+        "luminance": 0.7881526356100049
+      },
+      "frame": {
+        "r": 235,
+        "g": 229,
+        "b": 219,
+        "luminance": 0.7881526356100049
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "soft",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 235,
+        "g": 229,
+        "b": 219,
+        "luminance": 0.7881526356100049
+      },
+      "frame": {
+        "r": 235,
+        "g": 229,
+        "b": 219,
+        "luminance": 0.7881526356100049
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "soft",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 235,
+        "g": 229,
+        "b": 219,
+        "luminance": 0.7881526356100049
+      },
+      "frame": {
+        "r": 235,
+        "g": 229,
+        "b": 219,
+        "luminance": 0.7881526356100049
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "monochrome",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 231,
+        "g": 231,
+        "b": 231,
+        "luminance": 0.799102738014409
+      },
+      "frame": {
+        "r": 231,
+        "g": 231,
+        "b": 231,
+        "luminance": 0.799102738014409
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "monochrome",
+      "profile": "compact-default",
+      "copy": {
+        "r": 231,
+        "g": 231,
+        "b": 231,
+        "luminance": 0.799102738014409
+      },
+      "frame": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "monochrome",
+      "profile": "standard-default",
+      "copy": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      },
+      "frame": {
+        "r": 234,
+        "g": 234,
+        "b": 234,
+        "luminance": 0.8227857543962834
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "monochrome",
+      "profile": "framed-default",
+      "copy": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      },
+      "frame": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "monochrome",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      },
+      "frame": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      }
+    },
+    {
+      "presetId": "pressed-paper",
+      "effect": "monochrome",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      },
+      "frame": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "natural",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 188,
+        "g": 138,
+        "b": 86,
+        "luminance": 0.29540209596066225
+      },
+      "frame": {
+        "r": 192,
+        "g": 145,
+        "b": 93,
+        "luminance": 0.32247579039877944
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "natural",
+      "profile": "compact-default",
+      "copy": {
+        "r": 190,
+        "g": 141,
+        "b": 86,
+        "luminance": 0.30668788133158653
+      },
+      "frame": {
+        "r": 194,
+        "g": 145,
+        "b": 93,
+        "luminance": 0.32510445403769755
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "natural",
+      "profile": "standard-default",
+      "copy": {
+        "r": 189,
+        "g": 139,
+        "b": 86,
+        "luminance": 0.2995594023408151
+      },
+      "frame": {
+        "r": 195,
+        "g": 148,
+        "b": 95,
+        "luminance": 0.33608134575256843
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "natural",
+      "profile": "framed-default",
+      "copy": {
+        "r": 190,
+        "g": 141,
+        "b": 87,
+        "luminance": 0.3068502233048113
+      },
+      "frame": {
+        "r": 195,
+        "g": 147,
+        "b": 95,
+        "luminance": 0.3329576232271108
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "natural",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 197,
+        "g": 147,
+        "b": 92,
+        "luminance": 0.33510460362077793
+      },
+      "frame": {
+        "r": 196,
+        "g": 149,
+        "b": 96,
+        "luminance": 0.3407518279397791
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "natural",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 197,
+        "g": 146,
+        "b": 92,
+        "luminance": 0.33200792201356766
+      },
+      "frame": {
+        "r": 196,
+        "g": 149,
+        "b": 96,
+        "luminance": 0.3407518279397791
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "warm",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 198,
+        "g": 142,
+        "b": 86,
+        "luminance": 0.32023654336294344
+      },
+      "frame": {
+        "r": 203,
+        "g": 149,
+        "b": 91,
+        "luminance": 0.3494673321236772
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "warm",
+      "profile": "compact-default",
+      "copy": {
+        "r": 199,
+        "g": 146,
+        "b": 86,
+        "luminance": 0.33371768300405424
+      },
+      "frame": {
+        "r": 203,
+        "g": 150,
+        "b": 93,
+        "luminance": 0.35299516274711196
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "warm",
+      "profile": "standard-default",
+      "copy": {
+        "r": 199,
+        "g": 143,
+        "b": 86,
+        "luminance": 0.3245892094473499
+      },
+      "frame": {
+        "r": 206,
+        "g": 151,
+        "b": 94,
+        "luminance": 0.3606318100593245
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "warm",
+      "profile": "framed-default",
+      "copy": {
+        "r": 199,
+        "g": 146,
+        "b": 87,
+        "luminance": 0.33388002497727903
+      },
+      "frame": {
+        "r": 205,
+        "g": 151,
+        "b": 91,
+        "luminance": 0.35867684210421186
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "warm",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 206,
+        "g": 151,
+        "b": 92,
+        "luminance": 0.3602773568045308
+      },
+      "frame": {
+        "r": 204,
+        "g": 153,
+        "b": 96,
+        "luminance": 0.364643630167875
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "warm",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 206,
+        "g": 151,
+        "b": 92,
+        "luminance": 0.3602773568045308
+      },
+      "frame": {
+        "r": 204,
+        "g": 153,
+        "b": 96,
+        "luminance": 0.364643630167875
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "film",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 189,
+        "g": 140,
+        "b": 89,
+        "luminance": 0.3029625272584393
+      },
+      "frame": {
+        "r": 194,
+        "g": 148,
+        "b": 96,
+        "luminance": 0.3349367128510978
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "film",
+      "profile": "compact-default",
+      "copy": {
+        "r": 191,
+        "g": 143,
+        "b": 89,
+        "luminance": 0.3144255606282744
+      },
+      "frame": {
+        "r": 195,
+        "g": 148,
+        "b": 96,
+        "luminance": 0.3362643939744254
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "film",
+      "profile": "standard-default",
+      "copy": {
+        "r": 190,
+        "g": 141,
+        "b": 89,
+        "luminance": 0.30718171239349734
+      },
+      "frame": {
+        "r": 197,
+        "g": 151,
+        "b": 99,
+        "luminance": 0.3490438656632281
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "film",
+      "profile": "framed-default",
+      "copy": {
+        "r": 191,
+        "g": 143,
+        "b": 90,
+        "luminance": 0.3145947255777937
+      },
+      "frame": {
+        "r": 197,
+        "g": 150,
+        "b": 99,
+        "luminance": 0.34583861908692864
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "film",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 199,
+        "g": 150,
+        "b": 95,
+        "luminance": 0.3478102997573222
+      },
+      "frame": {
+        "r": 198,
+        "g": 152,
+        "b": 100,
+        "luminance": 0.3538233944466349
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "film",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 199,
+        "g": 149,
+        "b": 95,
+        "luminance": 0.3446322945007029
+      },
+      "frame": {
+        "r": 198,
+        "g": 152,
+        "b": 100,
+        "luminance": 0.3538233944466349
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "soft",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 191,
+        "g": 144,
+        "b": 94,
+        "luminance": 0.3183103573916851
+      },
+      "frame": {
+        "r": 195,
+        "g": 150,
+        "b": 100,
+        "luminance": 0.34334894803753807
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "soft",
+      "profile": "compact-default",
+      "copy": {
+        "r": 193,
+        "g": 146,
+        "b": 94,
+        "luminance": 0.32703377192474936
+      },
+      "frame": {
+        "r": 197,
+        "g": 150,
+        "b": 100,
+        "luminance": 0.3460310943864818
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "soft",
+      "profile": "standard-default",
+      "copy": {
+        "r": 192,
+        "g": 145,
+        "b": 94,
+        "luminance": 0.3226541761704108
+      },
+      "frame": {
+        "r": 198,
+        "g": 153,
+        "b": 102,
+        "luminance": 0.3574754146441193
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "soft",
+      "profile": "framed-default",
+      "copy": {
+        "r": 193,
+        "g": 146,
+        "b": 95,
+        "luminance": 0.3272144846252323
+      },
+      "frame": {
+        "r": 198,
+        "g": 152,
+        "b": 102,
+        "luminance": 0.3542154867353668
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "soft",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 199,
+        "g": 152,
+        "b": 100,
+        "luminance": 0.35518686707799896
+      },
+      "frame": {
+        "r": 199,
+        "g": 154,
+        "b": 103,
+        "luminance": 0.36232588830292023
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "soft",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 199,
+        "g": 151,
+        "b": 100,
+        "luminance": 0.35195431287076784
+      },
+      "frame": {
+        "r": 199,
+        "g": 154,
+        "b": 103,
+        "luminance": 0.36232588830292023
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "monochrome",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 145,
+        "g": 145,
+        "b": 145,
+        "luminance": 0.2831487404299921
+      },
+      "frame": {
+        "r": 152,
+        "g": 152,
+        "b": 152,
+        "luminance": 0.31398871337571754
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "monochrome",
+      "profile": "compact-default",
+      "copy": {
+        "r": 147,
+        "g": 147,
+        "b": 147,
+        "luminance": 0.29177064981753587
+      },
+      "frame": {
+        "r": 153,
+        "g": 153,
+        "b": 153,
+        "luminance": 0.31854677812509186
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "monochrome",
+      "profile": "standard-default",
+      "copy": {
+        "r": 146,
+        "g": 146,
+        "b": 146,
+        "luminance": 0.2874408377269175
+      },
+      "frame": {
+        "r": 155,
+        "g": 155,
+        "b": 155,
+        "luminance": 0.3277780980565421
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "monochrome",
+      "profile": "framed-default",
+      "copy": {
+        "r": 149,
+        "g": 149,
+        "b": 149,
+        "luminance": 0.3005437944157765
+      },
+      "frame": {
+        "r": 154,
+        "g": 154,
+        "b": 154,
+        "luminance": 0.32314320911295075
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "monochrome",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 155,
+        "g": 155,
+        "b": 155,
+        "luminance": 0.3277780980565421
+      },
+      "frame": {
+        "r": 156,
+        "g": 156,
+        "b": 156,
+        "luminance": 0.33245153634617935
+      }
+    },
+    {
+      "presetId": "candlelit-grain",
+      "effect": "monochrome",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 154,
+        "g": 154,
+        "b": 154,
+        "luminance": 0.32314320911295075
+      },
+      "frame": {
+        "r": 156,
+        "g": 156,
+        "b": 156,
+        "luminance": 0.33245153634617935
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "natural",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 192,
+        "g": 212,
+        "b": 213,
+        "luminance": 0.6309753079792975
+      },
+      "frame": {
+        "r": 219,
+        "g": 232,
+        "b": 231,
+        "luminance": 0.7854281631746617
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "natural",
+      "profile": "compact-default",
+      "copy": {
+        "r": 192,
+        "g": 212,
+        "b": 213,
+        "luminance": 0.6309753079792975
+      },
+      "frame": {
+        "r": 223,
+        "g": 234,
+        "b": 234,
+        "luminance": 0.8047412559167162
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "natural",
+      "profile": "standard-default",
+      "copy": {
+        "r": 191,
+        "g": 211,
+        "b": 213,
+        "luminance": 0.624689933681884
+      },
+      "frame": {
+        "r": 214,
+        "g": 228,
+        "b": 227,
+        "luminance": 0.7532899785410956
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "natural",
+      "profile": "framed-default",
+      "copy": {
+        "r": 192,
+        "g": 212,
+        "b": 213,
+        "luminance": 0.6309753079792975
+      },
+      "frame": {
+        "r": 218,
+        "g": 231,
+        "b": 230,
+        "luminance": 0.7777042517448712
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "natural",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 186,
+        "g": 207,
+        "b": 209,
+        "luminance": 0.5966819991060334
+      },
+      "frame": {
+        "r": 220,
+        "g": 231,
+        "b": 231,
+        "luminance": 0.7813699341202234
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "natural",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 193,
+        "g": 213,
+        "b": 214,
+        "luminance": 0.6378099551564593
+      },
+      "frame": {
+        "r": 226,
+        "g": 237,
+        "b": 235,
+        "luminance": 0.8273528299729476
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "warm",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 197,
+        "g": 218,
+        "b": 219,
+        "luminance": 0.6712759712548875
+      },
+      "frame": {
+        "r": 223,
+        "g": 238,
+        "b": 237,
+        "luminance": 0.8295147135505464
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "warm",
+      "profile": "compact-default",
+      "copy": {
+        "r": 197,
+        "g": 218,
+        "b": 219,
+        "luminance": 0.6712759712548875
+      },
+      "frame": {
+        "r": 228,
+        "g": 240,
+        "b": 240,
+        "luminance": 0.8510542732714171
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "warm",
+      "profile": "standard-default",
+      "copy": {
+        "r": 196,
+        "g": 217,
+        "b": 220,
+        "luminance": 0.6652877783740503
+      },
+      "frame": {
+        "r": 219,
+        "g": 234,
+        "b": 233,
+        "luminance": 0.797888984863197
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "warm",
+      "profile": "framed-default",
+      "copy": {
+        "r": 197,
+        "g": 218,
+        "b": 219,
+        "luminance": 0.6712759712548875
+      },
+      "frame": {
+        "r": 223,
+        "g": 237,
+        "b": 236,
+        "luminance": 0.8231247767286144
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "warm",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 191,
+        "g": 213,
+        "b": 216,
+        "luminance": 0.6362273341525564
+      },
+      "frame": {
+        "r": 224,
+        "g": 237,
+        "b": 237,
+        "luminance": 0.8253009174391486
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "warm",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 198,
+        "g": 219,
+        "b": 220,
+        "luminance": 0.6783610946279702
+      },
+      "frame": {
+        "r": 231,
+        "g": 243,
+        "b": 241,
+        "luminance": 0.8744098206904402
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "film",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 201,
+        "g": 221,
+        "b": 222,
+        "luminance": 0.6940433652831774
+      },
+      "frame": {
+        "r": 230,
+        "g": 244,
+        "b": 243,
+        "luminance": 0.8799542613528895
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "film",
+      "profile": "compact-default",
+      "copy": {
+        "r": 201,
+        "g": 221,
+        "b": 222,
+        "luminance": 0.6940433652831774
+      },
+      "frame": {
+        "r": 235,
+        "g": 246,
+        "b": 246,
+        "luminance": 0.9022752294350334
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "film",
+      "profile": "standard-default",
+      "copy": {
+        "r": 200,
+        "g": 220,
+        "b": 222,
+        "luminance": 0.6873968586321022
+      },
+      "frame": {
+        "r": 225,
+        "g": 240,
+        "b": 238,
+        "luminance": 0.8450077452441435
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "film",
+      "profile": "framed-default",
+      "copy": {
+        "r": 201,
+        "g": 221,
+        "b": 222,
+        "luminance": 0.6940433652831774
+      },
+      "frame": {
+        "r": 229,
+        "g": 243,
+        "b": 242,
+        "luminance": 0.871700025122822
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "film",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 195,
+        "g": 215,
+        "b": 217,
+        "luminance": 0.652127335934172
+      },
+      "frame": {
+        "r": 232,
+        "g": 243,
+        "b": 243,
+        "luminance": 0.8772805388273803
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "film",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 202,
+        "g": 222,
+        "b": 223,
+        "luminance": 0.7012682184054632
+      },
+      "frame": {
+        "r": 238,
+        "g": 250,
+        "b": 247,
+        "luminance": 0.9326375747058071
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "soft",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 195,
+        "g": 214,
+        "b": 215,
+        "luminance": 0.6460153326509491
+      },
+      "frame": {
+        "r": 221,
+        "g": 233,
+        "b": 232,
+        "luminance": 0.7947617418614862
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "soft",
+      "profile": "compact-default",
+      "copy": {
+        "r": 195,
+        "g": 214,
+        "b": 215,
+        "luminance": 0.6460153326509491
+      },
+      "frame": {
+        "r": 225,
+        "g": 235,
+        "b": 235,
+        "luminance": 0.8142237162589572
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "soft",
+      "profile": "standard-default",
+      "copy": {
+        "r": 194,
+        "g": 213,
+        "b": 215,
+        "luminance": 0.6396413014029644
+      },
+      "frame": {
+        "r": 216,
+        "g": 229,
+        "b": 228,
+        "luminance": 0.7623898900857993
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "soft",
+      "profile": "framed-default",
+      "copy": {
+        "r": 195,
+        "g": 214,
+        "b": 215,
+        "luminance": 0.6460153326509491
+      },
+      "frame": {
+        "r": 220,
+        "g": 232,
+        "b": 231,
+        "luminance": 0.7869839105773668
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "soft",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 190,
+        "g": 209,
+        "b": 211,
+        "luminance": 0.6125122669612919
+      },
+      "frame": {
+        "r": 222,
+        "g": 232,
+        "b": 232,
+        "luminance": 0.7906901610319779
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "soft",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 196,
+        "g": 215,
+        "b": 216,
+        "luminance": 0.6529450778008696
+      },
+      "frame": {
+        "r": 227,
+        "g": 238,
+        "b": 236,
+        "luminance": 0.8353609358829535
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "monochrome",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 212,
+        "g": 212,
+        "b": 212,
+        "luminance": 0.6583748172794485
+      },
+      "frame": {
+        "r": 234,
+        "g": 234,
+        "b": 234,
+        "luminance": 0.8227857543962834
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "monochrome",
+      "profile": "compact-default",
+      "copy": {
+        "r": 212,
+        "g": 212,
+        "b": 212,
+        "luminance": 0.6583748172794485
+      },
+      "frame": {
+        "r": 237,
+        "g": 237,
+        "b": 237,
+        "luminance": 0.846873231509858
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "monochrome",
+      "profile": "standard-default",
+      "copy": {
+        "r": 210,
+        "g": 210,
+        "b": 210,
+        "luminance": 0.6444796819705821
+      },
+      "frame": {
+        "r": 229,
+        "g": 229,
+        "b": 229,
+        "luminance": 0.7835377915261935
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "monochrome",
+      "profile": "framed-default",
+      "copy": {
+        "r": 212,
+        "g": 212,
+        "b": 212,
+        "luminance": 0.6583748172794485
+      },
+      "frame": {
+        "r": 233,
+        "g": 233,
+        "b": 233,
+        "luminance": 0.8148465722161011
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "monochrome",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 206,
+        "g": 206,
+        "b": 206,
+        "luminance": 0.6172065624196511
+      },
+      "frame": {
+        "r": 234,
+        "g": 234,
+        "b": 234,
+        "luminance": 0.8227857543962834
+      }
+    },
+    {
+      "presetId": "coastal-haze",
+      "effect": "monochrome",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 213,
+        "g": 213,
+        "b": 213,
+        "luminance": 0.665387298282272
+      },
+      "frame": {
+        "r": 240,
+        "g": 240,
+        "b": 240,
+        "luminance": 0.8713671191987972
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "natural",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 76,
+        "g": 89,
+        "b": 100,
+        "luminance": 0.0960135664248503
+      },
+      "frame": {
+        "r": 78,
+        "g": 92,
+        "b": 103,
+        "luminance": 0.10253266175408889
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "natural",
+      "profile": "compact-default",
+      "copy": {
+        "r": 76,
+        "g": 90,
+        "b": 100,
+        "luminance": 0.09768928348712451
+      },
+      "frame": {
+        "r": 78,
+        "g": 92,
+        "b": 103,
+        "luminance": 0.10253266175408889
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "natural",
+      "profile": "standard-default",
+      "copy": {
+        "r": 77,
+        "g": 90,
+        "b": 101,
+        "luminance": 0.09829694575927417
+      },
+      "frame": {
+        "r": 80,
+        "g": 93,
+        "b": 103,
+        "luminance": 0.10513447574860149
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "natural",
+      "profile": "framed-default",
+      "copy": {
+        "r": 77,
+        "g": 91,
+        "b": 101,
+        "luminance": 0.09999536767662182
+      },
+      "frame": {
+        "r": 80,
+        "g": 93,
+        "b": 104,
+        "luminance": 0.10533651195283866
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "natural",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 80,
+        "g": 93,
+        "b": 104,
+        "luminance": 0.10533651195283866
+      },
+      "frame": {
+        "r": 80,
+        "g": 93,
+        "b": 104,
+        "luminance": 0.10533651195283866
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "natural",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 80,
+        "g": 93,
+        "b": 104,
+        "luminance": 0.10533651195283866
+      },
+      "frame": {
+        "r": 80,
+        "g": 93,
+        "b": 104,
+        "luminance": 0.10533651195283866
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "warm",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 79,
+        "g": 94,
+        "b": 105,
+        "luminance": 0.10687592788506511
+      },
+      "frame": {
+        "r": 81,
+        "g": 97,
+        "b": 109,
+        "luminance": 0.11402845540718545
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "warm",
+      "profile": "compact-default",
+      "copy": {
+        "r": 79,
+        "g": 95,
+        "b": 105,
+        "luminance": 0.10866603485716184
+      },
+      "frame": {
+        "r": 81,
+        "g": 97,
+        "b": 109,
+        "luminance": 0.11402845540718545
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "warm",
+      "profile": "standard-default",
+      "copy": {
+        "r": 80,
+        "g": 95,
+        "b": 107,
+        "luminance": 0.10951428180103394
+      },
+      "frame": {
+        "r": 84,
+        "g": 98,
+        "b": 109,
+        "luminance": 0.11724309571708862
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "warm",
+      "profile": "framed-default",
+      "copy": {
+        "r": 80,
+        "g": 96,
+        "b": 107,
+        "luminance": 0.11132752402086928
+      },
+      "frame": {
+        "r": 84,
+        "g": 98,
+        "b": 110,
+        "luminance": 0.1174597182226717
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "warm",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 84,
+        "g": 98,
+        "b": 110,
+        "luminance": 0.1174597182226717
+      },
+      "frame": {
+        "r": 84,
+        "g": 98,
+        "b": 110,
+        "luminance": 0.1174597182226717
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "warm",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 84,
+        "g": 98,
+        "b": 110,
+        "luminance": 0.1174597182226717
+      },
+      "frame": {
+        "r": 84,
+        "g": 98,
+        "b": 110,
+        "luminance": 0.1174597182226717
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "film",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 71,
+        "g": 84,
+        "b": 94,
+        "luminance": 0.08488392635447284
+      },
+      "frame": {
+        "r": 74,
+        "g": 87,
+        "b": 98,
+        "luminance": 0.09154077839836268
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "film",
+      "profile": "compact-default",
+      "copy": {
+        "r": 71,
+        "g": 85,
+        "b": 94,
+        "luminance": 0.0864474428812612
+      },
+      "frame": {
+        "r": 74,
+        "g": 87,
+        "b": 98,
+        "luminance": 0.09154077839836268
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "film",
+      "profile": "standard-default",
+      "copy": {
+        "r": 72,
+        "g": 85,
+        "b": 95,
+        "luminance": 0.08700940032759244
+      },
+      "frame": {
+        "r": 75,
+        "g": 88,
+        "b": 99,
+        "luminance": 0.09376155224885693
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "film",
+      "profile": "framed-default",
+      "copy": {
+        "r": 72,
+        "g": 86,
+        "b": 95,
+        "luminance": 0.08859517871717013
+      },
+      "frame": {
+        "r": 75,
+        "g": 88,
+        "b": 99,
+        "luminance": 0.09376155224885693
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "film",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 75,
+        "g": 88,
+        "b": 99,
+        "luminance": 0.09376155224885693
+      },
+      "frame": {
+        "r": 75,
+        "g": 88,
+        "b": 99,
+        "luminance": 0.09376155224885693
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "film",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 75,
+        "g": 88,
+        "b": 99,
+        "luminance": 0.09376155224885693
+      },
+      "frame": {
+        "r": 75,
+        "g": 88,
+        "b": 99,
+        "luminance": 0.09376155224885693
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "soft",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 84,
+        "g": 97,
+        "b": 107,
+        "luminance": 0.11495742998274647
+      },
+      "frame": {
+        "r": 86,
+        "g": 100,
+        "b": 110,
+        "luminance": 0.12218565522848593
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "soft",
+      "profile": "compact-default",
+      "copy": {
+        "r": 84,
+        "g": 98,
+        "b": 107,
+        "luminance": 0.11681719618409293
+      },
+      "frame": {
+        "r": 86,
+        "g": 100,
+        "b": 110,
+        "luminance": 0.12218565522848593
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "soft",
+      "profile": "standard-default",
+      "copy": {
+        "r": 85,
+        "g": 98,
+        "b": 109,
+        "luminance": 0.11770786587032576
+      },
+      "frame": {
+        "r": 88,
+        "g": 100,
+        "b": 110,
+        "luminance": 0.12314838972964014
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "soft",
+      "profile": "framed-default",
+      "copy": {
+        "r": 85,
+        "g": 99,
+        "b": 109,
+        "luminance": 0.1195910198913063
+      },
+      "frame": {
+        "r": 88,
+        "g": 100,
+        "b": 111,
+        "luminance": 0.12336747134133057
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "soft",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 88,
+        "g": 100,
+        "b": 111,
+        "luminance": 0.12336747134133057
+      },
+      "frame": {
+        "r": 88,
+        "g": 100,
+        "b": 111,
+        "luminance": 0.12336747134133057
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "soft",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 88,
+        "g": 100,
+        "b": 111,
+        "luminance": 0.12336747134133057
+      },
+      "frame": {
+        "r": 88,
+        "g": 100,
+        "b": 111,
+        "luminance": 0.12336747134133057
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "monochrome",
+      "profile": "short-lookup",
+      "copy": {
+        "r": 84,
+        "g": 84,
+        "b": 84,
+        "luminance": 0.08865558628577294
+      },
+      "frame": {
+        "r": 88,
+        "g": 88,
+        "b": 88,
+        "luminance": 0.09758734714186246
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "monochrome",
+      "profile": "compact-default",
+      "copy": {
+        "r": 86,
+        "g": 86,
+        "b": 86,
+        "luminance": 0.09305896284668747
+      },
+      "frame": {
+        "r": 88,
+        "g": 88,
+        "b": 88,
+        "luminance": 0.09758734714186246
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "monochrome",
+      "profile": "standard-default",
+      "copy": {
+        "r": 86,
+        "g": 86,
+        "b": 86,
+        "luminance": 0.09305896284668747
+      },
+      "frame": {
+        "r": 89,
+        "g": 89,
+        "b": 89,
+        "luminance": 0.09989872824711389
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "monochrome",
+      "profile": "framed-default",
+      "copy": {
+        "r": 87,
+        "g": 87,
+        "b": 87,
+        "luminance": 0.0953074666309647
+      },
+      "frame": {
+        "r": 89,
+        "g": 89,
+        "b": 89,
+        "luminance": 0.09989872824711389
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "monochrome",
+      "profile": "compact-expanded",
+      "copy": {
+        "r": 89,
+        "g": 89,
+        "b": 89,
+        "luminance": 0.09989872824711389
+      },
+      "frame": {
+        "r": 89,
+        "g": 89,
+        "b": 89,
+        "luminance": 0.09989872824711389
+      }
+    },
+    {
+      "presetId": "midnight-wash",
+      "effect": "monochrome",
+      "profile": "wide-expanded",
+      "copy": {
+        "r": 89,
+        "g": 89,
+        "b": 89,
+        "luminance": 0.09989872824711389
+      },
+      "frame": {
+        "r": 89,
+        "g": 89,
+        "b": 89,
+        "luminance": 0.09989872824711389
+      }
     }
   ]
 }
