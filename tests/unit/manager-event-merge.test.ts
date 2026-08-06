@@ -175,4 +175,50 @@ describe('manager event merges', () => {
     expect(merged.theme).toBe(garden);
     expect(merged.name).toBe('Maya & Theo');
   });
+
+  it('adopts the revision and preparation a cover response carries', () => {
+    const preparation = {
+      operationId: 'operation-a',
+      status: 'preparing' as const,
+      completedSteps: 2,
+      requiredSteps: 6,
+      retryable: false,
+      safeFailureCode: null,
+      updatedAt: '2026-08-04T00:00:00.000Z',
+    };
+    const merged = mergeCoverResponse(current, {
+      ...staleElsewhere,
+      coverRevision: 4,
+      coverPreparation: preparation,
+    });
+    // Without the revision, the next publication sends `expectedRevision: 0`
+    // against a server at 4 and takes a 409 no host action caused.
+    expect(merged.coverRevision).toBe(4);
+    expect(merged.coverPreparation).toEqual(preparation);
+  });
+
+  it('keeps settings, theme, and photo-intake responses out of the cover domain', () => {
+    const coverMoved: EventView = {
+      ...staleElsewhere,
+      coverRevision: 9,
+      coverPreparation: {
+        operationId: 'operation-b',
+        status: 'applied',
+        completedSteps: 6,
+        requiredSteps: 6,
+        retryable: false,
+        safeFailureCode: null,
+        updatedAt: '2026-08-04T00:00:00.000Z',
+      },
+    };
+    for (const merged of [
+      mergeSettingsResponse(current, coverMoved),
+      mergeThemeResponse(current, coverMoved),
+      mergePhotoIntakeResponse(current, coverMoved),
+    ]) {
+      expect(merged.coverRevision).toBe(0);
+      expect(merged.coverPreparation).toBeNull();
+      expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+    }
+  });
 });

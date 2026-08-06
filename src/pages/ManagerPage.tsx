@@ -919,6 +919,7 @@ export function ManagerPage() {
           ref={appearanceAutosave}
           event={event}
           onEventWrite={eventWrite}
+          onEventRead={eventRead}
           onThemeSaved={(updated) => setEvent((current) => current ? mergeThemeResponse(current, updated) : updated)}
           onCoverSaved={(updated) => setEvent((current) => current ? mergeCoverResponse(current, updated) : updated)}
           onAutosaveStateChange={recordAutosaveState}

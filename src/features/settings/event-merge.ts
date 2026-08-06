@@ -38,7 +38,17 @@ const PHOTO_INTAKE_AND_SCHEDULE_OWNED = [
 ] as const satisfies readonly (keyof EventView)[];
 
 const THEME_OWNED = ['theme'] as const satisfies readonly (keyof EventView)[];
-const COVER_OWNED = ['coverObjectKey'] as const satisfies readonly (keyof EventView)[];
+// All three, not just presence. `mergeOwned` copies only what is listed, so an
+// unlisted `coverRevision` would leave client state holding the pre-publication
+// number after a publication answered with the new one — and the next
+// publication would send a stale `expectedRevision` and take a 409 no host
+// action caused. `coverPreparation` is on the same response and has the same
+// owner, so it is listed beside it rather than merged by a second path.
+const COVER_OWNED = [
+  'coverObjectKey',
+  'coverPreparation',
+  'coverRevision',
+] as const satisfies readonly (keyof EventView)[];
 
 function mergeOwned(
   current: EventView,

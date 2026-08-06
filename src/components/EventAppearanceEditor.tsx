@@ -17,7 +17,14 @@ import {
   resolveEventTheme,
   serializeEventThemeConfig,
 } from '../../shared/event-theme';
+import { COVER_UPLOAD_MIME_TYPES, MAX_COVER_UPLOAD_BYTES } from '../../shared/constants';
 import { api, ClientApiError } from '../app/api';
+import {
+  CoverUploadRejected,
+  publishCoverRemoval,
+  publishCoverUpload,
+  type CoverCompositionRunner,
+} from '../features/cover/cover-draft-client';
 import {
   createAutosaveQueue,
   type AutosaveFailure,
@@ -29,6 +36,7 @@ import {
 } from '../features/settings/autosave-queue';
 import { AutosaveStatus } from './AutosaveStatus';
 import { EventAppearancePreview } from './EventAppearancePreview';
+import { ManagerCoverPreparationStatus } from './ManagerCoverPreparationStatus';
 import { EventThemePresetSelector } from './EventThemePresetSelector';
 import { describeLoadFailure } from './States';
 
@@ -41,6 +49,12 @@ interface EventAppearanceEditorProps {
   onAutosaveStateChange(state: DomainAutosaveState): void;
   // Brackets a write so an older whole-event read cannot rebase this editor.
   onEventWrite<T>(request: () => Promise<T>): Promise<T>;
+  // A fresh whole-event read, so an outcome the host was not waiting on still
+  // reaches the canvas. `EventSettingsEditor` already receives the same one.
+  onEventRead<T>(request: () => Promise<T>): Promise<T>;
+  // Injected in tests for the same reason `GuestUploadFlow` takes a transport:
+  // the real one decodes an image in a Web Worker, and jsdom has neither.
+  compositionRunner?: CoverCompositionRunner;
   ref?: Ref<AutosaveHandle>;
 }
 
@@ -50,8 +64,13 @@ type ColorKind = 'primaryColor' | 'accentColor';
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/u;
 const SYNTAX_ERROR = 'Enter a six-digit hex color, such as #245c46.';
-const COVER_ACCEPT = 'image/jpeg,image/png,image/webp';
-const COVER_MAX_BYTES = 10 * 1024 * 1024;
+// Driven by the server's own constants. The literals that stood here said JPEG,
+// PNG, and WebP at 10 MiB while the route accepted seven types at 20 MiB, and
+// neither control accepted HEIC — which is what an iPhone photo picker hands
+// over, so §15.4's HEIC acceptance was blocked in the browser before any server
+// saw it.
+const COVER_ACCEPT = COVER_UPLOAD_MIME_TYPES.join(',');
+const COVER_MAX_MB = Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000);
 
 function rawColors(theme: ResolvedEventTheme) {
   return {
@@ -70,6 +89,8 @@ export function EventAppearanceEditor({
   onCoverSaved,
   onAutosaveStateChange,
   onEventWrite,
+  onEventRead,
+  compositionRunner,
   ref,
 }: EventAppearanceEditorProps) {
   const initialRaw = rawColors(event.theme);
@@ -308,34 +329,24 @@ export function EventAppearanceEditor({
 
   async function uploadCover(file: File) {
     if (coverBusy) return;
-    if (file.size > COVER_MAX_BYTES) {
-      setCoverError('Cover photos must be 10 MB or smaller.');
-      return;
-    }
     setCoverBusy(true);
     setCoverError(null);
     try {
-      const result = await onEventWrite(async () => {
-        const upload = await api<{ objectKey: string; url: string }>('/api/manage/events/' + event.id + '/cover', {
-          method: 'POST',
-          body: JSON.stringify({ filename: file.name, mimeType: file.type, byteSize: file.size }),
-        });
-        const transferred = await fetch(upload.url, {
-          method: 'PUT',
-          headers: { 'content-type': file.type },
-          body: file,
-        });
-        if (!transferred.ok) throw new Error('Cover transfer failed.');
-        return api<{ event: EventView }>('/api/manage/events/' + event.id + '/cover/finalize', {
-          method: 'POST',
-          body: JSON.stringify({ objectKey: upload.objectKey, mimeType: file.type }),
-        });
-      });
-      onCoverSaved(result.event);
+      const result = await onEventWrite(() => publishCoverUpload({
+        eventId: event.id,
+        file,
+        // Every publication carries the revision this page last read. A stale one
+        // is a 409 whose recovery view carries the current number.
+        expectedRevision: event.coverRevision,
+        runComposition: compositionRunner,
+      }));
+      // An upload answers `202`: the receipt is accepted and durable, but the
+      // cover is not live until its renderings are. The status beside the summary
+      // owns the rest, and the current cover stays exactly as it was.
+      if (result.event) onCoverSaved(result.event);
+      else await refreshEvent();
     } catch (caught) {
-      setCoverError(caught instanceof ClientApiError
-        ? caught.message
-        : 'The cover photo could not be saved. Try again.');
+      setCoverError(describeCoverFailure(caught, 'The cover photo could not be saved. Try again.'));
     } finally {
       setCoverBusy(false);
       if (coverInput.current) coverInput.current.value = '';
@@ -347,17 +358,28 @@ export function EventAppearanceEditor({
     setCoverBusy(true);
     setCoverError(null);
     try {
-      const result = await onEventWrite(() => api<{ event: EventView }>('/api/manage/events/' + event.id + '/cover', {
-        method: 'DELETE',
-      }));
-      onCoverSaved(result.event);
+      // Removal is a publication like any other: one of exactly two configs this
+      // release can publish, through the same revision guard and receipt.
+      const result = await onEventWrite(() => publishCoverRemoval(event.id, event.coverRevision));
+      if (result.event) onCoverSaved(result.event);
+      else await refreshEvent();
     } catch (caught) {
-      setCoverError(caught instanceof ClientApiError
-        ? caught.message
-        : 'The cover photo could not be removed. Try again.');
+      setCoverError(describeCoverFailure(caught, 'The cover photo could not be removed. Try again.'));
     } finally {
       setCoverBusy(false);
     }
+  }
+
+  async function refreshEvent() {
+    const loaded = await onEventRead(() => api<{ event: EventView }>(
+      '/api/manage/events/' + event.id,
+    ));
+    onCoverSaved(loaded.event);
+  }
+
+  function describeCoverFailure(caught: unknown, fallback: string): string {
+    if (caught instanceof CoverUploadRejected) return caught.message;
+    return caught instanceof ClientApiError ? caught.message : fallback;
   }
 
   const primaryError = errors['overrides.primaryColor'];
@@ -395,7 +417,12 @@ export function EventAppearanceEditor({
         <strong>Cover photo</strong>
         <p>{event.coverObjectKey
           ? 'Shown on the guest hero for RSVP and photo delivery.'
-          : 'Optional. JPEG, PNG, or WebP · 10 MB max.'}</p>
+          : `Optional. JPEG, PNG, WebP, or HEIC · ${COVER_MAX_MB} MB max.`}</p>
+        <ManagerCoverPreparationStatus
+          eventId={event.id}
+          preparation={event.coverPreparation}
+          onResolved={() => { void refreshEvent(); }}
+        />
       </div>
       <div className="event-appearance-editor__cover-actions">
         <label className="cover-field cover-field--compact">
