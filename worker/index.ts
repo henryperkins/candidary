@@ -6,7 +6,13 @@ import { NotificationService } from './services/notifications';
 import { processExport } from './workflows/export';
 import { scheduledCleanup } from './workflows/cleanup';
 import { EVENT_COVER_PROFILES } from '../shared/event-cover';
-import type { CoverBackfillPayload } from './workflows/cover-backfill';
+import {
+  coverBackfillFinalize,
+  coverBackfillNormalize,
+  coverBackfillPreflight,
+  coverBackfillProfileStep,
+  type CoverBackfillPayload,
+} from './workflows/cover-backfill';
 import {
   coverRenderFinalize,
   coverRenderPreflight,
@@ -54,15 +60,39 @@ export class CoverRenderWorkflow extends WorkflowEntrypoint<AppEnv, CoverRenderP
   }
 }
 
-/** Release-only. Converts one pre-0012 legacy original onto the new pipeline. */
+/**
+ * Release-only. Converts one pre-0012 legacy original onto the new pipeline.
+ *
+ * Nine deterministically named steps rather than the render Workflow's eight:
+ * normalization is its own step because, unlike a publication, a backfill job
+ * arrives with no master and its manifest cannot be derived until the ladder
+ * has chosen a rung. Every exit before `finalize` leaves the legacy original in
+ * place and the event on the compatibility reader.
+ */
 export class CoverBackfillWorkflow extends WorkflowEntrypoint<AppEnv, CoverBackfillPayload> {
   async run(event: WorkflowEvent<CoverBackfillPayload>, step: WorkflowStep) {
-    return step.do('preflight cover backfill job', async () => ({
-      runId: event.payload.runId,
-      jobId: event.payload.jobId,
-      eventId: event.payload.eventId,
-      shouldRender: false,
-    }));
+    const preflight = await step.do(
+      'preflight cover backfill job',
+      async () => coverBackfillPreflight(this.env, event.payload),
+    );
+    if (!preflight.shouldContinue) return preflight.outcome;
+
+    const normalized = await step.do(
+      'normalize legacy cover master',
+      async () => coverBackfillNormalize(this.env, event.payload),
+    );
+    if (!normalized.shouldContinue) return normalized.outcome;
+
+    for (const profile of EVENT_COVER_PROFILES) {
+      await step.do(
+        `render backfill profile ${profile.id}`,
+        async () => coverBackfillProfileStep(this.env, event.payload, profile.id),
+      );
+    }
+    return step.do(
+      'finalize cover backfill job',
+      async () => coverBackfillFinalize(this.env, event.payload),
+    );
   }
 }
 

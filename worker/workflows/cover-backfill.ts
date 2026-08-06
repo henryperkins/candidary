@@ -1,3 +1,45 @@
+import {
+  COVER_PIPELINE_VERSIONS,
+  EVENT_COVER_PROFILES,
+  type EventCoverProfileId,
+  canonicalCoverConfig,
+} from '../../shared/event-cover';
+import { ApiError } from '../../shared/errors';
+import { adoptCoverRenderObject } from '../db/event-covers';
+import { coverPointerStatements } from '../db/events';
+import type { EventRow } from '../db/events';
+import type { CoverBackfillJobRow, CoverMasterRow, CoverRenderSetRow } from '../db/types';
+import type { AppEnv } from '../env';
+import { coverRequestDigest } from '../services/event-cover-publication';
+import {
+  normalizeCoverMaster,
+  renderCoverProfileObject,
+  verifyCoverManifest,
+} from '../storage/event-cover-images';
+import { coverKeyFingerprint } from '../storage/event-cover-keys';
+import { deriveCoverSlots, type CoverRenderSlot } from './cover-render';
+
+/**
+ * Converts one pre-`0012` legacy original onto the responsive pipeline.
+ *
+ * Release-only, and deliberately the same engine as publication rather than a
+ * parallel one: the same normalization service, the same source-qualified
+ * manifest rules, the same replay-safe profile operations, and the same
+ * fence discipline. What differs is ownership. A backfill job is not a host
+ * intent, so it consumes no draft slot, no publication receipt, and none of the
+ * event's mutation-rate capacity — an operator sweeping every legacy cover must
+ * not be able to lock a host out of changing their own.
+ *
+ * Two properties matter more than throughput. **No release phase silently
+ * discards an existing cover**: a source that cannot enter Images, cannot meet
+ * the 1x minimum without upscaling, or cannot pass the master ladder becomes
+ * `needs_replacement` and stays on the compatibility reader, never degraded and
+ * never deleted. And **a newer cover always wins**: every predicate carries the
+ * original key fingerprint, the expected revision, and the null render set, so a
+ * host who replaced their cover between inventory and execution turns the job
+ * into `skipped` rather than having their choice overwritten by a sweep.
+ */
+
 /**
  * The payload one legacy-cover backfill job's Workflow instance carries.
  *
@@ -11,3 +53,653 @@ export interface CoverBackfillPayload {
   jobId: string;
   eventId: string;
 }
+
+/**
+ * The wrangler binding name, and an immutable release constant from `0012`
+ * onward for the same reason `COVER_RENDER_BINDING` is: it is written into every
+ * fence row protecting a backfill instance, so renaming it orphans them.
+ */
+export const COVER_BACKFILL_BINDING = 'COVER_BACKFILL_WORKFLOW';
+
+const JOB_REFERENCE_RELEASE_MS = 7 * 24 * 60 * 60 * 1000;
+const JOB_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
+const RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
+/** A restart is reachable only inside this window, and only for a retryable job. */
+export const BACKFILL_RESTART_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export type CoverBackfillStatus =
+  | 'applied'
+  | 'skipped'
+  | 'resolved'
+  | 'needs_replacement'
+  | 'failed';
+
+export interface CoverBackfillOutcome {
+  status: CoverBackfillStatus;
+  appliedRevision: number | null;
+  failureCode: string | null;
+  retryable: boolean;
+}
+
+export interface CoverBackfillStage {
+  shouldContinue: boolean;
+  outcome: CoverBackfillOutcome;
+}
+
+export interface CoverBackfillStepSummary {
+  profile: EventCoverProfileId;
+  /** Small inventory only. Image bytes stay in R2, never in Workflow state. */
+  written: number;
+  adopted: number;
+}
+
+/**
+ * The source-independent dependency snapshot pinned at job creation.
+ *
+ * Source-independent is the operative word: every version here is decided before
+ * the legacy object is read, so a restart inside the window renders under
+ * exactly the resolvers the first attempt used even though the master those
+ * resolvers produce is derived later.
+ */
+export function coverBackfillDependencyVersions(): Record<string, number> {
+  return {
+    normalizationLadder: COVER_PIPELINE_VERSIONS.normalizationLadder,
+    imagesParameterRecipe: COVER_PIPELINE_VERSIONS.imagesParameterRecipe,
+    matte: COVER_PIPELINE_VERSIONS.matte,
+    metadataPolicy: COVER_PIPELINE_VERSIONS.metadataPolicy,
+    compositionModel: COVER_PIPELINE_VERSIONS.compositionModel,
+    cropProfileRegistry: COVER_PIPELINE_VERSIONS.cropProfileRegistry,
+    tonalEffect: COVER_PIPELINE_VERSIONS.tonalEffect,
+    sharpening: COVER_PIPELINE_VERSIONS.sharpening,
+    outputQualityLadder: COVER_PIPELINE_VERSIONS.outputQualityLadder,
+  };
+}
+
+/** Unique within `CoverBackfillWorkflow`; a later run derives a different ID. */
+export async function coverBackfillInstanceId(
+  runId: string,
+  jobId: string,
+  eventId: string,
+): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`cover-backfill-v1|${runId}|${jobId}|${eventId}`),
+  );
+  const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `cb1-${hex.slice(0, 48)}`;
+}
+
+/**
+ * The canonical config every backfilled cover receives.
+ *
+ * `natural` and automatic focus, because there is no host intent to recover: a
+ * pre-`0012` original was never composed or styled, and inventing either would
+ * change how an existing event looks without its host asking.
+ */
+export const BACKFILL_COVER_CONFIG = {
+  version: 1,
+  source: { kind: 'upload' },
+  focus: { mode: 'auto' },
+  effect: 'natural',
+} as const;
+
+function stage(
+  status: CoverBackfillStatus,
+  failureCode: string | null = null,
+  retryable = false,
+  appliedRevision: number | null = null,
+): CoverBackfillStage {
+  return {
+    shouldContinue: false,
+    outcome: { status, appliedRevision, failureCode, retryable },
+  };
+}
+
+const CONTINUE: CoverBackfillStage = {
+  shouldContinue: true,
+  outcome: { status: 'skipped', appliedRevision: null, failureCode: null, retryable: true },
+};
+
+interface BackfillState {
+  job: CoverBackfillJobRow;
+  event: EventRow;
+}
+
+async function loadState(env: AppEnv, payload: CoverBackfillPayload): Promise<BackfillState | null> {
+  const job = await env.DB.prepare(
+    'SELECT * FROM event_cover_backfill_jobs WHERE id = ? AND run_id = ? AND event_id = ?',
+  ).bind(payload.jobId, payload.runId, payload.eventId).first<CoverBackfillJobRow>();
+  if (!job) return null;
+  const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?')
+    .bind(payload.eventId).first<EventRow>();
+  return event ? { job, event } : null;
+}
+
+/**
+ * Whether the exact row this job was created against is still the current one.
+ *
+ * All four predicates travel together everywhere they appear. Checking three of
+ * them is how a sweep overwrites the cover a host chose while the job sat in the
+ * queue, and the fingerprint is the one that catches a replacement that happened
+ * to land back on the same revision.
+ */
+export async function backfillPredicatesHold(
+  job: CoverBackfillJobRow,
+  event: EventRow,
+): Promise<boolean> {
+  if (event.deleted_at) return false;
+  if (!event.cover_object_key || event.cover_render_set_id !== null) return false;
+  if (event.cover_revision !== job.expected_revision) return false;
+  return await coverKeyFingerprint(event.cover_object_key) === job.legacy_key_fingerprint;
+}
+
+function terminalTimestamps(now: Date, ageOut: boolean): {
+  terminalAt: string;
+  referenceReleaseAt: string | null;
+  expiresAt: string | null;
+} {
+  const terminalAt = now.toISOString();
+  if (!ageOut) return { terminalAt, referenceReleaseAt: null, expiresAt: null };
+  return {
+    terminalAt,
+    referenceReleaseAt: new Date(now.getTime() + JOB_REFERENCE_RELEASE_MS).toISOString(),
+    expiresAt: new Date(now.getTime() + JOB_EXPIRY_MS).toISOString(),
+  };
+}
+
+/**
+ * Run counters, recomputed from the jobs rather than decremented.
+ *
+ * A manual decrement is wrong the first time a job moves between two nonterminal
+ * states twice, and the ledger's whole purpose is to be truthful after an
+ * interruption. Always batched with the transition it summarizes.
+ */
+export function recomputeBackfillRunCounters(
+  db: D1Database,
+  runId: string,
+  now: Date,
+): D1PreparedStatement {
+  return db.prepare(`
+    UPDATE event_cover_backfill_runs SET
+      total_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1),
+      queued_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1
+                        AND status IN ('queued', 'normalizing', 'rendering', 'finalizing')),
+      applied_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1 AND status = 'applied'),
+      skipped_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1 AND status = 'skipped'),
+      resolved_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1 AND status = 'resolved'),
+      failed_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1 AND status = 'failed'),
+      needs_replacement_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1
+                                   AND status = 'needs_replacement'),
+      updated_at = ?2
+    WHERE id = ?1
+  `).bind(runId, now.toISOString());
+}
+
+async function recordTerminal(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  status: CoverBackfillStatus,
+  now: Date,
+  options: { failureCode?: string | null; retryable?: boolean; abandonSetId?: string | null } = {},
+): Promise<void> {
+  const retryable = options.retryable === true;
+  // A `needs_replacement` job and a retryable failure inside its window never age
+  // out: one still blocks the zero-legacy proof, and the other is still
+  // restartable. Only a settled job gets a reference release and an expiry.
+  const { terminalAt, referenceReleaseAt, expiresAt } = terminalTimestamps(
+    now,
+    !retryable && status !== 'needs_replacement',
+  );
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = ?, failure_code = ?, retryable = ?, terminal_at = ?,
+          reference_release_at = ?, expires_at = ?, updated_at = ?
+      WHERE id = ? AND status NOT IN ('applied', 'skipped', 'resolved')
+    `).bind(
+      status, options.failureCode ?? null, retryable ? 1 : 0, terminalAt,
+      referenceReleaseAt, expiresAt, terminalAt, payload.jobId,
+    ),
+  ];
+  if (options.abandonSetId) {
+    statements.push(env.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'abandoned', abandoned_reason = ?, abandoned_at = ?, cleanup_after = ?
+      WHERE id = ? AND state IN ('staging', 'ready')
+    `).bind(
+      options.failureCode ?? status, terminalAt,
+      new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString(), options.abandonSetId,
+    ));
+  }
+  statements.push(recomputeBackfillRunCounters(env.DB, payload.runId, now));
+  await env.DB.batch(statements);
+}
+
+/**
+ * Step 1: everything that must hold before the legacy object is even read.
+ *
+ * The fence is checked before Images and R2 for the same reason publication
+ * checks it there: an instance that survived an event purge must exit without
+ * writing objects into a prefix that has already been swept.
+ */
+export async function coverBackfillPreflight(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  now = new Date(),
+): Promise<CoverBackfillStage> {
+  const state = await loadState(env, payload);
+  if (!state) return stage('skipped');
+  const { job, event } = state;
+
+  if (job.status === 'applied') return stage('applied', null, false, event.cover_revision);
+  if (job.status === 'skipped' || job.status === 'resolved') return stage(job.status);
+  if (job.status === 'needs_replacement') return stage('needs_replacement', job.failure_code);
+  if (job.status === 'failed' && job.retryable === 0) return stage('failed', job.failure_code);
+
+  const fence = await env.DB.prepare(`
+    SELECT state FROM event_cover_workflow_fences
+    WHERE workflow_binding = ? AND workflow_instance_id = ?
+  `).bind(COVER_BACKFILL_BINDING, job.workflow_instance_id).first<{ state: string }>();
+  if (fence && fence.state !== 'open') {
+    await recordTerminal(env, payload, 'failed', now, {
+      failureCode: 'COVER_RENDER_UNAVAILABLE',
+      abandonSetId: job.render_set_id,
+    });
+    return stage('failed', 'COVER_RENDER_UNAVAILABLE');
+  }
+
+  // A row that changed after inventory is skipped, not failed. A host replacing
+  // their own cover is not a defect; it is the guard working.
+  if (!await backfillPredicatesHold(job, event)) {
+    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: job.render_set_id });
+    return stage('skipped');
+  }
+
+  // A replay that is already past normalization continues where it stopped
+  // rather than restarting the ladder it already paid for.
+  if (job.status === 'rendering' || job.status === 'finalizing') return CONTINUE;
+
+  const advanced = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'normalizing', updated_at = ?
+      WHERE id = ? AND status IN ('queued', 'normalizing')
+    `).bind(now.toISOString(), payload.jobId),
+    recomputeBackfillRunCounters(env.DB, payload.runId, now),
+  ]);
+  if ((advanced[0]?.meta.changes ?? 0) !== 1) return stage('skipped');
+  return CONTINUE;
+}
+
+/**
+ * Steps 2-4: inspect, normalize, then freeze the manifest and staging set.
+ *
+ * The manifest cannot be derived any earlier. Its 2x membership depends on the
+ * winning master dimensions, and those are unknown until the five-rung ladder has
+ * chosen a rung — which is exactly why `manifest_json` and `render_set_id` are
+ * nullable in `queued` and `normalizing` and required from `rendering` onward.
+ */
+export async function coverBackfillNormalize(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  now = new Date(),
+): Promise<CoverBackfillStage> {
+  const state = await loadState(env, payload);
+  if (!state) return stage('skipped');
+  const { job, event } = state;
+
+  if (job.status === 'rendering' || job.status === 'finalizing') return CONTINUE;
+  if (job.status !== 'normalizing') return stage('skipped');
+  if (!await backfillPredicatesHold(job, event)) {
+    await recordTerminal(env, payload, 'skipped', now);
+    return stage('skipped');
+  }
+
+  const masterId = crypto.randomUUID();
+  let master: CoverMasterRow;
+  try {
+    const normalized = await normalizeCoverMaster(env, {
+      eventId: payload.eventId,
+      masterId,
+      rawKey: event.cover_object_key!,
+    });
+    // Centre focus, written with the master rather than after it: no historic
+    // focal point exists to recover, and a master a draft could later edit from
+    // must never be left without the point Reset returns to.
+    await env.DB.prepare(`
+      INSERT INTO event_cover_masters (
+        id, event_id, object_key, mime_type, byte_size, width, height, sha256,
+        normalization_version, normalization_rung,
+        auto_focus_x, auto_focus_y, composition_model_version, created_at
+      ) VALUES (?, ?, ?, 'image/webp', ?, ?, ?, ?, ?, ?, 0.5, 0.5, ?, ?)
+    `).bind(
+      masterId, payload.eventId, normalized.objectKey, normalized.byteSize,
+      normalized.width, normalized.height, normalized.sha256,
+      normalized.normalizationVersion, normalized.rung,
+      COVER_PIPELINE_VERSIONS.compositionModel, now.toISOString(),
+    ).run();
+    master = (await env.DB.prepare('SELECT * FROM event_cover_masters WHERE id = ?')
+      .bind(masterId).first<CoverMasterRow>())!;
+  } catch (error) {
+    // A source Candidary cannot normalize is not a failure of this job — it is a
+    // photo that needs replacing. It stays on the compatibility reader, and the
+    // proof stays red until its host replaces or removes it.
+    const code = error instanceof ApiError ? error.code : 'COVER_RENDER_UNAVAILABLE';
+    const needsReplacement = code === 'COVER_SOURCE_UNSUPPORTED'
+      || code === 'COVER_SOURCE_TOO_SMALL'
+      || code === 'COVER_MASTER_BUDGET_EXHAUSTED'
+      || code === 'UPLOAD_OBJECT_MISSING';
+    await recordTerminal(env, payload, needsReplacement ? 'needs_replacement' : 'failed', now, {
+      failureCode: code,
+      retryable: !needsReplacement,
+    });
+    return stage(needsReplacement ? 'needs_replacement' : 'failed', code, !needsReplacement);
+  }
+
+  const slots = deriveCoverSlots(master, BACKFILL_COVER_CONFIG.focus);
+  const manifestJson = JSON.stringify({ slots });
+  const recipeJson = canonicalCoverConfig(BACKFILL_COVER_CONFIG);
+  const renderSetId = crypto.randomUUID();
+  const timestamp = now.toISOString();
+
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO event_cover_render_sets (
+        id, event_id, master_id, draft_id, recipe_json, recipe_sha256,
+        state, required_slots, created_at
+      )
+      SELECT ?, ?, ?, NULL, ?, ?, 'staging', ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM events
+        WHERE id = ? AND deleted_at IS NULL AND cover_revision = ?
+          AND cover_object_key = ? AND cover_render_set_id IS NULL
+      )
+    `).bind(
+      renderSetId, payload.eventId, masterId, recipeJson,
+      await coverRequestDigest(recipeJson), slots.length, timestamp,
+      payload.eventId, job.expected_revision, event.cover_object_key,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'rendering', master_id = ?, render_set_id = ?,
+          manifest_json = ?, manifest_sha256 = ?, updated_at = ?
+      WHERE id = ? AND status = 'normalizing' AND changes() = 1
+    `).bind(
+      masterId, renderSetId, manifestJson, await coverRequestDigest(manifestJson),
+      timestamp, payload.jobId,
+    ),
+    recomputeBackfillRunCounters(env.DB, payload.runId, now),
+  ]);
+
+  if ((results[1]?.meta.changes ?? 0) !== 1) {
+    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: renderSetId });
+    return stage('skipped');
+  }
+  return CONTINUE;
+}
+
+/** Step 5, one profile at a time and individually replay-safe. */
+export async function coverBackfillProfileStep(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  profile: EventCoverProfileId,
+  now = new Date(),
+): Promise<CoverBackfillStepSummary> {
+  const state = await loadState(env, payload);
+  if (!state || state.job.status !== 'rendering') return { profile, written: 0, adopted: 0 };
+  const { job } = state;
+  if (!job.master_id || !job.render_set_id || !job.manifest_json) {
+    throw new ApiError('COVER_RENDER_UNAVAILABLE', 'This cover could not be prepared.', 503);
+  }
+  const master = await env.DB.prepare('SELECT * FROM event_cover_masters WHERE id = ?')
+    .bind(job.master_id).first<CoverMasterRow>();
+  if (!master) {
+    throw new ApiError('COVER_RENDER_UNAVAILABLE', 'This cover could not be prepared.', 503);
+  }
+
+  // The frozen manifest, not a re-derivation. Re-deriving here would let a
+  // dependency change between steps produce a set nothing ever verified.
+  const { slots } = JSON.parse(job.manifest_json) as { slots: CoverRenderSlot[] };
+  let written = 0;
+  let adopted = 0;
+  for (const slot of slots) {
+    if (slot.profile !== profile) continue;
+    const result = await renderCoverProfileObject(env, {
+      eventId: payload.eventId,
+      renderSetId: job.render_set_id,
+      masterKey: master.object_key,
+      master: { width: master.width, height: master.height },
+      focus: { x: 0.5, y: 0.5, zoom: 1 },
+      effect: BACKFILL_COVER_CONFIG.effect,
+      profile: slot.profile,
+      density: slot.density,
+      format: slot.format,
+    });
+    await adoptCoverRenderObject(env.DB, {
+      renderSetId: job.render_set_id,
+      eventId: payload.eventId,
+      profileId: slot.profile,
+      density: slot.density,
+      format: slot.format,
+      objectKey: result.objectKey,
+      contentType: result.contentType,
+      byteSize: result.byteSize,
+      width: result.width,
+      height: result.height,
+      qualityRung: result.rung,
+      sha256: result.sha256,
+      now,
+    });
+    if (result.adopted) adopted += 1; else written += 1;
+  }
+  return { profile, written, adopted };
+}
+
+/**
+ * Steps 6-7: verify the exact manifest, then swap the pointers under guard.
+ *
+ * The legacy original is inventoried by the same statements that displace it —
+ * `coverPointerStatements` with a `backfilled` reason — so there is no window in
+ * which the pointer has moved and the only record of the old object has not been
+ * written. Nothing is deleted from R2 here or anywhere in this Workflow.
+ */
+export async function coverBackfillFinalize(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  now = new Date(),
+): Promise<CoverBackfillOutcome> {
+  const state = await loadState(env, payload);
+  if (!state) return stage('skipped').outcome;
+  const { job, event } = state;
+  if (job.status === 'applied') {
+    return {
+      status: 'applied', appliedRevision: event.cover_revision, failureCode: null, retryable: false,
+    };
+  }
+  if (job.status !== 'rendering' && job.status !== 'finalizing') return stage('skipped').outcome;
+  if (!job.render_set_id || !job.master_id) return stage('skipped').outcome;
+
+  if (!await backfillPredicatesHold(job, event)) {
+    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: job.render_set_id });
+    return stage('skipped').outcome;
+  }
+
+  const set = await env.DB.prepare('SELECT * FROM event_cover_render_sets WHERE id = ?')
+    .bind(job.render_set_id).first<CoverRenderSetRow>();
+  const master = await env.DB.prepare('SELECT * FROM event_cover_masters WHERE id = ?')
+    .bind(job.master_id).first<CoverMasterRow>();
+  if (!set || !master) return stage('skipped').outcome;
+
+  const verdict = await verifyCoverManifest(env, set.id);
+  if (!verdict.complete) {
+    await recordTerminal(env, payload, 'failed', now, {
+      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED',
+      abandonSetId: set.id,
+    });
+    return {
+      status: 'failed', appliedRevision: null,
+      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED', retryable: false,
+    };
+  }
+
+  const timestamp = now.toISOString();
+  const nextRevision = job.expected_revision + 1;
+  const { referenceReleaseAt, expiresAt } = terminalTimestamps(now, true);
+
+  const results = await env.DB.batch([
+    ...coverPointerStatements(env.DB, {
+      eventId: payload.eventId,
+      expectedRevision: job.expected_revision,
+      expectedCurrentKey: event.cover_object_key,
+      expectedCurrentRenderSetId: null,
+      nextConfig: canonicalCoverConfig(BACKFILL_COVER_CONFIG),
+      nextObjectKey: master.object_key,
+      nextRenderSetId: set.id,
+      retiredAt: timestamp,
+      cleanupAfter: new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString(),
+      retiredKeyFingerprint: job.legacy_key_fingerprint,
+      reason: 'backfilled',
+    }),
+    // Predicated on the revision having actually moved: a zero-change UPDATE does
+    // not error a D1 batch, so without this a lost guard would still activate the
+    // set and mark the job applied.
+    env.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'active', manifest_sha256 = ?, published_revision = ?,
+          ready_at = COALESCE(ready_at, ?), published_at = ?
+      WHERE id = ? AND state IN ('staging', 'ready')
+        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+    `).bind(
+      job.manifest_sha256, nextRevision, timestamp, timestamp,
+      set.id, payload.eventId, nextRevision,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'applied', failure_code = NULL, retryable = 0, terminal_at = ?,
+          reference_release_at = ?, expires_at = ?, updated_at = ?
+      WHERE id = ? AND status IN ('rendering', 'finalizing')
+        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+    `).bind(
+      timestamp, referenceReleaseAt, expiresAt, timestamp,
+      payload.jobId, payload.eventId, nextRevision,
+    ),
+    recomputeBackfillRunCounters(env.DB, payload.runId, now),
+  ]);
+
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: set.id });
+    return stage('skipped').outcome;
+  }
+  return { status: 'applied', appliedRevision: nextRevision, failureCode: null, retryable: false };
+}
+
+/**
+ * The one exit from `needs_replacement` and `failed` that is not terminal.
+ *
+ * A job whose source is no longer current cannot block the zero-legacy proof:
+ * the host replaced or removed that cover themselves, or a later job applied it.
+ * Nothing about the job's history changes — it simply stops counting against a
+ * proof it can no longer say anything true about.
+ */
+export async function resolveSupersededBackfillJobs(
+  env: AppEnv,
+  runId: string,
+  now = new Date(),
+  limit = 100,
+): Promise<number> {
+  const { results } = await env.DB.prepare(`
+    SELECT * FROM event_cover_backfill_jobs
+    WHERE run_id = ? AND status IN ('needs_replacement', 'failed')
+    ORDER BY updated_at LIMIT ?
+  `).bind(runId, limit).all<CoverBackfillJobRow>();
+
+  let resolved = 0;
+  for (const job of results) {
+    const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(job.event_id).first<EventRow>();
+    const stillCurrent = event !== null
+      && !event.deleted_at
+      && event.cover_object_key !== null
+      && event.cover_render_set_id === null
+      && await coverKeyFingerprint(event.cover_object_key) === job.legacy_key_fingerprint;
+    if (stillCurrent) continue;
+
+    const { terminalAt, referenceReleaseAt, expiresAt } = terminalTimestamps(now, true);
+    const updated = await env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'resolved', retryable = 0, terminal_at = COALESCE(terminal_at, ?),
+          reference_release_at = ?, expires_at = ?, updated_at = ?
+      WHERE id = ? AND status IN ('needs_replacement', 'failed')
+    `).bind(terminalAt, referenceReleaseAt, expiresAt, terminalAt, job.id).run();
+    if (updated.meta.changes === 1) resolved += 1;
+  }
+  if (resolved > 0) await recomputeBackfillRunCounters(env.DB, runId, now).run();
+  return resolved;
+}
+
+export interface ZeroLegacyProof {
+  legacyRows: number;
+  blockingJobs: number;
+  incompleteActiveSets: number;
+  uploadsWithoutActiveSet: number;
+  proven: boolean;
+}
+
+/**
+ * The direct D1 proof phase 3 is gated on.
+ *
+ * Four independent counts rather than one clever query, because each names a
+ * different way the cutover could be incomplete and an operator needs to know
+ * which. `blockingJobs` deliberately counts across every retained run: a
+ * historical job cannot keep the proof red after its exact source was safely
+ * replaced, but it must not be ignorable while that source is still current.
+ */
+export async function proveZeroLegacyCovers(env: AppEnv): Promise<ZeroLegacyProof> {
+  const legacy = await env.DB.prepare(`
+    SELECT count(*) AS count FROM events
+    WHERE cover_object_key IS NOT NULL AND cover_render_set_id IS NULL AND deleted_at IS NULL
+  `).first<{ count: number }>();
+
+  const blocking = await env.DB.prepare(`
+    SELECT count(*) AS count FROM event_cover_backfill_jobs j
+    JOIN events e ON e.id = j.event_id
+    WHERE j.status IN ('needs_replacement', 'failed')
+      AND e.deleted_at IS NULL
+      AND e.cover_object_key IS NOT NULL
+      AND e.cover_render_set_id IS NULL
+  `).first<{ count: number }>();
+
+  const incomplete = await env.DB.prepare(`
+    SELECT count(*) AS count FROM event_cover_render_sets s
+    WHERE s.state = 'active'
+      AND s.required_slots <> (
+        SELECT count(*) FROM event_cover_render_objects o WHERE o.render_set_id = s.id
+      )
+  `).first<{ count: number }>();
+
+  const orphaned = await env.DB.prepare(`
+    SELECT count(*) AS count FROM events e
+    WHERE e.deleted_at IS NULL
+      AND json_extract(e.cover_config, '$.source.kind') = 'upload'
+      AND NOT EXISTS (
+        SELECT 1 FROM event_cover_render_sets s
+        WHERE s.id = e.cover_render_set_id AND s.event_id = e.id AND s.state = 'active'
+      )
+  `).first<{ count: number }>();
+
+  const counts = {
+    legacyRows: legacy?.count ?? -1,
+    blockingJobs: blocking?.count ?? -1,
+    incompleteActiveSets: incomplete?.count ?? -1,
+    uploadsWithoutActiveSet: orphaned?.count ?? -1,
+  };
+  return {
+    ...counts,
+    proven: counts.legacyRows === 0
+      && counts.blockingJobs === 0
+      && counts.incompleteActiveSets === 0
+      && counts.uploadsWithoutActiveSet === 0,
+  };
+}
+
+export { EVENT_COVER_PROFILES };

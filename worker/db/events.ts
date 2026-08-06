@@ -102,6 +102,15 @@ export interface CoverPointerMove {
    * this is a statement builder. Ignored when nothing is displaced.
    */
   retiredKeyFingerprint: string;
+  /**
+   * Why the displaced original is being retired.
+   *
+   * Defaults to the publication reading — `removed` when nothing replaces it,
+   * `replaced` otherwise. Only backfill passes this explicitly, because its
+   * displacement is neither: the host did not ask for it, and the bytes it
+   * displaces are the ones the compatibility reader was still serving.
+   */
+  reason?: 'replaced' | 'removed' | 'backfilled';
 }
 
 /**
@@ -168,7 +177,7 @@ export function coverPointerStatements(
       input.eventId,
       input.expectedCurrentKey,
       input.retiredKeyFingerprint,
-      input.nextObjectKey === null ? 'removed' : 'replaced',
+      input.reason ?? (input.nextObjectKey === null ? 'removed' : 'replaced'),
       input.retiredAt,
       input.cleanupAfter,
       // A key was actually displaced...
