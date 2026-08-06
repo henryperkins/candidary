@@ -136,6 +136,15 @@ describe('the checked-in preset matrix', () => {
     expect(current.copyBandTop).toBe(0.4);
   });
 
+  /**
+   * Explicit timeout because this is genuinely bulk I/O, not a slow assertion.
+   *
+   * It reads all 720 files — 11.6 MB — and SHA-256s every one. That fits inside
+   * the jsdom project's 5-second default on a warm working copy and does not on
+   * the cold detached worktree `verify:release` builds, where several suites are
+   * also competing for the disk. Raising it here is honest about the cost;
+   * sampling a subset instead would quietly stop checking most of the matrix.
+   */
   it('matches every checked-in file to its manifest row, ceiling, and decoded size', () => {
     const current = manifest();
     const rows = new Map(current.files.map((file) => [file.path, file]));
@@ -166,7 +175,7 @@ describe('the checked-in preset matrix', () => {
     }
 
     expect(failures).toEqual([]);
-  });
+  }, 60_000);
 
   it('ships the grain tile as an RGBA PNG matching its manifest row', () => {
     const treatment = manifest().surfaceTreatment;
@@ -184,7 +193,9 @@ describe('the checked-in preset matrix', () => {
     const result = await verifyCoverPresets({ projectRoot: root });
     expect(result.fileCount).toBe(720);
     expect(result.worstCeilingUse.ratio).toBeLessThanOrEqual(1);
-  });
+    // The same bulk-I/O reason as above: the verifier re-reads all 720 files and
+    // walks the versioned directory to prove nothing unregistered is in it.
+  }, 60_000);
 });
 
 describe('the preset assets are reachable as versioned static files', () => {
