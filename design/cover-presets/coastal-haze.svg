@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1600" viewBox="0 0 2400 1600">
+  <title>Coastal Haze</title>
+  <desc>Mineral blue-green atmosphere and soft haze. No horizon line, people, typography, logo, venue, or event prop.</desc>
+  <!--
+    Atmosphere rather than a seascape: the bands are deliberately soft-edged and
+    unequal so no crop reads as a horizon. Denim and mineral green only, and no
+    stop anywhere near violet.
+  -->
+  <defs>
+    <linearGradient id="air" x1="0.15" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#dfeae9"/>
+      <stop offset="0.3" stop-color="#b9d0d3"/>
+      <stop offset="0.62" stop-color="#84a9b4"/>
+      <stop offset="1" stop-color="#4a7286"/>
+    </linearGradient>
+    <linearGradient id="band" x1="0" y1="0.2" x2="0.2" y2="0.95">
+      <stop offset="0" stop-color="#eaf3f1" stop-opacity="0.46"/>
+      <stop offset="0.36" stop-color="#cfe0de" stop-opacity="0.12"/>
+      <stop offset="0.55" stop-color="#5f8c93" stop-opacity="0.22"/>
+      <stop offset="0.78" stop-color="#eef5f3" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#3f6d95" stop-opacity="0.26"/>
+    </linearGradient>
+    <filter id="haze" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0022 0.0009" numOctaves="4" seed="17"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.92  0 0 0 0 0.96  0 0 0 0 0.95  0 0 0 0.34 0"/>
+    </filter>
+    <filter id="mineral" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0042" numOctaves="3" seed="37"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.16  0 0 0 0 0.34  0 0 0 0 0.38  0 0 0 0.20 0"/>
+    </filter>
+    <filter id="salt" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.74" numOctaves="1" seed="61"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.88  0 0 0 0 0.93  0 0 0 0 0.92  0 0 0 0.10 0"/>
+    </filter>
+  </defs>
+  <rect width="2400" height="1600" fill="url(#air)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#mineral)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#haze)"/>
+  <rect width="2400" height="1600" fill="url(#band)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#salt)"/>
+</svg>

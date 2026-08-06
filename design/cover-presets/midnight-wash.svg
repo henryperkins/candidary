@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1600" viewBox="0 0 2400 1600">
+  <title>Midnight Wash</title>
+  <desc>Deep ink wash with subtle paper variation. No people, typography, logo, venue, or event prop.</desc>
+  <!--
+    The darkest of the six. Ink is a blue-leaning charcoal rather than a violet
+    navy, and the wash keeps a lifted centre so `monochrome` still has a midtone
+    to protect. The falloff is carried by the vignette rather than the base
+    gradient, because a centred crop of any profile keeps the middle of the frame
+    and would otherwise never see the darker corners at all.
+  -->
+  <defs>
+    <linearGradient id="ink" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#2b3b49"/>
+      <stop offset="0.42" stop-color="#1c2731"/>
+      <stop offset="1" stop-color="#0f171f"/>
+    </linearGradient>
+    <filter id="wash" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0015" numOctaves="5" seed="97"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.58  0 0 0 0 0.66  0 0 0 0 0.71  0 0 0 0.32 0"/>
+    </filter>
+    <filter id="pool" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0034 0.0021" numOctaves="4" seed="53"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.02  0 0 0 0 0.04  0 0 0 0 0.07  0 0 0 0.42 0"/>
+    </filter>
+    <filter id="tooth" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.105" numOctaves="2" seed="41"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.74  0 0 0 0 0.79  0 0 0 0 0.83  0 0 0 0.12 0"/>
+    </filter>
+    <radialGradient id="edge" cx="0.44" cy="0.38" r="0.88">
+      <stop offset="0" stop-color="#93a8b6" stop-opacity="0.22"/>
+      <stop offset="0.46" stop-color="#93a8b6" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#05090d" stop-opacity="0.55"/>
+    </radialGradient>
+  </defs>
+  <rect width="2400" height="1600" fill="url(#ink)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#pool)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#wash)"/>
+  <rect width="2400" height="1600" fill="url(#edge)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#tooth)"/>
+</svg>

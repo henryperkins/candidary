@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1600" viewBox="0 0 2400 1600">
+  <title>Pressed Paper</title>
+  <desc>Pale fibrous paper with restrained depth. No people, typography, logo, venue, or event prop.</desc>
+  <!--
+    The palest of the six, and the one that has to survive `soft` without going
+    flat white: the depth comes from a very low-frequency tonal drift and an edge
+    vignette, and the tooth is deliberately coarse enough to still be there after
+    a profile resample rather than fine enough to look right only at master size.
+  -->
+  <defs>
+    <linearGradient id="sheet" x1="0" y1="0.1" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#fbf6ec"/>
+      <stop offset="0.58" stop-color="#f3ebdd"/>
+      <stop offset="1" stop-color="#e6dbc9"/>
+    </linearGradient>
+    <filter id="drift" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0011" numOctaves="4" seed="47"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.42  0 0 0 0 0.36  0 0 0 0 0.27  0 0 0 0.20 0"/>
+    </filter>
+    <filter id="tooth" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.095" numOctaves="3" seed="13"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.99  0 0 0 0 0.97  0 0 0 0 0.92  0 0 0 0.20 0"/>
+    </filter>
+    <filter id="speck" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.13" numOctaves="2" seed="67"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.44  0 0 0 0 0.38  0 0 0 0 0.28  0 0 0 0.13 0"/>
+    </filter>
+    <filter id="fibres" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.30 0.055" numOctaves="1" seed="59"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.46  0 0 0 0 0.41  0 0 0 0 0.32  0 0 0 0.13 0"/>
+    </filter>
+    <radialGradient id="press" cx="0.5" cy="0.44" r="0.78">
+      <stop offset="0" stop-color="#fffdf8" stop-opacity="0.42"/>
+      <stop offset="0.62" stop-color="#fffdf8" stop-opacity="0"/>
+      <stop offset="1" stop-color="#6f6350" stop-opacity="0.24"/>
+    </radialGradient>
+  </defs>
+  <rect width="2400" height="1600" fill="url(#sheet)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#drift)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#tooth)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#speck)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#fibres)"/>
+  <rect width="2400" height="1600" fill="url(#press)"/>
+</svg>

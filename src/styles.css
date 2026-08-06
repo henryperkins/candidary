@@ -1135,7 +1135,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .responsive-cover { position: relative; overflow: hidden; background: linear-gradient(145deg, var(--event-hero-start) 0%, var(--event-hero-mid) 53%, var(--event-hero-end) 100%); }
 .responsive-cover__image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .responsive-cover__treatment, .responsive-cover__scrim { position: absolute; inset: 0; pointer-events: none; }
-.responsive-cover--film-grain .responsive-cover__treatment { background-image: var(--cover-film-grain); background-repeat: repeat; opacity: .18; }
+/* The one versioned tileable grain asset, layered at runtime rather than baked
+   into any of the 720 rendered outputs — which is why `film` costs the same
+   bytes as every other effect and why changing theme never re-renders. */
+.responsive-cover--film-grain .responsive-cover__treatment { background-image: var(--cover-film-grain, url('/assets/event-covers/v1/film-grain-v1.png')); background-repeat: repeat; opacity: .18; }
 .responsive-cover__scrim { background: linear-gradient(180deg, var(--event-cover-overlay-top), var(--event-cover-overlay-bottom)); }
 @media (prefers-reduced-motion: reduce) { .cover-studio, .cover-studio__backdrop { transition: none; } }
 

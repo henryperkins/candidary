@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "generate:app-icons": "node scripts/generate-app-icons.mjs",
+    "build:cover-presets": "node --experimental-strip-types scripts/build-cover-presets.ts",
+    "verify:cover-presets": "node --experimental-strip-types scripts/verify-cover-presets.ts",
     "verify:pwa-build": "node scripts/verify-pwa-build.mjs",
     "deploy": "node --experimental-strip-types scripts/deploy-release.ts",
     "typecheck": "tsc -b --pretty false",
