@@ -70,6 +70,24 @@ When scoping any other rule on these zones, name the host rather than matching e
 `forum.candidary.online` is a Custom Domain for a different Worker on the same zone, and an unscoped
 `true` expression would swallow it.
 
+Confirm each origin after deploying, because the read path and the write path fail separately and only
+the write path is silent from a browser tab that is already open. Post a deliberately invalid body: the
+origin check runs before the schema does, so the two outcomes are distinguishable and neither creates an
+event.
+
+```powershell
+foreach ($host in 'candidary.app', 'candidary.online') {
+  curl.exe -sS -X POST "https://$host/api/events" -H 'content-type: application/json' `
+    -H "origin: https://$host" --data '{}'
+}
+```
+
+Expected `VALIDATION_FAILED` from every origin. `ORIGIN_FORBIDDEN` means that hostname is serving pages
+it cannot accept a write from — it is attached to the Worker but missing from `ALTERNATE_ORIGINS`, or the
+deployed version predates its addition. Check what is actually deployed rather than what was uploaded:
+a version upload from a branch build changes the script's settings without changing the version serving
+traffic.
+
 Cookies are scoped to a host, so the two origins do not share sessions. A host signed in on one is not
 signed in on the other, a guest who scanned a QR on one re-scans if they arrive on the other, and an
 RSVP household is looked up per origin. Nothing in D1 or R2 is per-origin: one credential is one row and
