@@ -49,7 +49,7 @@ where there is no request to take a host from, and a `From` domain that differs 
 links inside the message still passes SPF, DKIM, and DMARC — nothing fails loudly, it just reads as a
 phishing attempt to the host being asked to click a login code.
 
-Adding a hostname is three settings, and skipping any one of them produces a front door that looks like
+Adding a hostname is four settings, and skipping any one of them produces a front door that looks like
 a working deployment until someone tries to do something:
 
 1. Attach it to the Worker as a Custom Domain, and confirm **Always Use HTTPS** and the HSTS
@@ -58,11 +58,13 @@ a working deployment until someone tries to do something:
    every write with `ORIGIN_FORBIDDEN`.
 3. Add it to `config/r2-cors.json` and apply the policy. Without this every page works and every photo
    upload fails at the browser-direct `PUT`.
+4. Add it to `KNOWN_APPLICATION_ORIGINS` in `shared/origins.ts`. Without this a host who was mailed a
+   management link on the canonical origin cannot paste it while on the new one.
 
-Add it to `KNOWN_APPLICATION_ORIGINS` in `shared/origins.ts` too. The browser cannot read
-`ALTERNATE_ORIGINS`, so that constant is its copy of the list, used to accept a management link a host
-was mailed on the canonical origin and pasted while on the other one. `tests/unit/origins.test.ts` reads
-`wrangler.jsonc` off disk and fails if the two disagree.
+The fourth is the one that looks optional and is not. The browser cannot read `ALTERNATE_ORIGINS`, so
+that constant is its copy of the list. `tests/unit/origins.test.ts` reads `wrangler.jsonc` off disk and
+fails if the two disagree, which catches the omission at build time — but only if steps 2 and 4 land in
+the same commit.
 
 There must be no zone Redirect Rule sending one application origin to another; a `301` at the edge runs
 ahead of the Worker and would make the second hostname unreachable no matter what the Worker allows.
@@ -632,7 +634,9 @@ The event-creation endpoint is suitable for a controlled deployment. Before unre
 
 Host accounts send confirmation codes, password resets, and lifecycle notifications through the `EMAIL` binding (Cloudflare Email Service).
 
-`candidary.app` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.app`, set in `EMAIL_FROM`, and Email Routing forwards replies. The account quota is 1,000 messages per day. `candidary.online` remains onboarded and `ready` on the same terms, so it can be sent from without waiting on DNS.
+`candidary.app` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.app`, set in `EMAIL_FROM`, and Email Routing forwards replies. The account quota is 1,000 messages per day.
+
+`candidary.online` is onboarded and `ready` on the same terms, but it is not a second sending domain and no mail is sent from it. Being onboarded means only that its DNS is already in place, so making it the sending domain later would not wait on propagation. It is a standby, not a live alternative: `EMAIL_FROM` names exactly one address, and moving it to `candidary.online` means moving `APP_ORIGIN` with it in the same change.
 
 There is one sending domain and one canonical origin, and they should not be allowed to drift apart. Mail whose `From` domain differs from the domain of the links inside it still passes SPF, DKIM, and DMARC, so nothing fails loudly — it just reads as a phishing attempt to the host being asked to click a login code. This is why `EMAIL_FROM` is paired with `APP_ORIGIN` specifically and not with whichever origin a host happens to be using: the alternate origins serve the application, but no mail is ever built on them.
 
