@@ -4,12 +4,40 @@ import type { Role } from '../../shared/contracts';
 import { failureDecisionForCode } from '../../shared/load-failure';
 import { ApiError } from '../../shared/errors';
 import type { AppBindings } from '../env';
-import { requestOrigin } from '../origins';
+import { canonicalOrigin, isApplicationOrigin, requestOrigin } from '../origins';
 import { setSessionCookies } from '../http/cookies';
 import { AuthService } from '../auth/service';
 import { EventEntryService } from '../services/event-entry';
 
 export const exchangeRoutes = new Hono<AppBindings>();
+
+/**
+ * Refuses a credential exchange on a hostname this deployment does not answer
+ * on, before the credential is read.
+ *
+ * These two routes are the only places a bearer credential becomes a session
+ * through a `GET`, and a `GET` navigation carries no `Origin` header — so
+ * `assertRequestOrigin` cannot cover them, and every other guard in the app runs
+ * after the session already exists. Without this the Worker mints a real session
+ * on any hostname routed to it: `workers_dev` is on, per-version preview URLs
+ * are public, and both are bound to the production database. Writes from there
+ * would fail `ORIGIN_FORBIDDEN`, but the session still reads, and a manager
+ * session reads event data and re-displays the printed entry credential.
+ *
+ * Sends the browser to the canonical origin's own recovery page and drops the
+ * credential rather than forwarding it. No printed credential names a hostname
+ * outside the allow-list, so there is nothing legitimate to carry over, and
+ * carrying it would put the secret in a second host's request line to reach a
+ * session it should not have started. The holder lands on the real site and can
+ * paste their link there.
+ */
+function refuseExchangeOffApplicationHost(
+  context: Context<AppBindings>,
+  recoveryPath: string,
+): Response | null {
+  if (isApplicationOrigin(context.env, new URL(context.req.url).origin)) return null;
+  return context.redirect(`${canonicalOrigin(context.env)}${recoveryPath}`, 302);
+}
 
 export function isDocumentNavigation(request: Request): boolean {
   return request.headers.get('sec-fetch-mode') === 'navigate'
@@ -52,6 +80,8 @@ async function exchange(context: Context<AppBindings>, role: Role) {
 exchangeRoutes.get('/join/:token', async (context) => {
   const raw = context.req.param('token') ?? '';
   context.header('Cache-Control', 'no-store');
+  const offHost = refuseExchangeOffApplicationHost(context, '/recover/event-entry?kind=unavailable');
+  if (offHost) return offHost;
   try {
     const entries = new EventEntryService(context.env, requestOrigin(context));
     await entries.adoptPrintedToken(raw);
@@ -73,6 +103,10 @@ exchangeRoutes.get('/join/:token', async (context) => {
   }
 });
 exchangeRoutes.get('/manage/:token', async (context) => {
+  // Ahead of the try, so a refused host is never classified as an exchange
+  // failure the holder could be told to retry.
+  const offHost = refuseExchangeOffApplicationHost(context, '/recover/manage?kind=latest-link');
+  if (offHost) return offHost;
   try {
     return await exchange(context, 'manager');
   } catch (error) {

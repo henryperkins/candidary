@@ -41,7 +41,20 @@ Two rules follow from it, and they are deliberately different:
   management link on `candidary.online` — that last one matters, because the client follows the returned
   link with a full-page navigation and a canonical link would move them to the other domain mid-session.
   A hostname the deployment does not answer on falls back to the canonical origin instead of echoing
-  itself, so a domain someone else points at this Worker cannot mint a link that looks like Candidary's.
+  itself. The hosts that reach the Worker are this account's own — a Custom Domain requires a zone the
+  account controls — so what this covers in practice is the `workers_dev` route and the public
+  per-version preview URLs, both bound to the production database. Echoing one back would put a
+  `workers.dev` hostname into a printed QR or a management link a host then saves.
+
+**A credential is never exchanged off an application host.** `GET /manage/:token` and the pre-0008
+`GET /join/:token` are the only places a bearer credential becomes a session through a navigation, and a
+navigation carries no `Origin` header, so `assertRequestOrigin` cannot reach them and every other guard
+runs after the session exists. `worker/routes/exchange.ts` checks the request's own host first and sends
+an unrecognized one to the canonical origin's recovery page without the credential. Writes from such a
+host would already fail, but a session still *reads* — a manager session reads event data and
+re-displays the printed entry credential — so the boundary has to sit ahead of the exchange. The same
+check on the browser side keeps management-link recovery from offering the move in the first place;
+neither side is sufficient alone, because the URL can be typed.
 
 **Mail is the exception and stays canonical.** `services/notifications.ts` and
 `services/host-auth.ts` build from `APP_ORIGIN` always. Notifications are composed by the hourly Cron,

@@ -156,6 +156,52 @@ describe('links minted while answering on a second origin', () => {
     expect(cookiesFrom(exchanged).cookie).toContain('candidary_session=');
   });
 
+  // `GET /manage/:token` and `GET /join/:token` are the only places a bearer
+  // credential becomes a session without an `Origin` header to check. Every
+  // hostname routed to this Worker reaches them — the `workers.dev` route and
+  // the public per-version preview URLs included, both bound to the production
+  // database — so the host has to be checked before the credential is read.
+  it('refuses to exchange a management link on a host it does not answer on', async () => {
+    const body = await (await createEvent(ALTERNATE)).json<any>();
+    const managementPath = new URL(body.data.managementLink).pathname;
+
+    const refused = await createApp().request(`${UNKNOWN}${managementPath}`, {
+      redirect: 'manual',
+      headers: { accept: 'text/html' },
+    }, testEnv);
+
+    expect(refused.status).toBe(302);
+    expect(refused.headers.get('location')).toBe(`${origin}/recover/manage?kind=latest-link`);
+    // The credential is dropped rather than forwarded, and no session is minted.
+    expect(refused.headers.get('location')).not.toContain(managementPath.split('/').pop());
+    expect(refused.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('still exchanges that same management link on an application origin', async () => {
+    const body = await (await createEvent(ALTERNATE)).json<any>();
+    const managementPath = new URL(body.data.managementLink).pathname;
+
+    const exchanged = await createApp().request(`${ALTERNATE}${managementPath}`, {
+      redirect: 'manual',
+      headers: { accept: 'text/html' },
+    }, testEnv);
+
+    expect(exchanged.status).toBe(302);
+    expect(exchanged.headers.get('location')).toBe(`/manage/event/${body.data.event.id}`);
+    expect(cookiesFrom(exchanged).cookie).toContain('candidary_session=');
+  });
+
+  it('refuses the pre-0008 printed join path on a host it does not answer on', async () => {
+    const refused = await createApp().request(`${UNKNOWN}/join/someid.somesecret`, {
+      redirect: 'manual',
+      headers: { accept: 'text/html' },
+    }, testEnv);
+
+    expect(refused.status).toBe(302);
+    expect(refused.headers.get('location')).toBe(`${origin}/recover/event-entry?kind=unavailable`);
+    expect(refused.headers.get('set-cookie')).toBeNull();
+  });
+
   it('leaves mail on the canonical origin, where the From domain is', async () => {
     // Composed by the hourly Cron, where there is no request to take a host from,
     // and read in an inbox where a link on a different domain than the sender

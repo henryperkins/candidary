@@ -17,6 +17,16 @@ import {
 const wranglerConfig = JSON.parse(readFileSync(resolve(process.cwd(), 'wrangler.jsonc'), 'utf8')) as {
   vars?: { APP_ORIGIN?: string; ALTERNATE_ORIGINS?: string };
 };
+const r2Cors = JSON.parse(readFileSync(resolve(process.cwd(), 'config/r2-cors.json'), 'utf8')) as {
+  rules?: { allowed?: { origins?: string[] } }[];
+};
+
+function configuredOrigins(): string[] {
+  return [...new Set([
+    wranglerConfig.vars?.APP_ORIGIN,
+    ...parseOriginList(wranglerConfig.vars?.ALTERNATE_ORIGINS),
+  ].map(normalizeOrigin).filter((value): value is string => value !== null))];
+}
 
 describe('origin normalization', () => {
   it('reduces the forms a browser and a config file disagree about to one', () => {
@@ -66,11 +76,17 @@ describe('known application origins', () => {
   // hostname to the deployment without adding it here leaves a host unable to
   // paste a management link they were mailed.
   it('matches the origins the Worker is configured to answer on', () => {
-    const configured = [
-      wranglerConfig.vars?.APP_ORIGIN,
-      ...parseOriginList(wranglerConfig.vars?.ALTERNATE_ORIGINS),
-    ].map(normalizeOrigin).filter((origin): origin is string => origin !== null);
-    expect([...KNOWN_APPLICATION_ORIGINS].sort()).toEqual([...new Set(configured)].sort());
+    expect([...KNOWN_APPLICATION_ORIGINS].sort()).toEqual(configuredOrigins().sort());
+  });
+
+  // The third copy of the same deployment fact, and the one whose omission is
+  // hardest to read: a signed browser `PUT` goes to R2 rather than the Worker, so
+  // a missing entry here leaves every page working and every upload failing.
+  it('matches the R2 CORS policy the browser uploads against', () => {
+    const allowed = (r2Cors.rules ?? []).flatMap((rule) => rule.allowed?.origins ?? [])
+      .map(normalizeOrigin)
+      .filter((origin): origin is string => origin !== null);
+    expect([...new Set(allowed)].sort()).toEqual(configuredOrigins().sort());
   });
 
   it('names the canonical origin first', () => {

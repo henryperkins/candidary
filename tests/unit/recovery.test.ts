@@ -37,16 +37,28 @@ describe('management link recovery', () => {
   // returning on the other hostname pastes a link that is ours and is not this
   // page's origin. Only the pathname survives, and it opens on the origin the
   // host is already on.
-  it('accepts a management link from any origin the application answers on', () => {
+  it('accepts a management link from one application origin while on another', () => {
     for (const linkOrigin of KNOWN_APPLICATION_ORIGINS) {
       for (const pageOrigin of KNOWN_APPLICATION_ORIGINS) {
         expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, pageOrigin))
           .toBe(`/manage/${TOKEN}`);
       }
-      // And from a preview or local origin that is not itself in the list.
-      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, ORIGIN))
-        .toBe(`/manage/${TOKEN}`);
     }
+  });
+
+  // The returned pathname is opened on the page's own origin, and
+  // `GET /manage/:token` turns it into a manager session — so accepting a
+  // production link here would carry a live bearer credential onto a preview,
+  // `workers.dev`, or local host. Same-origin recovery still works there.
+  it('refuses a production management link pasted on a host that is not an application origin', () => {
+    for (const linkOrigin of KNOWN_APPLICATION_ORIGINS) {
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, ORIGIN)).toBeNull();
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, 'https://candidary.lfd.workers.dev'))
+        .toBeNull();
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, 'http://localhost:5173')).toBeNull();
+    }
+    expect(parseManagementLink(`/manage/${TOKEN}`, ORIGIN)).toBe(`/manage/${TOKEN}`);
+    expect(parseManagementLink(`${ORIGIN}/manage/${TOKEN}`, ORIGIN)).toBe(`/manage/${TOKEN}`);
   });
 
   it('still refuses a lookalike of an application origin', () => {
