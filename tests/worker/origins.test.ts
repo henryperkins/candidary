@@ -158,9 +158,10 @@ describe('links minted while answering on a second origin', () => {
 
   // `GET /manage/:token` and `GET /join/:token` are the only places a bearer
   // credential becomes a session without an `Origin` header to check. Every
-  // hostname routed to this Worker reaches them — the `workers.dev` route and
-  // the public per-version preview URLs included, both bound to the production
-  // database — so the host has to be checked before the credential is read.
+  // hostname routed to this Worker reaches them. Public development routes are
+  // disabled in the committed Wrangler config because uploaded versions use the
+  // production bindings, but this remains the defense if one is ever re-enabled,
+  // so the host has to be checked before the credential is read.
   it('refuses to exchange a management link on a host it does not answer on', async () => {
     const body = await (await createEvent(ALTERNATE)).json<any>();
     const managementPath = new URL(body.data.managementLink).pathname;

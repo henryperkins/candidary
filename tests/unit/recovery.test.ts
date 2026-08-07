@@ -5,7 +5,8 @@ import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '
 import { KNOWN_APPLICATION_ORIGINS } from '../../shared/origins';
 
 const EVENT = '11111111-2222-4333-8444-555555555555';
-const ORIGIN = 'https://candidary.test';
+const ORIGIN = KNOWN_APPLICATION_ORIGINS[0];
+const LOCAL_ORIGIN = 'http://localhost:5173';
 const TOKEN = 'Abc_123.Xyz-789';
 
 describe('management link recovery', () => {
@@ -18,7 +19,7 @@ describe('management link recovery', () => {
 
   it.each([
     ['foreign origin', `https://evil.example/manage/${TOKEN}`],
-    ['credentials', `https://user:pass@candidary.test/manage/${TOKEN}`],
+    ['credentials', `https://user:pass@candidary.app/manage/${TOKEN}`],
     ['manager client route', '/manage/event'],
     ['extra segment', `/manage/${TOKEN}/more`],
     ['trailing slash', `/manage/${TOKEN}/`],
@@ -47,18 +48,25 @@ describe('management link recovery', () => {
   });
 
   // The returned pathname is opened on the page's own origin, and
-  // `GET /manage/:token` turns it into a manager session — so accepting a
-  // production link here would carry a live bearer credential onto a preview,
-  // `workers.dev`, or local host. Same-origin recovery still works there.
+  // `GET /manage/:token` turns it into a manager session. A relative link must
+  // not make an unrecognized page origin trustworthy: that would carry the
+  // bearer credential onto a public preview or another clone.
   it('refuses a production management link pasted on a host that is not an application origin', () => {
+    const previewOrigin = 'https://candidary.lfd.workers.dev';
     for (const linkOrigin of KNOWN_APPLICATION_ORIGINS) {
-      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, ORIGIN)).toBeNull();
-      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, 'https://candidary.lfd.workers.dev'))
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, previewOrigin))
         .toBeNull();
-      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, 'http://localhost:5173')).toBeNull();
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, LOCAL_ORIGIN)).toBeNull();
     }
-    expect(parseManagementLink(`/manage/${TOKEN}`, ORIGIN)).toBe(`/manage/${TOKEN}`);
-    expect(parseManagementLink(`${ORIGIN}/manage/${TOKEN}`, ORIGIN)).toBe(`/manage/${TOKEN}`);
+    expect(parseManagementLink(`/manage/${TOKEN}`, previewOrigin)).toBeNull();
+    expect(parseManagementLink(`${previewOrigin}/manage/${TOKEN}`, previewOrigin)).toBeNull();
+    expect(parseManagementLink(`/manage/${TOKEN}`, 'https://candidary.test')).toBeNull();
+  });
+
+  it('keeps same-origin recovery available on the loopback development server', () => {
+    expect(parseManagementLink(`/manage/${TOKEN}`, LOCAL_ORIGIN)).toBe(`/manage/${TOKEN}`);
+    expect(parseManagementLink(`${LOCAL_ORIGIN}/manage/${TOKEN}`, LOCAL_ORIGIN))
+      .toBe(`/manage/${TOKEN}`);
   });
 
   it('still refuses a lookalike of an application origin', () => {

@@ -19,10 +19,12 @@ export const exchangeRoutes = new Hono<AppBindings>();
  * through a `GET`, and a `GET` navigation carries no `Origin` header — so
  * `assertRequestOrigin` cannot cover them, and every other guard in the app runs
  * after the session already exists. Without this the Worker mints a real session
- * on any hostname routed to it: `workers_dev` is on, per-version preview URLs
- * are public, and both are bound to the production database. Writes from there
- * would fail `ORIGIN_FORBIDDEN`, but the session still reads, and a manager
- * session reads event data and re-displays the printed entry credential.
+ * on any hostname routed to it. The committed configuration disables both the
+ * `workers.dev` route and public preview URLs because uploaded versions use the
+ * production bindings, but this guard keeps credential exchange safe if either
+ * route is re-enabled or configuration drifts. Writes from an unknown host would
+ * fail `ORIGIN_FORBIDDEN`, but a minted session still reads, and a manager session
+ * reads event data and re-displays the printed entry credential.
  *
  * Sends the browser to the canonical origin's own recovery page and drops the
  * credential rather than forwarding it. No printed credential names a hostname

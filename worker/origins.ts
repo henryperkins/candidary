@@ -42,11 +42,11 @@ export function isApplicationOrigin(env: AppEnv, value: string | undefined | nul
  * bounces their browser to the other domain mid-session.
  *
  * An unrecognized host falls back to the canonical origin rather than echoing
- * itself. The hosts that reach here are this account's own: a Custom Domain
- * needs a zone the account controls, so the extra surfaces are the `workers_dev`
- * route and the public per-version preview URLs, both bound to the production
- * database. Echoing those back would put a `workers.dev` hostname into a printed
- * QR or a management link a host then saves.
+ * itself. The committed configuration disables public Workers development
+ * routes because uploaded versions use the production bindings, but this check
+ * remains the safe boundary if a dashboard change or another upload ever routes
+ * an extra hostname here. Echoing one back would put that hostname into a
+ * printed QR or a management link a host then saves.
  */
 export function requestOrigin(context: Context<AppBindings>): string {
   const origin = new URL(context.req.url).origin;

@@ -15,6 +15,8 @@ import {
 // without stripping them, so it is kept comment-free and this fails loudly if
 // it ever is not.
 const wranglerConfig = JSON.parse(readFileSync(resolve(process.cwd(), 'wrangler.jsonc'), 'utf8')) as {
+  workers_dev?: boolean;
+  preview_urls?: boolean;
   vars?: { APP_ORIGIN?: string; ALTERNATE_ORIGINS?: string };
 };
 const r2Cors = JSON.parse(readFileSync(resolve(process.cwd(), 'config/r2-cors.json'), 'utf8')) as {
@@ -29,11 +31,10 @@ function configuredOrigins(): string[] {
 }
 
 describe('origin normalization', () => {
-  it('reduces the forms a browser and a config file disagree about to one', () => {
+  it('reduces equivalent root-origin spellings to one', () => {
     expect(normalizeOrigin('https://candidary.app/')).toBe('https://candidary.app');
     expect(normalizeOrigin('  https://candidary.app  ')).toBe('https://candidary.app');
     expect(normalizeOrigin('https://candidary.app:443')).toBe('https://candidary.app');
-    expect(normalizeOrigin('https://candidary.app/manage/abc')).toBe('https://candidary.app');
     expect(normalizeOrigin('http://127.0.0.1:5173')).toBe('http://127.0.0.1:5173');
   });
 
@@ -41,7 +42,9 @@ describe('origin normalization', () => {
   // compare equal to one.
   it('refuses anything that is not an absolute http(s) origin', () => {
     for (const value of ['candidary.app', '', '   ', '/manage/abc', 'javascript:alert(1)',
-      'data:text/html,x', 'file:///etc/passwd', undefined, null]) {
+      'data:text/html,x', 'file:///etc/passwd', 'https://user:pass@candidary.app',
+      'https://candidary.app/manage/abc', 'https://candidary.app?token=secret',
+      'https://candidary.app#fragment', undefined, null]) {
       expect(normalizeOrigin(value)).toBeNull();
     }
   });
@@ -71,6 +74,11 @@ describe('origin list parsing', () => {
 });
 
 describe('known application origins', () => {
+  it('does not expose production bindings through public Workers development routes', () => {
+    expect(wranglerConfig.workers_dev).toBe(false);
+    expect(wranglerConfig.preview_urls).toBe(false);
+  });
+
   // The browser cannot read `ALTERNATE_ORIGINS`, so it carries its own copy of
   // the list. This is the only thing keeping the two from drifting: adding a
   // hostname to the deployment without adding it here leaves a host unable to
@@ -83,10 +91,8 @@ describe('known application origins', () => {
   // hardest to read: a signed browser `PUT` goes to R2 rather than the Worker, so
   // a missing entry here leaves every page working and every upload failing.
   it('matches the R2 CORS policy the browser uploads against', () => {
-    const allowed = (r2Cors.rules ?? []).flatMap((rule) => rule.allowed?.origins ?? [])
-      .map(normalizeOrigin)
-      .filter((origin): origin is string => origin !== null);
-    expect([...new Set(allowed)].sort()).toEqual(configuredOrigins().sort());
+    const allowed = (r2Cors.rules ?? []).flatMap((rule) => rule.allowed?.origins ?? []);
+    expect(allowed.sort()).toEqual(configuredOrigins().sort());
   });
 
   it('names the canonical origin first', () => {

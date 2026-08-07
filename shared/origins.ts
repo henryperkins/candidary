@@ -14,22 +14,33 @@ export const KNOWN_APPLICATION_ORIGINS = [
   'https://candidary.online',
 ] as const;
 
+const ROOT_HTTP_ORIGIN = /^https?:\/\/[^/?#\\@\s]+\/?$/iu;
+
 /**
  * `https://Candidary.App/` and `https://candidary.app` are the same origin, and a
  * browser sends the second form in `Origin`. Normalizing both sides of every
  * comparison is what lets a configured value carry a stray trailing slash or a
  * default port without failing every write on the host that has it.
  *
- * Anything that is not an absolute `http:` or `https:` URL is not an origin, and
- * returning null rather than the input keeps a bare hostname from ever comparing
- * equal to one.
+ * Anything that is not an absolute, root-only `http:` or `https:` URL is not an
+ * origin. Rejecting user info, paths, query strings, and fragments before taking
+ * `URL.origin` prevents a malformed config entry from being silently cleaned
+ * into one that compares equal to a real application origin.
  */
 export function normalizeOrigin(value: string | undefined | null): string | null {
   const trimmed = value?.trim();
-  if (!trimmed) return null;
+  if (!trimmed || !ROOT_HTTP_ORIGIN.test(trimmed)) return null;
   try {
     const url = new URL(trimmed);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : null;
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:')
+      || url.username
+      || url.password
+      || url.pathname !== '/'
+      || url.search
+      || url.hash
+    ) return null;
+    return url.origin;
   } catch {
     return null;
   }

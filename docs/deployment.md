@@ -42,9 +42,11 @@ Two rules follow from it, and they are deliberately different:
   link with a full-page navigation and a canonical link would move them to the other domain mid-session.
   A hostname the deployment does not answer on falls back to the canonical origin instead of echoing
   itself. The hosts that reach the Worker are this account's own — a Custom Domain requires a zone the
-  account controls — so what this covers in practice is the `workers_dev` route and the public
-  per-version preview URLs, both bound to the production database. Echoing one back would put a
-  `workers.dev` hostname into a printed QR or a management link a host then saves.
+  account controls. The committed Wrangler configuration explicitly disables both the `workers.dev`
+  route and Preview URLs because uploaded versions use the production bindings and Preview URLs are
+  otherwise public. The application-level origin check remains defense in depth if either route is
+  re-enabled or configuration drifts. Echoing an unknown host back would put its hostname into a
+  printed QR or a management link a host then saves.
 
 **A credential is never exchanged off an application host.** `GET /manage/:token` and the pre-0008
 `GET /join/:token` are the only places a bearer credential becomes a session through a navigation, and a

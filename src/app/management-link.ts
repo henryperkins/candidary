@@ -2,6 +2,15 @@ import { isKnownApplicationOrigin } from '../../shared/origins';
 
 const MANAGEMENT_PATH = /^\/manage\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u;
 
+function isLoopbackDevelopmentOrigin(origin: string): boolean {
+  const url = new URL(origin);
+  return url.protocol === 'http:' && (
+    url.hostname === 'localhost'
+    || url.hostname === '127.0.0.1'
+    || url.hostname === '[::1]'
+  );
+}
+
 export function parseManagementLink(value: string, currentOrigin: string): string | null {
   try {
     const origin = new URL(currentOrigin).origin;
@@ -14,15 +23,16 @@ export function parseManagementLink(value: string, currentOrigin: string): strin
     //
     // Both sides have to be recognized, because this returns a pathname that the
     // caller opens on the page's own origin — and `GET /manage/:token` turns that
-    // pathname into a manager session. Accepting a production link on an
-    // unrecognized host would carry a live bearer credential onto it. The Worker
-    // refuses that exchange too, but the check belongs on both sides: this one
-    // keeps the form from ever offering it. Same-origin recovery still works
-    // everywhere, so localhost and preview hosts recover their own links.
-    if (
-      parsed.origin !== origin
-      && (!isKnownApplicationOrigin(origin) || !isKnownApplicationOrigin(parsed.origin))
-    ) return null;
+    // pathname into a manager session. A relative link must not make an unknown
+    // page origin trusted: public previews and `workers.dev` hosts would otherwise
+    // receive the bearer path. The only non-production exception is a same-origin
+    // loopback server, which keeps the documented local-development flow usable.
+    const sameOrigin = parsed.origin === origin;
+    if (sameOrigin) {
+      if (!isKnownApplicationOrigin(origin) && !isLoopbackDevelopmentOrigin(origin)) return null;
+    } else if (!isKnownApplicationOrigin(origin) || !isKnownApplicationOrigin(parsed.origin)) {
+      return null;
+    }
     return MANAGEMENT_PATH.test(parsed.pathname) ? parsed.pathname : null;
   } catch {
     return null;
