@@ -71,6 +71,7 @@
   },
   "vars": {
     "APP_ORIGIN": "https://candidary.app",
+    "ALTERNATE_ORIGINS": "https://candidary.online",
     "R2_ACCOUNT_ID": "a77e479f6736120eadd99973dbeb705e",
     "R2_BUCKET_NAME": "candidary-media",
     "EMAIL_FROM": "hello@candidary.app"

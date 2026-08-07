@@ -1,6 +1,7 @@
 import { TokensRepository } from '../db/tokens';
 import type { EventRecord } from '../db/types';
 import type { AppEnv } from '../env';
+import { canonicalOrigin } from '../origins';
 import { createSecretToken, digestSecret } from '../security/crypto';
 
 /**
@@ -11,7 +12,11 @@ import { createSecretToken, digestSecret } from '../security/crypto';
  * new URL. That lives in `EventEntryService.rotateInternalGuestGrant`.
  */
 export class LinkService {
-  constructor(private readonly env: AppEnv) {}
+  // The origin the caller is being answered on, so a rotation performed on one
+  // hostname hands back a link on that same hostname — the client navigates
+  // straight to it, and a cross-origin jump would sign the host out of the page
+  // they were working in.
+  constructor(private readonly env: AppEnv, private readonly origin: string = canonicalOrigin(env)) {}
 
   async rotateManagementLink(event: EventRecord, now = new Date()) {
     const tokens = new TokensRepository(this.env.DB);
@@ -28,7 +33,6 @@ export class LinkService {
       expiresAt: event.managementAccessExpiresAt,
       createdAt: now.toISOString(),
     });
-    const origin = this.env.APP_ORIGIN.replace(/\/$/u, '');
-    return { managementLink: `${origin}/manage/${replacement.token}` };
+    return { managementLink: `${this.origin}/manage/${replacement.token}` };
   }
 }

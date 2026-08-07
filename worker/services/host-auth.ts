@@ -4,6 +4,7 @@ import { AccountsRepository, normalizeEmail } from '../db/accounts';
 import { AuthRateLimitsRepository, type AuthRateLimitAction, type AuthRateLimitScopeKind } from '../db/auth-rate-limits';
 import type { HostAccountRecord, PendingRegistrationRecord } from '../db/types';
 import type { AppEnv } from '../env';
+import { canonicalOrigin } from '../origins';
 import { constantTimeEqual, createSecretToken, digestSecret, type SecretToken } from '../security/crypto';
 import { hashPassword, verifyPassword } from '../security/passwords';
 import { EmailService, layout } from './email';
@@ -373,7 +374,7 @@ export class HostAuthService {
   }
 
   async sendPasswordChanged(account: HostAccountRecord) {
-    const origin = this.env.APP_ORIGIN.replace(/\/$/u, '');
+    const origin = canonicalOrigin(this.env);
     return this.email.send({
       to: account.email,
       subject: 'Your Candidary password was changed',

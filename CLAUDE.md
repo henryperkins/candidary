@@ -185,6 +185,10 @@ objects nothing can find again.
 - **New image format**: update `SUPPORTED_IMAGE_TYPES`, the client `accept`/validation sets in
   `GuestUploadFlow.tsx`, the signature sniffer, *and* add a migration — `mime_type` has a table CHECK
   constraint.
+- **New application origin**: add it to `ALTERNATE_ORIGINS` in `wrangler.jsonc`, to
+  `KNOWN_APPLICATION_ORIGINS` in `shared/origins.ts`, and to `config/r2-cors.json`, then attach it as a
+  Custom Domain. Missing the first fails every write with `ORIGIN_FORBIDDEN`; missing the third fails
+  every upload. `tests/unit/origins.test.ts` pins the first two together.
 - **New migration**: add the next numbered SQL file under `migrations/`.
   `vitest.worker.config.ts` discovers that directory with `readD1Migrations()` and exposes the same
   ordered set through `TEST_MIGRATIONS`/`TEST_MIGRATION_QUERIES`.

@@ -22,6 +22,9 @@ export default defineConfig({
           TEST_MIGRATIONS: JSON.stringify(migrations),
           TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries),
           APP_ORIGIN: 'http://127.0.0.1:5173',
+          // A second front door, so the suite exercises the multi-origin path
+          // rather than a deployment that happens to have exactly one.
+          ALTERNATE_ORIGINS: 'http://127.0.0.1:4173, https://candidary.test',
           TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
           SESSION_HMAC_KEY: 'test-session-hmac-key-with-at-least-32-bytes',
           GUEST_TOKEN_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',

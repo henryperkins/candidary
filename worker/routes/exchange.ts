@@ -4,6 +4,7 @@ import type { Role } from '../../shared/contracts';
 import { failureDecisionForCode } from '../../shared/load-failure';
 import { ApiError } from '../../shared/errors';
 import type { AppBindings } from '../env';
+import { requestOrigin } from '../origins';
 import { setSessionCookies } from '../http/cookies';
 import { AuthService } from '../auth/service';
 import { EventEntryService } from '../services/event-entry';
@@ -52,7 +53,7 @@ exchangeRoutes.get('/join/:token', async (context) => {
   const raw = context.req.param('token') ?? '';
   context.header('Cache-Control', 'no-store');
   try {
-    const entries = new EventEntryService(context.env);
+    const entries = new EventEntryService(context.env, requestOrigin(context));
     await entries.adoptPrintedToken(raw);
     // A credential issued after 0008 is a fragment credential and is refused
     // here even when it is otherwise valid, so this path cannot become a second,

@@ -4,6 +4,7 @@ import { RsvpSessionsRepository } from '../db/rsvp-sessions';
 import { TokensRepository } from '../db/tokens';
 import type { EventEntryRecord, EventRecord } from '../db/types';
 import type { AppEnv } from '../env';
+import { canonicalOrigin } from '../origins';
 import {
   constantTimeEqual,
   createSecretToken,
@@ -25,14 +26,14 @@ export class EventEntryService {
   private readonly rsvpSessions: RsvpSessionsRepository;
   private readonly tokens: TokensRepository;
 
-  constructor(private readonly env: AppEnv) {
+  // `origin` is the hostname this request arrived on, so the QR a host prints
+  // carries the domain they are looking at. It only ever decides how the
+  // credential is displayed: the credential itself is one row and resolves on
+  // every origin the deployment answers on.
+  constructor(private readonly env: AppEnv, private readonly origin: string = canonicalOrigin(env)) {
     this.entries = new EventEntriesRepository(env.DB);
     this.rsvpSessions = new RsvpSessionsRepository(env.DB);
     this.tokens = new TokensRepository(env.DB);
-  }
-
-  private origin(): string {
-    return this.env.APP_ORIGIN.replace(/\/$/u, '');
   }
 
   /**
@@ -142,7 +143,7 @@ export class EventEntryService {
     if (!entry) throw entryUnavailable();
     if (entry.disabledAt) return { eventLink: null, disabledAt: entry.disabledAt };
     const secret = await decryptSecret(entry.secretCiphertext, this.env.ENTRY_ENCRYPTION_KEY);
-    return { eventLink: `${this.origin()}/join#${entry.id}.${secret}`, disabledAt: null };
+    return { eventLink: `${this.origin}/join#${entry.id}.${secret}`, disabledAt: null };
   }
 
   /**
