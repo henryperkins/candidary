@@ -15,6 +15,7 @@ import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
+import { requestOrigin } from '../origins';
 import { canonicalTimeZone, isIanaTimeZone } from '../../shared/event-time';
 import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
@@ -119,7 +120,7 @@ export const manageRoutes = new Hono<AppBindings>();
 // already standing at the venue.
 manageRoutes.get('/manage/events/:eventId/entry', async (context) => {
   const auth = await managerForEvent(context);
-  const entry = await new EventEntryService(context.env).recover(auth.event.id);
+  const entry = await new EventEntryService(context.env, requestOrigin(context)).recover(auth.event.id);
   // This body contains the printed credential in full.
   context.header('Cache-Control', 'no-store');
   return context.json({ data: entry, requestId: context.get('requestId') });
@@ -131,14 +132,14 @@ manageRoutes.get('/manage/events/:eventId/entry', async (context) => {
 manageRoutes.post('/manage/events/:eventId/guest-sessions/rotate', async (context) => {
   const auth = await managerForEvent(context, true);
   await assertEventNameConfirmed(context, auth.event.name);
-  const result = await new EventEntryService(context.env).rotateInternalGuestGrant(auth.event);
+  const result = await new EventEntryService(context.env, requestOrigin(context)).rotateInternalGuestGrant(auth.event);
   return context.json({ data: result, requestId: context.get('requestId') });
 });
 
 manageRoutes.post('/manage/events/:eventId/entry/disable', async (context) => {
   const auth = await managerForEvent(context, true);
   await assertEventNameConfirmed(context, auth.event.name);
-  const result = await new EventEntryService(context.env).disable(auth.event);
+  const result = await new EventEntryService(context.env, requestOrigin(context)).disable(auth.event);
   return context.json({ data: result, requestId: context.get('requestId') });
 });
 
@@ -247,7 +248,7 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
   // an event that accepts submissions and no working way in. Manager authority
   // does not outrank the irreversible stop.
   if (parsed.data.rsvpEnabled) {
-    await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+    await new EventEntryService(context.env, requestOrigin(context)).requireOpenEntry(auth.event.id);
   }
 
   const eventTimezone = canonicalTimeZone(parsed.data.eventTimezone) ?? parsed.data.eventTimezone;
@@ -289,7 +290,7 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
     // irreversible stop and a moving guest list are different problems with
     // different ways out.
     if (parsed.data.rsvpEnabled) {
-      await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+      await new EventEntryService(context.env, requestOrigin(context)).requireOpenEntry(auth.event.id);
     }
     throw new ApiError(
       'RSVP_ROSTER_INVALID',
@@ -322,7 +323,7 @@ manageRoutes.post('/manage/events/:eventId/photo-intake', async (context) => {
   // Cheap, honest refusal ahead of the write for the one case the host cannot
   // resolve by reloading. The statement refuses it as well.
   if (parsed.data.action === 'reopen') {
-    await new EventEntryService(context.env).requireOpenEntry(auth.event.id);
+    await new EventEntryService(context.env, requestOrigin(context)).requireOpenEntry(auth.event.id);
   }
   const event = await new EventsRepository(context.env.DB)
     .applyPhotoIntake(auth.event.id, parsed.data.action);
@@ -412,6 +413,6 @@ manageRoutes.post('/manage/events/:eventId/links/manager/rotate', async (context
       409,
     );
   }
-  const result = await new LinkService(context.env).rotateManagementLink(auth.event);
+  const result = await new LinkService(context.env, requestOrigin(context)).rotateManagementLink(auth.event);
   return context.json({ data: result, requestId: context.get('requestId') });
 });

@@ -17,6 +17,7 @@ import { assertRequestOrigin } from '../http/csrf';
 import { DEFAULT_EVENT_START_TIME, resolveEventSchedule } from '../http/event-schedule';
 import { eventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
+import { requestOrigin } from '../origins';
 import { EventService } from '../services/events';
 
 const eventSchema = z.object({
@@ -76,7 +77,7 @@ publicRoutes.post('/events', async (context) => {
     { ...parsed.data, eventTimezone },
     'Check the highlighted event details.',
   );
-  const created = await new EventService(context.env).create(
+  const created = await new EventService(context.env, requestOrigin(context)).create(
     { ...parsed.data, theme, eventTimezone, ...schedule },
     accountId,
   );

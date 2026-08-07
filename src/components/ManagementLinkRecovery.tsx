@@ -13,7 +13,7 @@ export function ManagementLinkRecovery() {
     const data = new FormData(event.currentTarget);
     const pathname = parseManagementLink(String(data.get('managementLink') ?? ''), window.location.origin);
     if (!pathname) {
-      setError('Enter a Candidary management link from this site.');
+      setError('Enter a Candidary management link.');
       input.current?.focus();
       return;
     }

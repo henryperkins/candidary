@@ -1,4 +1,10 @@
 # Copy to .dev.vars for local development. Never commit real values.
+
+# The origin `vite dev` serves on. Without this the Worker uses the deployed
+# `APP_ORIGIN` from `wrangler.jsonc`, which no local page matches: every write
+# fails `ORIGIN_FORBIDDEN`, and opening a local management link sends the browser
+# to the production recovery page instead of exchanging the credential.
+APP_ORIGIN=http://localhost:5173
 TOKEN_HMAC_KEY=replace-with-a-32-byte-or-longer-random-secret
 SESSION_HMAC_KEY=replace-with-a-different-32-byte-or-longer-random-secret
 GUEST_TOKEN_ENCRYPTION_KEY=replace-with-32-random-bytes-encoded-as-base64url

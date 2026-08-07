@@ -4,7 +4,8 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-07-21",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": true,
+  "workers_dev": false,
+  "preview_urls": false,
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
@@ -71,6 +72,7 @@
   },
   "vars": {
     "APP_ORIGIN": "https://candidary.app",
+    "ALTERNATE_ORIGINS": "https://candidary.online",
     "R2_ACCOUNT_ID": "a77e479f6736120eadd99973dbeb705e",
     "R2_BUCKET_NAME": "candidary-media",
     "EMAIL_FROM": "hello@candidary.app"

@@ -106,7 +106,7 @@ describe('management link recovery', () => {
     await user.click(screen.getByRole('button', { name: 'Open event manager' }));
 
     expect(screen.getByLabelText('Management link')).toHaveAttribute('aria-invalid', 'true');
-    expect(screen.getByText('Enter a Candidary management link from this site.')).toBeVisible();
+    expect(screen.getByText('Enter a Candidary management link.')).toBeVisible();
     expect(screen.getByLabelText('Management link')).toHaveFocus();
   });
 

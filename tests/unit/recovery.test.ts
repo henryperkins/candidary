@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { parseManagementLink, replaceManagementLocation } from '../../src/app/management-link';
 import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
+import { KNOWN_APPLICATION_ORIGINS } from '../../shared/origins';
 
 const EVENT = '11111111-2222-4333-8444-555555555555';
-const ORIGIN = 'https://candidary.test';
+const ORIGIN = KNOWN_APPLICATION_ORIGINS[0];
+const LOCAL_ORIGIN = 'http://localhost:5173';
 const TOKEN = 'Abc_123.Xyz-789';
 
 describe('management link recovery', () => {
@@ -17,7 +19,7 @@ describe('management link recovery', () => {
 
   it.each([
     ['foreign origin', `https://evil.example/manage/${TOKEN}`],
-    ['credentials', `https://user:pass@candidary.test/manage/${TOKEN}`],
+    ['credentials', `https://user:pass@candidary.app/manage/${TOKEN}`],
     ['manager client route', '/manage/event'],
     ['extra segment', `/manage/${TOKEN}/more`],
     ['trailing slash', `/manage/${TOKEN}/`],
@@ -30,6 +32,51 @@ describe('management link recovery', () => {
     ['non-management path', `/join/${TOKEN}`],
   ])('rejects %s', (_label, value) => {
     expect(parseManagementLink(value, ORIGIN)).toBeNull();
+  });
+
+  // Mail always links to the canonical origin, so a host reading it and then
+  // returning on the other hostname pastes a link that is ours and is not this
+  // page's origin. Only the pathname survives, and it opens on the origin the
+  // host is already on.
+  it('accepts a management link from one application origin while on another', () => {
+    for (const linkOrigin of KNOWN_APPLICATION_ORIGINS) {
+      for (const pageOrigin of KNOWN_APPLICATION_ORIGINS) {
+        expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, pageOrigin))
+          .toBe(`/manage/${TOKEN}`);
+      }
+    }
+  });
+
+  // The returned pathname is opened on the page's own origin, and
+  // `GET /manage/:token` turns it into a manager session. A relative link must
+  // not make an unrecognized page origin trustworthy: that would carry the
+  // bearer credential onto a public preview or another clone.
+  it('refuses a production management link pasted on a host that is not an application origin', () => {
+    const previewOrigin = 'https://candidary.lfd.workers.dev';
+    for (const linkOrigin of KNOWN_APPLICATION_ORIGINS) {
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, previewOrigin))
+        .toBeNull();
+      expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, LOCAL_ORIGIN)).toBeNull();
+    }
+    expect(parseManagementLink(`/manage/${TOKEN}`, previewOrigin)).toBeNull();
+    expect(parseManagementLink(`${previewOrigin}/manage/${TOKEN}`, previewOrigin)).toBeNull();
+    expect(parseManagementLink(`/manage/${TOKEN}`, 'https://candidary.test')).toBeNull();
+  });
+
+  it('keeps same-origin recovery available on the loopback development server', () => {
+    expect(parseManagementLink(`/manage/${TOKEN}`, LOCAL_ORIGIN)).toBe(`/manage/${TOKEN}`);
+    expect(parseManagementLink(`${LOCAL_ORIGIN}/manage/${TOKEN}`, LOCAL_ORIGIN))
+      .toBe(`/manage/${TOKEN}`);
+  });
+
+  it('still refuses a lookalike of an application origin', () => {
+    for (const value of [
+      `https://candidary.app.evil.example/manage/${TOKEN}`,
+      `https://candidary-app.example/manage/${TOKEN}`,
+      `http://candidary.app/manage/${TOKEN}`,
+    ]) {
+      expect(parseManagementLink(value, ORIGIN)).toBeNull();
+    }
   });
 
   it('passes a management pathname to Location.replace', () => {

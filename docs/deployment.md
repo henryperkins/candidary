@@ -11,62 +11,110 @@ npx wrangler r2 bucket create candidary-media
 
 The Worker uses an `IMAGES` binding for metadata-free browser previews, including HEIC and HEIF. Confirm the account plan and Images availability before deploying; preview failure never removes an already delivered original, but hosts need the binding to view phone formats cross-browser.
 
-The R2 CORS policy names the application origin, so it has to be reset whenever `APP_ORIGIN` changes — a signed browser `PUT` comes from the page, not from the Worker, and a stale origin fails every upload while leaving the rest of the app working. Set it after replacing the example origin:
+The R2 CORS policy names every application origin, so it has to be reset whenever that set changes — a signed browser `PUT` comes from the page, not from the Worker, and a missing origin fails every upload from that hostname while leaving the rest of the app working. Set it after replacing the example origins:
 
 ```powershell
 Copy-Item config/r2-cors.example.json config/r2-cors.json
 npx wrangler r2 bucket cors set candidary-media --file config/r2-cors.json
 ```
 
-The committed policy currently lists `candidary.app` and `candidary.online` while the origin cutover completes; narrow it to the canonical origin alone once the old one no longer serves pages.
+The committed policy lists `candidary.app` and `candidary.online` because both serve the application. This list and `APP_ORIGIN`/`ALTERNATE_ORIGINS` have to hold the same origins: nothing checks them against each other, and a hostname present in one but not the other produces a front door where every page loads and no photo uploads.
 
 The bucket remains private. CORS permits signed browser PUT requests from the application origin with the signed `content-type` header. Originals are manager-only; previews are authorization-checked; export links are short-lived and manager-only.
 
-## Canonical origin
+## Application origins
 
-`candidary.app` is the application origin, and `APP_ORIGIN` is the one place that says so. A single
-value has to serve every purpose: `worker/http/csrf.ts` compares the `Origin` header of every write
-against it exactly, and the printed guest credential, the management link, host mail, and notification
-links are all built from it (`services/event-entry.ts`, `services/links.ts`, `services/events.ts`,
-`services/host-auth.ts`, `services/notifications.ts`). A second hostname attached to the same Worker is
-therefore not a second front door. It renders the SPA and then fails every write with
-`ORIGIN_FORBIDDEN` — a failure mode that looks like a working deployment until someone tries to create
-an event, upload a photo, RSVP, or sign in.
+Candidary answers on `candidary.app` and `candidary.online`, and both are real front doors rather than
+one origin and one redirect. Two vars say so. `APP_ORIGIN` is the canonical origin, and
+`ALTERNATE_ORIGINS` is a comma- or whitespace-separated list of the others; `worker/origins.ts` reads
+both and is the only place that decides what counts as this application.
 
-`candidary.online` is the origin printed before 2026-08-04. It stays attached to the Worker as a Custom
-Domain, because a QR already on a sign cannot be recalled, but it must not serve the application. A
-zone Redirect Rule sends it to `candidary.app` with `301`, path and query preserved. The browser
-reattaches the fragment because the `Location` carries none, so `https://candidary.online/join#<id.secret>`
-arrives as `https://candidary.app/join#<id.secret>` with the credential intact and still out of the
-request line, and the pre-0008 `/join/<token>` path form carries over unchanged.
+Two rules follow from it, and they are deliberately different:
 
-The rule's expression has to name the host rather than match everything:
+- **Every write is checked against the whole set.** `assertRequestOrigin` in `worker/http/csrf.ts` tests
+  membership, not equality, so a create, an upload, an RSVP, or a sign-in works from either hostname.
+  Comparison is normalized, so a trailing slash or an explicit `:443` in the config does not fail a
+  write. A request with no `Origin` header still fails: no header is not one of the origins.
+- **Every link handed to a browser is built on the origin the request arrived on.** `requestOrigin`
+  reads it from the request URL rather than the `Origin` header, because a `GET` navigation carries
+  none. A host who works on `candidary.online` prints a QR on `candidary.online` and rotates into a
+  management link on `candidary.online` — that last one matters, because the client follows the returned
+  link with a full-page navigation and a canonical link would move them to the other domain mid-session.
+  A hostname the deployment does not answer on falls back to the canonical origin instead of echoing
+  itself. The hosts that reach the Worker are this account's own — a Custom Domain requires a zone the
+  account controls. The committed Wrangler configuration explicitly disables both the `workers.dev`
+  route and Preview URLs because uploaded versions use the production bindings and Preview URLs are
+  otherwise public. The application-level origin check remains defense in depth if either route is
+  re-enabled or configuration drifts. Echoing an unknown host back would put its hostname into a
+  printed QR or a management link a host then saves.
 
+**A credential is never exchanged off an application host.** `GET /manage/:token` and the pre-0008
+`GET /join/:token` are the only places a bearer credential becomes a session through a navigation, and a
+navigation carries no `Origin` header, so `assertRequestOrigin` cannot reach them and every other guard
+runs after the session exists. `worker/routes/exchange.ts` checks the request's own host first and sends
+an unrecognized one to the canonical origin's recovery page without the credential. Writes from such a
+host would already fail, but a session still *reads* — a manager session reads event data and
+re-displays the printed entry credential — so the boundary has to sit ahead of the exchange. The same
+check on the browser side keeps management-link recovery from offering the move in the first place;
+neither side is sufficient alone, because the URL can be typed.
+
+**Mail is the exception and stays canonical.** `services/notifications.ts` and
+`services/host-auth.ts` build from `APP_ORIGIN` always. Notifications are composed by the hourly Cron,
+where there is no request to take a host from, and a `From` domain that differs from the domain of the
+links inside the message still passes SPF, DKIM, and DMARC — nothing fails loudly, it just reads as a
+phishing attempt to the host being asked to click a login code.
+
+Adding a hostname is four settings, and skipping any one of them produces a front door that looks like
+a working deployment until someone tries to do something:
+
+1. Attach it to the Worker as a Custom Domain, and confirm **Always Use HTTPS** and the HSTS
+   preconditions below for its zone.
+2. Add it to `ALTERNATE_ORIGINS` and deploy. Without this the hostname renders the SPA and then fails
+   every write with `ORIGIN_FORBIDDEN`.
+3. Add it to `config/r2-cors.json` and apply the policy. Without this every page works and every photo
+   upload fails at the browser-direct `PUT`.
+4. Add it to `KNOWN_APPLICATION_ORIGINS` in `shared/origins.ts`. Without this a host who was mailed a
+   management link on the canonical origin cannot paste it while on the new one.
+
+The fourth is the one that looks optional and is not. The browser cannot read `ALTERNATE_ORIGINS`, so
+that constant is its copy of the list. `tests/unit/origins.test.ts` reads `wrangler.jsonc` off disk and
+fails if the two disagree, which catches the omission at build time — but only if steps 2 and 4 land in
+the same commit.
+
+There must be no zone Redirect Rule sending one application origin to another; a `301` at the edge runs
+ahead of the Worker and would make the second hostname unreachable no matter what the Worker allows.
+When scoping any other rule on these zones, name the host rather than matching everything —
+`forum.candidary.online` is a Custom Domain for a different Worker on the same zone, and an unscoped
+`true` expression would swallow it.
+
+Confirm each origin after deploying, because the read path and the write path fail separately and only
+the write path is silent from a browser tab that is already open. Post a deliberately invalid body: the
+origin check runs before the schema does, so the two outcomes are distinguishable and neither creates an
+event.
+
+```powershell
+foreach ($host in 'candidary.app', 'candidary.online') {
+  curl.exe -sS -X POST "https://$host/api/events" -H 'content-type: application/json' `
+    -H "origin: https://$host" --data '{}'
+}
 ```
-(http.host eq "candidary.online")
-```
 
-with target `concat("https://candidary.app", http.request.uri)` and status `301`. Leave **preserve query
-string off**: `http.request.uri` already carries the query, and the setting appends it a second time.
-Turn it on only with the `http.request.uri.path` form of the target, which does not.
-`forum.candidary.online` is a Custom Domain for a different Worker on the same zone; an unscoped `true`
-expression would swallow it.
+Expected `VALIDATION_FAILED` from every origin. `ORIGIN_FORBIDDEN` means that hostname is serving pages
+it cannot accept a write from — it is attached to the Worker but missing from `ALTERNATE_ORIGINS`, or the
+deployed version predates its addition. Check what is actually deployed rather than what was uploaded:
+a version upload from a branch build changes the script's settings without changing the version serving
+traffic.
 
-The redirect cannot live in the Worker. `/` is not in `assets.run_worker_first`, so the `ASSETS` binding
-answers the homepage before any Worker code runs — the surface most first visits land on is exactly the
-one Worker middleware cannot reach. Redirect Rules run ahead of both.
+Cookies are scoped to a host, so the two origins do not share sessions. A host signed in on one is not
+signed in on the other, a guest who scanned a QR on one re-scans if they arrive on the other, and an
+RSVP household is looked up per origin. Nothing in D1 or R2 is per-origin: one credential is one row and
+resolves on every front door, which is why moving between them costs a session and never an event.
 
-Sequence a change of `APP_ORIGIN` deliberately, because between the deploy and the redirect every page
-still open on the old origin has a working read path and a dead write path:
-
-1. Widen the R2 CORS policy to both origins. This is additive and cannot break either one.
-2. Deploy the new `APP_ORIGIN`.
-3. Enable the redirect rule, staged in advance so that gap is seconds rather than minutes.
-4. Narrow CORS back to the canonical origin.
-
-Cookies are scoped to a host, so the cutover ends every live guest session, host login, and RSVP session
-on the old origin. Hosts sign in again and guests re-scan. Nothing in D1 or R2 is touched and no
-persisted-data key moves, so every printed credential still resolves.
+Retiring an origin is the expensive direction. Every QR printed while it was serving carries it, and a
+QR already on a sign cannot be recalled — so a hostname that has ever been minted into printed
+credentials keeps needing either a Custom Domain or a Redirect Rule for as long as those invitations
+exist. Changing which origin is canonical is cheaper: it moves only where mail points and where an
+unrecognized host falls back.
 
 ## Transport security
 
@@ -601,9 +649,11 @@ The event-creation endpoint is suitable for a controlled deployment. Before unre
 
 Host accounts send confirmation codes, password resets, and lifecycle notifications through the `EMAIL` binding (Cloudflare Email Service).
 
-`candidary.app` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.app`, set in `EMAIL_FROM`, and Email Routing forwards replies. The account quota is 1,000 messages per day. `candidary.online` remains onboarded and `ready` on the same terms, so it can be reverted to without waiting on DNS.
+`candidary.app` is onboarded as a sending domain with DNS status `ready`: SPF and DKIM on the `cf-bounce` return-path subdomain, and `_dmarc` at `p=reject`. Mail is sent as `hello@candidary.app`, set in `EMAIL_FROM`, and Email Routing forwards replies. The account quota is 1,000 messages per day.
 
-The sending domain and `APP_ORIGIN` are independent settings that should not be allowed to drift apart. Mail whose `From` domain differs from the domain of the links inside it still passes SPF, DKIM, and DMARC, so nothing fails loudly — it just reads as a phishing attempt to the host being asked to click a login code.
+`candidary.online` is onboarded and `ready` on the same terms, but it is not a second sending domain and no mail is sent from it. Being onboarded means only that its DNS is already in place, so making it the sending domain later would not wait on propagation. It is a standby, not a live alternative: `EMAIL_FROM` names exactly one address, and moving it to `candidary.online` means moving `APP_ORIGIN` with it in the same change.
+
+There is one sending domain and one canonical origin, and they should not be allowed to drift apart. Mail whose `From` domain differs from the domain of the links inside it still passes SPF, DKIM, and DMARC, so nothing fails loudly — it just reads as a phishing attempt to the host being asked to click a login code. This is why `EMAIL_FROM` is paired with `APP_ORIGIN` specifically and not with whichever origin a host happens to be using: the alternate origins serve the application, but no mail is ever built on them.
 
 Setting up a different domain means repeating three things:
 

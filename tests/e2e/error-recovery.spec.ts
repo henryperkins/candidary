@@ -207,7 +207,7 @@ test('a full-page expired manager validates links and a valid link-only recovery
   await page.getByRole('button', { name: 'Open event manager' }).click();
   await expect(managementLink).toBeFocused();
   await expect(managementLink).toHaveAttribute('aria-invalid', 'true');
-  await expect(page.getByText('Enter a Candidary management link from this site.')).toBeVisible();
+  await expect(page.getByText('Enter a Candidary management link.')).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/manage/event/${RECOVERY_EVENT_ID}$`, 'u'));
 
   await managementLink.fill(`/manage/${VALID_MANAGEMENT_TOKEN}?from=mail#saved`);

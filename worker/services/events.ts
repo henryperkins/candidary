@@ -6,6 +6,7 @@ import { NotificationOutboxRepository } from '../db/notification-outbox';
 import { SessionsRepository } from '../db/sessions';
 import { TokensRepository } from '../db/tokens';
 import type { AppEnv } from '../env';
+import { canonicalOrigin } from '../origins';
 import {
   createSecretToken,
   digestSecret,
@@ -25,7 +26,10 @@ export interface CreateEventInput {
 }
 
 export class EventService {
-  constructor(private readonly env: AppEnv) {}
+  // The origin this creation is being answered on. Both printed and management
+  // links come out on the hostname the host actually used, rather than sending
+  // them to the other domain the moment their event exists.
+  constructor(private readonly env: AppEnv, private readonly origin: string = canonicalOrigin(env)) {}
 
   // `accountId` is the resolved host account when the creator was signed in, and
   // null otherwise. It is never taken from the request body: the caller resolves
@@ -133,14 +137,13 @@ export class EventService {
         `).bind(eventId, accountId).first())
       : false;
 
-    const origin = this.env.APP_ORIGIN.replace(/\/$/u, '');
     return {
       event,
       // In the fragment, not the path: browsers never send a fragment in a
       // request line or a Referer header, so the printed secret stays out of
       // every access log between the guest's phone and this Worker.
-      eventLink: `${origin}/join#${entryToken.token}`,
-      managementLink: `${origin}/manage/${managerToken.token}`,
+      eventLink: `${this.origin}/join#${entryToken.token}`,
+      managementLink: `${this.origin}/manage/${managerToken.token}`,
       managementSession,
       csrfToken,
       sessionExpiresAt,
