@@ -57,7 +57,6 @@ const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const INSTANCE_ID_PATTERN = /^cb1-[0-9a-f]{48}$/u;
 const ROLLING_MINUTE_MS = 60 * 1000;
-const FENCE_TTL_MS = 31 * 24 * 60 * 60 * 1000;
 const DISPATCH_ARTIFACT_KIND = 'candidary-cover-backfill-dispatch' as const;
 const EXECUTE_ARTIFACT_KIND = 'candidary-cover-backfill-execute' as const;
 const CONFIRM_ARTIFACT_KIND = 'candidary-cover-backfill-confirm' as const;
@@ -944,14 +943,13 @@ export function buildDispatchBatch(input: {
   const create = eligible.slice(0, capacity);
   withheld[limiter[2]] = eligible.length - create.length;
 
-  const expiresAt = new Date(Date.parse(input.now) + FENCE_TTL_MS).toISOString();
   const fenceStatements = create.map((row) => (
     'INSERT INTO event_cover_workflow_fences ('
     + 'workflow_binding, workflow_instance_id, event_id, dispatch_generation, state,'
     + ' created_at, updated_at, expires_at)'
     + ` SELECT ${sqlString(COVER_BACKFILL_BINDING)}, ${sqlString(row.workflowInstanceId)},`
     + ` ${sqlString(row.eventId)}, ${row.dispatchGeneration}, 'open', ${sqlString(input.now)},`
-    + ` ${sqlString(input.now)}, ${sqlString(expiresAt)}`
+    + ` ${sqlString(input.now)}, ${sqlString(constants.COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT)}`
     // Guarded the way the job inserts are, and for a sharper reason. A fence
     // carries no foreign key to `events` — it has to outlive the row it
     // protected — so nothing in the schema stops an operator from applying a
@@ -989,7 +987,11 @@ export function buildDispatchBatch(input: {
         perMinute: constants.MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
       },
     );
-    return [fenceStatements[index]!, `${claim.job};`, `${claim.fence};`];
+    const fenceClaim = claim.fence.replace(
+      ', updated_at =',
+      `, expires_at = ${sqlString(constants.COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT)}, updated_at =`,
+    );
+    return [fenceStatements[index]!, `${claim.job};`, `${fenceClaim};`];
   });
 
   // Read off `wrangler workflows --help` at 4.113.0 rather than assumed: there is

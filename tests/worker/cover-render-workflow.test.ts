@@ -3,9 +3,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import { createCoverDraft, insertCoverMaster } from '../../worker/db/event-covers';
 import { EventsRepository } from '../../worker/db/events';
-import { acceptCoverPublication } from '../../worker/services/event-cover-publication';
+import {
+  acceptCoverPublication,
+  restartCoverPublication,
+} from '../../worker/services/event-cover-publication';
 import { coverMasterKey } from '../../worker/storage/event-cover-keys';
 import {
+  cleanupEventCovers,
   reconcileEventCoverPurge,
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
@@ -21,6 +25,7 @@ import type { AppEnv } from '../../worker/env';
 const now = new Date('2026-08-04T12:00:00.000Z');
 const HEX_64 = 'a'.repeat(64);
 const OPERATION = '5f3a2b18-6c2d-4f0e-9a71-0c2d1e8b4a55';
+const FENCE_HOLD = '9999-12-31T23:59:59.999Z';
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 
@@ -81,6 +86,72 @@ async function publication(access: Access, master: { width: number; height: numb
   });
   return { draft, receipt: accepted.receipt };
 }
+
+it('holds a newly accepted render fence open beyond 32 days', async () => {
+  await resetDatabase();
+  const access = await eventAccess();
+  const created = new Date('2026-06-01T12:00:00.000Z');
+  await insertCoverMaster(testEnv.DB, {
+    id: 'master-old', eventId: access.event.id,
+    objectKey: coverMasterKey(access.event.id, 'master-old'),
+    byteSize: 900_000, width: 2480, height: 1680, sha256: HEX_64,
+    normalizationVersion: 1, normalizationRung: 1, now: created,
+  });
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_masters SET auto_focus_x = 0.5, auto_focus_y = 0.5,
+      composition_model_version = 1 WHERE id = 'master-old'
+  `).run();
+  const draft = (await createCoverDraft(testEnv.DB, {
+    eventId: access.event.id, draftIntentId: 'intent-old', requestDigest: HEX_64,
+    source: 'existing_upload', masterId: 'master-old', now: created,
+  })).draft;
+  const event = (await new EventsRepository(testEnv.DB).getById(access.event.id))!;
+  const accepted = await acceptCoverPublication(testEnv, {
+    event,
+    request: {
+      operationId: OPERATION, expectedRevision: event.coverRevision,
+      source: { kind: 'upload', draftId: draft.id }, focus: { mode: 'auto' }, effect: 'natural',
+    },
+    requestDigest: HEX_64,
+    now: created,
+  });
+
+  expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+    accepted.receipt.workflow_instance_id)).toEqual({ expires_at: FENCE_HOLD });
+  await cleanupEventCovers(testEnv, new Date(created.getTime() + 32 * 24 * 60 * 60 * 1000));
+  expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+    accepted.receipt.workflow_instance_id)).toEqual({ expires_at: FENCE_HOLD });
+});
+
+it('restores the hold when a terminal render receipt is claimed for retry', async () => {
+  await resetDatabase();
+  const access = await eventAccess();
+  const { receipt } = await publication(access, { width: 2480, height: 1680 });
+  await testEnv.DB.batch([
+    testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, updated_at = ?
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(new Date(now.getTime() - 60_000).toISOString(), access.event.id, OPERATION),
+    testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences SET expires_at = ?
+      WHERE workflow_instance_id = ?
+    `).bind('2026-09-04T12:00:00.000Z', receipt.workflow_instance_id),
+  ]);
+  const workflow = {
+    async lookup() { return { kind: 'status' as const, status: 'errored' }; },
+    async create() { throw new Error('unreachable'); },
+    async resume() { throw new Error('unreachable'); },
+    async restart() {},
+    async terminate() { throw new Error('unreachable'); },
+  };
+
+  expect(await restartCoverPublication(testEnv, {
+    eventId: access.event.id, operationId: OPERATION, now, workflow,
+  })).toMatchObject({ status: 'restarted' });
+  expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+    receipt.workflow_instance_id)).toEqual({ expires_at: FENCE_HOLD });
+});
 
 async function runEveryProfile(env: AppEnv, eventId: string) {
   for (const profile of EVENT_COVER_PROFILES) {
@@ -373,6 +444,8 @@ describe('cover render finalize', () => {
       .toEqual({ state: 'published' });
     expect(await row('SELECT status, applied_revision FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
       .toEqual({ status: 'applied', applied_revision: 1 });
+    expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE event_id = ?', access.event.id))
+      .toEqual({ expires_at: '2026-09-04T12:00:00.000Z' });
 
     // The displaced legacy original is inventoried by the same statements that
     // moved the pointer, and is still in R2.

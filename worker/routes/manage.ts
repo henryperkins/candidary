@@ -183,8 +183,11 @@ manageRoutes.delete('/manage/events/:eventId', async (context) => {
   if (!parsed.success || parsed.data.confirmation !== auth.event.name) {
     throw new ApiError('VALIDATION_FAILED', 'Type the event name exactly to delete it.', 422, { confirmation: 'Event name does not match.' });
   }
-  await deleteEventData(context.env, auth.event.id);
-  return context.json({ data: { deleted: true }, requestId: context.get('requestId') });
+  const summary = await deleteEventData(context.env, auth.event.id);
+  const requestId = context.get('requestId');
+  return summary.remainder
+    ? context.json({ data: { deletionScheduled: true }, requestId }, 202)
+    : context.json({ data: { deleted: true }, requestId });
 });
 
 manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {

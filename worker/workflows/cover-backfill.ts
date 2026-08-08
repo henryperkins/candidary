@@ -1,6 +1,8 @@
 import {
   COVER_CLEANUP_ROWS_PER_CLASS,
+  COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
+  coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import {
   CLAIM_APPLIED_AT_SQL,
@@ -231,6 +233,27 @@ function terminalTimestamps(now: Date, ageOut: boolean): {
   };
 }
 
+function terminalFenceStatement(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  now: Date,
+): D1PreparedStatement {
+  return env.DB.prepare(`
+    UPDATE event_cover_workflow_fences
+    SET expires_at = ?, updated_at = ?
+    WHERE workflow_binding = ? AND workflow_instance_id = (
+      SELECT workflow_instance_id FROM event_cover_backfill_jobs
+      WHERE id = ? AND run_id = ? AND event_id = ?
+        AND status IN ('applied', 'skipped', 'resolved', 'failed', 'needs_replacement')
+    ) AND event_id = ? AND dispatch_generation = (
+      SELECT dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?
+    ) AND state = 'open'
+  `).bind(
+    coverWorkflowFenceTerminalExpiry(now), now.toISOString(), COVER_BACKFILL_BINDING,
+    payload.jobId, payload.runId, payload.eventId, payload.eventId, payload.jobId,
+  );
+}
+
 /**
  * Run counters, recomputed from the jobs rather than decremented.
  *
@@ -284,6 +307,7 @@ async function recordTerminal(
       status, options.failureCode ?? null, retryable ? 1 : 0, terminalAt,
       referenceReleaseAt, expiresAt, terminalAt, payload.jobId,
     ),
+    terminalFenceStatement(env, payload, now),
   ];
   if (options.abandonSetId) {
     statements.push(env.DB.prepare(`
@@ -656,6 +680,7 @@ const RESTART_CLAIM_SQL = 'UPDATE event_cover_backfill_jobs'
 const FENCE_CLAIM_SQL = 'UPDATE event_cover_workflow_fences'
   + ' SET dispatch_generation = (SELECT j.dispatch_generation'
   + '   FROM event_cover_backfill_jobs j WHERE j.id = ?2),'
+  + ` expires_at = '${COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT}',`
   + ` updated_at = ${CLAIM_APPLIED_AT_SQL}`
   + ' WHERE workflow_binding = ?1 AND workflow_instance_id = ?4'
   + " AND event_id = ?3 AND state = 'open' AND changes() = 1";
@@ -1224,6 +1249,7 @@ export async function coverBackfillFinalize(
       timestamp, referenceReleaseAt, expiresAt, timestamp,
       payload.jobId, payload.eventId, nextRevision,
     ),
+    terminalFenceStatement(env, payload, now),
     recomputeBackfillRunCounters(env.DB, payload.runId, now),
   ]);
 

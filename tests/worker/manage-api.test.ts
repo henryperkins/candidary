@@ -13,6 +13,7 @@ import {
   importRoster,
   png,
   resetDatabase,
+  seedEventCoverGraph,
   secondGuest,
   testEnv,
   uploadPending,
@@ -823,6 +824,35 @@ describe('access link rotation', () => {
 });
 
 describe('host-initiated event deletion', () => {
+  it('returns the exact scheduled-deletion contract while a fence remains parked', async () => {
+    const access = await eventAccess();
+    const graph = await seedEventCoverGraph(testEnv.DB, access.event.id);
+    const claimedAt = new Date().toISOString();
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'queued', dispatch_state = 'creating', last_dispatch_at = ?, updated_at = ?
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(claimedAt, claimedAt, access.event.id, graph.operationId).run();
+    await testEnv.MEDIA_BUCKET.put(`events/${access.event.id}/cover/held.webp`, png());
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      method: 'DELETE',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({ confirmation: access.event.name }),
+    }, testEnv);
+
+    expect(response.status).toBe(202);
+    const body = await response.json<Record<string, unknown>>();
+    expect(body).toEqual({
+      data: { deletionScheduled: true },
+      requestId: expect.any(String),
+    });
+    expect(await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toMatchObject({ deleted_at: expect.any(String) });
+    expect((await testEnv.MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` })).objects.length)
+      .toBeGreaterThan(0);
+  });
+
   it('needs the exact event name and leaves nothing of the event behind', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'keeper');
@@ -843,6 +873,10 @@ describe('host-initiated event deletion', () => {
       body: JSON.stringify({ confirmation: access.event.name }),
     }, testEnv);
     expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({
+      data: { deleted: true },
+      requestId: expect.any(String),
+    });
 
     // The row is gone rather than soft-deleted, so a purge that already ran does
     // not leave the event waiting for a later scheduled pass.

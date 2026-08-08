@@ -1,3 +1,4 @@
+import { coverWorkflowFenceTerminalExpiry } from '../../shared/constants';
 import {
   COVER_PIPELINE_VERSIONS,
   EVENT_COVER_PROFILES,
@@ -70,6 +71,26 @@ export interface CoverRenderStepSummary {
 const RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
 const RECEIPT_APPLIED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RECEIPT_TERMINAL_TTL_MS = 24 * 60 * 60 * 1000;
+
+function terminalFenceStatement(
+  env: AppEnv,
+  payload: CoverRenderPayload,
+  generation: number,
+  now: Date,
+): D1PreparedStatement {
+  return env.DB.prepare(`
+    UPDATE event_cover_workflow_fences
+    SET expires_at = ?, updated_at = ?
+    WHERE workflow_binding = ? AND workflow_instance_id = (
+      SELECT workflow_instance_id FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = ? AND dispatch_generation = ?
+        AND status IN ('applied', 'conflict', 'failed')
+    ) AND event_id = ? AND dispatch_generation = ? AND state = 'open'
+  `).bind(
+    coverWorkflowFenceTerminalExpiry(now), now.toISOString(), COVER_RENDER_BINDING,
+    payload.eventId, payload.operationId, generation, payload.eventId, generation,
+  );
+}
 
 interface RehydratedState {
   receipt: CoverPublishReceiptRow;
@@ -176,11 +197,11 @@ export async function coverRenderPreflight(
   // The event moved on while this was queued. Record the conflict, abandon the
   // empty set, and hand the still-valid draft back so the host can republish.
   if (event.cover_revision !== receipt.expected_revision) {
-    await recordConflict(env, payload, set.id, draft.id, now);
+    await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
     return terminal('conflict');
   }
   if (draft.state !== 'publishing') {
-    await recordConflict(env, payload, set.id, draft.id, now);
+    await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
     return terminal('conflict');
   }
 
@@ -437,10 +458,11 @@ export async function coverRenderFinalize(
       payload.eventId, payload.operationId, receipt.request_sha256, receipt.workflow_instance_id,
       payload.eventId, nextRevision,
     ),
+    terminalFenceStatement(env, payload, receipt.dispatch_generation, now),
   ]);
 
   if ((results[0]?.meta.changes ?? 0) !== 1) {
-    await recordConflict(env, payload, set.id, draft.id, now);
+    await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
     return { status: 'conflict', appliedRevision: null, failureCode: null, retryable: false };
   }
   return { status: 'applied', appliedRevision: nextRevision, failureCode: null, retryable: false };
@@ -458,6 +480,7 @@ async function recordConflict(
   renderSetId: string,
   draftId: string,
   now: Date,
+  generation: number,
 ): Promise<void> {
   const timestamp = now.toISOString();
   await env.DB.batch([
@@ -480,6 +503,7 @@ async function recordConflict(
       SET state = 'ready', draft_revision = draft_revision + 1, updated_at = ?
       WHERE id = ? AND state = 'publishing'
     `).bind(timestamp, draftId),
+    terminalFenceStatement(env, payload, generation, now),
   ]);
 }
 
@@ -532,6 +556,7 @@ async function recordSafeFailure(
       `).bind(timestamp, draftId),
     );
   }
+  statements.push(terminalFenceStatement(env, payload, generation, now));
   await env.DB.batch(statements);
 }
 

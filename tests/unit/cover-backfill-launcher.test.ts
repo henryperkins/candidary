@@ -62,6 +62,12 @@ const EVENT = '33333333-3333-4333-8333-333333333333';
 const OTHER_EVENT = '44444444-4444-4444-8444-444444444444';
 const NOW = '2026-08-05T10:00:00.000Z';
 
+it('promises immediate access revocation and scheduled physical cleanup in Manager', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/pages/ManagerPage.tsx'), 'utf8');
+  expect(source).toContain('revoke access immediately and schedule every private file for permanent deletion');
+  expect(source).not.toContain('permanently remove every file');
+});
+
 const row = (id: string, key: string, revision = 0): InventoryRow => ({
   id,
   cover_object_key: key,
@@ -569,6 +575,7 @@ describe('the dispatch batch', () => {
     });
     expect(one.fenceStatements[0]).toContain(`'${COVER_BACKFILL_BINDING}'`);
     expect(one.fenceStatements[0]).toContain("'open'");
+    expect(one.fenceStatements[0]).toContain("'9999-12-31T23:59:59.999Z'");
     expect(one.fenceStatements[0]).toContain('ON CONFLICT');
     // A fence carries no foreign key to `events`, so nothing in the schema stops
     // a stale artifact from opening one behind a purge that has already left the
@@ -703,6 +710,7 @@ describe('the transactional claim', () => {
     expect(fenceClaim).toContain('UPDATE event_cover_workflow_fences');
     expect(fenceClaim).toContain('changes() = 1');
     expect(fenceClaim).toContain('SELECT j.dispatch_generation');
+    expect(fenceClaim).toContain("expires_at = '9999-12-31T23:59:59.999Z'");
   });
 
   it('carries all four refusals into the statement itself', () => {

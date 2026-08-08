@@ -37,6 +37,7 @@ import type { AppEnv } from '../../worker/env';
 const now = new Date('2026-08-05T12:00:00.000Z');
 const RUN = '11111111-1111-4111-8111-111111111111';
 const JOB = '22222222-2222-4222-8222-222222222222';
+const FENCE_HOLD = '9999-12-31T23:59:59.999Z';
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 
@@ -139,7 +140,7 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
   `).bind(
     instanceId, access.event.id, fenceGeneration, fenceState,
     now.toISOString(), claimedAt,
-    new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString(),
+    FENCE_HOLD,
   ).run();
 
   return { key, instanceId, payload: { runId: RUN, jobId: JOB, eventId: access.event.id } };
@@ -761,6 +762,9 @@ describe('backfill finalize', () => {
     expect(job.status).toBe('applied');
     expect(job.reference_release_at).toBe('2026-08-12T12:00:00.000Z');
     expect(job.expires_at).toBe('2026-09-04T12:00:00.000Z');
+    expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+      (await coverBackfillInstanceId(RUN, JOB, access.event.id))))
+      .toEqual({ expires_at: '2026-09-05T12:00:00.000Z' });
     expect(await row('SELECT applied_count, queued_count FROM event_cover_backfill_runs WHERE id = ?', RUN))
       .toEqual({ applied_count: 1, queued_count: 0 });
   });
@@ -914,6 +918,8 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
     // The fence moved with the job, because a resume *is* a dispatch claim.
     expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+    expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId))
+      .toEqual({ expires_at: FENCE_HOLD });
   });
 
   it('leaves a refused resume recoverable at its claimed generation', async () => {
@@ -946,6 +952,8 @@ describe('platform reconciliation and the guarded restart edge', () => {
         expires_at: null, reference_release_at: null,
       });
       expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+      expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId))
+        .toEqual({ expires_at: FENCE_HOLD });
     },
   );
 
@@ -983,6 +991,8 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(await currentJob()).toMatchObject({
       status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 2,
     });
+    expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId))
+      .toEqual({ expires_at: FENCE_HOLD });
   });
 
   /* ---------------- deletion and fence ownership ---------------- */

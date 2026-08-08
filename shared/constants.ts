@@ -106,3 +106,11 @@ export const MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE = 25;
 export const MAX_COVER_PURGE_FENCES_PER_PASS = 10;
 export const MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS = 5;
 export const COVER_CLEANUP_ROWS_PER_CLASS = 100;
+
+/** Open dispatch fences do not expire until a terminal Workflow outcome is proven. */
+export const COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT = '9999-12-31T23:59:59.999Z';
+export const COVER_WORKFLOW_FENCE_TERMINAL_TTL_MS = 31 * 24 * 60 * 60 * 1000;
+
+export function coverWorkflowFenceTerminalExpiry(now: Date): string {
+  return new Date(now.getTime() + COVER_WORKFLOW_FENCE_TERMINAL_TTL_MS).toISOString();
+}

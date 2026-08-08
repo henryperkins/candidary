@@ -932,7 +932,7 @@ export function ManagerPage() {
         </section>
         <div className="danger-zone">
           <h3>Delete this event</h3>
-          <p>Type <strong>{event.name}</strong> to revoke both links and permanently remove every file.</p>
+          <p>Type <strong>{event.name}</strong> to revoke access immediately and schedule every private file for permanent deletion.</p>
           <form onSubmit={(formEvent) => {
             formEvent.preventDefault();
             const element = formEvent.currentTarget;

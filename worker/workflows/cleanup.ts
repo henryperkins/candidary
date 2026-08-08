@@ -1,10 +1,17 @@
-import { COVER_CLEANUP_ROWS_PER_CLASS } from '../../shared/constants';
+import {
+  COVER_CLEANUP_ROWS_PER_CLASS,
+  COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+  MAX_COVER_PURGE_FENCES_PER_PASS,
+  MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
+  coverWorkflowFenceTerminalExpiry,
+} from '../../shared/constants';
 import type { AppEnv } from '../env';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
 import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
+import { STALE_DISPATCH_CLAIM_MS } from '../services/event-cover-publication';
 import {
   COVER_BACKFILL_BINDING,
   reconcileCoverBackfillJobs,
@@ -543,25 +550,6 @@ const COVER_PURGE_ORDER = [
  * Event purge coordination
  * ------------------------------------------------------------------ */
 
-/**
- * The expiry an unresolved blocked fence is held at.
- *
- * Two jobs in one value. The bounded sweep deletes fences by `expires_at`, so a
- * fence still protecting an unfinished purge must never be reachable by it; and
- * `0012` gives the fence no "settled" column, so the sentinel *is* the marker —
- * a blocked fence still holding it has not been verified terminal, and one that
- * no longer holds it has. Exact equality rather than a comparison, so the test
- * for "unresolved" can never drift into a range check that a re-stamped expiry
- * accidentally satisfies.
- */
-export const FENCE_PURGE_HOLD_EXPIRES_AT = '9999-12-31T23:59:59.999Z';
-
-/**
- * 31 days past terminal verification, exceeding the platform's own 30-day
- * retention for a completed instance so its ID can never be recreated behind us.
- */
-const FENCE_TERMINAL_TTL_MS = 31 * 24 * 60 * 60 * 1000;
-
 export interface CoverPurgeProgressSummary {
   eventId: string;
   /** `complete` is not a stored phase: `0012` allows only the first three, and
@@ -580,27 +568,20 @@ export interface CoverPurgeWorkflowAccessors {
 interface HeldFenceRow {
   workflow_binding: string;
   workflow_instance_id: string;
-  created_at: string;
+  dispatch_state: string | null;
+  claim_at: string | null;
 }
 
-/**
- * How long a fence nobody can classify may hold a purge open.
- *
- * `unknown` never settles, and that is right: acting on absent information is
- * how a swept prefix ends up underneath a running instance. But the hold
- * sentinel also removes the fence from the only sweep that would ever have
- * deleted it, so "never settles" was literally never — a fence opened for a
- * `create()` that failed answers no status read and no terminate, and the event
- * behind it stayed soft-deleted with every object intact for good.
- *
- * The bound is the fence's own TTL, which is already chosen to exceed the
- * platform's retention of a completed instance. A cover Workflow renders at most
- * twenty-four objects from one master; none of them is a month-long job, so an
- * ID that has been silent for that long is not an instance that might still
- * write — it is a fence for work that never started. Past that point the purge
- * stops waiting, having tried to stop it one more time first.
- */
-const FENCE_UNRESOLVABLE_AFTER_MS = 31 * 24 * 60 * 60 * 1000;
+const CLAIM_STATES = new Set(['creating', 'resuming', 'restarting']);
+
+function isYoungClaim(fence: HeldFenceRow, now: Date): boolean {
+  if (!fence.dispatch_state || !CLAIM_STATES.has(fence.dispatch_state) || !fence.claim_at) {
+    return false;
+  }
+  const claimedAt = Date.parse(fence.claim_at);
+  return Number.isFinite(claimedAt)
+    && now.getTime() - claimedAt < STALE_DISPATCH_CLAIM_MS;
+}
 
 /** What a purge does about one lookup. Total, with an explicit wait default. */
 function purgeActionFor(lookup: CoverWorkflowLookup): 'terminate' | 'settle' | 'materialize' | 'wait' {
@@ -648,31 +629,39 @@ async function materializeForPurge(
   fence: HeldFenceRow,
   eventId: string,
   accessors: CoverPurgeWorkflowAccessors,
-): Promise<boolean> {
+): Promise<{ attempted: boolean; created: boolean }> {
   try {
     if (fence.workflow_binding === COVER_BACKFILL_BINDING) {
       const job = await env.DB.prepare(`
         SELECT id, run_id FROM event_cover_backfill_jobs
         WHERE event_id = ? AND workflow_instance_id = ?
       `).bind(eventId, fence.workflow_instance_id).first<{ id: string; run_id: string }>();
-      if (!job) return false;
-      await accessors.backfill.createBatch([{
-        id: fence.workflow_instance_id,
-        params: { runId: job.run_id, jobId: job.id, eventId },
-      }]);
-      return true;
+      if (!job) return { attempted: false, created: false };
+      try {
+        await accessors.backfill.createBatch([{
+          id: fence.workflow_instance_id,
+          params: { runId: job.run_id, jobId: job.id, eventId },
+        }]);
+        return { attempted: true, created: true };
+      } catch {
+        return { attempted: true, created: false };
+      }
     }
     const receipt = await env.DB.prepare(`
       SELECT operation_id FROM event_cover_publish_receipts
       WHERE event_id = ? AND workflow_instance_id = ?
     `).bind(eventId, fence.workflow_instance_id).first<{ operation_id: string }>();
-    if (!receipt) return false;
-    await accessors.render.create(fence.workflow_instance_id, {
-      eventId, operationId: receipt.operation_id,
-    });
-    return true;
+    if (!receipt) return { attempted: false, created: false };
+    try {
+      await accessors.render.create(fence.workflow_instance_id, {
+        eventId, operationId: receipt.operation_id,
+      });
+      return { attempted: true, created: true };
+    } catch {
+      return { attempted: true, created: false };
+    }
   } catch {
-    return false;
+    return { attempted: false, created: false };
   }
 }
 
@@ -698,16 +687,29 @@ async function settleEventCoverFences(
   `).bind(eventId).first<{ workflow_binding: string | null; workflow_instance_id: string | null }>();
 
   const held = await env.DB.prepare(`
-    SELECT workflow_binding, workflow_instance_id, created_at FROM event_cover_workflow_fences
-    WHERE event_id = ?1 AND state = 'deletion-blocked' AND expires_at = ?2
-      AND (workflow_binding > ?3
-        OR (workflow_binding = ?3 AND workflow_instance_id > ?4))
-    ORDER BY workflow_binding, workflow_instance_id
+    SELECT f.workflow_binding, f.workflow_instance_id,
+      CASE WHEN f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+        THEN r.dispatch_state ELSE j.dispatch_state END AS dispatch_state,
+      CASE WHEN f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+        THEN COALESCE(r.last_dispatch_at, r.updated_at) ELSE j.updated_at END AS claim_at
+    FROM event_cover_workflow_fences f
+    LEFT JOIN event_cover_publish_receipts r
+      ON f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+     AND r.event_id = f.event_id AND r.workflow_instance_id = f.workflow_instance_id
+     AND r.dispatch_generation = f.dispatch_generation
+    LEFT JOIN event_cover_backfill_jobs j
+      ON f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+     AND j.event_id = f.event_id AND j.workflow_instance_id = f.workflow_instance_id
+     AND j.dispatch_generation = f.dispatch_generation
+    WHERE f.event_id = ?1 AND f.state = 'deletion-blocked' AND f.expires_at = ?2
+      AND (f.workflow_binding > ?3
+        OR (f.workflow_binding = ?3 AND f.workflow_instance_id > ?4))
+    ORDER BY f.workflow_binding, f.workflow_instance_id
     LIMIT ?5
   `).bind(
-    eventId, FENCE_PURGE_HOLD_EXPIRES_AT,
+    eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
     cursor?.workflow_binding ?? '', cursor?.workflow_instance_id ?? '',
-    COVER_CLEANUP_ROWS_PER_CLASS,
+    MAX_COVER_PURGE_FENCES_PER_PASS,
   ).all<HeldFenceRow>();
 
   // Rows *resolved*, which is what the column is called and what an operator
@@ -715,8 +717,14 @@ async function settleEventCoverFences(
   // pass that reads the same unresolved fence every day would otherwise report a
   // resolution count larger than the number of fences the event ever had.
   let resolved = 0;
+  let halted = false;
+  let lastSettled: HeldFenceRow | null = null;
 
   for (const fence of held.results) {
+    if (isYoungClaim(fence, now)) {
+      halted = true;
+      break;
+    }
     summary.inspected += 1;
     const accessor = fence.workflow_binding === COVER_BACKFILL_BINDING
       ? accessors.backfill
@@ -724,21 +732,37 @@ async function settleEventCoverFences(
 
     let lookup = await purgeLookup(accessor, fence.workflow_instance_id);
     let action = purgeActionFor(lookup);
+    if (action === 'wait') {
+      halted = true;
+      break;
+    }
+
+    const requiredMutations = action === 'materialize' ? 2 : action === 'terminate' ? 1 : 0;
+    if (summary.platformMutations + requiredMutations
+      > MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS) {
+      halted = true;
+      break;
+    }
 
     if (action === 'materialize') {
-      if (!await materializeForPurge(env, fence, eventId, accessors)) continue;
-      summary.platformMutations += 1;
+      const materialized = await materializeForPurge(env, fence, eventId, accessors);
+      if (materialized.attempted) summary.platformMutations += 1;
+      if (!materialized.created) {
+        halted = true;
+        break;
+      }
       action = 'terminate';
     }
 
     if (action === 'terminate') {
+      summary.platformMutations += 1;
       try {
         await accessor.terminate(fence.workflow_instance_id);
       } catch {
         // The next pass retries exactly this instance.
-        continue;
+        halted = true;
+        break;
       }
-      summary.platformMutations += 1;
       // Re-read rather than assume: terminate returning is not proof the
       // instance reached a terminal state, and the fence may only be released
       // against an observed one.
@@ -747,45 +771,48 @@ async function settleEventCoverFences(
     }
 
     if (action !== 'settle') {
-      // Still unclassifiable, and young enough that it might yet be real.
-      if (Date.parse(fence.created_at) + FENCE_UNRESOLVABLE_AFTER_MS > now.getTime()) continue;
-      // Older than any cover instance can be. One last attempt to stop whatever
-      // might be behind it, then the purge stops waiting on an answer that is
-      // never going to come.
-      try {
-        await accessor.terminate(fence.workflow_instance_id);
-        summary.platformMutations += 1;
-      } catch { /* Nothing is there to stop; settling is the point. */ }
+      halted = true;
+      break;
     }
 
     const released = await env.DB.prepare(`
       UPDATE event_cover_workflow_fences
       SET expires_at = ?, updated_at = ?
       WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'deletion-blocked'
+        AND expires_at = ?
     `).bind(
-      new Date(now.getTime() + FENCE_TERMINAL_TTL_MS).toISOString(), timestamp,
+      coverWorkflowFenceTerminalExpiry(now), timestamp,
       fence.workflow_binding, fence.workflow_instance_id,
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
     ).run();
-    resolved += released.meta.changes;
+    if (released.meta.changes !== 1) {
+      halted = true;
+      break;
+    }
+    resolved += 1;
+    lastSettled = fence;
   }
 
-  const last = held.results[held.results.length - 1];
-  const exhausted = held.results.length < COVER_CLEANUP_ROWS_PER_CLASS;
+  const reachedEnd = !halted && held.results.length < MAX_COVER_PURGE_FENCES_PER_PASS;
+  const nextBinding = reachedEnd ? null
+    : lastSettled?.workflow_binding ?? cursor?.workflow_binding ?? null;
+  const nextInstance = reachedEnd ? null
+    : lastSettled?.workflow_instance_id ?? cursor?.workflow_instance_id ?? null;
   await env.DB.prepare(`
     UPDATE event_cover_purge_progress
     SET workflow_binding = ?, workflow_instance_id = ?, fences_resolved = fences_resolved + ?,
         platform_mutations = platform_mutations + ?, updated_at = ?
     WHERE event_id = ?
   `).bind(
-    exhausted ? null : last?.workflow_binding ?? null,
-    exhausted ? null : last?.workflow_instance_id ?? null,
+    nextBinding,
+    nextInstance,
     resolved, summary.platformMutations, timestamp, eventId,
   ).run();
 
   const unresolved = await env.DB.prepare(`
     SELECT count(*) AS count FROM event_cover_workflow_fences
-    WHERE event_id = ? AND state = 'deletion-blocked' AND expires_at = ?
-  `).bind(eventId, FENCE_PURGE_HOLD_EXPIRES_AT).first<{ count: number }>();
+    WHERE event_id = ? AND expires_at = ?
+  `).bind(eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT).first<{ count: number }>();
   return (unresolved?.count ?? 0) === 0;
 }
 
@@ -832,13 +859,28 @@ export async function reconcileEventCoverPurge(
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
-          dispatch_state = 'blocked', updated_at = ?
+          dispatch_state = CASE
+            WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN dispatch_state
+            ELSE 'blocked'
+          END,
+          updated_at = CASE
+            WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN updated_at
+            ELSE ?
+          END
       WHERE event_id = ? AND status IN ('queued', 'rendering', 'finalizing')
     `).bind(timestamp, eventId),
     env.DB.prepare(`
       UPDATE event_cover_backfill_jobs
       SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
-          dispatch_state = 'blocked', terminal_at = COALESCE(terminal_at, ?), updated_at = ?
+          dispatch_state = CASE
+            WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN dispatch_state
+            ELSE 'blocked'
+          END,
+          terminal_at = COALESCE(terminal_at, ?),
+          updated_at = CASE
+            WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN updated_at
+            ELSE ?
+          END
       WHERE event_id = ? AND status IN ('queued', 'normalizing', 'rendering', 'finalizing')
     `).bind(timestamp, timestamp, eventId),
     env.DB.prepare(`
@@ -857,7 +899,7 @@ export async function reconcileEventCoverPurge(
       UPDATE event_cover_workflow_fences
       SET state = 'deletion-blocked', expires_at = ?, updated_at = ?
       WHERE event_id = ? AND state = 'open'
-    `).bind(FENCE_PURGE_HOLD_EXPIRES_AT, timestamp, eventId),
+    `).bind(COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId),
     env.DB.prepare(`
       INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
       SELECT ?, 'fences', ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
@@ -987,8 +1029,12 @@ async function purgeEventRelationalRows(
  * for the scheduled pass to finish — the host's delete has still taken effect,
  * because every credential is revoked before this returns.
  */
-export async function deleteEventData(env: AppEnv, eventId: string, now = new Date()): Promise<void> {
-  await reconcileEventCoverPurge(env, eventId, now);
+export async function deleteEventData(
+  env: AppEnv,
+  eventId: string,
+  now = new Date(),
+): Promise<CoverPurgeProgressSummary> {
+  return reconcileEventCoverPurge(env, eventId, now);
 }
 
 export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {

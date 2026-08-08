@@ -1,4 +1,5 @@
 import {
+  COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_PUBLICATIONS_PER_HOUR,
   MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
   MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
@@ -37,7 +38,6 @@ import {
 const RECEIPT_APPLIED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RECEIPT_TERMINAL_TTL_MS = 24 * 60 * 60 * 1000;
 const RESTART_WINDOW_MS = 24 * 60 * 60 * 1000;
-const FENCE_TTL_MS = 31 * 24 * 60 * 60 * 1000;
 const RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
 /** How long a `creating`/`resuming`/`restarting` claim may sit before purge reconciles it. */
 export const STALE_DISPATCH_CLAIM_MS = 2 * 60 * 1000;
@@ -344,7 +344,7 @@ export async function acceptCoverPublication(
         SELECT ?, ?, ?, 0, 'open', ?, ?, ? WHERE changes() = 1
       `).bind(
         COVER_RENDER_BINDING, workflowInstanceId, event.id, timestamp, timestamp,
-        new Date(now.getTime() + FENCE_TTL_MS).toISOString(),
+        COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
       ),
     );
   }
@@ -611,10 +611,15 @@ export async function restartCoverPublication(
     // `deletion-blocked`, and this claim changes nothing.
     env.DB.prepare(`
       UPDATE event_cover_workflow_fences
-      SET dispatch_generation = dispatch_generation + 1, updated_at = ?
+      SET dispatch_generation = dispatch_generation + 1, expires_at = ?, updated_at = ?
       WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'open'
         AND changes() = 1
-    `).bind(timestamp, COVER_RENDER_BINDING, receipt.workflow_instance_id),
+    `).bind(
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      timestamp,
+      COVER_RENDER_BINDING,
+      receipt.workflow_instance_id,
+    ),
   ]);
 
   if ((claimed[0]?.meta.changes ?? 0) !== 1) {
