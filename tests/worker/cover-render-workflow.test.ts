@@ -194,8 +194,8 @@ describe('cover render preflight', () => {
     expect(recording.calls).toHaveLength(0);
   });
 
-  it('refuses to work when no fence exists at all', async () => {
-    const { receipt } = await publication(access, { width: 2480, height: 1680 });
+  it('refuses to work when no fence exists at all, and gives the draft back', async () => {
+    const { draft, receipt } = await publication(access, { width: 2480, height: 1680 });
     // A settled purge deletes the fence on its own 31-day schedule. Absence is
     // what an instance that outlived its fence sees, and it is refusal: the
     // earlier guard asked only whether a fence objected, so no row read as
@@ -210,16 +210,53 @@ describe('cover render preflight', () => {
 
     expect(preflight.outcome).toMatchObject({ status: 'failed', failureCode: 'COVER_RENDER_UNAVAILABLE' });
     expect(recording.calls).toHaveLength(0);
+    // A permanent refusal has to release publication ownership with it.
+    // `publishing` is not expirable, cannot be discarded, and cannot be failed,
+    // so a draft left in it is stranded for the life of the event — and three of
+    // them exhaust the per-event live-draft cap.
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ state: 'abandoned' });
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'ready' });
   });
 
-  it('refuses to work for a fence from another dispatch generation', async () => {
-    const { receipt } = await publication(access, { width: 2480, height: 1680 });
-    // The fence moved on without this instance, so this instance is the stale
-    // one and may not spend transformations under a newer claim.
+  /**
+   * Supersession is not failure. `restartCoverPublication` bumps the receipt and
+   * the fence in one batch, so a generation the instance did not claim means
+   * another generation owns this receipt now — and the earlier form stamped a
+   * *permanent* failure over it, which the live run then exits on. Nothing here
+   * may be written by the run that lost.
+   */
+  it('writes nothing at all for a fence from another dispatch generation', async () => {
+    const { draft, receipt } = await publication(access, { width: 2480, height: 1680 });
     await testEnv.DB.prepare(`
       UPDATE event_cover_workflow_fences
       SET dispatch_generation = dispatch_generation + 1 WHERE workflow_instance_id = ?
     `).bind(receipt.workflow_instance_id).run();
+    const before = await row('SELECT status, retryable, failure_code FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
+
+    const recording = withRecordingImages();
+    const preflight = await coverRenderPreflight(recording.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now);
+
+    expect(preflight.shouldRender).toBe(false);
+    expect(preflight.outcome.status).toBe('skipped');
+    expect(recording.calls).toHaveLength(0);
+    // The receipt still belongs to the generation that owns it, and the draft
+    // and set stay exactly as that generation left them.
+    expect(await row('SELECT status, retryable, failure_code FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
+      .toEqual(before);
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'publishing' });
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ state: 'staging' });
+  });
+
+  it('gives the draft back when the stored recipe cannot be read', async () => {
+    const { draft } = await publication(access, { width: 2480, height: 1680 });
+    await testEnv.DB.prepare("UPDATE event_cover_render_sets SET recipe_json = '{}' WHERE event_id = ?")
+      .bind(access.event.id).run();
 
     const recording = withRecordingImages();
     const preflight = await coverRenderPreflight(recording.env, {
@@ -228,6 +265,10 @@ describe('cover render preflight', () => {
 
     expect(preflight.outcome).toMatchObject({ status: 'failed', failureCode: 'COVER_RENDER_UNAVAILABLE' });
     expect(recording.calls).toHaveLength(0);
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'ready' });
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ state: 'abandoned' });
   });
 
   it('records a safe failure for a deleted event', async () => {

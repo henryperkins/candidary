@@ -147,14 +147,29 @@ export async function coverRenderPreflight(
     WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
   `).bind(COVER_RENDER_BINDING, receipt.workflow_instance_id, receipt.event_id)
     .first<{ state: string; dispatch_generation: number }>();
-  if (!fence
-    || fence.state !== 'open'
-    || fence.dispatch_generation !== receipt.dispatch_generation) {
-    await recordSafeFailure(env, payload, 'COVER_RENDER_UNAVAILABLE', false, now);
+  //
+  // Absence and a purge's hold are refusals, and a refusal has to hand the draft
+  // back with it: `publishing` is not expirable, cannot be discarded, and cannot
+  // be failed, so a draft left in it is stranded for the life of the event.
+  if (!fence || fence.state !== 'open') {
+    await recordSafeFailure(
+      env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
+      receipt.dispatch_generation, set.id, draft.id,
+    );
     return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
   }
+  // A generation this instance did not claim is supersession, not failure.
+  // `restartCoverPublication` moves the receipt and the fence in one batch, so a
+  // divergence means another generation owns this receipt now — and writing a
+  // terminal status here would poison the run that does. The superseded run
+  // leaves without touching anything.
+  if (fence.dispatch_generation !== receipt.dispatch_generation) return terminal('skipped');
+
   if (event.deleted_at) {
-    await recordSafeFailure(env, payload, 'COVER_RENDER_UNAVAILABLE', false, now);
+    await recordSafeFailure(
+      env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
+      receipt.dispatch_generation, set.id, draft.id,
+    );
     return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
   }
 
@@ -171,7 +186,10 @@ export async function coverRenderPreflight(
 
   const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
   if (!config || !('effect' in config) || !('focus' in config)) {
-    await recordSafeFailure(env, payload, 'COVER_RENDER_UNAVAILABLE', false, now);
+    await recordSafeFailure(
+      env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
+      receipt.dispatch_generation, set.id, draft.id,
+    );
     return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
   }
 
@@ -351,7 +369,10 @@ export async function coverRenderFinalize(
   if (!verdict.complete) {
     // A controlled permanent failure: abandon the set and hand the draft back
     // so the host can correct it. The active cover is untouched throughout.
-    await recordSafeFailure(env, payload, 'COVER_OUTPUT_BUDGET_EXHAUSTED', false, now, set.id, draft.id);
+    await recordSafeFailure(
+      env, payload, 'COVER_OUTPUT_BUDGET_EXHAUSTED', false, now,
+      receipt.dispatch_generation, set.id, draft.id,
+    );
     return {
       status: 'failed', appliedRevision: null,
       failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED', retryable: false,
@@ -462,12 +483,20 @@ async function recordConflict(
   ]);
 }
 
+/**
+ * The receipt UPDATE carries the generation the caller read, so a run that has
+ * been superseded between its own reads cannot stamp a terminal status over the
+ * generation that replaced it. Every caller has already decided it owns this
+ * receipt; this is the guard that makes that decision true at commit time
+ * rather than at read time.
+ */
 async function recordSafeFailure(
   env: AppEnv,
   payload: CoverRenderPayload,
   failureCode: string,
   retryable: boolean,
   now: Date,
+  generation: number,
   renderSetId?: string,
   draftId?: string,
 ): Promise<void> {
@@ -477,10 +506,11 @@ async function recordSafeFailure(
       UPDATE event_cover_publish_receipts
       SET status = 'failed', failure_code = ?, retryable = ?, updated_at = ?, expires_at = ?
       WHERE event_id = ? AND operation_id = ? AND status NOT IN ('applied', 'conflict')
+        AND dispatch_generation = ?
     `).bind(
       failureCode, retryable ? 1 : 0, timestamp,
       new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
-      payload.eventId, payload.operationId,
+      payload.eventId, payload.operationId, generation,
     ),
   ];
   // Only a permanent failure releases the draft. A retryable one keeps it
@@ -498,7 +528,7 @@ async function recordSafeFailure(
       env.DB.prepare(`
         UPDATE event_cover_drafts
         SET state = 'ready', draft_revision = draft_revision + 1, updated_at = ?
-        WHERE id = ? AND state = 'publishing'
+        WHERE id = ? AND state = 'publishing' AND changes() = 1
       `).bind(timestamp, draftId),
     );
   }
