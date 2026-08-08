@@ -133,14 +133,23 @@ export async function coverRenderPreflight(
   }
   if (receipt.status === 'failed' && receipt.retryable === 0) return terminal('failed');
 
-  // The deletion fence, before Images or R2 work. A late dispatcher that
-  // survived a purge exits here rather than writing objects into a prefix that
-  // has already been swept.
+  // The deletion fence, before Images or R2 work. A present, open,
+  // generation-matching fence for this event is *permission*; anything else,
+  // including no row at all, is refusal.
+  //
+  // The earlier form asked only whether a fence objected, so a missing row read
+  // as "nothing objects" — and a missing row is exactly what a purge that has
+  // already settled and swept leaves behind. Failing closed also costs nothing
+  // legitimate: every instance that may run has a fence written in the same
+  // transaction that accepted it.
   const fence = await env.DB.prepare(`
-    SELECT state FROM event_cover_workflow_fences
-    WHERE workflow_binding = ? AND workflow_instance_id = ?
-  `).bind(COVER_RENDER_BINDING, receipt.workflow_instance_id).first<{ state: string }>();
-  if (fence && fence.state !== 'open') {
+    SELECT state, dispatch_generation FROM event_cover_workflow_fences
+    WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+  `).bind(COVER_RENDER_BINDING, receipt.workflow_instance_id, receipt.event_id)
+    .first<{ state: string; dispatch_generation: number }>();
+  if (!fence
+    || fence.state !== 'open'
+    || fence.dispatch_generation !== receipt.dispatch_generation) {
     await recordSafeFailure(env, payload, 'COVER_RENDER_UNAVAILABLE', false, now);
     return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
   }

@@ -5,13 +5,17 @@ import { AuthService } from '../../worker/auth/service';
 import { MediaRepository } from '../../worker/db/media';
 import { COVER_CLEANUP_ROWS_PER_CLASS } from '../../shared/constants';
 import {
+  FENCE_PURGE_HOLD_EXPIRES_AT,
   cleanupAuthScratch,
   cleanupEventCovers,
   cleanupExpiredReservations,
   cleanupRsvpScratch,
   deleteEventData,
+  reconcileEventCoverPurge,
   scheduledCleanup,
+  type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
+import type { CoverWorkflowLookup } from '../../worker/workflows/cover-platform';
 import worker from '../../worker/index';
 import {
   EVENT_COVER_TABLES,
@@ -64,6 +68,237 @@ async function countRows(table: string, eventId: string) {
     .bind(eventId).first<{ count: number }>();
   return row?.count ?? 0;
 }
+
+/**
+ * A scripted platform for the purge coordinator.
+ *
+ * `terminate` rewrites its own instance's next lookup to `terminated`, because
+ * that is what the real platform does and the coordinator is required to
+ * re-verify rather than assume its own call worked.
+ */
+function purgeAccessors(
+  script: Record<string, CoverWorkflowLookup | 'throw'> = {},
+  failures: { terminate?: boolean; create?: boolean } = {},
+) {
+  const calls: string[] = [];
+  const scripted = new Map<string, CoverWorkflowLookup | 'throw'>(Object.entries(script));
+  const shared = {
+    async lookup(id: string): Promise<CoverWorkflowLookup> {
+      calls.push(`lookup:${id}`);
+      const entry = scripted.get(id);
+      if (entry === 'throw') throw new Error('binding unavailable');
+      return entry ?? { kind: 'status', status: 'complete' };
+    },
+    async terminate(id: string) {
+      calls.push(`terminate:${id}`);
+      if (failures.terminate) throw new Error('terminate refused');
+      scripted.set(id, { kind: 'status', status: 'terminated' });
+    },
+    async resume(id: string) { calls.push(`resume:${id}`); },
+    async restart(id: string) { calls.push(`restart:${id}`); },
+  };
+  const accessors: CoverPurgeWorkflowAccessors = {
+    render: {
+      ...shared,
+      async create(id: string) {
+        calls.push(`create:${id}`);
+        if (failures.create) throw new Error('create refused');
+        scripted.set(id, { kind: 'status', status: 'running' });
+      },
+    },
+    backfill: {
+      ...shared,
+      async createBatch(input: Array<{ id: string }>) {
+        for (const item of input) {
+          calls.push(`createBatch:${item.id}`);
+          if (failures.create) throw new Error('create refused');
+          scripted.set(item.id, { kind: 'status', status: 'running' });
+        }
+      },
+    },
+  };
+  return { accessors, calls };
+}
+
+/**
+ * Purges through the production coordinator against a platform that reports
+ * every instance already terminal.
+ *
+ * A seeded cover graph carries an open fence, and the coordinator will not
+ * touch R2 until each one is verified terminal. A purge test therefore has to
+ * state what the platform reports rather than leaving it to a binding that
+ * cannot answer for an instance that was never really created.
+ */
+async function purgeSettled(eventId: string, now: Date) {
+  return reconcileEventCoverPurge(testEnv, eventId, now, purgeAccessors().accessors);
+}
+
+async function fenceRow(instanceId: string) {
+  return testEnv.DB.prepare(`
+    SELECT state, expires_at, dispatch_generation FROM event_cover_workflow_fences
+    WHERE workflow_instance_id = ?
+  `).bind(instanceId).first<{ state: string; expires_at: string; dispatch_generation: number }>();
+}
+
+describe('event cover purge coordinator', () => {
+  beforeEach(resetDatabase);
+
+  const now = new Date('2026-08-04T12:00:00.000Z');
+
+  async function seeded() {
+    const access = await eventAccess();
+    const ids = await seedEventCoverGraph(testEnv.DB, access.event.id);
+    await testEnv.MEDIA_BUCKET.put(`events/${access.event.id}/cover/masters/m.webp`, png());
+    return { access, ids };
+  }
+
+  async function prefixKeys(eventId: string) {
+    const listed = await testEnv.MEDIA_BUCKET.list({ prefix: `events/${eventId}/` });
+    return listed.objects.map(({ key }) => key);
+  }
+
+  it('blocks every open fence and holds it against the expiry sweep', async () => {
+    const { access, ids } = await seeded();
+    const { accessors } = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 't' } });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(summary).toMatchObject({ phase: 'fences', remainder: true });
+    const fence = await fenceRow(ids.workflowInstanceId);
+    expect(fence?.state).toBe('deletion-blocked');
+    // An unresolved fence must not be swept while the purge still needs it.
+    expect(fence?.expires_at).toBe(FENCE_PURGE_HOLD_EXPIRES_AT);
+  });
+
+  it('marks nonterminal publication and backfill rows EVENT_DELETED', async () => {
+    const { access, ids } = await seeded();
+    await testEnv.DB.prepare(`UPDATE event_cover_backfill_jobs SET status = 'rendering' WHERE id = ?`)
+      .bind(ids.jobId).run();
+    const { accessors } = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 't' } });
+
+    await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT status, failure_code, retryable FROM event_cover_backfill_jobs WHERE id = ?
+    `).bind(ids.jobId).first()).toMatchObject({
+      status: 'failed', failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+  });
+
+  it('never deletes R2 objects while a fence is unresolved', async () => {
+    const { access, ids } = await seeded();
+    const { accessors, calls } = purgeAccessors({
+      [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 't' },
+    });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(summary.remainder).toBe(true);
+    expect(await prefixKeys(access.event.id)).not.toEqual([]);
+    // An unknown lookup performs no platform mutation at all.
+    expect(calls.filter((call) => !call.startsWith('lookup:'))).toEqual([]);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).not.toBeNull();
+  });
+
+  it('settles an already-terminal instance without terminating it', async () => {
+    const { access, ids } = await seeded();
+    const { accessors, calls } = purgeAccessors({
+      [ids.workflowInstanceId]: { kind: 'status', status: 'errored' },
+    });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(calls).toEqual([`lookup:${ids.workflowInstanceId}`]);
+    expect(summary.phase).toBe('complete');
+    // Expiry is stamped only after terminal verification, and outlives the
+    // platform's own retention.
+    const fence = await fenceRow(ids.workflowInstanceId);
+    expect(fence?.expires_at).toBe(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString());
+  });
+
+  it('terminates a live instance and settles it only after re-verifying', async () => {
+    const { access, ids } = await seeded();
+    const { accessors, calls } = purgeAccessors({
+      [ids.workflowInstanceId]: { kind: 'status', status: 'running' },
+    });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(calls).toEqual([
+      `lookup:${ids.workflowInstanceId}`,
+      `terminate:${ids.workflowInstanceId}`,
+      `lookup:${ids.workflowInstanceId}`,
+    ]);
+    expect(summary.platformMutations).toBe(1);
+    expect(summary.phase).toBe('complete');
+  });
+
+  it('leaves the fence unresolved and retries when terminate fails', async () => {
+    const { access, ids } = await seeded();
+    const first = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'status', status: 'running' } }, { terminate: true });
+
+    const blocked = await reconcileEventCoverPurge(testEnv, access.event.id, now, first.accessors);
+    expect(blocked).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await prefixKeys(access.event.id)).not.toEqual([]);
+
+    const second = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'status', status: 'terminated' } });
+    const done = await reconcileEventCoverPurge(testEnv, access.event.id, now, second.accessors);
+    expect(done.phase).toBe('complete');
+    expect(await prefixKeys(access.event.id)).toEqual([]);
+  });
+
+  it('materializes a certified-missing instance under the same ID, then terminates it', async () => {
+    const { access, ids } = await seeded();
+    const { accessors, calls } = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'missing' } });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    // Recreated under the *same* fenced ID, never a fresh one, and from the
+    // receipt's own immutable payload — then driven terminal so the fence is
+    // released against an observed state rather than an assumed one.
+    expect(calls).toContain(`create:${ids.workflowInstanceId}`);
+    expect(calls).toContain(`terminate:${ids.workflowInstanceId}`);
+    expect(calls).not.toContain(`create:${ids.operationId}`);
+    expect(summary.phase).toBe('complete');
+  });
+
+  it('leaves a certified-missing instance unresolved when its payload row is gone', async () => {
+    const { access, ids } = await seeded();
+    await testEnv.DB.prepare('DELETE FROM event_cover_publish_receipts WHERE event_id = ?')
+      .bind(access.event.id).run();
+    const { accessors, calls } = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'missing' } });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    // Nothing to recreate from means nothing is recreated, and the purge waits
+    // rather than sweeping the prefix on an unverified fence.
+    expect(calls).toEqual([`lookup:${ids.workflowInstanceId}`]);
+    expect(summary).toMatchObject({ phase: 'fences', remainder: true });
+  });
+
+  it('completes the relational purge and removes its own progress row', async () => {
+    const { access, ids } = await seeded();
+    const { accessors } = purgeAccessors({ [ids.workflowInstanceId]: { kind: 'status', status: 'complete' } });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(summary).toMatchObject({ phase: 'complete', remainder: false });
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+    expect(await countRows('event_cover_purge_progress', access.event.id)).toBe(0);
+    expect(await foreignKeyCheck()).toEqual([]);
+    expect(await prefixKeys(access.event.id)).toEqual([]);
+  });
+
+  it('purges an event that never had a cover fence in one pass', async () => {
+    const access = await eventAccess();
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now);
+    expect(summary).toMatchObject({ phase: 'complete', remainder: false, inspected: 0 });
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+  });
+});
 
 describe('lifecycle cleanup', () => {
   beforeEach(resetDatabase);
@@ -414,7 +649,7 @@ describe('lifecycle cleanup', () => {
       const keys = await seedCoverObjects(access.event.id, ids.renderSetId, ids.draftId);
       expect(await coverPrefixKeys(access.event.id)).toEqual([...keys].sort());
 
-      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z'));
+      await purgeSettled(access.event.id, new Date('2026-08-04T12:00:00.000Z'));
 
       expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
         .bind(access.event.id).first()).toBeNull();
@@ -438,7 +673,7 @@ describe('lifecycle cleanup', () => {
       await testEnv.DB.prepare('UPDATE event_cover_backfill_runs SET expires_at = ? WHERE id = ?')
         .bind('2026-08-01T00:00:00.000Z', ids.runId).run();
 
-      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z'));
+      await purgeSettled(access.event.id, new Date('2026-08-04T12:00:00.000Z'));
 
       expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM event_cover_backfill_runs')
         .first<{ count: number }>()).toEqual({ count: 0 });
@@ -449,9 +684,16 @@ describe('lifecycle cleanup', () => {
     // protected so a late dispatcher cannot do cover work for a purged event.
     it('leaves workflow fences to age out on their own schedule', async () => {
       const access = await eventAccess();
-      await seedEventCoverGraph(testEnv.DB, access.event.id);
-      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z'));
+      const ids = await seedEventCoverGraph(testEnv.DB, access.event.id);
+      const now = new Date('2026-08-04T12:00:00.000Z');
+      await purgeSettled(access.event.id, now);
       expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(1);
+      // Still blocked, and now carrying the post-terminal expiry rather than the
+      // hold, so the ordinary bounded sweep is what finally removes it.
+      const fence = await fenceRow(ids.workflowInstanceId);
+      expect(fence?.state).toBe('deletion-blocked');
+      expect(fence?.expires_at)
+        .toBe(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString());
     });
 
     it('keeps a backfill run alive while another event still owns a job', async () => {
@@ -465,7 +707,7 @@ describe('lifecycle cleanup', () => {
       await testEnv.DB.prepare('DELETE FROM event_cover_backfill_runs WHERE id = ?')
         .bind(other.runId).run();
 
-      await deleteEventData(testEnv, first.event.id, new Date('2026-08-04T12:00:00.000Z'));
+      await purgeSettled(first.event.id, new Date('2026-08-04T12:00:00.000Z'));
 
       const run = await testEnv.DB.prepare(`
         SELECT total_count, applied_count FROM event_cover_backfill_runs WHERE id = ?
@@ -483,7 +725,7 @@ describe('lifecycle cleanup', () => {
       const failing = vi.spyOn(testEnv.MEDIA_BUCKET, 'delete')
         .mockRejectedValueOnce(new Error('R2 unavailable'));
 
-      await expect(deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:00:00.000Z')))
+      await expect(purgeSettled(access.event.id, new Date('2026-08-04T12:00:00.000Z')))
         .rejects.toThrow();
       failing.mockRestore();
 
@@ -495,8 +737,13 @@ describe('lifecycle cleanup', () => {
       for (const table of EVENT_COVER_TABLES) {
         expect(await countRows(table, access.event.id), `${table} rows after failure`).toBeGreaterThan(0);
       }
+      // The fences were already settled, so the retry resumes at `r2` rather
+      // than paying for the whole platform reconciliation again.
+      expect(await testEnv.DB.prepare(`
+        SELECT phase FROM event_cover_purge_progress WHERE event_id = ?
+      `).bind(access.event.id).first()).toEqual({ phase: 'r2' });
 
-      await deleteEventData(testEnv, access.event.id, new Date('2026-08-04T12:05:00.000Z'));
+      await purgeSettled(access.event.id, new Date('2026-08-04T12:05:00.000Z'));
       expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
         .bind(access.event.id).first()).toBeNull();
       expect(await coverPrefixKeys(access.event.id)).toEqual([]);

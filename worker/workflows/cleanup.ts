@@ -5,6 +5,14 @@ import { MediaRepository } from '../db/media';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
 import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
+import { COVER_BACKFILL_BINDING } from './cover-backfill';
+import {
+  defaultCoverBackfillWorkflowAccessor,
+  defaultCoverWorkflowAccessor,
+  type CoverBackfillWorkflowAccessor,
+  type CoverWorkflowAccessor,
+  type CoverWorkflowLookup,
+} from './cover-platform';
 
 /**
  * Exported rather than duplicated: the cover storage service needs exactly this
@@ -504,18 +512,248 @@ const COVER_PURGE_ORDER = [
   'event_cover_purge_progress',
 ] as const;
 
+/* ------------------------------------------------------------------ *
+ * Event purge coordination
+ * ------------------------------------------------------------------ */
+
 /**
- * Retires one event completely.
+ * The expiry an unresolved blocked fence is held at.
  *
- * The order is load-bearing. Every credential is revoked and the printed entry
- * disabled first, so nothing can reach the event while its objects are being
- * removed. Only once the prefix is actually gone does the relational purge run —
- * a hard delete before that would strand objects nothing can discover again. If
- * object deletion fails, the failure propagates and the event stays marked
- * deleted so a later scheduled pass retries exactly this row.
+ * Two jobs in one value. The bounded sweep deletes fences by `expires_at`, so a
+ * fence still protecting an unfinished purge must never be reachable by it; and
+ * `0012` gives the fence no "settled" column, so the sentinel *is* the marker —
+ * a blocked fence still holding it has not been verified terminal, and one that
+ * no longer holds it has. Exact equality rather than a comparison, so the test
+ * for "unresolved" can never drift into a range check that a re-stamped expiry
+ * accidentally satisfies.
  */
-export async function deleteEventData(env: AppEnv, eventId: string, now = new Date()): Promise<void> {
+export const FENCE_PURGE_HOLD_EXPIRES_AT = '9999-12-31T23:59:59.999Z';
+
+/**
+ * 31 days past terminal verification, exceeding the platform's own 30-day
+ * retention for a completed instance so its ID can never be recreated behind us.
+ */
+const FENCE_TERMINAL_TTL_MS = 31 * 24 * 60 * 60 * 1000;
+
+export interface CoverPurgeProgressSummary {
+  eventId: string;
+  /** `complete` is not a stored phase: `0012` allows only the first three, and
+   * completion is the progress row no longer existing. */
+  phase: 'fences' | 'r2' | 'relational' | 'complete';
+  inspected: number;
+  platformMutations: number;
+  remainder: boolean;
+}
+
+export interface CoverPurgeWorkflowAccessors {
+  render: CoverWorkflowAccessor;
+  backfill: CoverBackfillWorkflowAccessor;
+}
+
+interface HeldFenceRow {
+  workflow_binding: string;
+  workflow_instance_id: string;
+}
+
+/** What a purge does about one lookup. Total, with an explicit wait default. */
+function purgeActionFor(lookup: CoverWorkflowLookup): 'terminate' | 'settle' | 'materialize' | 'wait' {
+  if (lookup.kind === 'unknown') return 'wait';
+  if (lookup.kind === 'missing') return 'materialize';
+  switch (lookup.status) {
+    // Still able to do work, so it is stopped before the prefix is swept.
+    case 'queued':
+    case 'running':
+    case 'waiting':
+    case 'waitingForPause':
+    case 'paused':
+      return 'terminate';
+    case 'errored':
+    case 'terminated':
+    case 'complete':
+      return 'settle';
+    // The platform's own `unknown`, and any status this release has never seen.
+    // Neither is evidence the instance is finished, and neither may be acted on.
+    case 'unknown':
+    default:
+      return 'wait';
+  }
+}
+
+/** Never throws: an accessor that rejects leaves the fence unresolved. */
+async function purgeLookup(
+  accessor: { lookup(id: string): Promise<CoverWorkflowLookup> },
+  instanceId: string,
+): Promise<CoverWorkflowLookup> {
+  return accessor.lookup(instanceId)
+    .catch((): CoverWorkflowLookup => ({ kind: 'unknown', telemetry: 'cover_purge_lookup_failed' }));
+}
+
+/**
+ * Recreates a certified-absent instance from its own immutable payload.
+ *
+ * Under the same fenced ID, never a fresh one: the point is to obtain something
+ * that can be driven terminal and verified, not to start new work. Returns false
+ * when the payload row is gone or the platform refuses, which leaves the fence
+ * unresolved for a later pass rather than advancing the purge on a guess.
+ */
+async function materializeForPurge(
+  env: AppEnv,
+  fence: HeldFenceRow,
+  eventId: string,
+  accessors: CoverPurgeWorkflowAccessors,
+): Promise<boolean> {
+  try {
+    if (fence.workflow_binding === COVER_BACKFILL_BINDING) {
+      const job = await env.DB.prepare(`
+        SELECT id, run_id FROM event_cover_backfill_jobs
+        WHERE event_id = ? AND workflow_instance_id = ?
+      `).bind(eventId, fence.workflow_instance_id).first<{ id: string; run_id: string }>();
+      if (!job) return false;
+      await accessors.backfill.createBatch([{
+        id: fence.workflow_instance_id,
+        params: { runId: job.run_id, jobId: job.id, eventId },
+      }]);
+      return true;
+    }
+    const receipt = await env.DB.prepare(`
+      SELECT operation_id FROM event_cover_publish_receipts
+      WHERE event_id = ? AND workflow_instance_id = ?
+    `).bind(eventId, fence.workflow_instance_id).first<{ operation_id: string }>();
+    if (!receipt) return false;
+    await accessors.render.create(fence.workflow_instance_id, {
+      eventId, operationId: receipt.operation_id,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Settles every fence this event still holds, bounded, and reports what remains.
+ *
+ * The cursor lets an event with more fences than one pass allows drain across
+ * passes; when the walk reaches the end it resets, so fences left unresolved by
+ * an earlier pass are revisited rather than skipped forever. The phase advances
+ * only on a fresh count of zero, never on this pass having merely finished.
+ */
+async function settleEventCoverFences(
+  env: AppEnv,
+  eventId: string,
+  now: Date,
+  accessors: CoverPurgeWorkflowAccessors,
+  summary: CoverPurgeProgressSummary,
+): Promise<boolean> {
   const timestamp = now.toISOString();
+  const cursor = await env.DB.prepare(`
+    SELECT workflow_binding, workflow_instance_id FROM event_cover_purge_progress
+    WHERE event_id = ?
+  `).bind(eventId).first<{ workflow_binding: string | null; workflow_instance_id: string | null }>();
+
+  const held = await env.DB.prepare(`
+    SELECT workflow_binding, workflow_instance_id FROM event_cover_workflow_fences
+    WHERE event_id = ?1 AND state = 'deletion-blocked' AND expires_at = ?2
+      AND (workflow_binding > ?3
+        OR (workflow_binding = ?3 AND workflow_instance_id > ?4))
+    ORDER BY workflow_binding, workflow_instance_id
+    LIMIT ?5
+  `).bind(
+    eventId, FENCE_PURGE_HOLD_EXPIRES_AT,
+    cursor?.workflow_binding ?? '', cursor?.workflow_instance_id ?? '',
+    COVER_CLEANUP_ROWS_PER_CLASS,
+  ).all<HeldFenceRow>();
+
+  for (const fence of held.results) {
+    summary.inspected += 1;
+    const accessor = fence.workflow_binding === COVER_BACKFILL_BINDING
+      ? accessors.backfill
+      : accessors.render;
+
+    let lookup = await purgeLookup(accessor, fence.workflow_instance_id);
+    let action = purgeActionFor(lookup);
+
+    if (action === 'materialize') {
+      if (!await materializeForPurge(env, fence, eventId, accessors)) continue;
+      summary.platformMutations += 1;
+      action = 'terminate';
+    }
+
+    if (action === 'terminate') {
+      try {
+        await accessor.terminate(fence.workflow_instance_id);
+      } catch {
+        // The next pass retries exactly this instance.
+        continue;
+      }
+      summary.platformMutations += 1;
+      // Re-read rather than assume: terminate returning is not proof the
+      // instance reached a terminal state, and the fence may only be released
+      // against an observed one.
+      lookup = await purgeLookup(accessor, fence.workflow_instance_id);
+      action = purgeActionFor(lookup);
+    }
+
+    if (action !== 'settle') continue;
+    await env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET expires_at = ?, updated_at = ?
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'deletion-blocked'
+    `).bind(
+      new Date(now.getTime() + FENCE_TERMINAL_TTL_MS).toISOString(), timestamp,
+      fence.workflow_binding, fence.workflow_instance_id,
+    ).run();
+  }
+
+  const last = held.results[held.results.length - 1];
+  const exhausted = held.results.length < COVER_CLEANUP_ROWS_PER_CLASS;
+  await env.DB.prepare(`
+    UPDATE event_cover_purge_progress
+    SET workflow_binding = ?, workflow_instance_id = ?, fences_resolved = fences_resolved + ?,
+        platform_mutations = platform_mutations + ?, updated_at = ?
+    WHERE event_id = ?
+  `).bind(
+    exhausted ? null : last?.workflow_binding ?? null,
+    exhausted ? null : last?.workflow_instance_id ?? null,
+    summary.inspected, summary.platformMutations, timestamp, eventId,
+  ).run();
+
+  const unresolved = await env.DB.prepare(`
+    SELECT count(*) AS count FROM event_cover_workflow_fences
+    WHERE event_id = ? AND state = 'deletion-blocked' AND expires_at = ?
+  `).bind(eventId, FENCE_PURGE_HOLD_EXPIRES_AT).first<{ count: number }>();
+  return (unresolved?.count ?? 0) === 0;
+}
+
+/**
+ * Retires one event completely, in persisted phases that survive interruption.
+ *
+ * The order is load-bearing. Every credential is revoked, every nonterminal
+ * cover row is made terminal, and every open fence is blocked first, so nothing
+ * can reach the event or start new cover work while its objects are being
+ * removed. Then every blocked fence is driven to an *observed* terminal state:
+ * until a fresh count proves none is outstanding, the prefix is not touched,
+ * because a running instance and a swept prefix is exactly how a cover write
+ * lands in a bucket nothing will ever look in again. Only once the prefix is
+ * actually gone does the relational purge run, and if any step fails the event
+ * stays marked deleted so a later scheduled pass retries exactly this row.
+ */
+export async function reconcileEventCoverPurge(
+  env: AppEnv,
+  eventId: string,
+  now = new Date(),
+  accessors?: CoverPurgeWorkflowAccessors,
+): Promise<CoverPurgeProgressSummary> {
+  const timestamp = now.toISOString();
+  const summary: CoverPurgeProgressSummary = {
+    eventId, phase: 'fences', inspected: 0, platformMutations: 0, remainder: true,
+  };
+  const platform = accessors ?? {
+    render: defaultCoverWorkflowAccessor(env),
+    backfill: defaultCoverBackfillWorkflowAccessor(env),
+  };
+
+  // Idempotent: every statement is guarded, so a resumed purge re-runs this
+  // without undoing a phase it already finished.
   await env.DB.batch([
     env.DB.prepare('UPDATE events SET deleted_at = COALESCE(deleted_at, ?) WHERE id = ?').bind(timestamp, eventId),
     env.DB.prepare('UPDATE event_access_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE event_id = ?').bind(timestamp, eventId),
@@ -524,13 +762,92 @@ export async function deleteEventData(env: AppEnv, eventId: string, now = new Da
     env.DB.prepare(`
       UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?
     `).bind(timestamp, eventId),
+    // Accepted work that can no longer be delivered is made terminal here rather
+    // than left `preparing` forever behind a deleted event.
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+          dispatch_state = 'blocked', updated_at = ?
+      WHERE event_id = ? AND status IN ('queued', 'rendering', 'finalizing')
+    `).bind(timestamp, eventId),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+          dispatch_state = 'blocked', terminal_at = COALESCE(terminal_at, ?), updated_at = ?
+      WHERE event_id = ? AND status IN ('queued', 'normalizing', 'rendering', 'finalizing')
+    `).bind(timestamp, timestamp, eventId),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_runs SET
+        queued_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id
+            AND j.status IN ('queued', 'normalizing', 'rendering', 'finalizing')),
+        failed_count = (SELECT count(*) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'failed'),
+        updated_at = ?
+      WHERE id IN (SELECT run_id FROM event_cover_backfill_jobs WHERE event_id = ?)
+    `).bind(timestamp, eventId),
+    // The fence is what actually stops a late dispatcher, and holding its expiry
+    // keeps the bounded sweep from removing it mid-purge.
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET state = 'deletion-blocked', expires_at = ?, updated_at = ?
+      WHERE event_id = ? AND state = 'open'
+    `).bind(FENCE_PURGE_HOLD_EXPIRES_AT, timestamp, eventId),
+    env.DB.prepare(`
+      INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
+      SELECT ?, 'fences', ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+      ON CONFLICT (event_id) DO NOTHING
+    `).bind(eventId, timestamp, timestamp, eventId),
   ]);
-  // The existing prefix already covers all four cover key shapes — raw, masters,
-  // previews, rendered — because every one of them is built beneath
-  // `events/{eventId}/cover/`. `cleanup.test.ts` asserts that rather than
-  // assuming it.
-  await deletePrefix(env.MEDIA_BUCKET, `events/${eventId}/`);
 
+  const progress = await env.DB.prepare(
+    'SELECT phase FROM event_cover_purge_progress WHERE event_id = ?',
+  ).bind(eventId).first<{ phase: string }>();
+  // No progress row and no event row means an earlier pass already finished.
+  if (!progress) {
+    return { ...summary, phase: 'complete', remainder: false };
+  }
+
+  let phase = progress.phase;
+  if (phase === 'fences') {
+    const settled = await settleEventCoverFences(env, eventId, now, platform, summary);
+    if (!settled) return { ...summary, phase: 'fences', remainder: true };
+    await env.DB.prepare(`
+      UPDATE event_cover_purge_progress SET phase = 'r2', updated_at = ? WHERE event_id = ?
+    `).bind(timestamp, eventId).run();
+    phase = 'r2';
+  }
+
+  if (phase === 'r2') {
+    // The existing prefix already covers all four cover key shapes — raw,
+    // masters, previews, rendered — because every one of them is built beneath
+    // `events/{eventId}/cover/`. `cleanup.test.ts` asserts that rather than
+    // assuming it.
+    await deletePrefix(env.MEDIA_BUCKET, `events/${eventId}/`);
+    const remaining = await env.MEDIA_BUCKET.list({ prefix: `events/${eventId}/` });
+    if (remaining.objects.length > 0) {
+      return { ...summary, phase: 'r2', remainder: true };
+    }
+    await env.DB.prepare(`
+      UPDATE event_cover_purge_progress SET phase = 'relational', updated_at = ? WHERE event_id = ?
+    `).bind(timestamp, eventId).run();
+  }
+
+  await purgeEventRelationalRows(env, eventId, timestamp);
+  return { ...summary, phase: 'complete', remainder: false };
+}
+
+/**
+ * The relational half, unchanged in order and still schema-enforced.
+ *
+ * Reached only once every fence is verified terminal and the prefix is proven
+ * empty, so nothing here can strand an object.
+ */
+async function purgeEventRelationalRows(
+  env: AppEnv,
+  eventId: string,
+  timestamp: string,
+): Promise<void> {
   // Read before the jobs go, so their run counters can be recomputed from what
   // actually remains rather than decremented by hand.
   const runs = await env.DB.prepare(
@@ -590,6 +907,18 @@ export async function deleteEventData(env: AppEnv, eventId: string, now = new Da
     env.DB.prepare('DELETE FROM guest_messages WHERE event_id = ?').bind(eventId),
     env.DB.prepare('DELETE FROM events WHERE id = ?').bind(eventId),
   ]);
+}
+
+/**
+ * Retires one event, from the caller that does not care about phases.
+ *
+ * An event with no cover fence still finishes in this one call, which is the
+ * common case. One that owns unresolved fences is soft-deleted, fenced, and left
+ * for the scheduled pass to finish — the host's delete has still taken effect,
+ * because every credential is revoked before this returns.
+ */
+export async function deleteEventData(env: AppEnv, eventId: string, now = new Date()): Promise<void> {
+  await reconcileEventCoverPurge(env, eventId, now);
 }
 
 export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {

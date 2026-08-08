@@ -296,11 +296,17 @@ export async function coverBackfillPreflight(
   if (job.status === 'needs_replacement') return stage('needs_replacement', job.failure_code);
   if (job.status === 'failed' && job.retryable === 0) return stage('failed', job.failure_code);
 
+  // A present, open, generation-matching fence for this event is permission;
+  // anything else, including no row at all, is refusal. See the same guard in
+  // `coverRenderPreflight` for why absence cannot mean consent.
   const fence = await env.DB.prepare(`
-    SELECT state FROM event_cover_workflow_fences
-    WHERE workflow_binding = ? AND workflow_instance_id = ?
-  `).bind(COVER_BACKFILL_BINDING, job.workflow_instance_id).first<{ state: string }>();
-  if (fence && fence.state !== 'open') {
+    SELECT state, dispatch_generation FROM event_cover_workflow_fences
+    WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+  `).bind(COVER_BACKFILL_BINDING, job.workflow_instance_id, job.event_id)
+    .first<{ state: string; dispatch_generation: number }>();
+  if (!fence
+    || fence.state !== 'open'
+    || fence.dispatch_generation !== job.dispatch_generation) {
     await recordTerminal(env, payload, 'failed', now, {
       failureCode: 'COVER_RENDER_UNAVAILABLE',
       abandonSetId: job.render_set_id,

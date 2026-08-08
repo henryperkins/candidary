@@ -6,6 +6,10 @@ import { EventsRepository } from '../../worker/db/events';
 import { acceptCoverPublication } from '../../worker/services/event-cover-publication';
 import { coverMasterKey } from '../../worker/storage/event-cover-keys';
 import {
+  reconcileEventCoverPurge,
+  type CoverPurgeWorkflowAccessors,
+} from '../../worker/workflows/cleanup';
+import {
   coverRenderFinalize,
   coverRenderPreflight,
   coverRenderProfileStep,
@@ -19,6 +23,25 @@ const HEX_64 = 'a'.repeat(64);
 const OPERATION = '5f3a2b18-6c2d-4f0e-9a71-0c2d1e8b4a55';
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+/**
+ * A platform that can tell the coordinator nothing.
+ *
+ * Parks the purge in its fence phase without a single mutation, which is the
+ * state a late dispatcher has to be refused in.
+ */
+function blockingAccessors(): CoverPurgeWorkflowAccessors {
+  const shared = {
+    async lookup() { return { kind: 'unknown' as const, telemetry: 'test' }; },
+    async resume() { throw new Error('unreachable'); },
+    async restart() { throw new Error('unreachable'); },
+    async terminate() { throw new Error('unreachable'); },
+  };
+  return {
+    render: { ...shared, async create() { throw new Error('unreachable'); } },
+    backfill: { ...shared, async createBatch() { throw new Error('unreachable'); } },
+  };
+}
 
 /** Small enough that every slot lands inside its own byte ceiling. */
 function renderEnv(): AppEnv {
@@ -147,10 +170,55 @@ describe('cover render preflight', () => {
       .toEqual({ state: 'ready' });
   });
 
-  it('exits before any work when deletion blocked the fence', async () => {
+  it('exits before any work when the purge coordinator blocked the fence', async () => {
     const { receipt } = await publication(access, { width: 2480, height: 1680 });
+    // Through the production coordinator, not a hand-written state: an
+    // `unknown` platform reading leaves the purge parked in its fence phase,
+    // which is exactly the window a late dispatcher would arrive in.
+    const purge = await reconcileEventCoverPurge(testEnv, access.event.id, now, blockingAccessors());
+    expect(purge).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await row('SELECT state FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+      receipt.workflow_instance_id)).toEqual({ state: 'deletion-blocked' });
+
+    const recording = withRecordingImages();
+    const preflight = await coverRenderPreflight(recording.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now);
+
+    // Two independent barriers, and the receipt is the earlier one: the same
+    // coordinator batch that blocked the fence also made this receipt terminal,
+    // so the instance exits before it even reads the fence. The fence is what
+    // catches an instance whose row is still live, which the two cases below
+    // cover directly.
+    expect(preflight.outcome.status).toBe('failed');
+    expect(recording.calls).toHaveLength(0);
+  });
+
+  it('refuses to work when no fence exists at all', async () => {
+    const { receipt } = await publication(access, { width: 2480, height: 1680 });
+    // A settled purge deletes the fence on its own 31-day schedule. Absence is
+    // what an instance that outlived its fence sees, and it is refusal: the
+    // earlier guard asked only whether a fence objected, so no row read as
+    // consent and let a late instance write into a swept prefix.
+    await testEnv.DB.prepare('DELETE FROM event_cover_workflow_fences WHERE workflow_instance_id = ?')
+      .bind(receipt.workflow_instance_id).run();
+
+    const recording = withRecordingImages();
+    const preflight = await coverRenderPreflight(recording.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now);
+
+    expect(preflight.outcome).toMatchObject({ status: 'failed', failureCode: 'COVER_RENDER_UNAVAILABLE' });
+    expect(recording.calls).toHaveLength(0);
+  });
+
+  it('refuses to work for a fence from another dispatch generation', async () => {
+    const { receipt } = await publication(access, { width: 2480, height: 1680 });
+    // The fence moved on without this instance, so this instance is the stale
+    // one and may not spend transformations under a newer claim.
     await testEnv.DB.prepare(`
-      UPDATE event_cover_workflow_fences SET state = 'deletion-blocked' WHERE workflow_instance_id = ?
+      UPDATE event_cover_workflow_fences
+      SET dispatch_generation = dispatch_generation + 1 WHERE workflow_instance_id = ?
     `).bind(receipt.workflow_instance_id).run();
 
     const recording = withRecordingImages();

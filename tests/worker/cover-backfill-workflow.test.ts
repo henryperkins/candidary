@@ -13,6 +13,10 @@ import {
   resolveSupersededBackfillJobs,
 } from '../../worker/workflows/cover-backfill';
 import { coverKeyFingerprint, coverMasterKey } from '../../worker/storage/event-cover-keys';
+import {
+  reconcileEventCoverPurge,
+  type CoverPurgeWorkflowAccessors,
+} from '../../worker/workflows/cleanup';
 import { eventAccess, resetDatabase, testEnv, withRecordingImages } from './helpers';
 import type { AppEnv } from '../../worker/env';
 
@@ -21,6 +25,25 @@ const RUN = '11111111-1111-4111-8111-111111111111';
 const JOB = '22222222-2222-4222-8222-222222222222';
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+/**
+ * A platform that can tell the coordinator nothing.
+ *
+ * Parks the purge in its fence phase without a single mutation, which is the
+ * state a late dispatcher has to be refused in.
+ */
+function blockingAccessors(): CoverPurgeWorkflowAccessors {
+  const shared = {
+    async lookup() { return { kind: 'unknown' as const, telemetry: 'test' }; },
+    async resume() { throw new Error('unreachable'); },
+    async restart() { throw new Error('unreachable'); },
+    async terminate() { throw new Error('unreachable'); },
+  };
+  return {
+    render: { ...shared, async create() { throw new Error('unreachable'); } },
+    backfill: { ...shared, async createBatch() { throw new Error('unreachable'); } },
+  };
+}
 
 /** Fixed and small, so every slot lands inside its own byte ceiling. */
 function backfillEnv(source?: { width: number; height: number }): AppEnv {
@@ -125,10 +148,47 @@ describe('backfill preflight', () => {
       .toEqual({ total_count: 1, queued_count: 1 });
   });
 
-  it('exits before any Images work when deletion blocked the fence', async () => {
+  it('exits before any Images work when the purge coordinator blocked the fence', async () => {
+    const { payload, instanceId } = await seedJob(access);
+    // Blocked through the production coordinator rather than by hand: an
+    // `unknown` platform reading parks the purge in its fence phase, which is
+    // the exact window a late dispatcher arrives in.
+    const purge = await reconcileEventCoverPurge(testEnv, access.event.id, now, blockingAccessors());
+    expect(purge).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await row('SELECT state FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+      instanceId)).toEqual({ state: 'deletion-blocked' });
+
+    const recording = withRecordingImages();
+    const stage = await coverBackfillPreflight(recording.env, payload, now);
+
+    // Two independent barriers, and the job row is the earlier one: the same
+    // coordinator batch that blocked the fence also made this job terminal, so
+    // the instance exits before it reads the fence at all. The fence is what
+    // catches an instance whose row is still live — the two cases below.
+    expect(stage.outcome).toMatchObject({ status: 'failed', failureCode: 'EVENT_DELETED' });
+    expect(recording.calls).toHaveLength(0);
+  });
+
+  it('refuses to work when no fence exists at all', async () => {
+    const { payload, instanceId } = await seedJob(access);
+    // A settled purge removes the fence on its own schedule, so absence is what
+    // an instance that outlived its fence sees — and absence is refusal, never
+    // the "nothing objects" the earlier guard read it as.
+    await testEnv.DB.prepare('DELETE FROM event_cover_workflow_fences WHERE workflow_instance_id = ?')
+      .bind(instanceId).run();
+
+    const recording = withRecordingImages();
+    const stage = await coverBackfillPreflight(recording.env, payload, now);
+
+    expect(stage.outcome).toMatchObject({ status: 'failed', failureCode: 'COVER_RENDER_UNAVAILABLE' });
+    expect(recording.calls).toHaveLength(0);
+  });
+
+  it('refuses to work for a fence from another dispatch generation', async () => {
     const { payload, instanceId } = await seedJob(access);
     await testEnv.DB.prepare(`
-      UPDATE event_cover_workflow_fences SET state = 'deletion-blocked' WHERE workflow_instance_id = ?
+      UPDATE event_cover_workflow_fences
+      SET dispatch_generation = dispatch_generation + 1 WHERE workflow_instance_id = ?
     `).bind(instanceId).run();
 
     const recording = withRecordingImages();
