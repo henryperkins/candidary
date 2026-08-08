@@ -13,6 +13,7 @@ import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
 import { STALE_DISPATCH_CLAIM_MS } from '../services/event-cover-publication';
 import {
+  BACKFILL_RESTART_WINDOW_MS,
   COVER_BACKFILL_BINDING,
   reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
@@ -253,6 +254,9 @@ export async function cleanupEventCovers(
   now = new Date(),
 ): Promise<CoverCleanupSummary> {
   const timestamp = now.toISOString();
+  const backfillRestartFloor = new Date(
+    now.getTime() - BACKFILL_RESTART_WINDOW_MS,
+  ).toISOString();
   const limit = COVER_CLEANUP_ROWS_PER_CLASS;
   const summary: CoverCleanupSummary = {
     draftsExpired: 0,
@@ -273,6 +277,70 @@ export async function cleanupEventCovers(
     if (count >= limit) summary.remainder = true;
     return count;
   };
+
+  // Legacy releases created open fences with a creation-relative expiry. Age
+  // alone can therefore never authorize this sweep: an upgraded Workflow may
+  // still be running behind an already-due row. A deletion-blocked fence needs
+  // durable proof that its purge passed the fence phase (or completed and
+  // removed both event and progress); an open fence needs the exact
+  // generation-matching terminal owner to supply terminal proof.
+  //
+  // This runs before owner expiry. The receipt/job sweeps below retain any owner
+  // that still has a fence, so their independent 100-row bounds and sort orders
+  // cannot leave an unswept fence without the row that proves its outcome.
+  const fences = await env.DB.prepare(`
+    DELETE FROM event_cover_workflow_fences
+    WHERE rowid IN (
+      SELECT f.rowid FROM event_cover_workflow_fences f
+      WHERE f.expires_at <= ?1 AND (
+        (
+          f.state = 'deletion-blocked' AND (
+            EXISTS (
+              SELECT 1 FROM event_cover_purge_progress p
+              WHERE p.event_id = f.event_id AND p.phase IN ('r2', 'relational')
+            )
+            OR (
+              NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
+              AND NOT EXISTS (
+                SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
+              )
+            )
+          )
+        )
+        OR (
+          f.state = 'open' AND f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+          AND EXISTS (
+            SELECT 1 FROM event_cover_publish_receipts r
+            WHERE r.event_id = f.event_id
+              AND r.workflow_instance_id = f.workflow_instance_id
+              AND r.dispatch_generation = f.dispatch_generation
+              AND (
+                r.status IN ('applied', 'conflict')
+                OR (r.status = 'failed' AND (r.retryable = 0 OR r.expires_at < ?1))
+              )
+          )
+        )
+        OR (
+          f.state = 'open' AND f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+          AND EXISTS (
+            SELECT 1 FROM event_cover_backfill_jobs j
+            WHERE j.event_id = f.event_id
+              AND j.workflow_instance_id = f.workflow_instance_id
+              AND j.dispatch_generation = f.dispatch_generation
+              AND (
+                j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement')
+                OR (j.status = 'failed' AND (
+                  j.retryable = 0
+                  OR (j.terminal_at IS NOT NULL AND j.terminal_at <= ?3)
+                ))
+              )
+          )
+        )
+      )
+      ORDER BY f.expires_at LIMIT ?2
+    )
+  `).bind(timestamp, limit, backfillRestartFloor).run();
+  summary.fencesDeleted = note(fences.meta.changes);
 
   // 1. Reservations and unpublished drafts at their own expiry. A `publishing`
   // draft is absent from the state list entirely: its receipt may still be
@@ -330,6 +398,12 @@ export async function cleanupEventCovers(
       SELECT rowid FROM event_cover_publish_receipts
       WHERE expires_at IS NOT NULL AND expires_at <= ?1
         AND status IN ('applied', 'conflict', 'failed')
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+            AND f.event_id = event_cover_publish_receipts.event_id
+            AND f.workflow_instance_id = event_cover_publish_receipts.workflow_instance_id
+        )
       ORDER BY expires_at LIMIT ?2
     )
   `).bind(timestamp, limit).run();
@@ -377,6 +451,12 @@ export async function cleanupEventCovers(
         SELECT rowid FROM event_cover_backfill_jobs
         WHERE expires_at IS NOT NULL AND expires_at <= ?1
           AND master_id IS NULL AND render_set_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_cover_workflow_fences f
+            WHERE f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+              AND f.event_id = event_cover_backfill_jobs.event_id
+              AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id
+          )
         ORDER BY expires_at LIMIT ?2
       )
     `).bind(timestamp, limit),
@@ -389,8 +469,8 @@ export async function cleanupEventCovers(
     `).bind(timestamp),
   ]);
 
-  // 5-6. Persisted budgets and dispatch fences, both of which age out on their
-  // own recorded expiry. A fence deliberately outlives the event it protected.
+  // 5. Persisted budgets age out on their own recorded expiry. Dispatch fences
+  // were handled before their owner rows so terminal proof could not be lost.
   const scratch = await env.DB.batch([
     env.DB.prepare(`
       DELETE FROM event_cover_rate_events
@@ -399,16 +479,8 @@ export async function cleanupEventCovers(
         ORDER BY expires_at LIMIT ?2
       )
     `).bind(timestamp, limit),
-    env.DB.prepare(`
-      DELETE FROM event_cover_workflow_fences
-      WHERE rowid IN (
-        SELECT rowid FROM event_cover_workflow_fences WHERE expires_at <= ?1
-        ORDER BY expires_at LIMIT ?2
-      )
-    `).bind(timestamp, limit),
   ]);
   summary.rateEventsDeleted = note(scratch[0]?.meta.changes ?? 0);
-  summary.fencesDeleted = note(scratch[1]?.meta.changes ?? 0);
 
   // 7. A staging or ready set whose owning receipt and job are both gone can
   // never activate — nothing is left that could run its final transaction — so

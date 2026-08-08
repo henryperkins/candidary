@@ -87,7 +87,7 @@ async function publication(access: Access, master: { width: number; height: numb
   return { draft, receipt: accepted.receipt };
 }
 
-it('holds a newly accepted render fence open beyond 32 days', async () => {
+it('keeps a legacy-expired active render fence so a later profile write remains fenced', async () => {
   await resetDatabase();
   const access = await eventAccess();
   const created = new Date('2026-06-01T12:00:00.000Z');
@@ -101,6 +101,9 @@ it('holds a newly accepted render fence open beyond 32 days', async () => {
     UPDATE event_cover_masters SET auto_focus_x = 0.5, auto_focus_y = 0.5,
       composition_model_version = 1 WHERE id = 'master-old'
   `).run();
+  await testEnv.MEDIA_BUCKET.put(
+    coverMasterKey(access.event.id, 'master-old'), new Uint8Array(2_000),
+  );
   const draft = (await createCoverDraft(testEnv.DB, {
     eventId: access.event.id, draftIntentId: 'intent-old', requestDigest: HEX_64,
     source: 'existing_upload', masterId: 'master-old', now: created,
@@ -118,9 +121,22 @@ it('holds a newly accepted render fence open beyond 32 days', async () => {
 
   expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
     accepted.receipt.workflow_instance_id)).toEqual({ expires_at: FENCE_HOLD });
-  await cleanupEventCovers(testEnv, new Date(created.getTime() + 32 * 24 * 60 * 60 * 1000));
+  const env = renderEnv();
+  await coverRenderPreflight(env, { eventId: access.event.id, operationId: OPERATION }, created);
+  const legacyExpiry = new Date(created.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString();
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_workflow_fences SET expires_at = ? WHERE workflow_instance_id = ?
+  `).bind(legacyExpiry, accepted.receipt.workflow_instance_id).run();
+  const sweepAt = new Date(created.getTime() + 32 * 24 * 60 * 60 * 1000);
+
+  await cleanupEventCovers(testEnv, sweepAt);
+
   expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
-    accepted.receipt.workflow_instance_id)).toEqual({ expires_at: FENCE_HOLD });
+    accepted.receipt.workflow_instance_id)).toEqual({ expires_at: legacyExpiry });
+  const rendered = await coverRenderProfileStep(
+    env, { eventId: access.event.id, operationId: OPERATION }, EVENT_COVER_PROFILES[0]!.id, sweepAt,
+  );
+  expect(rendered.written).toBeGreaterThan(0);
 });
 
 it('restores the hold when a terminal render receipt is claimed for retry', async () => {
@@ -427,9 +443,10 @@ describe('cover render finalize', () => {
 
   it('commits the pointer, the retirement, both set transitions, and both terminal flips together', async () => {
     const { draft } = await prepared(true);
+    const finalizedAt = new Date('2026-08-11T12:00:00.000Z');
     const outcome = await coverRenderFinalize(testEnv, {
       eventId: access.event.id, operationId: OPERATION,
-    }, now);
+    }, finalizedAt);
 
     expect(outcome).toMatchObject({ status: 'applied', appliedRevision: 1 });
     const event = (await new EventsRepository(testEnv.DB).getById(access.event.id))!;
@@ -445,7 +462,7 @@ describe('cover render finalize', () => {
     expect(await row('SELECT status, applied_revision FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
       .toEqual({ status: 'applied', applied_revision: 1 });
     expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE event_id = ?', access.event.id))
-      .toEqual({ expires_at: '2026-09-04T12:00:00.000Z' });
+      .toEqual({ expires_at: '2026-09-11T12:00:00.000Z' });
 
     // The displaced legacy original is inventoried by the same statements that
     // moved the pointer, and is still in R2.

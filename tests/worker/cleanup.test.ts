@@ -1117,6 +1117,25 @@ describe('bounded cover storage sweep', () => {
     ).run();
   }
 
+  async function insertFence(
+    binding: 'COVER_RENDER_WORKFLOW' | 'COVER_BACKFILL_WORKFLOW',
+    instanceId: string,
+    options: {
+      state?: 'open' | 'deletion-blocked'; generation?: number;
+      expiresAt?: string; eventId?: string;
+    } = {},
+  ) {
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_workflow_fences (
+        workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+        state, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      binding, instanceId, options.eventId ?? access.event.id, options.generation ?? 1,
+      options.state ?? 'open', PAST, PAST, options.expiresAt ?? PAST,
+    ).run();
+  }
+
   async function draftState(id: string) {
     return testEnv.DB.prepare('SELECT state, raw_object_key, draft_revision FROM event_cover_drafts WHERE id = ?')
       .bind(id).first<{ state: string; raw_object_key: string | null; draft_revision: number }>();
@@ -1255,25 +1274,187 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_backfill_jobs', access.event.id)).toBe(1);
   });
 
-  it('sweeps rate rows and dispatch fences on their own recorded expiry', async () => {
+  it('does not sweep legacy-expired active render or backfill fences', async () => {
+    await insertReceipt('legacy-render', { status: 'rendering', expiresAt: FUTURE });
+    await insertBackfillJob('legacy-backfill', 'legacy-run', { status: 'rendering' });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-legacy-render');
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-legacy-backfill');
+
+    const summary = await cleanupEventCovers(testEnv, NOW);
+
+    expect(summary.fencesDeleted).toBe(0);
+    const fences = await testEnv.DB.prepare(`
+      SELECT workflow_binding, workflow_instance_id FROM event_cover_workflow_fences
+      ORDER BY workflow_binding
+    `).all<{ workflow_binding: string; workflow_instance_id: string }>();
+    expect(fences.results).toEqual([
+      {
+        workflow_binding: 'COVER_BACKFILL_WORKFLOW',
+        workflow_instance_id: 'backfill-legacy-backfill',
+      },
+      {
+        workflow_binding: 'COVER_RENDER_WORKFLOW',
+        workflow_instance_id: 'instance-legacy-render',
+      },
+    ]);
+  });
+
+  it('does not sweep legacy-expired retryable failures inside their restart windows', async () => {
+    const retryableAt = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    await insertReceipt('retry-render', {
+      status: 'failed', retryable: 1, expiresAt: FUTURE,
+    });
+    await insertBackfillJob('retry-backfill', 'retry-run', { status: 'failed' });
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts SET updated_at = ? WHERE operation_id = ?
+      `).bind(retryableAt, 'retry-render'),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_jobs SET retryable = 1, terminal_at = ? WHERE id = ?
+      `).bind(retryableAt, 'retry-backfill'),
+    ]);
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-retry-render');
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-retry-backfill');
+
+    const summary = await cleanupEventCovers(testEnv, NOW);
+
+    expect(summary.fencesDeleted).toBe(0);
+    expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(2);
+  });
+
+  it('keeps expired open fences when owner proof is missing or generation-mismatched', async () => {
+    await insertReceipt('mismatched-render', { status: 'applied', expiresAt: FUTURE });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-mismatched-render', { generation: 2 });
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'ownerless-backfill');
+
+    const summary = await cleanupEventCovers(testEnv, NOW);
+
+    expect(summary.fencesDeleted).toBe(0);
+    expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(2);
+  });
+
+  it('keeps an expired deletion-blocked legacy fence while purge terminal proof is pending', async () => {
+    // This is the pre-fd upgrade state: soft delete terminalized the ledger and
+    // blocked the fence before platform reconciliation, but left the old dated
+    // expiry in place. The failed ledger row is not proof that the instance the
+    // purge still has to look up is terminal.
+    await insertReceipt('legacy-purge', { status: 'failed', expiresAt: FUTURE });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-legacy-purge', {
+      state: 'deletion-blocked',
+    });
+    await testEnv.DB.batch([
+      testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+        .bind(PAST, access.event.id),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
+        VALUES (?, 'fences', ?, ?)
+      `).bind(access.event.id, PAST, PAST),
+    ]);
+
+    const summary = await cleanupEventCovers(testEnv, NOW);
+
+    expect(summary.fencesDeleted).toBe(0);
+    expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(1);
+  });
+
+  it('retains terminal render and backfill owners until their matching fences are swept', async () => {
+    await insertReceipt('owner-render', { status: 'applied', expiresAt: PAST });
+    await insertBackfillJob('owner-backfill', 'owner-run', {
+      status: 'applied', expiresAt: PAST, runExpiresAt: PAST,
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-owner-render', { expiresAt: FUTURE });
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-owner-backfill', { expiresAt: FUTURE });
+
+    const held = await cleanupEventCovers(testEnv, NOW);
+
+    expect(held).toMatchObject({ receiptsExpired: 0, fencesDeleted: 0 });
+    expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(1);
+    expect(await countRows('event_cover_backfill_jobs', access.event.id)).toBe(1);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences SET expires_at = ? WHERE event_id = ?
+    `).bind(PAST, access.event.id).run();
+
+    const released = await cleanupEventCovers(testEnv, NOW);
+
+    expect(released).toMatchObject({ receiptsExpired: 1, fencesDeleted: 2 });
+    expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(0);
+    expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(0);
+    expect(await countRows('event_cover_backfill_jobs', access.event.id)).toBe(0);
+  });
+
+  it('keeps owner and fence aligned when reverse expiry order spills past the 100-row bound', async () => {
+    const count = COVER_CLEANUP_ROWS_PER_CLASS + 1;
+    const base = Date.parse(PAST);
+    const receipts = Array.from({ length: count }, (_unused, index) => {
+      const id = String(index).padStart(3, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_publish_receipts (
+          event_id, operation_id, request_sha256, action, expected_revision, status,
+          workflow_instance_id, dependency_versions_json, dispatch_state,
+          dispatch_generation, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, 'publish', 0, 'applied', ?, '{}', 'confirmed', 1, ?, ?, ?)
+      `).bind(
+        access.event.id, `bounded-owner-${id}`, HEX, `bounded-instance-${id}`,
+        PAST, PAST, new Date(base + index * 60_000).toISOString(),
+      );
+    });
+    const fences = Array.from({ length: count }, (_unused, index) => {
+      const id = String(index).padStart(3, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES ('COVER_RENDER_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
+      `).bind(
+        `bounded-instance-${id}`, access.event.id, PAST, PAST,
+        new Date(base + (count - index) * 60_000).toISOString(),
+      );
+    });
+    await testEnv.DB.batch(receipts);
+    await testEnv.DB.batch(fences);
+
+    const first = await cleanupEventCovers(testEnv, NOW);
+
+    expect(first).toMatchObject({ receiptsExpired: COVER_CLEANUP_ROWS_PER_CLASS, fencesDeleted: COVER_CLEANUP_ROWS_PER_CLASS });
+    const pairedRemainder = await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_workflow_fences f
+      JOIN event_cover_publish_receipts r
+        ON r.event_id = f.event_id AND r.workflow_instance_id = f.workflow_instance_id
+       AND r.dispatch_generation = f.dispatch_generation
+    `).first<{ count: number }>();
+    expect(pairedRemainder).toEqual({ count: 1 });
+
+    await cleanupEventCovers(testEnv, NOW);
+    expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(0);
+    expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(0);
+  });
+
+  it('sweeps rate rows and only terminal-proven dispatch fences at recorded expiry', async () => {
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_rate_events (
         id, event_id, action, replay_key, request_sha256, window_start, created_at, expires_at
       ) VALUES ('rate-due', ?, 'publication', 'replay-a', ?, 1785196800, ?, ?),
                ('rate-live', ?, 'publication', 'replay-b', ?, 1785196800, ?, ?)
     `).bind(access.event.id, HEX, PAST, PAST, access.event.id, HEX, PAST, FUTURE).run();
-    await testEnv.DB.prepare(`
-      INSERT INTO event_cover_workflow_fences (
-        workflow_binding, workflow_instance_id, event_id, dispatch_generation, state,
-        created_at, updated_at, expires_at
-      ) VALUES ('COVER_RENDER_WORKFLOW', 'instance-due', ?, 1, 'open', ?, ?, ?),
-               ('COVER_BACKFILL_WORKFLOW', 'instance-live', ?, 1, 'open', ?, ?, ?)
-    `).bind(access.event.id, PAST, PAST, PAST, access.event.id, PAST, PAST, FUTURE).run();
+    await insertReceipt('terminal-render', { status: 'applied', expiresAt: FUTURE });
+    await insertBackfillJob('terminal-backfill', 'terminal-run', { status: 'applied' });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-terminal-render');
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-terminal-backfill');
+    await insertFence('COVER_RENDER_WORKFLOW', 'purge-terminal', {
+      state: 'deletion-blocked', eventId: 'retired-event',
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'ownerless-open');
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'instance-live', { expiresAt: FUTURE });
 
     const summary = await cleanupEventCovers(testEnv, NOW);
 
-    expect(summary).toMatchObject({ rateEventsDeleted: 1, fencesDeleted: 1 });
+    expect(summary).toMatchObject({ rateEventsDeleted: 1, fencesDeleted: 3 });
     expect(await countRows('event_cover_rate_events', access.event.id)).toBe(1);
+    const remaining = await testEnv.DB.prepare(`
+      SELECT workflow_instance_id FROM event_cover_workflow_fences ORDER BY workflow_instance_id
+    `).all<{ workflow_instance_id: string }>();
+    expect(remaining.results.map((row) => row.workflow_instance_id))
+      .toEqual(['instance-live', 'ownerless-open']);
   });
 
   it('abandons an orphaned staging set but never the one the event points at', async () => {
