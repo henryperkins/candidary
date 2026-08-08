@@ -278,69 +278,157 @@ export async function cleanupEventCovers(
     return count;
   };
 
-  // Legacy releases created open fences with a creation-relative expiry. Age
-  // alone can therefore never authorize this sweep: an upgraded Workflow may
-  // still be running behind an already-due row. A deletion-blocked fence needs
-  // durable proof that its purge passed the fence phase (or completed and
-  // removed both event and progress); an open fence needs the exact
-  // generation-matching terminal owner to supply terminal proof.
+  // Legacy releases created open fences with a creation-relative expiry. A
+  // terminal owner first upgrades that old value to its full terminal-relative
+  // deadline. Deletion happens only on a later pass, so the derived deadline is
+  // durable before age can act on it. Exact equality makes current stamps
+  // replay-stable instead of extending them on every cleanup.
   //
-  // This runs before owner expiry. The receipt/job sweeps below retain any owner
-  // that still has a fence, so their independent 100-row bounds and sort orders
-  // cannot leave an unswept fence without the row that proves its outcome.
-  const fences = await env.DB.prepare(`
-    DELETE FROM event_cover_workflow_fences
+  // Owner expiry below remains guarded by the fence, so an upgrade cannot lose
+  // its proof even when the fence/owner bounds and expiry orders differ.
+  const stampedOrphans = await env.DB.prepare(`
+    UPDATE event_cover_workflow_fences
+    SET expires_at = ?, updated_at = ?
     WHERE rowid IN (
       SELECT f.rowid FROM event_cover_workflow_fences f
-      WHERE f.expires_at <= ?1 AND (
-        (
-          f.state = 'deletion-blocked' AND (
-            EXISTS (
-              SELECT 1 FROM event_cover_purge_progress p
-              WHERE p.event_id = f.event_id AND p.phase IN ('r2', 'relational')
-            )
-            OR (
-              NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
-              AND NOT EXISTS (
-                SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
-              )
-            )
+      WHERE f.state = 'deletion-blocked'
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
+        )
+        AND (
+          strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
+          OR f.expires_at <> strftime(
+            '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
           )
         )
-        OR (
-          f.state = 'open' AND f.workflow_binding = 'COVER_RENDER_WORKFLOW'
-          AND EXISTS (
-            SELECT 1 FROM event_cover_publish_receipts r
-            WHERE r.event_id = f.event_id
-              AND r.workflow_instance_id = f.workflow_instance_id
-              AND r.dispatch_generation = f.dispatch_generation
-              AND (
-                r.status IN ('applied', 'conflict')
-                OR (r.status = 'failed' AND (r.retryable = 0 OR r.expires_at < ?1))
-              )
-          )
-        )
-        OR (
-          f.state = 'open' AND f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
-          AND EXISTS (
-            SELECT 1 FROM event_cover_backfill_jobs j
-            WHERE j.event_id = f.event_id
-              AND j.workflow_instance_id = f.workflow_instance_id
-              AND j.dispatch_generation = f.dispatch_generation
-              AND (
-                j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement')
-                OR (j.status = 'failed' AND (
-                  j.retryable = 0
-                  OR (j.terminal_at IS NOT NULL AND j.terminal_at <= ?3)
-                ))
-              )
-          )
-        )
-      )
-      ORDER BY f.expires_at LIMIT ?2
+      ORDER BY f.expires_at LIMIT ?
     )
-  `).bind(timestamp, limit, backfillRestartFloor).run();
-  summary.fencesDeleted = note(fences.meta.changes);
+  `).bind(coverWorkflowFenceTerminalExpiry(now), timestamp, limit).run();
+
+  let upgradedFenceCount = 0;
+  if (stampedOrphans.meta.changes === 0) {
+    const upgradedFences = await env.DB.prepare(`
+    WITH terminal_owners AS (
+      SELECT f.rowid AS fence_rowid, f.expires_at AS fence_expires_at,
+        r.updated_at AS terminal_at,
+        strftime('%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days') AS terminal_expires_at
+      FROM event_cover_workflow_fences f
+      JOIN event_cover_publish_receipts r
+        ON f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+       AND r.event_id = f.event_id AND r.workflow_instance_id = f.workflow_instance_id
+       AND r.dispatch_generation = f.dispatch_generation
+      WHERE f.state = 'open' AND r.updated_at >= f.created_at AND (
+        r.status IN ('applied', 'conflict')
+        OR (r.status = 'failed' AND (r.retryable = 0 OR r.expires_at < ?1))
+      )
+      UNION ALL
+      SELECT f.rowid AS fence_rowid, f.expires_at AS fence_expires_at,
+        j.terminal_at AS terminal_at,
+        strftime('%Y-%m-%dT%H:%M:%fZ', j.terminal_at, '+31 days') AS terminal_expires_at
+      FROM event_cover_workflow_fences f
+      JOIN event_cover_backfill_jobs j
+        ON f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+       AND j.event_id = f.event_id AND j.workflow_instance_id = f.workflow_instance_id
+       AND j.dispatch_generation = f.dispatch_generation
+      WHERE f.state = 'open' AND j.terminal_at IS NOT NULL
+        AND j.terminal_at >= f.created_at AND (
+        j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement')
+        OR (j.status = 'failed' AND (
+          j.retryable = 0 OR j.terminal_at <= ?3
+        ))
+      )
+    )
+    UPDATE event_cover_workflow_fences
+    SET expires_at = (
+          SELECT terminal_expires_at FROM terminal_owners
+          WHERE fence_rowid = event_cover_workflow_fences.rowid
+        ),
+        updated_at = (
+          SELECT terminal_at FROM terminal_owners
+          WHERE fence_rowid = event_cover_workflow_fences.rowid
+        )
+    WHERE rowid IN (
+      SELECT fence_rowid FROM terminal_owners
+      WHERE terminal_expires_at IS NOT NULL
+        AND fence_expires_at <> terminal_expires_at
+      ORDER BY fence_expires_at LIMIT ?2
+    )
+    `).bind(timestamp, limit, backfillRestartFloor).run();
+    upgradedFenceCount = upgradedFences.meta.changes;
+  }
+
+  if (stampedOrphans.meta.changes > 0 || upgradedFenceCount > 0) {
+    // A later pass consumes the now-durable deadline. This also makes a partial
+    // (<100) upgrade visible to callers rather than claiming the class drained.
+    summary.remainder = true;
+  } else {
+    const fences = await env.DB.prepare(`
+      DELETE FROM event_cover_workflow_fences
+      WHERE rowid IN (
+        SELECT f.rowid FROM event_cover_workflow_fences f
+        WHERE f.expires_at <= ?1 AND (
+          (
+            f.state = 'deletion-blocked' AND (
+              f.expires_at = strftime(
+                '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
+              ) AND (
+              EXISTS (
+                SELECT 1 FROM event_cover_purge_progress p
+                WHERE p.event_id = f.event_id AND p.phase IN ('r2', 'relational')
+              )
+              OR (
+                NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
+                AND NOT EXISTS (
+                  SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
+                )
+              )
+              )
+            )
+          )
+          OR (
+            f.state = 'open' AND f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+            AND EXISTS (
+              SELECT 1 FROM event_cover_publish_receipts r
+              WHERE r.event_id = f.event_id
+                AND r.workflow_instance_id = f.workflow_instance_id
+                AND r.dispatch_generation = f.dispatch_generation
+                AND r.updated_at >= f.created_at
+                AND (
+                  r.status IN ('applied', 'conflict')
+                  OR (r.status = 'failed' AND (r.retryable = 0 OR r.expires_at < ?1))
+                )
+                AND f.expires_at = strftime(
+                  '%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days'
+                )
+            )
+          )
+          OR (
+            f.state = 'open' AND f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+            AND EXISTS (
+              SELECT 1 FROM event_cover_backfill_jobs j
+              WHERE j.event_id = f.event_id
+                AND j.workflow_instance_id = f.workflow_instance_id
+                AND j.dispatch_generation = f.dispatch_generation
+                AND j.terminal_at IS NOT NULL
+                AND j.terminal_at >= f.created_at
+                AND (
+                  j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement')
+                  OR (j.status = 'failed' AND (
+                    j.retryable = 0 OR j.terminal_at <= ?3
+                  ))
+                )
+                AND f.expires_at = strftime(
+                  '%Y-%m-%dT%H:%M:%fZ', j.terminal_at, '+31 days'
+                )
+            )
+          )
+        )
+        ORDER BY f.expires_at LIMIT ?2
+      )
+    `).bind(timestamp, limit, backfillRestartFloor).run();
+    summary.fencesDeleted = note(fences.meta.changes);
+  }
 
   // 1. Reservations and unpublished drafts at their own expiry. A `publishing`
   // draft is absent from the state list entirely: its receipt may still be
@@ -773,7 +861,12 @@ async function settleEventCoverFences(
       ON f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
      AND j.event_id = f.event_id AND j.workflow_instance_id = f.workflow_instance_id
      AND j.dispatch_generation = f.dispatch_generation
-    WHERE f.event_id = ?1 AND f.state = 'deletion-blocked' AND f.expires_at = ?2
+    WHERE f.event_id = ?1 AND f.state = 'deletion-blocked'
+      AND (
+        f.expires_at = ?2
+        OR strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
+        OR f.expires_at <> strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days')
+      )
       AND (f.workflow_binding > ?3
         OR (f.workflow_binding = ?3 AND f.workflow_instance_id > ?4))
     ORDER BY f.workflow_binding, f.workflow_instance_id
@@ -851,7 +944,11 @@ async function settleEventCoverFences(
       UPDATE event_cover_workflow_fences
       SET expires_at = ?, updated_at = ?
       WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'deletion-blocked'
-        AND expires_at = ?
+        AND (
+          expires_at = ?
+          OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
+          OR expires_at <> strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days')
+        )
     `).bind(
       coverWorkflowFenceTerminalExpiry(now), timestamp,
       fence.workflow_binding, fence.workflow_instance_id,
@@ -883,7 +980,11 @@ async function settleEventCoverFences(
 
   const unresolved = await env.DB.prepare(`
     SELECT count(*) AS count FROM event_cover_workflow_fences
-    WHERE event_id = ? AND expires_at = ?
+    WHERE event_id = ? AND state = 'deletion-blocked' AND (
+      expires_at = ?
+      OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
+      OR expires_at <> strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days')
+    )
   `).bind(eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT).first<{ count: number }>();
   return (unresolved?.count ?? 0) === 0;
 }
@@ -926,6 +1027,44 @@ export async function reconcileEventCoverPurge(
     env.DB.prepare(`
       UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?
     `).bind(timestamp, eventId),
+    // Preserve only a terminal stamp whose exact owner and generation prove it.
+    // Every other open fence enters the purge under HOLD before soft deletion
+    // changes nonterminal ledger statuses to `failed`.
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET state = 'deletion-blocked', expires_at = ?, updated_at = ?
+      WHERE event_id = ? AND state = 'open' AND NOT (
+        (
+          workflow_binding = 'COVER_RENDER_WORKFLOW' AND EXISTS (
+            SELECT 1 FROM event_cover_publish_receipts r
+            WHERE r.event_id = event_cover_workflow_fences.event_id
+              AND r.workflow_instance_id = event_cover_workflow_fences.workflow_instance_id
+              AND r.dispatch_generation = event_cover_workflow_fences.dispatch_generation
+              AND r.status IN ('applied', 'conflict', 'failed')
+              AND event_cover_workflow_fences.expires_at = strftime(
+                '%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days'
+              )
+          )
+        )
+        OR (
+          workflow_binding = 'COVER_BACKFILL_WORKFLOW' AND EXISTS (
+            SELECT 1 FROM event_cover_backfill_jobs j
+            WHERE j.event_id = event_cover_workflow_fences.event_id
+              AND j.workflow_instance_id = event_cover_workflow_fences.workflow_instance_id
+              AND j.dispatch_generation = event_cover_workflow_fences.dispatch_generation
+              AND j.terminal_at IS NOT NULL
+              AND j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement', 'failed')
+              AND event_cover_workflow_fences.expires_at = strftime(
+                '%Y-%m-%dT%H:%M:%fZ', j.terminal_at, '+31 days'
+              )
+          )
+        )
+      )
+    `).bind(COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId),
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+      WHERE event_id = ? AND state = 'open'
+    `).bind(eventId),
     // Accepted work that can no longer be delivered is made terminal here rather
     // than left `preparing` forever behind a deleted event.
     env.DB.prepare(`
@@ -965,18 +1104,47 @@ export async function reconcileEventCoverPurge(
         updated_at = ?
       WHERE id IN (SELECT run_id FROM event_cover_backfill_jobs WHERE event_id = ?)
     `).bind(timestamp, eventId),
-    // The fence is what actually stops a late dispatcher, and holding its expiry
-    // keeps the bounded sweep from removing it mid-purge.
+    // Pre-hold releases may already have marked a fence blocked while retaining
+    // its creation-relative deadline. Only a stamp exactly 31 days from this
+    // fence's own update is terminal-derived; every other dated blocked value
+    // is unresolved and must re-enter the coordinator under the hold sentinel.
     env.DB.prepare(`
       UPDATE event_cover_workflow_fences
-      SET state = 'deletion-blocked', expires_at = ?, updated_at = ?
-      WHERE event_id = ? AND state = 'open'
-    `).bind(COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId),
+      SET expires_at = ?, updated_at = ?
+      WHERE event_id = ? AND state = 'deletion-blocked' AND expires_at <> ?
+        AND (
+          strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
+          OR expires_at <> strftime(
+            '%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days'
+          )
+        )
+    `).bind(
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId,
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    ),
     env.DB.prepare(`
       INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
       SELECT ?, 'fences', ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
       ON CONFLICT (event_id) DO NOTHING
     `).bind(eventId, timestamp, timestamp, eventId),
+    // Old releases could advance progress while ignoring a dated blocked fence.
+    // Roll back atomically before control flow reads the phase, and reset the
+    // cursor so the newly re-held row cannot sit behind a prior position.
+    env.DB.prepare(`
+      UPDATE event_cover_purge_progress
+      SET phase = 'fences', workflow_binding = NULL, workflow_instance_id = NULL,
+          updated_at = ?
+      WHERE event_id = ? AND phase IN ('r2', 'relational') AND EXISTS (
+        SELECT 1 FROM event_cover_workflow_fences f
+        WHERE f.event_id = ? AND f.state = 'deletion-blocked' AND (
+          f.expires_at = ?
+          OR strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
+          OR f.expires_at <> strftime(
+            '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
+          )
+        )
+      )
+    `).bind(timestamp, eventId, eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT),
   ]);
 
   const progress = await env.DB.prepare(

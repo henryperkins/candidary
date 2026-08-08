@@ -223,6 +223,61 @@ describe('event cover purge coordinator', () => {
       .bind(access.event.id).first()).not.toBeNull();
   });
 
+  it.each(['r2', 'relational'] as const)(
+    'rolls an invalid legacy fence back from %s and parks before R2',
+    async (phase) => {
+      const { access, ids } = await seeded();
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_workflow_fences
+          SET state = 'deletion-blocked', updated_at = ?, expires_at = ?
+          WHERE workflow_instance_id = ?
+        `).bind('2026-08-01T00:00:00.000Z', '2026-08-20T00:00:00.000Z', ids.workflowInstanceId),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_purge_progress SET phase = ? WHERE event_id = ?
+        `).bind(phase, access.event.id),
+      ]);
+      const { accessors, calls } = purgeAccessors({
+        [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 'legacy-upgrade' },
+      });
+
+      const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+      expect(calls).toEqual([`lookup:${ids.workflowInstanceId}`]);
+      expect(summary).toMatchObject({ phase: 'fences', remainder: true, inspected: 1 });
+      expect(await prefixKeys(access.event.id)).not.toEqual([]);
+      expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+        .bind(access.event.id).first()).not.toBeNull();
+      expect(await testEnv.DB.prepare(`
+        SELECT phase FROM event_cover_purge_progress WHERE event_id = ?
+      `).bind(access.event.id).first()).toEqual({ phase: 'fences' });
+      expect(await fenceRow(ids.workflowInstanceId)).toMatchObject({
+        expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      });
+    },
+  );
+
+  it('treats a malformed legacy fence timestamp as unresolved rather than fresh zero', async () => {
+    const { access, ids } = await seeded();
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET state = 'deletion-blocked', updated_at = 'legacy-invalid', expires_at = ?
+      WHERE workflow_instance_id = ?
+    `).bind('2026-08-20T00:00:00.000Z', ids.workflowInstanceId).run();
+    const { accessors, calls } = purgeAccessors({
+      [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 'malformed-upgrade' },
+    });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+    expect(calls).toEqual([`lookup:${ids.workflowInstanceId}`]);
+    expect(summary).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await prefixKeys(access.event.id)).not.toEqual([]);
+    expect(await fenceRow(ids.workflowInstanceId)).toMatchObject({
+      expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+  });
+
   it('inspects at most ten fences and spends at most five platform mutations', async () => {
     const access = await eventAccess();
     const timestamp = now.toISOString();
@@ -1350,31 +1405,80 @@ describe('bounded cover storage sweep', () => {
         VALUES (?, 'fences', ?, ?)
       `).bind(access.event.id, PAST, PAST),
     ]);
+    const objectKey = `events/${access.event.id}/cover/legacy-blocked.webp`;
+    await testEnv.MEDIA_BUCKET.put(objectKey, png());
 
-    const summary = await cleanupEventCovers(testEnv, NOW);
+    const cleanup = await cleanupEventCovers(testEnv, NOW);
 
-    expect(summary.fencesDeleted).toBe(0);
+    expect(cleanup.fencesDeleted).toBe(0);
     expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(1);
+    const { accessors, calls } = purgeAccessors({
+      'instance-legacy-purge': { kind: 'unknown', telemetry: 'legacy-upgrade' },
+    });
+
+    const purge = await reconcileEventCoverPurge(testEnv, access.event.id, NOW, accessors);
+
+    expect(calls).toEqual(['lookup:instance-legacy-purge']);
+    expect(purge).toMatchObject({ phase: 'fences', remainder: true, inspected: 1 });
+    expect(await testEnv.MEDIA_BUCKET.head(objectKey)).not.toBeNull();
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).not.toBeNull();
+    expect(await fenceRow('instance-legacy-purge')).toMatchObject({
+      state: 'deletion-blocked', expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT phase FROM event_cover_purge_progress WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ phase: 'fences' });
   });
 
-  it('retains terminal render and backfill owners until their matching fences are swept', async () => {
+  it('upgrades both legacy terminal owners to a full owner-relative fence retention window', async () => {
+    const terminalAt = '2026-08-09T12:00:00.000Z';
+    const terminalExpiry = '2026-09-09T12:00:00.000Z';
     await insertReceipt('owner-render', { status: 'applied', expiresAt: PAST });
     await insertBackfillJob('owner-backfill', 'owner-run', {
       status: 'applied', expiresAt: PAST, runExpiresAt: PAST,
     });
-    await insertFence('COVER_RENDER_WORKFLOW', 'instance-owner-render', { expiresAt: FUTURE });
-    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-owner-backfill', { expiresAt: FUTURE });
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts SET updated_at = ? WHERE operation_id = ?
+      `).bind(terminalAt, 'owner-render'),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_jobs SET terminal_at = ?, updated_at = ? WHERE id = ?
+      `).bind(terminalAt, terminalAt, 'owner-backfill'),
+    ]);
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-owner-render');
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-owner-backfill');
 
     const held = await cleanupEventCovers(testEnv, NOW);
 
     expect(held).toMatchObject({ receiptsExpired: 0, fencesDeleted: 0 });
     expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(1);
     expect(await countRows('event_cover_backfill_jobs', access.event.id)).toBe(1);
-    await testEnv.DB.prepare(`
-      UPDATE event_cover_workflow_fences SET expires_at = ? WHERE event_id = ?
-    `).bind(PAST, access.event.id).run();
+    const upgraded = await testEnv.DB.prepare(`
+      SELECT workflow_binding, expires_at, updated_at FROM event_cover_workflow_fences
+      WHERE event_id = ? ORDER BY workflow_binding
+    `).bind(access.event.id).all<{
+      workflow_binding: string; expires_at: string; updated_at: string;
+    }>();
+    expect(upgraded.results).toEqual([
+      {
+        workflow_binding: 'COVER_BACKFILL_WORKFLOW',
+        expires_at: terminalExpiry,
+        updated_at: terminalAt,
+      },
+      {
+        workflow_binding: 'COVER_RENDER_WORKFLOW',
+        expires_at: terminalExpiry,
+        updated_at: terminalAt,
+      },
+    ]);
 
-    const released = await cleanupEventCovers(testEnv, NOW);
+    const almostDue = await cleanupEventCovers(
+      testEnv, new Date('2026-09-09T11:59:59.999Z'),
+    );
+    expect(almostDue.fencesDeleted).toBe(0);
+
+    const released = await cleanupEventCovers(testEnv, new Date(terminalExpiry));
 
     expect(released).toMatchObject({ receiptsExpired: 1, fencesDeleted: 2 });
     expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(0);
@@ -1385,8 +1489,10 @@ describe('bounded cover storage sweep', () => {
   it('keeps owner and fence aligned when reverse expiry order spills past the 100-row bound', async () => {
     const count = COVER_CLEANUP_ROWS_PER_CLASS + 1;
     const base = Date.parse(PAST);
+    const terminalBase = Date.parse('2026-06-01T00:00:00.000Z');
     const receipts = Array.from({ length: count }, (_unused, index) => {
       const id = String(index).padStart(3, '0');
+      const terminalAt = new Date(terminalBase + index * 60_000).toISOString();
       return testEnv.DB.prepare(`
         INSERT INTO event_cover_publish_receipts (
           event_id, operation_id, request_sha256, action, expected_revision, status,
@@ -1395,7 +1501,7 @@ describe('bounded cover storage sweep', () => {
         ) VALUES (?, ?, ?, 'publish', 0, 'applied', ?, '{}', 'confirmed', 1, ?, ?, ?)
       `).bind(
         access.event.id, `bounded-owner-${id}`, HEX, `bounded-instance-${id}`,
-        PAST, PAST, new Date(base + index * 60_000).toISOString(),
+        terminalAt, terminalAt, new Date(base + index * 60_000).toISOString(),
       );
     });
     const fences = Array.from({ length: count }, (_unused, index) => {
@@ -1406,16 +1512,27 @@ describe('bounded cover storage sweep', () => {
           state, created_at, updated_at, expires_at
         ) VALUES ('COVER_RENDER_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
       `).bind(
-        `bounded-instance-${id}`, access.event.id, PAST, PAST,
+        `bounded-instance-${id}`, access.event.id, '2026-05-01T00:00:00.000Z', PAST,
         new Date(base + (count - index) * 60_000).toISOString(),
       );
     });
     await testEnv.DB.batch(receipts);
     await testEnv.DB.batch(fences);
 
-    const first = await cleanupEventCovers(testEnv, NOW);
+    const firstUpgrade = await cleanupEventCovers(testEnv, NOW);
+    expect(firstUpgrade).toMatchObject({ fencesDeleted: 0, receiptsExpired: 0, remainder: true });
+    expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(count);
+    expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(count);
 
-    expect(first).toMatchObject({ receiptsExpired: COVER_CLEANUP_ROWS_PER_CLASS, fencesDeleted: COVER_CLEANUP_ROWS_PER_CLASS });
+    const finalUpgrade = await cleanupEventCovers(testEnv, NOW);
+    expect(finalUpgrade).toMatchObject({ fencesDeleted: 0, receiptsExpired: 0, remainder: true });
+
+    const firstSweep = await cleanupEventCovers(testEnv, NOW);
+
+    expect(firstSweep).toMatchObject({
+      receiptsExpired: COVER_CLEANUP_ROWS_PER_CLASS,
+      fencesDeleted: COVER_CLEANUP_ROWS_PER_CLASS,
+    });
     const pairedRemainder = await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM event_cover_workflow_fences f
       JOIN event_cover_publish_receipts r
@@ -1429,17 +1546,13 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(0);
   });
 
-  it('sweeps rate rows and only terminal-proven dispatch fences at recorded expiry', async () => {
+  it('gives an invalid completed-purge fence one full window before collecting it', async () => {
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_rate_events (
         id, event_id, action, replay_key, request_sha256, window_start, created_at, expires_at
       ) VALUES ('rate-due', ?, 'publication', 'replay-a', ?, 1785196800, ?, ?),
                ('rate-live', ?, 'publication', 'replay-b', ?, 1785196800, ?, ?)
     `).bind(access.event.id, HEX, PAST, PAST, access.event.id, HEX, PAST, FUTURE).run();
-    await insertReceipt('terminal-render', { status: 'applied', expiresAt: FUTURE });
-    await insertBackfillJob('terminal-backfill', 'terminal-run', { status: 'applied' });
-    await insertFence('COVER_RENDER_WORKFLOW', 'instance-terminal-render');
-    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-terminal-backfill');
     await insertFence('COVER_RENDER_WORKFLOW', 'purge-terminal', {
       state: 'deletion-blocked', eventId: 'retired-event',
     });
@@ -1448,13 +1561,21 @@ describe('bounded cover storage sweep', () => {
 
     const summary = await cleanupEventCovers(testEnv, NOW);
 
-    expect(summary).toMatchObject({ rateEventsDeleted: 1, fencesDeleted: 3 });
+    expect(summary).toMatchObject({ rateEventsDeleted: 1, fencesDeleted: 0, remainder: true });
     expect(await countRows('event_cover_rate_events', access.event.id)).toBe(1);
+    expect(await fenceRow('purge-terminal')).toMatchObject({
+      expires_at: '2026-09-10T12:00:00.000Z',
+    });
     const remaining = await testEnv.DB.prepare(`
       SELECT workflow_instance_id FROM event_cover_workflow_fences ORDER BY workflow_instance_id
     `).all<{ workflow_instance_id: string }>();
     expect(remaining.results.map((row) => row.workflow_instance_id))
-      .toEqual(['instance-live', 'ownerless-open']);
+      .toEqual(['instance-live', 'ownerless-open', 'purge-terminal']);
+
+    const expired = await cleanupEventCovers(
+      testEnv, new Date('2026-09-10T12:00:00.000Z'),
+    );
+    expect(expired.fencesDeleted).toBe(1);
   });
 
   it('abandons an orphaned staging set but never the one the event points at', async () => {
