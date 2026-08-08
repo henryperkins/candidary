@@ -1,9 +1,20 @@
-import { COVER_CLEANUP_ROWS_PER_CLASS } from '../../shared/constants';
 import {
+  COVER_CLEANUP_ROWS_PER_CLASS,
+  MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
+} from '../../shared/constants';
+import {
+  CLAIM_APPLIED_AT_SQL,
   LIVE_COVER_DISPATCH_STATES,
+  NONTERMINAL_COVER_BACKFILL_STATUSES,
   blockCoverBackfillDispatchSql,
   confirmCoverBackfillDispatchSql,
+  coverBackfillCurrentSourceSql,
+  coverBackfillFenceGuardSql,
+  coverBackfillInstanceIdleSql,
+  coverBackfillMinuteBudgetSql,
+  coverBackfillNoPurgeGuardSql,
   coverDispatchReadSql,
+  type CoverDispatchClaimState,
 } from '../../shared/cover-dispatch';
 import {
   COVER_PIPELINE_VERSIONS,
@@ -27,7 +38,9 @@ import { coverKeyFingerprint } from '../storage/event-cover-keys';
 import { deriveCoverSlots, type CoverRenderSlot } from './cover-render';
 import {
   defaultCoverBackfillWorkflowAccessor,
+  dispositionForLookup,
   type CoverBackfillWorkflowAccessor,
+  type CoverWorkflowLookup,
 } from './cover-platform';
 
 /**
@@ -326,8 +339,17 @@ const BOUND = {
  */
 export async function confirmCoverBackfillDispatch(
   env: AppEnv,
-  input: { runId: string; jobId: string; eventId: string; generation: number; now: Date },
+  input: {
+    runId: string;
+    jobId: string;
+    eventId: string;
+    generation: number;
+    now: Date;
+    /** Which claim is being confirmed. Only the reconciler passes the other two. */
+    from?: CoverDispatchClaimState;
+  },
 ): Promise<CoverBackfillDispatchConfirmation> {
+  const from = input.from ?? 'creating';
   const row = await env.DB.prepare(coverDispatchReadSql({
     binding: BOUND.binding, runId: BOUND.runId, jobId: BOUND.jobId, eventId: BOUND.eventId,
   })).bind(COVER_BACKFILL_BINDING, input.runId, input.jobId, input.eventId)
@@ -352,10 +374,10 @@ export async function confirmCoverBackfillDispatch(
   // Absence is refusal, and a fence standing somewhere else is not this unit's.
   if (row.fence_state !== 'open' || row.fence_generation !== input.generation) return 'stale';
   if (row.dispatch_state === 'confirmed') return 'confirmed';
-  if (row.dispatch_state !== 'creating') return 'stale';
+  if (row.dispatch_state !== from) return 'stale';
 
   const results = await env.DB.batch([
-    env.DB.prepare(confirmCoverBackfillDispatchSql(BOUND)).bind(...binds),
+    env.DB.prepare(confirmCoverBackfillDispatchSql(BOUND, from)).bind(...binds),
   ]);
   if (results[0]!.meta.changes === 1) return 'confirmed';
 
@@ -480,6 +502,394 @@ export async function recoverStaleInitialBackfillDispatches(
     if (outcome === 'confirmed') summary.confirmed += 1;
     if (outcome === 'blocked') summary.blocked += 1;
   }
+  return summary;
+}
+
+/* ------------------------------------------------------------------ *
+ * Platform reconciliation and the one guarded restart edge
+ * ------------------------------------------------------------------ */
+
+export interface CoverBackfillReconcileSummary {
+  inspected: number;
+  resumed: number;
+  restarted: number;
+  recreated: number;
+  failuresRecorded: number;
+  blocked: number;
+  unchanged: number;
+  remainder: boolean;
+}
+
+interface ReconcileRow {
+  id: string;
+  run_id: string;
+  event_id: string;
+  workflow_instance_id: string;
+  dispatch_state: string;
+  dispatch_generation: number;
+  status: string;
+  retryable: number;
+  terminal_at: string | null;
+  expected_revision: number;
+  legacy_key_fingerprint: string;
+  dependency_versions_json: string;
+  manifest_json: string | null;
+  manifest_sha256: string | null;
+  fence_state: string | null;
+  fence_generation: number | null;
+  event_deleted_at: string | null;
+  cover_object_key: string | null;
+  cover_render_set_id: string | null;
+  cover_revision: number | null;
+}
+
+const NONTERMINAL_SQL = NONTERMINAL_COVER_BACKFILL_STATUSES.map((s) => `'${s}'`).join(', ');
+
+/**
+ * The dispatch states a recovery may be claimed *out of*.
+ *
+ * `pending` is absent because there is nothing to recover — no instance was ever
+ * asked for — and `creating` is absent because an initial claim belongs to
+ * `recoverStaleInitialBackfillDispatches`, which replays it without a lookup on
+ * purpose. Consulting the platform about a `creating` claim would make recovery
+ * depend on telling an absent instance from an invalid ID, which the adapter
+ * deliberately refuses to certify.
+ */
+const RECOVERABLE_CLAIM_STATES = "('confirmed', 'resuming', 'restarting')";
+
+const CLAIM_BOUND = {
+  binding: '?1',
+  runId: '?2',
+  jobId: '?3',
+  eventId: '?4',
+  generation: '?5',
+  now: '?6',
+  workflowInstanceId: '?7',
+  dependencies: '?8',
+  windowFloor: '?9',
+} as const;
+
+/**
+ * One globally bounded pass over everything the platform might have moved
+ * underneath the ledger.
+ *
+ * Three arms, and each names a different way D1 and the platform can disagree:
+ * a job the ledger believes is running, a retryable failure still inside its
+ * restart window, and a recovery claim whose outcome nobody observed. A
+ * `pending` job is deliberately absent from all three — it has no instance
+ * behind it — and so is `creating`, which belongs to initial-create recovery.
+ */
+const RECONCILE_SELECT_SQL = `
+  SELECT j.id, j.run_id, j.event_id, j.workflow_instance_id, j.dispatch_state,
+         j.dispatch_generation, j.status, j.retryable, j.terminal_at,
+         j.expected_revision, j.legacy_key_fingerprint, j.dependency_versions_json,
+         j.manifest_json, j.manifest_sha256,
+         f.state AS fence_state, f.dispatch_generation AS fence_generation,
+         e.deleted_at AS event_deleted_at, e.cover_object_key,
+         e.cover_render_set_id, e.cover_revision
+  FROM event_cover_backfill_jobs j
+  LEFT JOIN event_cover_workflow_fences f
+    ON f.workflow_binding = ?1 AND f.workflow_instance_id = j.workflow_instance_id
+   AND f.event_id = j.event_id
+  LEFT JOIN events e ON e.id = j.event_id
+  WHERE (
+        (j.dispatch_state = 'confirmed' AND j.status IN (${NONTERMINAL_SQL}))
+     OR (j.status = 'failed' AND j.retryable = 1
+         AND j.terminal_at IS NOT NULL AND j.terminal_at > ?2)
+     OR (j.dispatch_state IN ('resuming', 'restarting') AND j.updated_at <= ?3
+         AND j.status IN (${NONTERMINAL_SQL}))
+  )
+  ORDER BY j.updated_at, j.id LIMIT ?4
+`;
+
+/**
+ * Everything a recovery claim and a restart claim require in common.
+ *
+ * Rendered from `shared/cover-dispatch.ts` rather than written out here, so the
+ * bounds a Worker-side recovery spends are the same strings the operator's
+ * initial dispatch is refused by. A resume, a restart, and a recreate each put
+ * an instance on the platform, so each one spends the rolling minute.
+ */
+const CLAIM_GUARDS = ` AND ${coverBackfillCurrentSourceSql()}`
+  + ` AND ${coverBackfillNoPurgeGuardSql()}`
+  + ` AND ${coverBackfillFenceGuardSql(CLAIM_BOUND.binding, 'open', CLAIM_BOUND.generation)}`
+  + ` AND ${coverBackfillMinuteBudgetSql(CLAIM_BOUND.binding, MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE)}`
+  + ` AND ${coverBackfillInstanceIdleSql(CLAIM_BOUND.binding, CLAIM_BOUND.workflowInstanceId)}`;
+
+const CLAIM_IDENTITY = ` WHERE id = ${CLAIM_BOUND.jobId} AND run_id = ${CLAIM_BOUND.runId}`
+  + ` AND event_id = ${CLAIM_BOUND.eventId}`
+  + ` AND dispatch_generation = ${CLAIM_BOUND.generation}`
+  + ` AND dispatch_state IN ${RECOVERABLE_CLAIM_STATES}`
+  + ` AND dependency_versions_json = ${CLAIM_BOUND.dependencies}`;
+
+/** `confirmed|resuming|restarting → resuming|creating`, leaving the status alone. */
+function recoveryClaimSql(target: 'resuming' | 'creating'): string {
+  return 'UPDATE event_cover_backfill_jobs'
+    + ` SET dispatch_state = '${target}', dispatch_generation = dispatch_generation + 1,`
+    + ` updated_at = ${CLAIM_BOUND.now}`
+    + CLAIM_IDENTITY
+    + ` AND status IN (${NONTERMINAL_SQL})`
+    + CLAIM_GUARDS;
+}
+
+/**
+ * The one `failed → queued` edge, with every predicate in the statement.
+ *
+ * It clears the terminal, reference-release, and expiry fields the failure
+ * stamped, because a job that is live again must not age out from underneath the
+ * instance now working on it. `dispatch_state` becomes `restarting` before the
+ * platform is called, so an interruption leaves a claim the next pass can see
+ * rather than a job that silently lost a generation.
+ */
+const RESTART_CLAIM_SQL = 'UPDATE event_cover_backfill_jobs'
+  + " SET status = 'queued', dispatch_state = 'restarting',"
+  + ' dispatch_generation = dispatch_generation + 1,'
+  + ' failure_code = NULL, retryable = 0, terminal_at = NULL,'
+  + ' reference_release_at = NULL, expires_at = NULL,'
+  + ` updated_at = ${CLAIM_BOUND.now}`
+  + CLAIM_IDENTITY
+  + " AND status = 'failed' AND retryable = 1"
+  + ` AND terminal_at IS NOT NULL AND terminal_at > ${CLAIM_BOUND.windowFloor}`
+  + CLAIM_GUARDS;
+
+/** The fence moves with the job, and only when the job moved. */
+const FENCE_CLAIM_SQL = 'UPDATE event_cover_workflow_fences'
+  + ' SET dispatch_generation = (SELECT j.dispatch_generation'
+  + '   FROM event_cover_backfill_jobs j WHERE j.id = ?2),'
+  + ` updated_at = ${CLAIM_APPLIED_AT_SQL}`
+  + ' WHERE workflow_binding = ?1 AND workflow_instance_id = ?4'
+  + " AND event_id = ?3 AND state = 'open' AND changes() = 1";
+
+/** Terminal, and never restartable: nothing is left that could authorize work. */
+async function settleUnreachableBackfillJob(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  failureCode: string,
+  now: Date,
+): Promise<void> {
+  const timestamp = now.toISOString();
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'failed', retryable = 0, failure_code = ?1, dispatch_state = 'blocked',
+          terminal_at = COALESCE(terminal_at, ?2), updated_at = ?2
+      WHERE id = ?3 AND status NOT IN ('applied', 'skipped', 'resolved')
+    `).bind(failureCode, timestamp, payload.jobId),
+    recomputeBackfillRunCounters(env.DB, payload.runId, now),
+  ]);
+}
+
+/**
+ * The predicates a digest is needed for, checked immediately before the claim.
+ *
+ * Everything SQL can decide is decided inside the claim statement at commit
+ * time; these two cannot be, so they are checked here and the statement is
+ * applied straight afterwards. A drift in either means this job's frozen work no
+ * longer describes what a restart would produce.
+ */
+async function backfillJobIsRestorable(job: ReconcileRow): Promise<boolean> {
+  if (job.dependency_versions_json !== JSON.stringify(coverBackfillDependencyVersions())) {
+    return false;
+  }
+  if (job.manifest_json !== null && job.manifest_sha256 !== null
+    && await coverRequestDigest(job.manifest_json) !== job.manifest_sha256) {
+    return false;
+  }
+  if (job.event_deleted_at !== null) return false;
+  if (!job.cover_object_key || job.cover_render_set_id !== null) return false;
+  if (job.cover_revision !== job.expected_revision) return false;
+  return await coverKeyFingerprint(job.cover_object_key) === job.legacy_key_fingerprint;
+}
+
+async function applyClaim(
+  env: AppEnv,
+  job: ReconcileRow,
+  statement: string,
+  binds: unknown[],
+): Promise<boolean> {
+  const results = await env.DB.batch([
+    env.DB.prepare(statement).bind(...binds),
+    env.DB.prepare(FENCE_CLAIM_SQL).bind(
+      COVER_BACKFILL_BINDING, job.id, job.event_id, job.workflow_instance_id,
+    ),
+  ]);
+  return results[0]!.meta.changes === 1;
+}
+
+function claimBinds(job: ReconcileRow, now: Date): unknown[] {
+  return [
+    COVER_BACKFILL_BINDING, job.run_id, job.id, job.event_id,
+    job.dispatch_generation, now.toISOString(), job.workflow_instance_id,
+    JSON.stringify(coverBackfillDependencyVersions()),
+  ];
+}
+
+/**
+ * Reconciles the ledger with what the platform actually reports, and takes at
+ * most one recovery edge per job per pass.
+ *
+ * Every transition here is Worker-side by design. An operator never issues a raw
+ * `instances resume` or `instances restart`: those commands move the platform
+ * without moving the generation or the fence, which is precisely the divergence
+ * this function exists to close. Keeping one authoritative writer is what lets
+ * the fence stay a truthful record of what was dispatched.
+ *
+ * Nothing is written on an `unknown` reading, ever. Absence of information is
+ * not evidence of absence of work, and the cost of guessing wrong is a second
+ * instance rendering into a set the first one is still writing.
+ */
+export async function reconcileCoverBackfillJobs(
+  env: AppEnv,
+  now = new Date(),
+  workflow: CoverBackfillWorkflowAccessor = defaultCoverBackfillWorkflowAccessor(env),
+): Promise<CoverBackfillReconcileSummary> {
+  const restartFloor = new Date(now.getTime() - BACKFILL_RESTART_WINDOW_MS).toISOString();
+  const staleBefore = new Date(now.getTime() - STALE_DISPATCH_CLAIM_MS).toISOString();
+
+  const selected = await env.DB.prepare(RECONCILE_SELECT_SQL).bind(
+    COVER_BACKFILL_BINDING, restartFloor, staleBefore, COVER_CLEANUP_ROWS_PER_CLASS,
+  ).all<ReconcileRow>();
+
+  const summary: CoverBackfillReconcileSummary = {
+    inspected: 0,
+    resumed: 0,
+    restarted: 0,
+    recreated: 0,
+    failuresRecorded: 0,
+    blocked: 0,
+    unchanged: 0,
+    remainder: selected.results.length >= COVER_CLEANUP_ROWS_PER_CLASS,
+  };
+
+  for (const job of selected.results) {
+    summary.inspected += 1;
+    const payload: CoverBackfillPayload = {
+      runId: job.run_id, jobId: job.id, eventId: job.event_id,
+    };
+    const next = job.dispatch_generation + 1;
+
+    // 1. Deletion and fence ownership, decided before the platform is contacted
+    // at all. A job whose event is going away routes to the purge coordinator,
+    // which owns terminating the instance; reconciliation only settles the row.
+    if (job.event_deleted_at !== null || job.fence_state === 'deletion-blocked') {
+      await settleUnreachableBackfillJob(env, payload, 'EVENT_DELETED', now);
+      summary.blocked += 1;
+      continue;
+    }
+    if (job.fence_state === null) {
+      // The fence outlived nothing: it is simply gone, and absence is refusal
+      // here for the same reason it is refusal in the preflight.
+      await settleUnreachableBackfillJob(env, payload, 'COVER_RENDER_UNAVAILABLE', now);
+      summary.blocked += 1;
+      continue;
+    }
+    // A fence standing at another generation belongs to another claim. This is
+    // supersession, not failure, and writing a terminal status would poison
+    // whichever run actually owns the instance.
+    if (job.fence_generation !== job.dispatch_generation) {
+      summary.unchanged += 1;
+      continue;
+    }
+
+    const lookup = await workflow.lookup(job.workflow_instance_id).catch(
+      (): CoverWorkflowLookup => ({
+        kind: 'unknown', telemetry: 'cover_backfill_lookup_failed',
+      }),
+    );
+    const disposition = dispositionForLookup(lookup);
+
+    if (!disposition.mutates) {
+      // A recovery claim whose instance turns out to be running did land: the
+      // interruption was between the platform call and the confirmation. Record
+      // that, so the ledger stops describing a claim nobody ever resolved.
+      if (disposition.kind === 'active'
+        && (job.dispatch_state === 'resuming' || job.dispatch_state === 'restarting')) {
+        await confirmCoverBackfillDispatch(env, {
+          ...payload,
+          generation: job.dispatch_generation,
+          now,
+          from: job.dispatch_state,
+        });
+      }
+      summary.unchanged += 1;
+      continue;
+    }
+
+    if (!await backfillJobIsRestorable(job)) {
+      summary.unchanged += 1;
+      continue;
+    }
+
+    // 2. Certified absence, which the shipped adapter cannot produce: its
+    // matcher registry is empty by construction, so this is reachable only once
+    // Task 11 proves a stable discriminator against the deployed platform.
+    if (disposition.kind === 'missing') {
+      if (!await applyClaim(env, job, recoveryClaimSql('creating'), claimBinds(job, now))) {
+        summary.unchanged += 1;
+        continue;
+      }
+      try {
+        await workflow.createBatch([{ id: job.workflow_instance_id, params: payload }]);
+      } catch {
+        // The claim stands, so the next pass finds it as a stale recovery claim.
+        continue;
+      }
+      const outcome = await confirmCoverBackfillDispatch(env, {
+        ...payload, generation: next, now, from: 'creating',
+      });
+      if (outcome === 'confirmed') summary.recreated += 1;
+      if (outcome === 'blocked') summary.blocked += 1;
+      continue;
+    }
+
+    // 3. Paused, on a job the ledger still believes is live. Resume keeps every
+    // step the instance already paid for, so it carries none of the restart
+    // predicates — no `failed`, no `retryable`, no `terminal_at`.
+    const nonterminal = (NONTERMINAL_COVER_BACKFILL_STATUSES as readonly string[])
+      .includes(job.status);
+    if (disposition.recovery === 'resume' && nonterminal) {
+      if (!await applyClaim(env, job, recoveryClaimSql('resuming'), claimBinds(job, now))) {
+        summary.unchanged += 1;
+        continue;
+      }
+      try {
+        await workflow.resume(job.workflow_instance_id);
+      } catch {
+        continue;
+      }
+      const outcome = await confirmCoverBackfillDispatch(env, {
+        ...payload, generation: next, now, from: 'resuming',
+      });
+      if (outcome === 'confirmed') summary.resumed += 1;
+      if (outcome === 'blocked') summary.blocked += 1;
+      continue;
+    }
+
+    // 4. Errored, terminated, or complete-while-D1-is-nonterminal. The platform's
+    // verdict is persisted *before* the restart is claimed: an interruption
+    // between the two then leaves a truthful retryable failure that the next
+    // pass can act on, rather than a job that lost a generation to nothing.
+    if (nonterminal) {
+      await recordTerminal(env, payload, 'failed', now, {
+        failureCode: 'COVER_RENDER_UNAVAILABLE', retryable: true,
+      });
+      summary.failuresRecorded += 1;
+    }
+    if (!await applyClaim(env, job, RESTART_CLAIM_SQL, [...claimBinds(job, now), restartFloor])) {
+      continue;
+    }
+    try {
+      await workflow.restart(job.workflow_instance_id);
+    } catch {
+      continue;
+    }
+    const outcome = await confirmCoverBackfillDispatch(env, {
+      ...payload, generation: next, now, from: 'restarting',
+    });
+    if (outcome === 'confirmed') summary.restarted += 1;
+    if (outcome === 'blocked') summary.blocked += 1;
+  }
+
   return summary;
 }
 

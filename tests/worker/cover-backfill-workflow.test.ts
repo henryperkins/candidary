@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE } from '../../shared/constants';
 import {
   ROLLING_CLAIM_WINDOW_SQL,
   claimCoverBackfillDispatchSql,
@@ -7,6 +8,7 @@ import {
 import { COVER_PIPELINE_VERSIONS, EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import { EventsRepository } from '../../worker/db/events';
 import {
+  BACKFILL_RESTART_WINDOW_MS,
   confirmCoverBackfillDispatch,
   coverBackfillConfirmStep,
   coverBackfillDependencyVersions,
@@ -16,10 +18,14 @@ import {
   coverBackfillPreflight,
   coverBackfillProfileStep,
   proveZeroLegacyCovers,
+  reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
   resolveSupersededBackfillJobs,
 } from '../../worker/workflows/cover-backfill';
-import type { CoverBackfillWorkflowAccessor } from '../../worker/workflows/cover-platform';
+import type {
+  CoverBackfillWorkflowAccessor,
+  CoverWorkflowLookup,
+} from '../../worker/workflows/cover-platform';
 import { coverKeyFingerprint, coverMasterKey } from '../../worker/storage/event-cover-keys';
 import {
   reconcileEventCoverPurge,
@@ -82,6 +88,11 @@ interface SeedOptions {
   /** How long ago the claim was made, for the staleness threshold. */
   claimedAt?: Date;
   status?: string;
+  /** A recorded platform failure, for the restart-window predicate. */
+  terminalAt?: Date;
+  retryable?: 0 | 1;
+  failureCode?: string;
+  dependencyVersions?: Record<string, number>;
 }
 
 /** One legacy row, one run, and one job created against exactly that row. */
@@ -108,12 +119,16 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
   await testEnv.DB.prepare(`
     INSERT INTO event_cover_backfill_jobs (
       id, run_id, event_id, expected_revision, legacy_key_fingerprint, workflow_instance_id,
-      dispatch_state, dispatch_generation, status, dependency_versions_json, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      dispatch_state, dispatch_generation, status, dependency_versions_json,
+      failure_code, retryable, terminal_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     JOB, RUN, access.event.id, revision, await coverKeyFingerprint(key), instanceId,
     dispatchState, generation, status,
-    JSON.stringify(coverBackfillDependencyVersions()), now.toISOString(), claimedAt,
+    JSON.stringify(options.dependencyVersions ?? coverBackfillDependencyVersions()),
+    options.failureCode ?? null, options.retryable ?? 0,
+    options.terminalAt?.toISOString() ?? null,
+    now.toISOString(), claimedAt,
   ).run();
 
   await testEnv.DB.prepare(`
@@ -156,6 +171,49 @@ function recordingBackfillAccessor(options: { failCreate?: boolean } = {}) {
     async terminate() { throw new Error('unreachable'); },
   };
   return { accessor, created };
+}
+
+/**
+ * A platform whose answer for each instance is scripted, and which records every
+ * call it receives in order.
+ *
+ * `resume` and `restart` rewrite their own instance's next reading the way the
+ * real platform would, so a reconciliation that calls one and then re-reads sees
+ * what actually happened rather than what it asked for.
+ */
+function scriptedBackfillAccessor(
+  script: Record<string, CoverWorkflowLookup | 'throw'> = {},
+  failures: { resume?: boolean; restart?: boolean; create?: boolean } = {},
+) {
+  const calls: string[] = [];
+  const scripted = new Map<string, CoverWorkflowLookup | 'throw'>(Object.entries(script));
+  const accessor: CoverBackfillWorkflowAccessor = {
+    async lookup(id) {
+      calls.push(`lookup:${id}`);
+      const entry = scripted.get(id);
+      if (entry === 'throw') throw new Error('binding unavailable');
+      return entry ?? { kind: 'status', status: 'running' };
+    },
+    async createBatch(input) {
+      for (const entry of input) {
+        calls.push(`createBatch:${entry.id}`);
+        if (failures.create) throw new Error('platform unavailable');
+        scripted.set(entry.id, { kind: 'status', status: 'running' });
+      }
+    },
+    async resume(id) {
+      calls.push(`resume:${id}`);
+      if (failures.resume) throw new Error('platform unavailable');
+      scripted.set(id, { kind: 'status', status: 'running' });
+    },
+    async restart(id) {
+      calls.push(`restart:${id}`);
+      if (failures.restart) throw new Error('platform unavailable');
+      scripted.set(id, { kind: 'status', status: 'running' });
+    },
+    async terminate(id) { calls.push(`terminate:${id}`); },
+  };
+  return { accessor, calls };
 }
 
 const STALE = new Date(now.getTime() - 5 * 60 * 1000);
@@ -742,6 +800,409 @@ describe('backfill finalize', () => {
     expect(event.coverRenderSetId).toBeNull();
     expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
       .toEqual({ state: 'abandoned' });
+  });
+});
+
+describe('platform reconciliation and the guarded restart edge', () => {
+  let access: Access;
+  beforeEach(async () => {
+    await resetDatabase();
+    access = await eventAccess();
+  });
+
+  /** A job the ledger believes is running: the ordinary reconciliation subject. */
+  const inFlight = (extra: SeedOptions = {}) => seedJob(access, {
+    dispatchState: 'confirmed', dispatchGeneration: 1, fenceGeneration: 1,
+    status: 'rendering', ...extra,
+  });
+
+  /** A retryable platform failure recorded a minute ago, well inside its window. */
+  const failedRetryable = (extra: SeedOptions = {}) => seedJob(access, {
+    dispatchState: 'confirmed', dispatchGeneration: 1, fenceGeneration: 1,
+    status: 'failed', retryable: 1, failureCode: 'COVER_RENDER_UNAVAILABLE',
+    terminalAt: new Date(now.getTime() - 60_000), ...extra,
+  });
+
+  interface JobShape {
+    status: string;
+    dispatch_state: string;
+    dispatch_generation: number;
+    retryable: number;
+    failure_code: string | null;
+    terminal_at: string | null;
+    expires_at: string | null;
+    reference_release_at: string | null;
+  }
+
+  const currentJob = () => row<JobShape>(`
+    SELECT status, dispatch_state, dispatch_generation, retryable, failure_code,
+           terminal_at, expires_at, reference_release_at
+    FROM event_cover_backfill_jobs WHERE id = ?
+  `, JOB);
+
+  const currentFence = (instanceId: string) => row<{ state: string; dispatch_generation: number }>(
+    'SELECT state, dispatch_generation FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+    instanceId,
+  );
+
+  /* ---------------- the total lookup map ---------------- */
+
+  it.each(['queued', 'running', 'waiting', 'waitingForPause'])(
+    'leaves a %s instance untouched', async (status) => {
+      const { instanceId } = await inFlight();
+      const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status } });
+
+      expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+        inspected: 1, unchanged: 1, resumed: 0, restarted: 0, recreated: 0, failuresRecorded: 0,
+      });
+      expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+      expect(await currentJob()).toMatchObject({
+        status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
+      });
+    },
+  );
+
+  /**
+   * A status this release has never seen is the one case where acting could
+   * destroy work that is still running, so the preserving default arm must reach
+   * reconciliation intact rather than being flattened into a recoverable reading.
+   */
+  it('preserves a job whose instance reports an unmapped status', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'status', status: 'someFutureState' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'rendering', dispatch_generation: 1 });
+  });
+
+  it.each<[string, CoverWorkflowLookup | 'throw']>([
+    ["the platform's own unknown", { kind: 'status', status: 'unknown' }],
+    ['a lookup that established nothing', 'throw'],
+  ])('writes nothing and calls nothing further for %s', async (_name, entry) => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor({ [instanceId]: entry });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, unchanged: 1, resumed: 0, restarted: 0, recreated: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 1 });
+  });
+
+  /**
+   * Resume is the one edge that keeps the instance's completed steps, so it
+   * carries none of the restart predicates: no `failed`, no `retryable`, no
+   * `terminal_at`. This job has none of the three.
+   */
+  it('claims, resumes, and confirms a paused instance without a failure record', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, resumed: 1, restarted: 0, recreated: 0, failuresRecorded: 0, unchanged: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
+    // The status is untouched: a resume continues the instance where it stopped.
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
+    // The fence moved with the job, because a resume *is* a dispatch claim.
+    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+  });
+
+  it('leaves a refused resume recoverable at its claimed generation', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor(
+      { [instanceId]: { kind: 'status', status: 'paused' } }, { resume: true },
+    );
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 0 });
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'resuming', dispatch_generation: 2,
+    });
+    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+  });
+
+  it.each(['errored', 'terminated'])(
+    'persists a retryable failure before restarting a %s instance', async (status) => {
+      const { instanceId } = await inFlight();
+      const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status } });
+
+      expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+        inspected: 1, failuresRecorded: 1, restarted: 1, resumed: 0, unchanged: 0,
+      });
+      expect(platform.calls).toEqual([`lookup:${instanceId}`, `restart:${instanceId}`]);
+      // The claim clears every terminal field it set a moment earlier.
+      expect(await currentJob()).toEqual({
+        status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+        retryable: 0, failure_code: null, terminal_at: null,
+        expires_at: null, reference_release_at: null,
+      });
+      expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+    },
+  );
+
+  it('treats a complete instance whose job is still nonterminal as a retryable divergence', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'complete' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, failuresRecorded: 1, restarted: 1 });
+    expect(await currentJob()).toMatchObject({ status: 'queued', dispatch_generation: 2 });
+  });
+
+  it('never inspects a job whose ledger row is already terminal', async () => {
+    await inFlight({ status: 'applied' });
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 0 });
+    expect(platform.calls).toEqual([]);
+  });
+
+  /**
+   * Certified absence is unreachable from the real adapter today — its matcher
+   * registry is deliberately empty — so this proves the branch a scripted
+   * platform can still reach, and that it recreates under the *fenced* ID.
+   */
+  it('recreates a certified-absent instance under its own fenced ID', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'missing' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, recreated: 1, restarted: 0, resumed: 0, failuresRecorded: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `createBatch:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
+  });
+
+  /* ---------------- deletion and fence ownership ---------------- */
+
+  it('settles a job the purge coordinator owns, without contacting the platform', async () => {
+    await inFlight();
+    await reconcileEventCoverPurge(testEnv, access.event.id, now, blockingAccessors());
+    // The coordinator's own batch already made this job terminal. Put it back to
+    // a live claim, leaving the coordinator-produced fence untouched, so the
+    // reconciler's settlement is the only thing that can move it.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'rendering', dispatch_state = 'confirmed', failure_code = NULL,
+          retryable = 0, terminal_at = NULL WHERE id = ?
+    `).bind(JOB).run();
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, blocked: 1, resumed: 0, restarted: 0, recreated: 0,
+    });
+    expect(platform.calls).toEqual([]);
+    expect(await currentJob()).toMatchObject({
+      status: 'failed', dispatch_state: 'blocked', failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+  });
+
+  it('settles a job whose fence was swept out from under it', async () => {
+    const { instanceId } = await inFlight();
+    await testEnv.DB.prepare('DELETE FROM event_cover_workflow_fences WHERE workflow_instance_id = ?')
+      .bind(instanceId).run();
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, blocked: 1 });
+    expect(platform.calls).toEqual([]);
+    expect(await currentJob()).toMatchObject({
+      status: 'failed', dispatch_state: 'blocked',
+      failure_code: 'COVER_RENDER_UNAVAILABLE', retryable: 0,
+    });
+  });
+
+  /**
+   * A fence standing at another generation belongs to another claim, so this is
+   * supersession rather than failure. Writing a terminal status here would poison
+   * whichever run actually owns the instance.
+   */
+  it('writes nothing for a fence that belongs to another generation', async () => {
+    await inFlight({ fenceGeneration: 4 });
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, unchanged: 1, blocked: 0 });
+    expect(platform.calls).toEqual([]);
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  /* ---------------- stale recovery claims ---------------- */
+
+  it('confirms a stale recovery claim whose instance is in fact running', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'restarting', dispatchGeneration: 2, fenceGeneration: 2,
+      status: 'queued', claimedAt: STALE,
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'running' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
+  });
+
+  it('resumes a stale resuming claim whose instance is still paused', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'resuming', dispatchGeneration: 2, fenceGeneration: 2,
+      status: 'rendering', claimedAt: STALE,
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      dispatch_state: 'confirmed', dispatch_generation: 3,
+    });
+  });
+
+  /** The platform is never called twice for one claim: a fresh one is not selected. */
+  it('leaves a recovery claim it just made alone until it goes stale', async () => {
+    await seedJob(access, {
+      dispatchState: 'restarting', dispatchGeneration: 2, fenceGeneration: 2, status: 'queued',
+    });
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 0 });
+    expect(platform.calls).toEqual([]);
+  });
+
+  /**
+   * A `creating` claim belongs to initial-create recovery, which replays it
+   * without a lookup on purpose. This accessor throws from `lookup`, so a
+   * reconciliation that consulted the platform about one would fail loudly.
+   */
+  it('leaves an initial-create claim to the recovery pass that owns it', async () => {
+    await seedJob(access, {
+      dispatchState: 'creating', dispatchGeneration: 1, fenceGeneration: 1,
+      status: 'queued', claimedAt: STALE,
+    });
+    const platform = recordingBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 0 });
+    expect(platform.created).toEqual([]);
+  });
+
+  /* ---------------- every restart predicate ---------------- */
+
+  it('restarts a retryable failure that is still inside its window', async () => {
+    const { instanceId } = await failedRetryable();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'terminated' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, restarted: 1, failuresRecorded: 0,
+    });
+    expect(await currentJob()).toMatchObject({ status: 'queued', dispatch_generation: 2 });
+  });
+
+  it.each<[string, SeedOptions]>([
+    ['it fell out of its restart window', {
+      terminalAt: new Date(now.getTime() - BACKFILL_RESTART_WINDOW_MS - 1000),
+    }],
+    ['the failure was never retryable', { retryable: 0 }],
+  ])('never selects a failed job when %s', async (_name, extra) => {
+    await failedRetryable(extra);
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 0 });
+    expect(platform.calls).toEqual([]);
+  });
+
+  it.each<[string, string]>([
+    ['the host replaced the cover', "UPDATE events SET cover_object_key = 'events/x/cover/other.jpg' WHERE id = ?"],
+    ['the host removed the cover', 'UPDATE events SET cover_object_key = NULL WHERE id = ?'],
+    ['the revision moved', 'UPDATE events SET cover_revision = 9 WHERE id = ?'],
+    ['a later job already converted it', "UPDATE events SET cover_render_set_id = 'set-x' WHERE id = ?"],
+  ])('refuses the restart when %s', async (_name, mutation) => {
+    const { instanceId } = await failedRetryable();
+    await testEnv.DB.prepare(mutation).bind(access.event.id).run();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', retryable: 1 });
+  });
+
+  it('refuses the restart when the pinned dependency versions have moved', async () => {
+    const { instanceId } = await failedRetryable({
+      dependencyVersions: { ...coverBackfillDependencyVersions(), normalizationLadder: 99 },
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', retryable: 1 });
+  });
+
+  it('refuses the restart when the frozen manifest no longer matches its digest', async () => {
+    const { instanceId } = await failedRetryable();
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET manifest_json = '{"slots":[]}', manifest_sha256 = ? WHERE id = ?
+    `).bind('b'.repeat(64), JOB).run();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', retryable: 1 });
+  });
+
+  it('refuses the restart when the rolling minute is already spent', async () => {
+    const { instanceId } = await failedRetryable();
+    const expiresAt = new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString();
+    await testEnv.DB.batch(
+      Array.from({ length: MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE }, (_unused, index) => testEnv.DB
+        .prepare(`
+          INSERT INTO event_cover_workflow_fences (
+            workflow_binding, workflow_instance_id, event_id, dispatch_generation, state,
+            created_at, updated_at, expires_at
+          ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, 1, 'open', ?,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+        `).bind(`budget-${index}`, access.event.id, now.toISOString(), expiresAt)),
+    );
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', retryable: 1 });
+  });
+
+  it('leaves a refused restart recoverable rather than terminal', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor(
+      { [instanceId]: { kind: 'status', status: 'errored' } }, { restart: true },
+    );
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, failuresRecorded: 1, restarted: 0 });
+    // The claim stands, so the next pass finds it as a stale recovery claim.
+    expect(await currentJob()).toMatchObject({
+      status: 'queued', dispatch_state: 'restarting', dispatch_generation: 2,
+    });
   });
 });
 

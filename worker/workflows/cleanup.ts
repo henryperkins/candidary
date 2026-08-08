@@ -7,6 +7,7 @@ import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
 import {
   COVER_BACKFILL_BINDING,
+  reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
 } from './cover-backfill';
 import {
@@ -942,6 +943,11 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // rather than being met as a surprise by the purge itself. Its own bound means
   // a backlog drains across passes.
   await recoverStaleInitialBackfillDispatches(env, now);
+  // After recovery, because an initial claim replayed a moment ago is not a
+  // divergence to reconcile, and before the purge, because a job whose event is
+  // going away must be settled by the coordinator that owns the fence rather
+  // than resumed or restarted into a prefix that is about to be swept.
+  await reconcileCoverBackfillJobs(env, now);
   // Notification delivery is no longer part of this run. It has its own hourly
   // trigger and its own durable state, so a mail failure and a retention purge no
   // longer share a failure boundary in either direction.

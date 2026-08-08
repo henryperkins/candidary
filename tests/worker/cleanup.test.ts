@@ -1181,4 +1181,41 @@ describe('bounded cover storage sweep', () => {
       .bind(other.event.id).first()).toBeNull();
     expect(await foreignKeyCheck()).toEqual([]);
   });
+
+  /**
+   * Reconciliation is wired between initial-create recovery and the purge.
+   *
+   * Proved with the one branch that needs no platform call: a job the ledger
+   * believes is running whose fence has gone. Nothing else in the pass settles
+   * that, so seeing it terminal is proof reconciliation ran — and the assertion
+   * cannot drift onto whatever a test binding happens to report for an instance
+   * that was never really created.
+   */
+  it('reconciles the backfill ledger inside the scheduled pass', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+        VALUES ('run-reconciled', 'execute', 'executing', ?, ?)
+      `).bind(PAST, PAST),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_jobs (
+          id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+          workflow_instance_id, dispatch_state, dispatch_generation, status,
+          dependency_versions_json, created_at, updated_at
+        ) VALUES ('job-reconciled', 'run-reconciled', ?, 0, ?, 'instance-reconciled',
+          'confirmed', 1, 'rendering', '{"normalizationLadder":1}', ?, ?)
+      `).bind(access.event.id, HEX, PAST, PAST),
+    ]);
+
+    await scheduledCleanup(testEnv, NOW);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, failure_code, retryable
+      FROM event_cover_backfill_jobs WHERE id = 'job-reconciled'
+    `).first()).toEqual({
+      status: 'failed', dispatch_state: 'blocked',
+      failure_code: 'COVER_RENDER_UNAVAILABLE', retryable: 0,
+    });
+    expect(await foreignKeyCheck()).toEqual([]);
+  });
 });

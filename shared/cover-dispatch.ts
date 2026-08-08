@@ -94,7 +94,11 @@ const LIVE_DISPATCH = quotedList(LIVE_COVER_DISPATCH_STATES);
  * the fence is always the one belonging to the job being written — an artifact
  * cannot be edited to point a confirmation at somebody else's fence.
  */
-function fenceGuard(binding: string, state: string, generation: string | null): string {
+export function coverBackfillFenceGuardSql(
+  binding: string,
+  state: string,
+  generation: string | null,
+): string {
   return 'EXISTS (SELECT 1 FROM event_cover_workflow_fences f'
     + ` WHERE f.workflow_binding = ${binding}`
     + ' AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id'
@@ -107,6 +111,53 @@ function fenceGuard(binding: string, state: string, generation: string | null): 
 function liveEventGuard(): string {
   return 'EXISTS (SELECT 1 FROM events e'
     + ' WHERE e.id = event_cover_backfill_jobs.event_id AND e.deleted_at IS NULL)';
+}
+
+/**
+ * The deployment-wide creation budget for one rolling minute.
+ *
+ * Exported because the Worker's own recovery claims spend the same budget the
+ * launcher's initial dispatch does. A resume, a restart, and a recreate each put
+ * an instance on the platform, so counting only initial creates would let
+ * reconciliation issue an unbounded second stream beside the bounded first.
+ */
+export function coverBackfillMinuteBudgetSql(binding: string, perMinute: number): string {
+  return '(SELECT count(*) FROM event_cover_workflow_fences f'
+    + ` WHERE f.workflow_binding = ${binding}`
+    + " AND f.state = 'open' AND f.dispatch_generation > 0"
+    + ` AND f.updated_at >= ${ROLLING_CLAIM_WINDOW_SQL}) < ${perMinute}`;
+}
+
+/** No claim has been made against this one instance inside the rolling minute. */
+export function coverBackfillInstanceIdleSql(
+  binding: string,
+  workflowInstanceId: string,
+): string {
+  return 'NOT EXISTS (SELECT 1 FROM event_cover_workflow_fences f'
+    + ` WHERE f.workflow_binding = ${binding}`
+    + ` AND f.workflow_instance_id = ${workflowInstanceId}`
+    + ' AND f.dispatch_generation > 0'
+    + ` AND f.updated_at >= ${ROLLING_CLAIM_WINDOW_SQL})`;
+}
+
+/** No purge owns this job's event. Correlated, so it cannot be pointed elsewhere. */
+export function coverBackfillNoPurgeGuardSql(): string {
+  return 'NOT EXISTS (SELECT 1 FROM event_cover_purge_progress p'
+    + '   WHERE p.event_id = event_cover_backfill_jobs.event_id)';
+}
+
+/**
+ * The exact row this job was created against is still the current one.
+ *
+ * The fingerprint is deliberately absent: it needs a digest, so its caller
+ * checks it in code immediately before applying the statement. Everything that
+ * SQL can decide is decided here, at commit time.
+ */
+export function coverBackfillCurrentSourceSql(): string {
+  return 'EXISTS (SELECT 1 FROM events e'
+    + ' WHERE e.id = event_cover_backfill_jobs.event_id AND e.deleted_at IS NULL'
+    + ' AND e.cover_object_key IS NOT NULL AND e.cover_render_set_id IS NULL'
+    + ' AND e.cover_revision = event_cover_backfill_jobs.expected_revision)';
 }
 
 /** One job and its fence, read together. The only input a confirmation may use. */
@@ -145,15 +196,10 @@ export function claimCoverBackfillDispatchSql(
   values: CoverDispatchSqlValues & { workflowInstanceId: string },
   bounds: CoverDispatchBounds,
 ): { job: string; fence: string } {
-  const claimedInLastMinute = 'NOT EXISTS (SELECT 1 FROM event_cover_workflow_fences f'
-    + ` WHERE f.workflow_binding = ${values.binding}`
-    + ` AND f.workflow_instance_id = ${values.workflowInstanceId}`
-    + ' AND f.dispatch_generation > 0'
-    + ` AND f.updated_at >= ${ROLLING_CLAIM_WINDOW_SQL})`;
-  const minuteBudget = '(SELECT count(*) FROM event_cover_workflow_fences f'
-    + ` WHERE f.workflow_binding = ${values.binding}`
-    + " AND f.state = 'open' AND f.dispatch_generation > 0"
-    + ` AND f.updated_at >= ${ROLLING_CLAIM_WINDOW_SQL}) < ${bounds.perMinute}`;
+  const claimedInLastMinute = coverBackfillInstanceIdleSql(
+    values.binding, values.workflowInstanceId,
+  );
+  const minuteBudget = coverBackfillMinuteBudgetSql(values.binding, bounds.perMinute);
   const inFlightBudget = '(SELECT count(*) FROM event_cover_backfill_jobs j'
     + ` WHERE j.run_id = ${values.runId}`
     + ` AND j.dispatch_state IN (${LIVE_DISPATCH})`
@@ -169,9 +215,8 @@ export function claimCoverBackfillDispatchSql(
       + ` AND dispatch_state = 'pending' AND status = 'queued'`
       + ` AND dispatch_generation = ${values.generation}`
       + ` AND ${liveEventGuard()}`
-      + ' AND NOT EXISTS (SELECT 1 FROM event_cover_purge_progress p'
-      + '   WHERE p.event_id = event_cover_backfill_jobs.event_id)'
-      + ` AND ${fenceGuard(values.binding, 'open', values.generation)}`
+      + ` AND ${coverBackfillNoPurgeGuardSql()}`
+      + ` AND ${coverBackfillFenceGuardSql(values.binding, 'open', values.generation)}`
       + ` AND ${noOtherActiveRun}`
       + ` AND ${inFlightBudget}`
       + ` AND ${claimedInLastMinute}`
@@ -187,7 +232,17 @@ export function claimCoverBackfillDispatchSql(
 }
 
 /**
- * `creating → confirmed` for exactly one generation.
+ * The dispatch states a claim may be confirmed out of.
+ *
+ * The launcher only ever renders `creating`: an operator issues an initial
+ * dispatch and nothing else, because resume and restart are Worker-side
+ * transitions by design. The other two exist for the reconciler, which claims a
+ * recovery the same way and has to confirm it the same way.
+ */
+export type CoverDispatchClaimState = 'creating' | 'resuming' | 'restarting';
+
+/**
+ * `<claim> → confirmed` for exactly one generation.
  *
  * Rechecks the fence and the event inside the statement, so a deletion that
  * lands between the post-trigger read and the apply records no success. It does
@@ -195,12 +250,15 @@ export function claimCoverBackfillDispatchSql(
  * rolling-minute budget is measured from, and rewriting it here would hand the
  * next batch a minute of capacity it never earned.
  */
-export function confirmCoverBackfillDispatchSql(values: CoverDispatchSqlValues): string {
+export function confirmCoverBackfillDispatchSql(
+  values: CoverDispatchSqlValues,
+  from: CoverDispatchClaimState = 'creating',
+): string {
   return 'UPDATE event_cover_backfill_jobs'
     + ` SET dispatch_state = 'confirmed', updated_at = ${values.now}`
     + ` WHERE id = ${values.jobId} AND run_id = ${values.runId} AND event_id = ${values.eventId}`
-    + ` AND dispatch_state = 'creating' AND dispatch_generation = ${values.generation}`
-    + ` AND ${fenceGuard(values.binding, 'open', values.generation)}`
+    + ` AND dispatch_state = '${from}' AND dispatch_generation = ${values.generation}`
+    + ` AND ${coverBackfillFenceGuardSql(values.binding, 'open', values.generation)}`
     + ` AND ${liveEventGuard()}`;
 }
 
@@ -218,5 +276,5 @@ export function blockCoverBackfillDispatchSql(values: CoverDispatchSqlValues): s
     + ` WHERE id = ${values.jobId} AND run_id = ${values.runId} AND event_id = ${values.eventId}`
     + ` AND dispatch_generation = ${values.generation}`
     + ` AND status IN (${NONTERMINAL})`
-    + ` AND ${fenceGuard(values.binding, 'deletion-blocked', null)}`;
+    + ` AND ${coverBackfillFenceGuardSql(values.binding, 'deletion-blocked', null)}`;
 }
