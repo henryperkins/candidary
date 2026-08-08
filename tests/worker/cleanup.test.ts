@@ -146,6 +146,9 @@ describe('event cover purge coordinator', () => {
   beforeEach(resetDatabase);
 
   const now = new Date('2026-08-04T12:00:00.000Z');
+  const LEGACY_UNSAFE_RELEASED_AT = '2026-08-04T12:00:00.000Z';
+  const LEGACY_UNSAFE_EXPIRES_AT = '2026-09-04T12:00:00.000Z';
+  const PURGE_FENCE_PROTOCOL_V2 = 'terminal-proof-v2:';
 
   async function seeded() {
     const access = await eventAccess();
@@ -157,6 +160,29 @@ describe('event cover purge coordinator', () => {
   async function prefixKeys(eventId: string) {
     const listed = await testEnv.MEDIA_BUCKET.list({ prefix: `events/${eventId}/` });
     return listed.objects.map(({ key }) => key);
+  }
+
+  async function seedExactUnsafeLegacyRelease(
+    eventId: string,
+    instanceId: string,
+    phase: 'fences' | 'r2' | 'relational',
+  ) {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+        .bind(LEGACY_UNSAFE_RELEASED_AT, eventId),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences
+        SET state = 'deletion-blocked', created_at = '2026-06-01T00:00:00.000Z',
+            updated_at = ?, expires_at = ?
+        WHERE workflow_instance_id = ?
+      `).bind(LEGACY_UNSAFE_RELEASED_AT, LEGACY_UNSAFE_EXPIRES_AT, instanceId),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_purge_progress
+        SET phase = ?, workflow_binding = NULL, workflow_instance_id = NULL,
+            created_at = ?, updated_at = ?
+        WHERE event_id = ?
+      `).bind(phase, LEGACY_UNSAFE_RELEASED_AT, LEGACY_UNSAFE_RELEASED_AT, eventId),
+    ]);
   }
 
   it('blocks every open fence and holds it against the expiry sweep', async () => {
@@ -278,6 +304,41 @@ describe('event cover purge coordinator', () => {
     });
   });
 
+  it.each(['fences', 'r2', 'relational'] as const)(
+    'upgrades an exact unsafe legacy release in %s before trusting any terminal stamp',
+    async (phase) => {
+      const { access, ids } = await seeded();
+      await seedExactUnsafeLegacyRelease(access.event.id, ids.workflowInstanceId, phase);
+      const objectKey = `events/${access.event.id}/cover/exact-unsafe-${phase}.webp`;
+      await testEnv.MEDIA_BUCKET.put(objectKey, png());
+      const { accessors, calls } = purgeAccessors({
+        [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 'legacy-terminate-failed' },
+      }, { terminate: true });
+
+      const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+
+      expect(calls).toEqual([`lookup:${ids.workflowInstanceId}`]);
+      expect(summary).toMatchObject({ phase: 'fences', remainder: true, inspected: 1 });
+      expect(await testEnv.MEDIA_BUCKET.head(objectKey)).not.toBeNull();
+      expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+        .bind(access.event.id).first()).not.toBeNull();
+      expect(await testEnv.DB.prepare(`
+        SELECT operation_id FROM event_cover_publish_receipts WHERE event_id = ?
+      `).bind(access.event.id).first()).not.toBeNull();
+      expect(await fenceRow(ids.workflowInstanceId)).toMatchObject({
+        state: 'deletion-blocked', expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      });
+      expect(await testEnv.DB.prepare(`
+        SELECT phase, workflow_binding, workflow_instance_id
+        FROM event_cover_purge_progress WHERE event_id = ?
+      `).bind(access.event.id).first()).toEqual({
+        phase: 'fences',
+        workflow_binding: PURGE_FENCE_PROTOCOL_V2,
+        workflow_instance_id: null,
+      });
+    },
+  );
+
   it('inspects at most ten fences and spends at most five platform mutations', async () => {
     const access = await eventAccess();
     const timestamp = now.toISOString();
@@ -304,7 +365,7 @@ describe('event cover purge coordinator', () => {
       SELECT workflow_binding, workflow_instance_id, fences_resolved, platform_mutations
       FROM event_cover_purge_progress WHERE event_id = ?
     `).bind(access.event.id).first()).toEqual({
-      workflow_binding: 'COVER_RENDER_WORKFLOW',
+      workflow_binding: 'terminal-proof-v2:COVER_RENDER_WORKFLOW',
       workflow_instance_id: ids[9],
       fences_resolved: 10,
       platform_mutations: 5,
@@ -485,7 +546,14 @@ describe('event cover purge coordinator', () => {
     // Expiry is stamped only after terminal verification, and outlives the
     // platform's own retention.
     const fence = await fenceRow(ids.workflowInstanceId);
+    expect(fence?.state).toBe('open');
     expect(fence?.expires_at).toBe(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString());
+
+    const swept = await cleanupEventCovers(
+      testEnv, new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000),
+    );
+    expect(swept.fencesDeleted).toBe(1);
+    expect(await fenceRow(ids.workflowInstanceId)).toBeNull();
   });
 
   it('terminates a live instance and settles it only after re-verifying', async () => {
@@ -966,10 +1034,11 @@ describe('lifecycle cleanup', () => {
       const now = new Date('2026-08-04T12:00:00.000Z');
       await purgeSettled(access.event.id, now);
       expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(1);
-      // Still blocked, and now carrying the post-terminal expiry rather than the
-      // hold, so the ordinary bounded sweep is what finally removes it.
+      // Relational completion atomically retires the proven fence to the
+      // old-code-impossible open-without-event marker. The exact terminal
+      // expiry still controls collection.
       const fence = await fenceRow(ids.workflowInstanceId);
-      expect(fence?.state).toBe('deletion-blocked');
+      expect(fence?.state).toBe('open');
       expect(fence?.expires_at)
         .toBe(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString());
 
@@ -1024,10 +1093,18 @@ describe('lifecycle cleanup', () => {
       // The fences were already settled, so the retry resumes at `r2` rather
       // than paying for the whole platform reconciliation again.
       expect(await testEnv.DB.prepare(`
-        SELECT phase FROM event_cover_purge_progress WHERE event_id = ?
-      `).bind(access.event.id).first()).toEqual({ phase: 'r2' });
+        SELECT phase, workflow_binding FROM event_cover_purge_progress WHERE event_id = ?
+      `).bind(access.event.id).first()).toEqual({
+        phase: 'r2', workflow_binding: 'terminal-proof-v2:',
+      });
 
-      await purgeSettled(access.event.id, new Date('2026-08-04T12:05:00.000Z'));
+      const retry = purgeAccessors({
+        [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 'must-not-recheck' },
+      });
+      await reconcileEventCoverPurge(
+        testEnv, access.event.id, new Date('2026-08-04T12:05:00.000Z'), retry.accessors,
+      );
+      expect(retry.calls).toEqual([]);
       expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
         .bind(access.event.id).first()).toBeNull();
       expect(await coverPrefixKeys(access.event.id)).toEqual([]);
@@ -1431,6 +1508,36 @@ describe('bounded cover storage sweep', () => {
     `).bind(access.event.id).first()).toEqual({ phase: 'fences' });
   });
 
+  it.each(['fences', 'r2', 'relational'] as const)(
+    'does not generically sweep an exact unsafe unversioned fence in %s',
+    async (phase) => {
+      const releasedAt = '2026-08-01T00:00:00.000Z';
+      const exactUnsafeExpiry = '2026-09-01T00:00:00.000Z';
+      await insertFence('COVER_RENDER_WORKFLOW', `exact-unsafe-${phase}`, {
+        state: 'deletion-blocked', expiresAt: exactUnsafeExpiry,
+      });
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_workflow_fences SET updated_at = ?
+          WHERE workflow_instance_id = ?
+        `).bind(releasedAt, `exact-unsafe-${phase}`),
+        testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+          .bind(releasedAt, access.event.id),
+        testEnv.DB.prepare(`
+          INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
+          VALUES (?, ?, ?, ?)
+        `).bind(access.event.id, phase, releasedAt, releasedAt),
+      ]);
+
+      const summary = await cleanupEventCovers(testEnv, new Date('2026-09-02T00:00:00.000Z'));
+
+      expect(summary.fencesDeleted).toBe(0);
+      expect(await fenceRow(`exact-unsafe-${phase}`)).toMatchObject({
+        state: 'deletion-blocked', expires_at: exactUnsafeExpiry,
+      });
+    },
+  );
+
   it('upgrades both legacy terminal owners to a full owner-relative fence retention window', async () => {
     const terminalAt = '2026-08-09T12:00:00.000Z';
     const terminalExpiry = '2026-09-09T12:00:00.000Z';
@@ -1546,36 +1653,54 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(0);
   });
 
-  it('gives an invalid completed-purge fence one full window before collecting it', async () => {
+  it('retains unmarked completed-purge fences for operator diagnosis', async () => {
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_rate_events (
         id, event_id, action, replay_key, request_sha256, window_start, created_at, expires_at
       ) VALUES ('rate-due', ?, 'publication', 'replay-a', ?, 1785196800, ?, ?),
                ('rate-live', ?, 'publication', 'replay-b', ?, 1785196800, ?, ?)
     `).bind(access.event.id, HEX, PAST, PAST, access.event.id, HEX, PAST, FUTURE).run();
-    await insertFence('COVER_RENDER_WORKFLOW', 'purge-terminal', {
+    await insertFence('COVER_RENDER_WORKFLOW', 'purge-terminal-malformed', {
       state: 'deletion-blocked', eventId: 'retired-event',
     });
+    await insertFence('COVER_RENDER_WORKFLOW', 'purge-terminal-exact-unsafe', {
+      state: 'deletion-blocked', eventId: 'retired-event',
+      expiresAt: '2026-09-01T00:00:00.000Z',
+    });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET updated_at = CASE workflow_instance_id
+        WHEN 'purge-terminal-malformed' THEN 'legacy-invalid'
+        ELSE '2026-08-01T00:00:00.000Z'
+      END
+      WHERE workflow_instance_id IN (
+        'purge-terminal-malformed', 'purge-terminal-exact-unsafe'
+      )
+    `).run();
     await insertFence('COVER_RENDER_WORKFLOW', 'ownerless-open');
     await insertFence('COVER_BACKFILL_WORKFLOW', 'instance-live', { expiresAt: FUTURE });
 
     const summary = await cleanupEventCovers(testEnv, NOW);
 
-    expect(summary).toMatchObject({ rateEventsDeleted: 1, fencesDeleted: 0, remainder: true });
+    expect(summary).toMatchObject({ rateEventsDeleted: 1, fencesDeleted: 0 });
     expect(await countRows('event_cover_rate_events', access.event.id)).toBe(1);
-    expect(await fenceRow('purge-terminal')).toMatchObject({
-      expires_at: '2026-09-10T12:00:00.000Z',
-    });
     const remaining = await testEnv.DB.prepare(`
       SELECT workflow_instance_id FROM event_cover_workflow_fences ORDER BY workflow_instance_id
     `).all<{ workflow_instance_id: string }>();
     expect(remaining.results.map((row) => row.workflow_instance_id))
-      .toEqual(['instance-live', 'ownerless-open', 'purge-terminal']);
+      .toEqual([
+        'instance-live',
+        'ownerless-open',
+        'purge-terminal-exact-unsafe',
+        'purge-terminal-malformed',
+      ]);
 
     const expired = await cleanupEventCovers(
-      testEnv, new Date('2026-09-10T12:00:00.000Z'),
+      testEnv, new Date('2026-10-10T12:00:00.000Z'),
     );
-    expect(expired.fencesDeleted).toBe(1);
+    expect(expired.fencesDeleted).toBe(0);
+    expect(await fenceRow('purge-terminal-exact-unsafe')).not.toBeNull();
+    expect(await fenceRow('purge-terminal-malformed')).not.toBeNull();
   });
 
   it('abandons an orphaned staging set but never the one the event points at', async () => {

@@ -278,37 +278,14 @@ export async function cleanupEventCovers(
     return count;
   };
 
-  // Legacy releases created open fences with a creation-relative expiry. A
-  // terminal owner first upgrades that old value to its full terminal-relative
-  // deadline. Deletion happens only on a later pass, so the derived deadline is
-  // durable before age can act on it. Exact equality makes current stamps
-  // replay-stable instead of extending them on every cleanup.
+  // Legacy releases created open fences with a creation-relative expiry. An
+  // exact generation-matching terminal owner first upgrades that old value to
+  // its full terminal-relative deadline. Deletion happens only on a later pass,
+  // so the derived deadline is durable before age can act on it.
   //
   // Owner expiry below remains guarded by the fence, so an upgrade cannot lose
   // its proof even when the fence/owner bounds and expiry orders differ.
-  const stampedOrphans = await env.DB.prepare(`
-    UPDATE event_cover_workflow_fences
-    SET expires_at = ?, updated_at = ?
-    WHERE rowid IN (
-      SELECT f.rowid FROM event_cover_workflow_fences f
-      WHERE f.state = 'deletion-blocked'
-        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
-        AND NOT EXISTS (
-          SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
-        )
-        AND (
-          strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
-          OR f.expires_at <> strftime(
-            '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
-          )
-        )
-      ORDER BY f.expires_at LIMIT ?
-    )
-  `).bind(coverWorkflowFenceTerminalExpiry(now), timestamp, limit).run();
-
-  let upgradedFenceCount = 0;
-  if (stampedOrphans.meta.changes === 0) {
-    const upgradedFences = await env.DB.prepare(`
+  const upgradedFences = await env.DB.prepare(`
     WITH terminal_owners AS (
       SELECT f.rowid AS fence_rowid, f.expires_at AS fence_expires_at,
         r.updated_at AS terminal_at,
@@ -354,11 +331,9 @@ export async function cleanupEventCovers(
         AND fence_expires_at <> terminal_expires_at
       ORDER BY fence_expires_at LIMIT ?2
     )
-    `).bind(timestamp, limit, backfillRestartFloor).run();
-    upgradedFenceCount = upgradedFences.meta.changes;
-  }
+  `).bind(timestamp, limit, backfillRestartFloor).run();
 
-  if (stampedOrphans.meta.changes > 0 || upgradedFenceCount > 0) {
+  if (upgradedFences.meta.changes > 0) {
     // A later pass consumes the now-durable deadline. This also makes a partial
     // (<100) upgrade visible to callers rather than claiming the class drained.
     summary.remainder = true;
@@ -372,18 +347,34 @@ export async function cleanupEventCovers(
             f.state = 'deletion-blocked' AND (
               f.expires_at = strftime(
                 '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
-              ) AND (
-              EXISTS (
+              ) AND EXISTS (
                 SELECT 1 FROM event_cover_purge_progress p
                 WHERE p.event_id = f.event_id AND p.phase IN ('r2', 'relational')
+                  AND p.workflow_binding IN (?4, ?5, ?6)
               )
-              OR (
-                NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
-                AND NOT EXISTS (
-                  SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
-                )
-              )
-              )
+            )
+          )
+          OR (
+            -- The v2 relational transaction is the only writer that reverses a
+            -- blocked fence to open while deleting its event, owners, and
+            -- progress. Old purge code cannot synthesize this retired marker.
+            f.state = 'open'
+            AND f.expires_at = strftime(
+              '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
+            )
+            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
+            AND NOT EXISTS (
+              SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM event_cover_publish_receipts r
+              WHERE r.event_id = f.event_id
+                AND r.workflow_instance_id = f.workflow_instance_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM event_cover_backfill_jobs j
+              WHERE j.event_id = f.event_id
+                AND j.workflow_instance_id = f.workflow_instance_id
             )
           )
           OR (
@@ -426,7 +417,10 @@ export async function cleanupEventCovers(
         )
         ORDER BY f.expires_at LIMIT ?2
       )
-    `).bind(timestamp, limit, backfillRestartFloor).run();
+    `).bind(
+      timestamp, limit, backfillRestartFloor,
+      ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES,
+    ).run();
     summary.fencesDeleted = note(fences.meta.changes);
   }
 
@@ -725,6 +719,34 @@ export interface CoverPurgeWorkflowAccessors {
   backfill: CoverBackfillWorkflowAccessor;
 }
 
+/**
+ * Durable upgrade marker stored in the existing purge cursor column.
+ *
+ * Releases before terminal-proof fencing wrote only NULL or one of the two
+ * literal Workflow bindings here. Prefixing the cursor therefore creates a
+ * migration-free protocol version old code could not have synthesized. The
+ * upgrade batch re-holds every blocked fence before publishing this marker.
+ */
+const COVER_PURGE_FENCE_PROTOCOL_V2 = 'terminal-proof-v2:';
+
+function encodedPurgeFenceCursor(binding: string | null): string {
+  return `${COVER_PURGE_FENCE_PROTOCOL_V2}${binding ?? ''}`;
+}
+
+function decodedPurgeFenceCursor(value: string | null): string | null {
+  if (!value?.startsWith(COVER_PURGE_FENCE_PROTOCOL_V2)) return null;
+  const binding = value.slice(COVER_PURGE_FENCE_PROTOCOL_V2.length);
+  return binding === 'COVER_RENDER_WORKFLOW' || binding === COVER_BACKFILL_BINDING
+    ? binding
+    : null;
+}
+
+const COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES = [
+  encodedPurgeFenceCursor(null),
+  encodedPurgeFenceCursor('COVER_RENDER_WORKFLOW'),
+  encodedPurgeFenceCursor(COVER_BACKFILL_BINDING),
+] as const;
+
 interface HeldFenceRow {
   workflow_binding: string;
   workflow_instance_id: string;
@@ -845,6 +867,8 @@ async function settleEventCoverFences(
     SELECT workflow_binding, workflow_instance_id FROM event_cover_purge_progress
     WHERE event_id = ?
   `).bind(eventId).first<{ workflow_binding: string | null; workflow_instance_id: string | null }>();
+  const cursorBinding = decodedPurgeFenceCursor(cursor?.workflow_binding ?? null);
+  const cursorInstance = cursorBinding ? cursor?.workflow_instance_id ?? '' : '';
 
   const held = await env.DB.prepare(`
     SELECT f.workflow_binding, f.workflow_instance_id,
@@ -873,7 +897,7 @@ async function settleEventCoverFences(
     LIMIT ?5
   `).bind(
     eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
-    cursor?.workflow_binding ?? '', cursor?.workflow_instance_id ?? '',
+    cursorBinding ?? '', cursorInstance,
     MAX_COVER_PURGE_FENCES_PER_PASS,
   ).all<HeldFenceRow>();
 
@@ -964,16 +988,16 @@ async function settleEventCoverFences(
 
   const reachedEnd = !halted && held.results.length < MAX_COVER_PURGE_FENCES_PER_PASS;
   const nextBinding = reachedEnd ? null
-    : lastSettled?.workflow_binding ?? cursor?.workflow_binding ?? null;
+    : lastSettled?.workflow_binding ?? cursorBinding;
   const nextInstance = reachedEnd ? null
-    : lastSettled?.workflow_instance_id ?? cursor?.workflow_instance_id ?? null;
+    : (lastSettled?.workflow_instance_id ?? cursorInstance) || null;
   await env.DB.prepare(`
     UPDATE event_cover_purge_progress
     SET workflow_binding = ?, workflow_instance_id = ?, fences_resolved = fences_resolved + ?,
         platform_mutations = platform_mutations + ?, updated_at = ?
     WHERE event_id = ?
   `).bind(
-    nextBinding,
+    encodedPurgeFenceCursor(nextBinding),
     nextInstance,
     resolved, summary.platformMutations, timestamp, eventId,
   ).run();
@@ -1027,9 +1051,25 @@ export async function reconcileEventCoverPurge(
     env.DB.prepare(`
       UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?
     `).bind(timestamp, eventId),
-    // Preserve only a terminal stamp whose exact owner and generation prove it.
-    // Every other open fence enters the purge under HOLD before soft deletion
-    // changes nonterminal ledger statuses to `failed`.
+    // Timestamp equality is not proof: a0ee's age escape hatch wrote the exact
+    // same shape after unknown + failed termination. Before publishing the v2
+    // marker, quarantine every *already blocked* row regardless of dated shape.
+    // This statement deliberately precedes the open -> blocked transition, so a
+    // self-recorded terminal owner can still provide durable proof below.
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET expires_at = ?, updated_at = ?
+      WHERE event_id = ? AND state = 'deletion-blocked' AND NOT EXISTS (
+        SELECT 1 FROM event_cover_purge_progress p
+        WHERE p.event_id = ? AND p.workflow_binding IN (?, ?, ?)
+      )
+        AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_cover_workflow_fences.event_id)
+    `).bind(
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId, eventId,
+      ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES,
+    ),
+    // Every open fence without exact generation-matching durable terminal proof
+    // enters purge blocked and held. Receipt/job claim clocks remain untouched.
     env.DB.prepare(`
       UPDATE event_cover_workflow_fences
       SET state = 'deletion-blocked', expires_at = ?, updated_at = ?
@@ -1040,7 +1080,11 @@ export async function reconcileEventCoverPurge(
             WHERE r.event_id = event_cover_workflow_fences.event_id
               AND r.workflow_instance_id = event_cover_workflow_fences.workflow_instance_id
               AND r.dispatch_generation = event_cover_workflow_fences.dispatch_generation
-              AND r.status IN ('applied', 'conflict', 'failed')
+              AND r.updated_at >= event_cover_workflow_fences.created_at
+              AND (
+                r.status IN ('applied', 'conflict')
+                OR (r.status = 'failed' AND r.retryable = 0)
+              )
               AND event_cover_workflow_fences.expires_at = strftime(
                 '%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days'
               )
@@ -1053,7 +1097,11 @@ export async function reconcileEventCoverPurge(
               AND j.workflow_instance_id = event_cover_workflow_fences.workflow_instance_id
               AND j.dispatch_generation = event_cover_workflow_fences.dispatch_generation
               AND j.terminal_at IS NOT NULL
-              AND j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement', 'failed')
+              AND j.terminal_at >= event_cover_workflow_fences.created_at
+              AND (
+                j.status IN ('applied', 'skipped', 'resolved', 'needs_replacement')
+                OR (j.status = 'failed' AND j.retryable = 0)
+              )
               AND event_cover_workflow_fences.expires_at = strftime(
                 '%Y-%m-%dT%H:%M:%fZ', j.terminal_at, '+31 days'
               )
@@ -1104,37 +1152,41 @@ export async function reconcileEventCoverPurge(
         updated_at = ?
       WHERE id IN (SELECT run_id FROM event_cover_backfill_jobs WHERE event_id = ?)
     `).bind(timestamp, eventId),
-    // Pre-hold releases may already have marked a fence blocked while retaining
-    // its creation-relative deadline. Only a stamp exactly 31 days from this
-    // fence's own update is terminal-derived; every other dated blocked value
-    // is unresolved and must re-enter the coordinator under the hold sentinel.
     env.DB.prepare(`
-      UPDATE event_cover_workflow_fences
-      SET expires_at = ?, updated_at = ?
-      WHERE event_id = ? AND state = 'deletion-blocked' AND expires_at <> ?
-        AND (
-          strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
-          OR expires_at <> strftime(
-            '%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days'
-          )
-        )
-    `).bind(
-      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId,
-      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
-    ),
-    env.DB.prepare(`
-      INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
-      SELECT ?, 'fences', ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+      INSERT INTO event_cover_purge_progress (
+        event_id, phase, workflow_binding, created_at, updated_at
+      )
+      SELECT ?, 'fences', ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
       ON CONFLICT (event_id) DO NOTHING
-    `).bind(eventId, timestamp, timestamp, eventId),
-    // Old releases could advance progress while ignoring a dated blocked fence.
-    // Roll back atomically before control flow reads the phase, and reset the
-    // cursor so the newly re-held row cannot sit behind a prior position.
+    `).bind(
+      eventId, encodedPurgeFenceCursor(null), timestamp, timestamp, eventId,
+    ),
+    // Publish v2 only after the blanket hold above. Old code wrote NULL or a
+    // literal binding, never this prefix. Any legacy purge with a blocked fence
+    // restarts at fences and must obtain fresh platform proof.
     env.DB.prepare(`
       UPDATE event_cover_purge_progress
-      SET phase = 'fences', workflow_binding = NULL, workflow_instance_id = NULL,
+      SET phase = CASE WHEN EXISTS (
+        SELECT 1 FROM event_cover_workflow_fences f
+        WHERE f.event_id = ? AND f.state = 'deletion-blocked'
+      ) THEN 'fences' ELSE phase END,
+          workflow_binding = ?, workflow_instance_id = NULL, updated_at = ?
+      WHERE event_id = ? AND (
+        workflow_binding IS NULL OR workflow_binding NOT IN (?, ?, ?)
+      )
+    `).bind(
+      eventId, encodedPurgeFenceCursor(null), timestamp, eventId,
+      ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES,
+    ),
+    // A marked purge can return from r2/relational only for a genuinely
+    // unresolved row written after its earlier phase proof. Selection and the
+    // fresh-zero query below use this same NULL-safe predicate.
+    env.DB.prepare(`
+      UPDATE event_cover_purge_progress
+      SET phase = 'fences', workflow_binding = ?, workflow_instance_id = NULL,
           updated_at = ?
-      WHERE event_id = ? AND phase IN ('r2', 'relational') AND EXISTS (
+      WHERE event_id = ? AND phase IN ('r2', 'relational')
+        AND workflow_binding IN (?, ?, ?) AND EXISTS (
         SELECT 1 FROM event_cover_workflow_fences f
         WHERE f.event_id = ? AND f.state = 'deletion-blocked' AND (
           f.expires_at = ?
@@ -1144,7 +1196,11 @@ export async function reconcileEventCoverPurge(
           )
         )
       )
-    `).bind(timestamp, eventId, eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT),
+    `).bind(
+      encodedPurgeFenceCursor(null), timestamp, eventId,
+      ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES,
+      eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    ),
   ]);
 
   const progress = await env.DB.prepare(
@@ -1219,6 +1275,24 @@ async function purgeEventRelationalRows(
       SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL
       WHERE id = ? AND deleted_at IS NOT NULL
     `).bind(CANONICAL_NONE_COVER_CONFIG, eventId),
+    // Publish a per-fence retirement marker in the same transaction that
+    // removes every owner, the v2 progress marker, and the event. Old purge
+    // code only moved open -> deletion-blocked, so it cannot produce this
+    // open-without-event state. No dispatcher can use it: the event and durable
+    // owner disappear atomically, after terminal proof and fresh R2 absence.
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET state = 'open'
+      WHERE event_id = ? AND state = 'deletion-blocked'
+        AND expires_at = strftime(
+          '%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_purge_progress p
+          WHERE p.event_id = ? AND p.phase = 'relational'
+            AND p.workflow_binding IN (?, ?, ?)
+        )
+    `).bind(eventId, eventId, ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES),
     ...COVER_PURGE_ORDER.map((table) => env.DB
       .prepare(`DELETE FROM ${table} WHERE event_id = ?`).bind(eventId)),
     env.DB.prepare(`
