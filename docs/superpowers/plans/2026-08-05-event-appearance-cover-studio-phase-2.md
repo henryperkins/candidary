@@ -151,10 +151,15 @@ git commit -m "refactor: classify cover workflow lookups conservatively"
 
 **Files:**
 
+- Modify: `shared/constants.ts`
+- Modify: `worker/services/event-cover-publication.ts`
+- Modify: `worker/routes/manage.ts`
+- Modify: `src/pages/ManagerPage.tsx`
 - Modify: `worker/workflows/cleanup.ts`
 - Modify: `worker/workflows/cover-backfill.ts`
 - Modify: `worker/workflows/cover-render.ts`
 - Modify: `tests/worker/cleanup.test.ts`
+- Modify: `tests/worker/manage-api.test.ts`
 - Modify: `tests/worker/cover-backfill-workflow.test.ts`
 - Modify: `tests/worker/cover-render-workflow.test.ts`
 
@@ -180,12 +185,16 @@ export async function reconcileEventCoverPurge(
 Replace the current soft-delete → prefix-delete → relational-delete shortcut with §14's persisted phases:
 
 1. In one D1 batch, soft-delete the event, revoke all credentials, mark nonterminal publication/backfill rows `EVENT_DELETED`, change every event fence to `deletion-blocked`, and create/resume `event_cover_purge_progress`.
-2. Stop while a `creating`, `resuming`, or `restarting` claim is younger than `STALE_DISPATCH_CLAIM_MS`.
-3. For stale claims and every other unresolved instance, apply the shared lookup result: `unknown` stops; active/paused is terminated; errored/terminated/complete is verified terminal; certified missing is materialized from the immutable receipt/job payload under the same deletion-blocked ID and then terminated. Persist the cursor/progress and respect `COVER_CLEANUP_ROWS_PER_CLASS`.
+2. Inspect at most `MAX_COVER_PURGE_FENCES_PER_PASS = 10` fences and perform at most
+   `MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS = 5` platform mutations. Stop on a
+   young dispatch claim or `unknown`; neither condition advances the cursor or phase.
+3. For stale claims and every other unresolved instance, apply the shared lookup result: `unknown` stops; active/paused is terminated; errored/terminated/complete is verified terminal; certified missing is materialized from the immutable receipt/job payload under the same deletion-blocked ID and then terminated. Persist the cursor/progress within the explicit fence and platform-mutation bounds.
 4. Do not call `deletePrefix` until a fresh query proves zero unresolved cover fences for the event.
 5. Delete and verify the R2 prefix, then execute the existing load-bearing relational order and complete the progress row.
 
-Both Workflow preflights must change from “reject a present blocked fence” to “require a present open, generation-matching fence.” A missing fence is failure, never permission to work. Fence expiry is stamped only after terminal verification and remains 31 days beyond it.
+Both Workflow preflights must change from “reject a present blocked fence” to “require a present open, generation-matching fence.” A missing fence is failure, never permission to work. An open fence receives the non-expiring sentinel expiry; only a terminal transition stamps `now + 31 days`.
+
+The Manager deletion route returns `202 { deletionScheduled: true }` while bounded purge work remains, and the danger-zone UI copy promises immediate access revocation plus scheduled cleanup rather than immediate physical removal.
 
 Cover these races explicitly: deletion before create; deletion after create but before confirmation; deletion after Workflow preflight; stale create with missing instance; arbitrary lookup failure; terminate failure/retry; R2 deletion failure/retry; and a late dispatcher after relational deletion. No test may manually write `deletion-blocked` without also exercising the production coordinator.
 
@@ -194,10 +203,10 @@ Cover these races explicitly: deletion before create; deletion after create but 
 - [ ] **Step 3: Run focused gates and commit**
 
 ```powershell
-npx vitest run --config vitest.worker.config.ts tests/worker/cleanup.test.ts tests/worker/cover-render-workflow.test.ts tests/worker/cover-backfill-workflow.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/cleanup.test.ts tests/worker/manage-api.test.ts tests/worker/cover-render-workflow.test.ts tests/worker/cover-backfill-workflow.test.ts
 npm run typecheck
 npm run lint
-git add -- worker/workflows/cleanup.ts worker/workflows/cover-backfill.ts worker/workflows/cover-render.ts tests/worker/cleanup.test.ts tests/worker/cover-backfill-workflow.test.ts tests/worker/cover-render-workflow.test.ts
+git add -- shared/constants.ts worker/services/event-cover-publication.ts worker/routes/manage.ts src/pages/ManagerPage.tsx worker/workflows/cleanup.ts worker/workflows/cover-backfill.ts worker/workflows/cover-render.ts tests/worker/cleanup.test.ts tests/worker/manage-api.test.ts tests/worker/cover-backfill-workflow.test.ts tests/worker/cover-render-workflow.test.ts
 git commit -m "fix: settle cover workflow fences before event purge"
 ```
 
@@ -214,7 +223,7 @@ git commit -m "fix: settle cover workflow fences before event purge"
 **Interfaces:**
 
 ```ts
-export type CoverBackfillMode = 'inventory' | 'execute' | 'dispatch' | 'confirm' | 'verify';
+export type CoverBackfillMode = 'inventory' | 'execute' | 'dispatch' | 'launch' | 'confirm' | 'verify';
 
 export interface DurableDispatchRow {
   runId: string;
@@ -234,16 +243,19 @@ Split planning into explicit phases:
 - `inventory` emits only the next read-only page query and, from a saved page payload, ledger SQL. It records a rolling inventory digest and never emits Workflow commands.
 - `execute` creates or advances one run and inserts jobs. Resuming an existing run requires a saved run-state payload; it preserves its last durable cursor/digest, never sets the cursor back to null after an empty page, and never creates commands for proposed IDs.
 - An empty page sets `mode = 'execute'` and changes the run from `inventorying` to `executing`; that pair is the durable end-of-inventory marker.
-- `dispatch` first emits a read-only query for actual committed pending/retryable rows, actual nonterminal count, active-run count, and the rolling one-minute fence budget. Only a returned D1 row may appear in a dispatch artifact.
+- `dispatch` emits a transactional claim artifact for actual committed pending/retryable rows, followed by a saved post-claim read restricted to the exact claimed identities. Only that saved post-claim read may produce Workflow trigger steps; `dispatch` itself contains zero trigger steps.
+- `launch` consumes the saved post-claim read and emits Workflow trigger, confirm-read, and receipt-read steps only for rows whose matching job/fence claim remains accepted.
 - `confirm` consumes the saved post-trigger fence/job query for one generation. It emits a guarded confirmation statement only for an open matching fence; a blocked result emits the exact terminate/failure unit; stale, missing, malformed, or ambiguous payloads emit no success mutation.
 - `verify` prints the proof query by default. Under its separate confirmation gate it may emit an INSERT for a new `mode = 'verify', status = 'executing'` run; it never emits `status = 'verified'`.
 
 Remove `buildDispatchBatch({ nonterminal: 0 })`. A resumed page may emit guarded duplicate inserts, but the subsequent dispatch payload must contain the actual stored job ID; a newly generated ID whose insert lost `NOT EXISTS` can never be triggered.
 
-Every generated remote command must include `--remote --config wrangler.jsonc`, the exact database/workflow name, and a preceding resource-identity check. Generated JSON records the expected account/database/Worker identity, exact command order, `generatedAt`, and `notBefore`; it never contains an object key. Raw inventory payloads remain local, ignored, and are deleted after the ledger statements are applied and verified.
+D1 commands include `--remote --config wrangler.jsonc --json`. Workflow trigger,
+terminate, resume, and restart commands include `--config wrangler.jsonc` and never
+`--local`; they do not accept `--remote` in Wrangler 4.113. Every generated command names the exact database or Workflow and follows a resource-identity check. Generated JSON records the expected account/database/Worker identity, exact command order, `generatedAt`, and `notBefore`; it never contains an object key. Raw inventory payloads remain local, ignored, and are deleted after the ledger statements are applied and verified.
 
-- [ ] **Step 1: Write RED tests for cursor resumption, duplicate pages, real in-flight counts, actual stored IDs, active-run exclusion, and remote targeting**
-- [ ] **Step 2: Implement the five planner modes and add the `dispatch`/`confirm` npm scripts**
+- [ ] **Step 1: Write RED tests for cursor resumption, duplicate pages, real in-flight counts, actual stored IDs, active-run exclusion, command targeting, and the two durable dispatch stages**
+- [ ] **Step 2: Implement the six planner modes and add the `dispatch`/`launch`/`confirm` npm scripts**
 - [ ] **Step 3: Run focused gates and commit**
 
 ```powershell
@@ -280,10 +292,10 @@ export async function recoverStaleInitialBackfillDispatches(
 ): Promise<{ inspected: number; materialized: number; confirmed: number; blocked: number; remainder: boolean }>;
 ```
 
-A dispatch unit has exactly four ordered parts:
+A dispatch/launch unit has exactly four ordered parts:
 
 1. a generated transactional claim artifact changes one actual job `pending → creating`, increments its generation, applies the same generation/timestamp to its open fence, and refuses the claim when another run is active, in-flight headroom is zero, the same job was claimed inside the last minute, or 25 open fences with `dispatch_generation > 0` have a claim timestamp inside the rolling minute;
-2. the exact PowerShell-safe `wrangler workflows trigger` command with `{runId, jobId,eventId}` and `--id`;
+2. a saved post-claim read restricted to the exact claimed job, event, Workflow ID, and generation; only this saved read may produce the exact PowerShell-safe `wrangler workflows trigger` command with `{runId, jobId,eventId}` and `--id`;
 3. the post-trigger read query followed by the launcher's `confirm` mode, which emits a guarded confirm command only for the claimed generation while the fence remains open; if the saved read shows blocked state it emits the matching terminate/failure unit, and every emitted SQL statement rechecks the fence so a later deletion race records no success; and
 4. a read-only receipt query proving the job/fence generation and dispatch state after the unit.
 
@@ -347,14 +359,14 @@ Select, in one globally bounded pass:
 Apply the total lookup map:
 
 - active status → no mutation;
-- paused → atomically claim `resuming`, require unchanged immutable dependencies/current source, an open matching fence, rate capacity, and no purge, then call `resume()`, recheck the fence, and confirm; it does not require `failed`, `retryable`, or `terminal_at` predicates that belong only to restart;
+- paused → resume regardless of retryable failed/nonterminal D1 status; atomically claim `resuming`, require unchanged immutable dependencies/current source, an open matching fence, rate capacity, and no purge, then call `resume()`, recheck the fence, and confirm;
 - errored/terminated → first persist a safe retryable platform failure (`status = 'failed'`, `retryable = 1`, `terminal_at`, failure code, run recount), then take Task 5's guarded `failed → queued` restart claim;
-- complete with D1 nonterminal → persist the same retryable divergence failure before restart;
-- certified missing on a previously confirmed job → claim `creating`, call `createBatch()` with the immutable payload, recheck, and confirm;
+- complete + already-terminal D1 → no mutation; complete with D1 nonterminal → persist the same retryable divergence failure before restart;
+- certified missing + restorable confirmed job → recreate same ID; claim `creating`, call `createBatch()` with the immutable payload, recheck, and confirm;
 - unknown → sanitized telemetry only, no D1 write and no platform call;
-- deleted event or blocked/missing fence → terminal `EVENT_DELETED`, never resume/restart/create.
+- blocked or missing fence → `EVENT_DELETED`, never resume/restart/create.
 
-The one `failed → queued` edge requires all predicates together: retryable; exact `coverBackfillDependencyVersions()` equality; unchanged derived manifest digest when present; current legacy fingerprint/revision/null-set predicates; `terminal_at` inside `BACKFILL_RESTART_WINDOW_MS`; open matching fence; rolling-minute capacity; and no event purge. The claim clears terminal/reference/expiry fields, increments job and fence generation in one `DB.batch()`, and sets `dispatch_state = 'restarting'` before the platform call. A replay while `restarting` is a no-op and cannot call the platform twice.
+The one `failed → queued` edge requires all predicates together: retryable; exact `coverBackfillDependencyVersions()` equality; unchanged derived manifest digest when present; current legacy fingerprint/revision/null-set predicates; `terminal_at` inside `BACKFILL_RESTART_WINDOW_MS`; open matching fence; rolling-minute capacity; and no event purge. Restart with pinned derived state begins at the first incomplete profile/finalize step, preserving `master_id`, `render_set_id`, `manifest_json`, and `manifest_sha256` byte-for-byte. The claim clears terminal/reference/expiry fields, increments job and fence generation in one `DB.batch()`, and sets `dispatch_state = 'restarting'` before the platform call. A replay while `restarting` is a no-op and cannot call the platform twice.
 
 `scheduledCleanup` runs stale-initial recovery and reconciliation after cover ledger resolution but before event purge. A job belonging to a deleted event routes to the purge coordinator rather than ordinary reconciliation.
 
