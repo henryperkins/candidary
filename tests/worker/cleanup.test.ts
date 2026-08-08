@@ -185,6 +185,98 @@ describe('event cover purge coordinator', () => {
     });
   });
 
+  /**
+   * `unknown` never settling is correct, but the hold sentinel also removes the
+   * fence from the only sweep that would ever have deleted it — so "never
+   * settles" meant exactly that, and an event whose publication `create()` had
+   * failed stayed soft-deleted with every object intact for good.
+   */
+  it('stops waiting on a fence nothing can classify once no instance could still exist', async () => {
+    const { access, ids } = await seeded();
+    const unclassifiable: Record<string, CoverWorkflowLookup> = {
+      [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 't' },
+    };
+
+    // While the fence is young the purge waits, and nothing is touched.
+    const parked = await reconcileEventCoverPurge(
+      testEnv, access.event.id, now, purgeAccessors(unclassifiable).accessors,
+    );
+    expect(parked).toMatchObject({ phase: 'fences', remainder: true });
+    expect((await fenceRow(ids.workflowInstanceId))?.expires_at)
+      .toBe(FENCE_PURGE_HOLD_EXPIRES_AT);
+    expect(await prefixKeys(access.event.id)).not.toEqual([]);
+
+    // Past the age any cover instance could reach, it settles — after one last
+    // attempt to stop whatever might be behind it.
+    const later = new Date(now.getTime() + 32 * 24 * 60 * 60 * 1000);
+    const { accessors, calls } = purgeAccessors(unclassifiable);
+    const finished = await reconcileEventCoverPurge(testEnv, access.event.id, later, accessors);
+
+    expect(calls).toContain(`terminate:${ids.workflowInstanceId}`);
+    expect(finished).toMatchObject({ phase: 'complete', remainder: false });
+    expect(await prefixKeys(access.event.id)).toEqual([]);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+  });
+
+  /**
+   * The column is the durable signal an operator reads to answer "is this purge
+   * making progress?". Counting rows *read* would have it climb by one a day
+   * for a single fence that never resolves — past the number of fences the
+   * event ever had — in exactly the stalled case it exists to surface.
+   */
+  it('counts the fences it resolved, not the ones it read again', async () => {
+    const { access, ids } = await seeded();
+    const unclassifiable: Record<string, CoverWorkflowLookup> = {
+      [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 't' },
+    };
+
+    await reconcileEventCoverPurge(testEnv, access.event.id, now, purgeAccessors(unclassifiable).accessors);
+    await reconcileEventCoverPurge(testEnv, access.event.id, now, purgeAccessors(unclassifiable).accessors);
+
+    expect(await testEnv.DB.prepare(
+      'SELECT fences_resolved FROM event_cover_purge_progress WHERE event_id = ?',
+    ).bind(access.event.id).first()).toEqual({ fences_resolved: 0 });
+
+    await purgeSettled(access.event.id, now);
+    // Gone with the event, so the count is read from a pass that resolved one.
+    expect(await countRows('event_cover_purge_progress', access.event.id)).toBe(0);
+  });
+
+  /**
+   * A run pages over the whole fleet, so purging one of its events must not
+   * redefine what the run's counters mean for all the others.
+   */
+  it('recomputes a purged run counter over every nonterminal status', async () => {
+    const owner = await eventAccess('Ana & Bo');
+    const other = await eventAccess('Cy & Dee');
+    const stamp = now.toISOString();
+    const job = (id: string, eventId: string, status: string) => testEnv.DB.prepare(`
+      INSERT INTO event_cover_backfill_jobs (
+        id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+        workflow_instance_id, dispatch_state, dispatch_generation, status,
+        dependency_versions_json, created_at, updated_at
+      ) VALUES (?, 'run-shared', ?, 0, ?, ?, 'confirmed', 1, ?, '{"tonalEffect":1}', ?, ?)
+    `).bind(id, eventId, 'a'.repeat(64), `instance-${id}`, status, stamp, stamp);
+
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+        VALUES ('run-shared', 'execute', 'executing', ?, ?)
+      `).bind(stamp, stamp),
+      job('job-purged', owner.event.id, 'applied'),
+      job('job-elsewhere', other.event.id, 'rendering'),
+    ]);
+
+    await purgeSettled(owner.event.id, now);
+
+    // The other event's job is still in flight, and `rendering` is one of the
+    // four statuses that means so.
+    expect(await testEnv.DB.prepare(
+      "SELECT queued_count FROM event_cover_backfill_runs WHERE id = 'run-shared'",
+    ).first()).toEqual({ queued_count: 1 });
+  });
+
   it('never deletes R2 objects while a fence is unresolved', async () => {
     const { access, ids } = await seeded();
     const { accessors, calls } = purgeAccessors({
@@ -936,6 +1028,30 @@ describe('bounded cover storage sweep', () => {
     // Publication ownership is what returns it to `ready` — never a sweep.
     expect((await draftState('draft-publishing'))?.state).toBe('publishing');
     expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(1);
+  });
+
+  /**
+   * The other half of the rule above. A `publishing` draft is exempt from the
+   * sweep because publication ownership is what releases it — so once that
+   * owner's receipt has itself been swept, nothing is left that ever could, and
+   * the draft, its master and its raw bytes stay uncollectable for the life of
+   * the event with the host's one draft slot inside them.
+   */
+  it('releases a draft frozen by a publication whose receipt has been swept', async () => {
+    await insertDraft('draft-stranded', { state: 'publishing', expiresAt: PAST });
+    await insertDraft('draft-owned', { state: 'publishing', expiresAt: PAST });
+    await insertReceipt('op-owner', {
+      status: 'rendering', expiresAt: FUTURE, draftId: 'draft-owned',
+    });
+
+    const summary = await cleanupEventCovers(testEnv, NOW);
+
+    expect(summary.strandedDraftsReleased).toBe(1);
+    expect(await draftState('draft-stranded')).toMatchObject({
+      state: 'failed', draft_revision: 2,
+    });
+    // A publication that still owns its draft keeps it frozen.
+    expect((await draftState('draft-owned'))?.state).toBe('publishing');
   });
 
   it('deletes a preview file before its inventory row', async () => {

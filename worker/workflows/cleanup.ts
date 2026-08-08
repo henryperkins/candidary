@@ -189,6 +189,8 @@ export interface CoverCleanupSummary {
   draftsExpired: number;
   previewsDeleted: number;
   receiptsExpired: number;
+  /** Drafts left frozen by a publication whose receipt has since been swept. */
+  strandedDraftsReleased: number;
   backfillJobsReleased: number;
   rateEventsDeleted: number;
   fencesDeleted: number;
@@ -249,6 +251,7 @@ export async function cleanupEventCovers(
     draftsExpired: 0,
     previewsDeleted: 0,
     receiptsExpired: 0,
+    strandedDraftsReleased: 0,
     backfillJobsReleased: 0,
     rateEventsDeleted: 0,
     fencesDeleted: 0,
@@ -324,6 +327,26 @@ export async function cleanupEventCovers(
     )
   `).bind(timestamp, limit).run();
   summary.receiptsExpired = note(receipts.meta.changes);
+
+  // 3b. A draft frozen for a publication whose receipt has now gone. `publishing`
+  // is deliberately absent from the expirable states because publication
+  // ownership is what returns a draft to `ready` — but once the receipt is swept
+  // that owner no longer exists, and nothing else ever releases it. The draft,
+  // the master it holds, and its raw bytes would otherwise be uncollectable for
+  // the life of the event, and the host's one draft slot with them.
+  const stranded = await env.DB.prepare(`
+    UPDATE event_cover_drafts
+    SET state = 'failed', draft_revision = draft_revision + 1, updated_at = ?1
+    WHERE id IN (
+      SELECT d.id FROM event_cover_drafts d
+      WHERE d.state = 'publishing' AND d.expires_at <= ?1
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cover_publish_receipts r WHERE r.draft_id = d.id
+        )
+      ORDER BY d.expires_at LIMIT ?2
+    )
+  `).bind(timestamp, limit).run();
+  summary.strandedDraftsReleased = note(stranded.meta.changes);
 
   // 4. Backfill jobs release their master and set references only once an active
   // event pointer or abandoned-set inventory owns those objects, then the rows
@@ -557,7 +580,27 @@ export interface CoverPurgeWorkflowAccessors {
 interface HeldFenceRow {
   workflow_binding: string;
   workflow_instance_id: string;
+  created_at: string;
 }
+
+/**
+ * How long a fence nobody can classify may hold a purge open.
+ *
+ * `unknown` never settles, and that is right: acting on absent information is
+ * how a swept prefix ends up underneath a running instance. But the hold
+ * sentinel also removes the fence from the only sweep that would ever have
+ * deleted it, so "never settles" was literally never — a fence opened for a
+ * `create()` that failed answers no status read and no terminate, and the event
+ * behind it stayed soft-deleted with every object intact for good.
+ *
+ * The bound is the fence's own TTL, which is already chosen to exceed the
+ * platform's retention of a completed instance. A cover Workflow renders at most
+ * twenty-four objects from one master; none of them is a month-long job, so an
+ * ID that has been silent for that long is not an instance that might still
+ * write — it is a fence for work that never started. Past that point the purge
+ * stops waiting, having tried to stop it one more time first.
+ */
+const FENCE_UNRESOLVABLE_AFTER_MS = 31 * 24 * 60 * 60 * 1000;
 
 /** What a purge does about one lookup. Total, with an explicit wait default. */
 function purgeActionFor(lookup: CoverWorkflowLookup): 'terminate' | 'settle' | 'materialize' | 'wait' {
@@ -655,7 +698,7 @@ async function settleEventCoverFences(
   `).bind(eventId).first<{ workflow_binding: string | null; workflow_instance_id: string | null }>();
 
   const held = await env.DB.prepare(`
-    SELECT workflow_binding, workflow_instance_id FROM event_cover_workflow_fences
+    SELECT workflow_binding, workflow_instance_id, created_at FROM event_cover_workflow_fences
     WHERE event_id = ?1 AND state = 'deletion-blocked' AND expires_at = ?2
       AND (workflow_binding > ?3
         OR (workflow_binding = ?3 AND workflow_instance_id > ?4))
@@ -666,6 +709,12 @@ async function settleEventCoverFences(
     cursor?.workflow_binding ?? '', cursor?.workflow_instance_id ?? '',
     COVER_CLEANUP_ROWS_PER_CLASS,
   ).all<HeldFenceRow>();
+
+  // Rows *resolved*, which is what the column is called and what an operator
+  // watching a stalled purge needs. `summary.inspected` counts rows read, and a
+  // pass that reads the same unresolved fence every day would otherwise report a
+  // resolution count larger than the number of fences the event ever had.
+  let resolved = 0;
 
   for (const fence of held.results) {
     summary.inspected += 1;
@@ -697,8 +746,19 @@ async function settleEventCoverFences(
       action = purgeActionFor(lookup);
     }
 
-    if (action !== 'settle') continue;
-    await env.DB.prepare(`
+    if (action !== 'settle') {
+      // Still unclassifiable, and young enough that it might yet be real.
+      if (Date.parse(fence.created_at) + FENCE_UNRESOLVABLE_AFTER_MS > now.getTime()) continue;
+      // Older than any cover instance can be. One last attempt to stop whatever
+      // might be behind it, then the purge stops waiting on an answer that is
+      // never going to come.
+      try {
+        await accessor.terminate(fence.workflow_instance_id);
+        summary.platformMutations += 1;
+      } catch { /* Nothing is there to stop; settling is the point. */ }
+    }
+
+    const released = await env.DB.prepare(`
       UPDATE event_cover_workflow_fences
       SET expires_at = ?, updated_at = ?
       WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'deletion-blocked'
@@ -706,6 +766,7 @@ async function settleEventCoverFences(
       new Date(now.getTime() + FENCE_TERMINAL_TTL_MS).toISOString(), timestamp,
       fence.workflow_binding, fence.workflow_instance_id,
     ).run();
+    resolved += released.meta.changes;
   }
 
   const last = held.results[held.results.length - 1];
@@ -718,7 +779,7 @@ async function settleEventCoverFences(
   `).bind(
     exhausted ? null : last?.workflow_binding ?? null,
     exhausted ? null : last?.workflow_instance_id ?? null,
-    summary.inspected, summary.platformMutations, timestamp, eventId,
+    resolved, summary.platformMutations, timestamp, eventId,
   ).run();
 
   const unresolved = await env.DB.prepare(`
@@ -881,8 +942,13 @@ async function purgeEventRelationalRows(
     env.DB.prepare(`
       UPDATE event_cover_backfill_runs SET
         total_count = (SELECT count(*) FROM event_cover_backfill_jobs j WHERE j.run_id = event_cover_backfill_runs.id),
+        -- The same four statuses recomputeBackfillRunCounters uses. This batch
+        -- runs last in a purge, so a narrower definition here would silently
+        -- overwrite the canonical count with one that omits every job the run
+        -- still has in flight for some other event.
         queued_count = (SELECT count(*) FROM event_cover_backfill_jobs j
-          WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'queued'),
+          WHERE j.run_id = event_cover_backfill_runs.id
+            AND j.status IN ('queued', 'normalizing', 'rendering', 'finalizing')),
         applied_count = (SELECT count(*) FROM event_cover_backfill_jobs j
           WHERE j.run_id = event_cover_backfill_runs.id AND j.status = 'applied'),
         skipped_count = (SELECT count(*) FROM event_cover_backfill_jobs j
@@ -955,8 +1021,19 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // Rows already marked deleted are selected too: a purge whose object deletion
   // failed is retried here until it succeeds, rather than being left behind with
   // objects no later pass would look for.
+  //
+  // Least-recently-attempted first, and that ordering is load-bearing rather
+  // than tidiness. A purge can now legitimately return unfinished — an
+  // unresolved fence parks it in the `fences` phase — and an unordered
+  // `LIMIT 100` would hand every future pass the same hundred stalled rows, so
+  // an event deleted today would never be selected at all. An event that has
+  // never been attempted has no progress row and sorts first; one the last pass
+  // already worked on sorts behind it.
   const purged = await env.DB.prepare(`
-    SELECT id FROM events WHERE deleted_at IS NOT NULL OR purge_after <= ? LIMIT 100
+    SELECT e.id FROM events e
+    LEFT JOIN event_cover_purge_progress p ON p.event_id = e.id
+    WHERE e.deleted_at IS NOT NULL OR e.purge_after <= ?
+    ORDER BY COALESCE(p.updated_at, '') , e.id LIMIT 100
   `).bind(now.toISOString()).all<{ id: string }>();
   for (const event of purged.results) await deleteEventData(env, event.id, now);
 }
