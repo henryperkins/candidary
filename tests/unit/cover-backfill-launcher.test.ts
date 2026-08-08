@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   MAX_COVER_BACKFILL_CREATE_BATCH,
@@ -11,24 +11,47 @@ import {
 } from '../../shared/constants';
 import { COVER_PIPELINE_VERSIONS } from '../../shared/event-cover';
 import {
+  COVER_BACKFILL_BINDING,
+  COVER_BACKFILL_DATABASE_ID,
+  COVER_BACKFILL_DATABASE_NAME,
   COVER_BACKFILL_DEPENDENCY_VERSIONS,
+  COVER_BACKFILL_JOB_STATUSES,
+  COVER_BACKFILL_WORKER_NAME,
+  COVER_BACKFILL_WORKFLOW_NAME,
+  COVER_DISPATCH_STATES,
+  COVER_FENCE_STATES,
+  WRANGLER_CONFIG_PATH,
   backfillInstanceId,
   buildBackfillRunPlan,
   buildDispatchBatch,
+  confirmSql,
+  d1FileCommand,
+  d1ReadCommands,
+  dispatchSql,
+  evaluateConfirmation,
   evaluateZeroLegacyProof,
   fingerprintKey,
+  identityCheckCommands,
   inventoryDigest,
   inventorySql,
+  parseConfirmPayload,
   parseCountPayload,
   parseCoverBackfillArgs,
+  parseDispatchPayload,
   parseInventoryPayload,
+  parseRunStatePayload,
   proofSql,
+  rollingInventoryDigest,
   runCli,
+  runStateSql,
+  verificationRunStatement,
+  type DurableDispatchRow,
   type InventoryRow,
-  type PlannedJob,
+  type RunStateRow,
 } from '../../scripts/cover-backfill';
 
 const RUN = '11111111-1111-4111-8111-111111111111';
+const OTHER_RUN = '99999999-9999-4999-8999-999999999999';
 const JOB = '22222222-2222-4222-8222-222222222222';
 const EVENT = '33333333-3333-4333-8333-333333333333';
 const OTHER_EVENT = '44444444-4444-4444-8444-444444444444';
@@ -41,14 +64,109 @@ const row = (id: string, key: string, revision = 0): InventoryRow => ({
 });
 
 const envelope = (rows: unknown[]) => [{ results: rows, success: true }];
+const envelopes = (...sets: unknown[][]) => sets.map((rows) => ({ results: rows, success: true }));
 
-const plannedJob = (index: number): PlannedJob => ({
+const dispatchRow = (index: number, overrides: Partial<DurableDispatchRow> = {}): DurableDispatchRow => ({
+  runId: RUN,
   jobId: `${index}`.padStart(8, '0') + '-0000-4000-8000-000000000000',
   eventId: `${index}`.padStart(8, '1') + '-1111-4111-8111-111111111111',
-  expectedRevision: 0,
-  legacyKeyFingerprint: 'a'.repeat(64),
   workflowInstanceId: `cb1-${`${index}`.padStart(48, '0')}`,
+  dispatchState: 'pending',
+  dispatchGeneration: 0,
+  status: 'queued',
+  fenceState: null,
+  fenceGeneration: null,
+  ...overrides,
 });
+
+/** A wire row as `wrangler d1 execute --json` would return it for `dispatchSql`. */
+const dispatchWireRow = (source: DurableDispatchRow) => ({
+  kind: 'dispatchable',
+  run_id: source.runId,
+  job_id: source.jobId,
+  event_id: source.eventId,
+  workflow_instance_id: source.workflowInstanceId,
+  dispatch_state: source.dispatchState,
+  dispatch_generation: source.dispatchGeneration,
+  status: source.status,
+  fence_state: source.fenceState,
+  fence_generation: source.fenceGeneration,
+});
+
+const counterRows = (values: {
+  nonterminal?: number;
+  activeRuns?: number;
+  minuteClaims?: number;
+  retryable?: number;
+  latestClaimAt?: string | null;
+} = {}) => [
+  { kind: 'nonterminal', value: values.nonterminal ?? 0, at: null },
+  { kind: 'activeRuns', value: values.activeRuns ?? 0, at: null },
+  { kind: 'minuteClaims', value: values.minuteClaims ?? 0, at: null },
+  { kind: 'retryable', value: values.retryable ?? 0, at: null },
+  { kind: 'latestClaimAt', value: 0, at: values.latestClaimAt ?? null },
+];
+
+const dispatchPayload = (
+  rows: readonly DurableDispatchRow[],
+  values: Parameters<typeof counterRows>[0] = {},
+) => envelopes(rows.map(dispatchWireRow), counterRows(values));
+
+const confirmWireRow = (overrides: Record<string, unknown> = {}) => ({
+  kind: 'confirm',
+  run_id: RUN,
+  job_id: JOB,
+  event_id: EVENT,
+  workflow_instance_id: `cb1-${'0'.repeat(48)}`,
+  dispatch_state: 'creating',
+  dispatch_generation: 1,
+  status: 'queued',
+  fence_state: 'open',
+  fence_generation: 1,
+  ...overrides,
+});
+
+const expectation = { runId: RUN, jobId: JOB, eventId: EVENT, generation: 1, now: NOW };
+
+const runState = (overrides: Partial<RunStateRow> = {}): RunStateRow => ({
+  runId: RUN,
+  mode: 'inventory',
+  status: 'inventorying',
+  cursor: EVENT,
+  inventorySha256: 'b'.repeat(64),
+  ...overrides,
+});
+
+/* ------------------------------------------------------------------ *
+ * Schema and resource pins
+ * ------------------------------------------------------------------ */
+
+const migrationSql = readFileSync(
+  resolve(process.cwd(), 'migrations/0012_event_cover_storage.sql'),
+  'utf8',
+);
+const wranglerConfig = readFileSync(resolve(process.cwd(), 'wrangler.jsonc'), 'utf8');
+
+function tableBlock(name: string): string {
+  const start = migrationSql.indexOf(`CREATE TABLE ${name} (`);
+  expect(start).toBeGreaterThan(-1);
+  const end = migrationSql.indexOf('\n);', start);
+  expect(end).toBeGreaterThan(start);
+  return migrationSql.slice(start, end);
+}
+
+function checkList(block: string, column: string): string[] {
+  const marker = `CHECK (${column} IN (`;
+  const start = block.indexOf(marker);
+  expect(start).toBeGreaterThan(-1);
+  const from = start + marker.length;
+  const end = block.indexOf('))', from);
+  expect(end).toBeGreaterThan(from);
+  return block.slice(from, end)
+    .split(',')
+    .map((entry) => entry.trim().replace(/^'|'$/gu, ''))
+    .filter((entry) => entry.length > 0);
+}
 
 describe('the launcher is pinned to the same contract the Workflow renders under', () => {
   it('restates exactly the nine source-independent version axes', () => {
@@ -80,6 +198,32 @@ describe('the launcher is pinned to the same contract the Workflow renders under
   it('fingerprints an object key the way the Worker does', () => {
     expect(fingerprintKey(`events/${EVENT}/cover/legacy.jpg`))
       .toBe('af832e5d3d0474f8e02e10c5a59c71f68574d294543399824fe83e2399527fbf');
+  });
+
+  /**
+   * The script cannot import `worker/db/types.ts` — it is a different build
+   * project, and Node's type stripping cannot follow the extensionless imports
+   * underneath it. It restates the three unions instead, so they are pinned to
+   * `0012`'s CHECK constraints directly rather than to a copy that could drift
+   * with them.
+   */
+  it('restates the job, dispatch, and fence vocabularies exactly as 0012 constrains them', () => {
+    const jobs = tableBlock('event_cover_backfill_jobs');
+    expect([...COVER_DISPATCH_STATES]).toEqual(checkList(jobs, 'dispatch_state'));
+    expect([...COVER_BACKFILL_JOB_STATUSES]).toEqual(checkList(jobs, 'status'));
+    expect([...COVER_FENCE_STATES])
+      .toEqual(checkList(tableBlock('event_cover_workflow_fences'), 'state'));
+  });
+
+  it('names the exact resources wrangler.jsonc binds', () => {
+    expect(wranglerConfig).toContain(`"database_name": "${COVER_BACKFILL_DATABASE_NAME}"`);
+    expect(wranglerConfig).toContain(`"database_id": "${COVER_BACKFILL_DATABASE_ID}"`);
+    expect(wranglerConfig).toContain(`"name": "${COVER_BACKFILL_WORKFLOW_NAME}"`);
+    expect(wranglerConfig).toContain(`"binding": "${COVER_BACKFILL_BINDING}"`);
+    expect(wranglerConfig).toMatch(
+      new RegExp(`^\\s*"name": "${COVER_BACKFILL_WORKER_NAME}",`, 'mu'),
+    );
+    expect(existsSync(resolve(process.cwd(), WRANGLER_CONFIG_PATH))).toBe(true);
   });
 });
 
@@ -146,19 +290,39 @@ describe('the inventory digest', () => {
     expect(inventoryDigest(first)).toMatch(/^[0-9a-f]{64}$/u);
     expect(inventoryDigest(first)).not.toContain('cover');
   });
+
+  /**
+   * A per-page digest cannot prove what a multi-page run inventoried. The
+   * rolling form chains each page into the last so the stored value is a
+   * commitment to the whole ordered walk, and re-applying one page changes it.
+   */
+  it('rolls each page into the previous one', () => {
+    const page = [row(EVENT, 'events/a/cover/one')];
+    expect(rollingInventoryDigest(null, page)).toBe(inventoryDigest(page));
+
+    const chained = rollingInventoryDigest(inventoryDigest(page), page);
+    expect(chained).toMatch(/^[0-9a-f]{64}$/u);
+    expect(chained).not.toBe(inventoryDigest(page));
+    expect(rollingInventoryDigest(inventoryDigest(page), page)).toBe(chained);
+
+    const other = [row(OTHER_EVENT, 'events/b/cover/two')];
+    expect(rollingInventoryDigest(inventoryDigest(page), other)).not.toBe(chained);
+    expect(() => rollingInventoryDigest('short', page)).toThrow(/digest/u);
+  });
 });
 
 describe('the run plan', () => {
   const rows = [row(EVENT, 'events/a/cover/one', 3), row(OTHER_EVENT, 'events/b/cover/two', 0)];
+  const jobIds = () => {
+    let index = 0;
+    return () => [JOB, '55555555-5555-4555-8555-555555555555'][index++]!;
+  };
   const plan = (newRun: boolean) => buildBackfillRunPlan({
     runId: RUN,
     rows,
     now: NOW,
-    newRun,
-    makeJobId: (() => {
-      let index = 0;
-      return () => [JOB, '55555555-5555-4555-8555-555555555555'][index++]!;
-    })(),
+    runState: newRun ? null : runState({ cursor: null, inventorySha256: null }),
+    makeJobId: jobIds(),
   });
 
   it('creates the run row once and updates its cursor afterwards', () => {
@@ -192,56 +356,234 @@ describe('the run plan', () => {
   });
 
   it('has a null cursor for an empty page and refuses an oversized one', () => {
-    expect(buildBackfillRunPlan({ runId: RUN, rows: [], now: NOW, newRun: true }).cursor).toBeNull();
+    expect(buildBackfillRunPlan({ runId: RUN, rows: [], now: NOW, runState: null }).cursor).toBeNull();
     expect(() => buildBackfillRunPlan({
       runId: RUN,
       rows: Array.from({ length: MAX_COVER_BACKFILL_PAGE_SIZE + 1 }, () => row(EVENT, 'k')),
       now: NOW,
-      newRun: true,
+      runState: null,
     })).toThrow(/page size/u);
-    expect(() => buildBackfillRunPlan({ runId: 'nope', rows: [], now: NOW, newRun: true }))
+    expect(() => buildBackfillRunPlan({ runId: 'nope', rows: [], now: NOW, runState: null }))
       .toThrow(/UUID/u);
-    expect(() => buildBackfillRunPlan({ runId: RUN, rows: [], now: 'yesterday', newRun: true }))
+    expect(() => buildBackfillRunPlan({ runId: RUN, rows: [], now: 'yesterday', runState: null }))
       .toThrow(/instant/u);
+  });
+
+  /**
+   * The defect this replaces: an empty page on a resumed run rewrote `cursor`
+   * to NULL, so the next inventory pass restarted from the first event ID and
+   * proposed a duplicate job for every row it had already committed.
+   */
+  it('keeps the durable cursor when a resumed page comes back empty', () => {
+    const resumed = buildBackfillRunPlan({
+      runId: RUN,
+      rows: [],
+      now: NOW,
+      runState: runState({ cursor: OTHER_EVENT, inventorySha256: 'c'.repeat(64) }),
+    });
+    expect(resumed.cursor).toBe(OTHER_EVENT);
+    expect(resumed.inventorySha256).toBe('c'.repeat(64));
+    expect(resumed.statements).toHaveLength(1);
+    expect(resumed.statements[0]).not.toContain('cursor =');
+    expect(resumed.statements[0]).not.toContain('NULL');
+  });
+
+  /** The empty page is the durable end-of-inventory marker, and the only one. */
+  it('marks the end of inventory by moving the run to execute/executing', () => {
+    const resumed = buildBackfillRunPlan({
+      runId: RUN,
+      rows: [],
+      now: NOW,
+      runState: runState({ cursor: OTHER_EVENT }),
+    });
+    expect(resumed.inventoryExhausted).toBe(true);
+    expect(resumed.statements[0]).toContain("mode = 'execute'");
+    expect(resumed.statements[0]).toContain("status = 'executing'");
+    expect(resumed.statements[0]).toContain("status = 'inventorying'");
+    expect(resumed.jobs).toEqual([]);
+  });
+
+  it('chains the stored digest and refuses to rewind the cursor', () => {
+    const stored = runState({ cursor: '00000000-0000-4000-8000-000000000000', inventorySha256: 'd'.repeat(64) });
+    const resumed = buildBackfillRunPlan({
+      runId: RUN, rows, now: NOW, runState: stored, makeJobId: jobIds(),
+    });
+    expect(resumed.inventoryExhausted).toBe(false);
+    expect(resumed.inventorySha256).toBe(rollingInventoryDigest('d'.repeat(64), rows));
+    expect(resumed.statements[0]).toContain(`cursor < '${OTHER_EVENT}'`);
+    expect(resumed.statements[0]).toContain(`inventory_sha256 = '${'d'.repeat(64)}'`);
+    expect(resumed.statements[0]).toContain("status = 'inventorying'");
+  });
+
+  it('refuses a run state that is not the run being resumed, or is already closed', () => {
+    for (const state of [
+      runState({ runId: OTHER_RUN }),
+      runState({ status: 'verified' }),
+      runState({ status: 'failed' }),
+      runState({ mode: 'verify' }),
+    ]) {
+      expect(() => buildBackfillRunPlan({ runId: RUN, rows, now: NOW, runState: state }))
+        .toThrow(/run state/u);
+    }
+  });
+
+  /** Only `dispatch` may emit a Workflow command, and only for a committed row. */
+  it('never emits a Workflow command or a fence for a proposed job', () => {
+    const built = plan(true);
+    const text = built.statements.join('\n');
+    expect(text).not.toContain('event_cover_workflow_fences');
+    expect(text).not.toContain('wrangler');
+    expect(built).not.toHaveProperty('commands');
+  });
+});
+
+describe('the durable dispatch read', () => {
+  it('is read-only, run-scoped, and self-identifying', () => {
+    const sql = dispatchSql(RUN);
+    expect(sql).not.toMatch(/UPDATE|INSERT|DELETE/u);
+    expect(sql).toContain(`j.run_id = '${RUN}'`);
+    expect(sql).toContain("'dispatchable' AS kind");
+    for (const kind of ['nonterminal', 'activeRuns', 'minuteClaims', 'retryable', 'latestClaimAt']) {
+      expect(sql).toContain(`'${kind}'`);
+    }
+    // Only a row that is committed, pending, and unclaimed may be offered.
+    expect(sql).toContain("j.dispatch_state = 'pending'");
+    expect(sql).toContain("j.status = 'queued'");
+    expect(sql).toContain('e.deleted_at IS NULL');
+    expect(sql).toContain('event_cover_purge_progress');
+    expect(sql).toContain(`LIMIT ${MAX_COVER_BACKFILL_CREATE_BATCH}`);
+    // The rolling minute is measured by the database's clock, not the operator's.
+    expect(sql).toContain("'-60 seconds'");
+    expect(() => dispatchSql('nope')).toThrow(/UUID/u);
+  });
+
+  it('parses only rows the database returned', () => {
+    const source = dispatchRow(1);
+    const parsed = parseDispatchPayload(dispatchPayload([source], { nonterminal: 4, activeRuns: 1 }));
+    expect(parsed.rows).toEqual([source]);
+    expect(parsed.nonterminal).toBe(4);
+    expect(parsed.activeRuns).toBe(1);
+    expect(parsed.latestClaimAt).toBeNull();
+  });
+
+  it('refuses a payload missing a counter, carrying an unknown kind, or a bad row', () => {
+    expect(() => parseDispatchPayload(envelopes([], [{ kind: 'nonterminal', value: 0, at: null }])))
+      .toThrow(/activeRuns/u);
+    expect(() => parseDispatchPayload(envelopes([{ kind: 'surprise' }], counterRows())))
+      .toThrow(/kind/u);
+    expect(() => parseDispatchPayload(envelopes(
+      [{ ...dispatchWireRow(dispatchRow(1)), dispatch_state: 'nonsense' }],
+      counterRows(),
+    ))).toThrow(/dispatch state/u);
+    expect(() => parseDispatchPayload(envelopes(
+      [{ ...dispatchWireRow(dispatchRow(1)), workflow_instance_id: 'not-an-instance' }],
+      counterRows(),
+    ))).toThrow(/instance/u);
+    expect(() => parseDispatchPayload(envelopes(
+      [{ ...dispatchWireRow(dispatchRow(1)), fence_state: 'melted' }],
+      counterRows(),
+    ))).toThrow(/fence state/u);
   });
 });
 
 describe('the dispatch batch', () => {
-  const queued = Array.from({ length: 40 }, (_unused, index) => plannedJob(index));
-
-  it('creates nothing at all once the in-flight ceiling is reached', () => {
-    const batch = buildDispatchBatch({
-      runId: RUN, queued, nonterminal: MAX_COVER_BACKFILL_IN_FLIGHT, now: NOW,
-    });
-    expect(batch.create).toEqual([]);
-    expect(batch.commands).toEqual([]);
-    expect(batch.fenceStatements).toEqual([]);
-    expect(batch.withheldForInFlight).toBe(40);
+  const rows = Array.from({ length: 40 }, (_unused, index) => dispatchRow(index));
+  const batch = (
+    overrides: Partial<Parameters<typeof buildDispatchBatch>[0]> = {},
+  ) => buildDispatchBatch({
+    runId: RUN, rows, nonterminal: 0, activeRuns: 0, minuteClaims: 0, latestClaimAt: null, now: NOW,
+    ...overrides,
   });
 
-  it('takes the tightest of the three bounds', () => {
-    const empty = buildDispatchBatch({ runId: RUN, queued, nonterminal: 0, now: NOW });
+  it('creates nothing at all once the in-flight ceiling is reached', () => {
+    const full = batch({ nonterminal: MAX_COVER_BACKFILL_IN_FLIGHT });
+    expect(full.create).toEqual([]);
+    expect(full.commands).toEqual([]);
+    expect(full.fenceStatements).toEqual([]);
+    expect(full.withheld.inFlight).toBe(40);
+    expect(full.limitingBound).toBe('in-flight');
+  });
+
+  it('takes the tightest of the bounds', () => {
+    const empty = batch();
     expect(empty.create).toHaveLength(
       Math.min(MAX_COVER_BACKFILL_CREATE_BATCH, MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE),
     );
-    expect(empty.withheldForBatch).toBe(40 - empty.create.length);
+    expect(empty.withheld.batch).toBe(40 - empty.create.length);
 
-    const nearlyFull = buildDispatchBatch({
-      runId: RUN, queued, nonterminal: MAX_COVER_BACKFILL_IN_FLIGHT - 3, now: NOW,
-    });
+    const nearlyFull = batch({ nonterminal: MAX_COVER_BACKFILL_IN_FLIGHT - 3 });
     expect(nearlyFull.create).toHaveLength(3);
-    expect(nearlyFull.withheldForBatch).toBe(37);
+    expect(nearlyFull.withheld.inFlight).toBe(37);
+    expect(nearlyFull.limitingBound).toBe('in-flight');
   });
 
-  it('opens one fence per instance and emits a create carrying only opaque ids', () => {
-    const batch = buildDispatchBatch({ runId: RUN, queued: [plannedJob(7)], nonterminal: 0, now: NOW });
-    expect(batch.fenceStatements[0]).toContain("'COVER_BACKFILL_WORKFLOW'");
-    expect(batch.fenceStatements[0]).toContain("'open'");
-    expect(batch.fenceStatements[0]).toContain('ON CONFLICT');
-    expect(batch.commands[0]).toContain('candidary-cover-backfill');
-    expect(batch.commands[0]).toContain(plannedJob(7).workflowInstanceId);
-    expect(batch.commands[0]).toContain('"runId"');
-    expect(batch.commands[0]).not.toContain('cover_object_key');
+  /** One batch per minute, measured from the last durable fence claim. */
+  it('withholds the whole batch while this minute is already spent', () => {
+    const spent = batch({
+      minuteClaims: MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
+      latestClaimAt: '2026-08-05T09:59:30.000Z',
+    });
+    expect(spent.create).toEqual([]);
+    expect(spent.withheld.minute).toBe(40);
+    expect(spent.limitingBound).toBe('minute');
+    expect(spent.notBefore).toBe('2026-08-05T10:00:30.000Z');
+  });
+
+  it('never runs beside another active run', () => {
+    const contended = batch({ activeRuns: 1 });
+    expect(contended.create).toEqual([]);
+    expect(contended.commands).toEqual([]);
+    expect(contended.blockedByActiveRun).toBe(true);
+    expect(contended.withheld.activeRun).toBe(40);
+  });
+
+  /**
+   * A fence the purge coordinator owns is the one thing that must never be
+   * triggered, and a fence at another generation is ambiguous rather than safe.
+   */
+  it('excludes a blocked fence and a fence at a different generation', () => {
+    const excluded = buildDispatchBatch({
+      runId: RUN,
+      rows: [
+        dispatchRow(1, { fenceState: 'deletion-blocked', fenceGeneration: 0 }),
+        dispatchRow(2, { fenceState: 'open', fenceGeneration: 4 }),
+        dispatchRow(3, { fenceState: 'open', fenceGeneration: 0 }),
+        dispatchRow(4),
+      ],
+      nonterminal: 0, activeRuns: 0, minuteClaims: 0, latestClaimAt: null, now: NOW,
+    });
+    expect(excluded.create.map((entry) => entry.jobId))
+      .toEqual([dispatchRow(3).jobId, dispatchRow(4).jobId]);
+    expect(excluded.withheld.fence).toBe(2);
+  });
+
+  it('carries only the stored identifiers into the artifact', () => {
+    const one = buildDispatchBatch({
+      runId: RUN, rows: [dispatchRow(7)], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
+      latestClaimAt: null, now: NOW,
+    });
+    expect(one.fenceStatements[0]).toContain(`'${COVER_BACKFILL_BINDING}'`);
+    expect(one.fenceStatements[0]).toContain("'open'");
+    expect(one.fenceStatements[0]).toContain('ON CONFLICT');
+    // A fence carries no foreign key to `events`, so nothing in the schema stops
+    // a stale artifact from opening one behind a purge that has already left the
+    // fences phase — and no later phase would ever settle it.
+    expect(one.fenceStatements[0]).toContain('deleted_at IS NULL');
+    expect(one.fenceStatements[0]).toContain('event_cover_purge_progress');
+    expect(one.commands[0]).toContain(COVER_BACKFILL_WORKFLOW_NAME);
+    expect(one.commands[0]).toContain(dispatchRow(7).workflowInstanceId);
+    expect(one.commands[0]).toContain('"runId"');
+    expect(one.commands[0]).not.toContain('cover_object_key');
+    expect(one.notBefore).toBe(NOW);
+  });
+
+  it('refuses a negative count or a row belonging to another run', () => {
+    expect(() => batch({ nonterminal: -1 })).toThrow(/negative/u);
+    expect(() => batch({ minuteClaims: -1 })).toThrow(/negative/u);
+    expect(() => buildDispatchBatch({
+      runId: RUN, rows: [dispatchRow(1, { runId: OTHER_RUN })], nonterminal: 0, activeRuns: 0,
+      minuteClaims: 0, latestClaimAt: null, now: NOW,
+    })).toThrow(/run/u);
   });
 
   /**
@@ -255,39 +597,188 @@ describe('the dispatch batch', () => {
    * deterministic ID its fence is keyed by.
    */
   it('emits the creation command wrangler actually has', () => {
-    const job = plannedJob(3);
-    const batch = buildDispatchBatch({ runId: RUN, queued: [job], nonterminal: 0, now: NOW });
+    const source = dispatchRow(3);
+    const one = buildDispatchBatch({
+      runId: RUN, rows: [source], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
+      latestClaimAt: null, now: NOW,
+    });
 
-    expect(batch.commands[0]).toBe(
-      "npx wrangler workflows trigger candidary-cover-backfill "
-      + `'{"runId":"${RUN}","jobId":"${job.jobId}","eventId":"${job.eventId}"}'`
-      + ` --id ${job.workflowInstanceId}`,
+    expect(one.commands[0]).toBe(
+      'npx wrangler workflows trigger candidary-cover-backfill '
+      + `'{"runId":"${RUN}","jobId":"${source.jobId}","eventId":"${source.eventId}"}'`
+      + ` --id ${source.workflowInstanceId} --config ${WRANGLER_CONFIG_PATH}`,
     );
-    expect(batch.commands[0]).not.toContain('instances create');
-    expect(batch.commands[0]).not.toContain('--params');
+    expect(one.commands[0]).not.toContain('instances create');
+    expect(one.commands[0]).not.toContain('--params');
   });
 
   it('emits a PowerShell-quoted form beside it, because that is the shell here', () => {
-    const job = plannedJob(4);
-    const batch = buildDispatchBatch({ runId: RUN, queued: [job], nonterminal: 0, now: NOW });
+    const source = dispatchRow(4);
+    const one = buildDispatchBatch({
+      runId: RUN, rows: [source], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
+      latestClaimAt: null, now: NOW,
+    });
 
     // A single-quoted JSON payload survives POSIX and is eaten by PowerShell, so
     // the operator gets the doubled-quote form rather than an instance created
     // with no parameters at all.
-    expect(batch.powershellCommands[0]).toContain('""runId""');
-    expect(batch.powershellCommands[0]).toContain(`--id ${job.workflowInstanceId}`);
-    expect(batch.powershellCommands[0]).not.toContain("'{");
+    expect(one.powershellCommands[0]).toContain('""runId""');
+    expect(one.powershellCommands[0]).toContain(`--id ${source.workflowInstanceId}`);
+    expect(one.powershellCommands[0]).not.toContain("'{");
     expect(JSON.parse(
-      batch.powershellCommands[0]!.slice(
-        batch.powershellCommands[0]!.indexOf('"{'),
-        batch.powershellCommands[0]!.lastIndexOf('}"') + 2,
+      one.powershellCommands[0]!.slice(
+        one.powershellCommands[0]!.indexOf('"{'),
+        one.powershellCommands[0]!.lastIndexOf('}"') + 2,
       ).slice(1, -1).replace(/""/gu, '"'),
-    )).toEqual({ runId: RUN, jobId: job.jobId, eventId: job.eventId });
+    )).toEqual({ runId: RUN, jobId: source.jobId, eventId: source.eventId });
+  });
+});
+
+/**
+ * Wrangler 4.113 has `--remote` on `d1 execute` and does **not** have it on
+ * `workflows trigger` or `workflows instances terminate`, which take `--local`
+ * or nothing. Emitting `--remote` on a Workflow command is an unknown-argument
+ * error, so "always pass --remote" is not a rule that can be applied uniformly.
+ */
+describe('remote targeting', () => {
+  it('proves the account and the database before anything else runs', () => {
+    const [account, database, ...rest] = identityCheckCommands();
+    expect(account).toBe('npx wrangler whoami --json');
+    expect(database).toBe(
+      `npx wrangler d1 info ${COVER_BACKFILL_DATABASE_NAME} --config ${WRANGLER_CONFIG_PATH} --json`,
+    );
+    expect(rest).toEqual([]);
   });
 
-  it('refuses a negative in-flight count rather than inventing headroom', () => {
-    expect(() => buildDispatchBatch({ runId: RUN, queued, nonterminal: -1, now: NOW }))
-      .toThrow(/negative/u);
+  it('marks every D1 command remote and names the exact database and config', () => {
+    const read = d1ReadCommands(dispatchSql(RUN));
+    for (const command of [read.posix, read.powershell, d1FileCommand('output/x.sql')]) {
+      expect(command).toContain(`wrangler d1 execute ${COVER_BACKFILL_DATABASE_NAME}`);
+      expect(command).toContain('--remote');
+      expect(command).toContain(`--config ${WRANGLER_CONFIG_PATH}`);
+      expect(command).toContain('--json');
+      expect(command).not.toContain('--local');
+    }
+  });
+
+  it('never marks a Workflow command remote and never marks one local', () => {
+    const one = buildDispatchBatch({
+      runId: RUN, rows: [dispatchRow(1)], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
+      latestClaimAt: null, now: NOW,
+    });
+    for (const command of [...one.commands, ...one.powershellCommands]) {
+      expect(command).toContain(`--config ${WRANGLER_CONFIG_PATH}`);
+      expect(command).not.toContain('--remote');
+      expect(command).not.toContain('--local');
+    }
+  });
+});
+
+describe('the post-trigger confirmation', () => {
+  it('reads one job and its fence together, and mutates nothing', () => {
+    const sql = confirmSql({ runId: RUN, jobId: JOB, eventId: EVENT });
+    expect(sql).not.toMatch(/UPDATE|INSERT|DELETE/u);
+    expect(sql).toContain(`j.id = '${JOB}'`);
+    expect(sql).toContain(`j.run_id = '${RUN}'`);
+    expect(sql).toContain(`j.event_id = '${EVENT}'`);
+    expect(sql).toContain('LEFT JOIN event_cover_workflow_fences');
+    expect(() => confirmSql({ runId: RUN, jobId: 'nope', eventId: EVENT })).toThrow(/UUID/u);
+  });
+
+  it('confirms only an open fence at the claimed generation', () => {
+    const plan = evaluateConfirmation(parseConfirmPayload(envelope([confirmWireRow()])), expectation);
+    expect(plan.outcome).toBe('confirm');
+    expect(plan.commands).toEqual([]);
+    const statement = plan.statements[0]!;
+    expect(statement).toContain("dispatch_state = 'confirmed'");
+    expect(statement).toContain("dispatch_state = 'creating'");
+    expect(statement).toContain('dispatch_generation = 1');
+    // Every emitted statement rechecks the fence, so a deletion that lands
+    // between the read and the apply records no success.
+    expect(statement).toContain("f.state = 'open'");
+    expect(statement).toContain('f.dispatch_generation = 1');
+    expect(statement).toContain('deleted_at IS NULL');
+    // The fence claim timestamp is the durable dispatch clock and is not rewritten.
+    expect(statement).not.toContain('UPDATE event_cover_workflow_fences');
+  });
+
+  it('emits the terminate and failure unit for a blocked fence, and no confirmation', () => {
+    const plan = evaluateConfirmation(
+      parseConfirmPayload(envelope([confirmWireRow({ fence_state: 'deletion-blocked' })])),
+      expectation,
+    );
+    expect(plan.outcome).toBe('blocked');
+    expect(plan.statements.join('\n')).not.toContain("dispatch_state = 'confirmed'");
+    expect(plan.statements[0]).toContain("failure_code = 'EVENT_DELETED'");
+    expect(plan.statements[0]).toContain("f.state = 'deletion-blocked'");
+    expect(plan.commands[0]).toBe(
+      `npx wrangler workflows instances terminate ${COVER_BACKFILL_WORKFLOW_NAME}`
+      + ` cb1-${'0'.repeat(48)} --config ${WRANGLER_CONFIG_PATH}`,
+    );
+  });
+
+  it('emits no success mutation for a stale, missing, or ambiguous read', () => {
+    const cases: Array<[string, unknown]> = [
+      ['generation moved on', envelope([confirmWireRow({ dispatch_generation: 2, fence_generation: 2 })])],
+      ['fence already swept', envelope([confirmWireRow({ fence_state: null, fence_generation: null })])],
+      ['job already terminal', envelope([confirmWireRow({ dispatch_state: 'failed', status: 'failed' })])],
+      ['no row at all', envelope([])],
+      ['two rows', envelope([confirmWireRow(), confirmWireRow()])],
+    ];
+    for (const [label, payload] of cases) {
+      const plan = evaluateConfirmation(parseConfirmPayload(payload), expectation);
+      expect(plan.outcome, label).not.toBe('confirm');
+      expect(plan.statements, label).toEqual([]);
+      expect(plan.commands, label).toEqual([]);
+      expect(plan.reasons.length, label).toBeGreaterThan(0);
+    }
+  });
+
+  it('refuses a read that is not the job the operator claimed', () => {
+    const plan = evaluateConfirmation(
+      parseConfirmPayload(envelope([confirmWireRow({ event_id: OTHER_EVENT })])),
+      expectation,
+    );
+    expect(plan.outcome).toBe('unusable');
+    expect(plan.statements).toEqual([]);
+  });
+
+  /** Replaying the same confirmation is a guarded no-op, never a second write. */
+  it('treats an already-confirmed job as a replay', () => {
+    const plan = evaluateConfirmation(
+      parseConfirmPayload(envelope([confirmWireRow({ dispatch_state: 'confirmed' })])),
+      expectation,
+    );
+    expect(plan.outcome).toBe('confirm');
+    expect(plan.reasons.join(' ')).toMatch(/replay/u);
+    expect(plan.statements[0]).toContain("dispatch_state = 'creating'");
+  });
+});
+
+describe('the run-state read', () => {
+  it('reads exactly one run and mutates nothing', () => {
+    const sql = runStateSql(RUN);
+    expect(sql).not.toMatch(/UPDATE|INSERT|DELETE/u);
+    expect(sql).toContain(`id = '${RUN}'`);
+    expect(parseRunStatePayload(envelope([{
+      kind: 'run', run_id: RUN, mode: 'inventory', status: 'inventorying',
+      cursor: EVENT, inventory_sha256: 'b'.repeat(64),
+    }]))).toEqual(runState());
+    expect(() => parseRunStatePayload(envelope([]))).toThrow(/run state/u);
+    expect(() => parseRunStatePayload(envelope([
+      { kind: 'run', run_id: RUN, mode: 'inventory', status: 'nonsense', cursor: null, inventory_sha256: null },
+    ]))).toThrow(/status/u);
+  });
+});
+
+describe('the verification run', () => {
+  it('creates an executing verify run and can never record verified', () => {
+    const statement = verificationRunStatement({ runId: RUN, now: NOW });
+    expect(statement).toContain('INSERT INTO event_cover_backfill_runs');
+    expect(statement).toContain("'verify'");
+    expect(statement).toContain("'executing'");
+    expect(statement).not.toContain("'verified'");
+    expect(statement).not.toContain('verified_at');
   });
 });
 
@@ -320,12 +811,17 @@ describe('the zero-legacy proof', () => {
 });
 
 describe('the command line', () => {
-  it('defaults to the read-only inventory mode', () => {
+  it('accepts the five planner modes and nothing else', () => {
     expect(parseCoverBackfillArgs([]).mode).toBe('inventory');
-    expect(parseCoverBackfillArgs(['execute']).mode).toBe('execute');
+    for (const mode of ['inventory', 'execute', 'dispatch', 'confirm', 'verify'] as const) {
+      expect(parseCoverBackfillArgs([mode]).mode).toBe(mode);
+    }
     expect(() => parseCoverBackfillArgs(['apply'])).toThrow(/Unknown mode/u);
     expect(() => parseCoverBackfillArgs(['inventory', '--force'])).toThrow(/Unknown argument/u);
     expect(() => parseCoverBackfillArgs(['inventory', '--payload-file'])).toThrow(/needs a value/u);
+    expect(parseCoverBackfillArgs(['confirm', '--generation', '3']).generation).toBe(3);
+    expect(() => parseCoverBackfillArgs(['confirm', '--generation', 'two']))
+      .toThrow(/generation/u);
   });
 
   it('reads the confirmation from the environment, never from a flag', () => {
@@ -339,26 +835,67 @@ describe('the command line', () => {
     expect(runCli(['inventory'], {}, (message) => lines.push(message))).toBe(0);
     expect(lines.join('\n')).toContain('cover_render_set_id IS NULL');
     expect(lines.join('\n')).toContain('wrangler d1 execute');
+    expect(lines.join('\n')).toContain('--remote');
   });
 
-  it('emits nothing mutating in execute mode without the confirmation', () => {
+  it('emits nothing mutating in verify mode without the confirmation', () => {
     const lines: string[] = [];
     expect(runCli(['verify'], {}, (message) => lines.push(message))).toBe(0);
     expect(lines.join('\n')).toContain('legacyRows');
+    expect(lines.join('\n')).not.toContain('INSERT');
+  });
+
+  it('prints the durable dispatch read before it will plan anything', () => {
+    const lines: string[] = [];
+    expect(runCli(['dispatch', '--run-id', RUN], {}, (message) => lines.push(message))).toBe(0);
+    const text = lines.join('\n');
+    expect(text).toContain("'dispatchable' AS kind");
+    expect(text).not.toContain('wrangler workflows trigger');
+  });
+
+  it('requires a run id for dispatch and confirm', () => {
+    const lines: string[] = [];
+    expect(runCli(['dispatch'], {}, (message) => lines.push(message))).toBe(1);
+    expect(runCli(['confirm'], {}, (message) => lines.push(message))).toBe(1);
+    expect(lines.join('\n')).toContain('--run-id');
+  });
+});
+
+describe('artifacts stay inside the ignored output directory', () => {
+  const outputRoot = resolve(process.cwd(), 'output');
+  const planFile = 'output/cover-backfill-test-plan.json';
+  const sqlFile = resolve(process.cwd(), 'output/cover-backfill-test-plan.sql');
+
+  beforeAll(() => {
+    mkdirSync(outputRoot, { recursive: true });
+  });
+  afterAll(() => {
+    rmSync(resolve(process.cwd(), planFile), { force: true });
+    rmSync(sqlFile, { force: true });
+  });
+
+  it('refuses to write a plan anywhere else in the repository', () => {
+    const lines: string[] = [];
+    const code = runCli(
+      ['dispatch', '--run-id', RUN, '--payload-file', 'output/missing.json', '--plan-file', 'docs/leak.json'],
+      { CANDIDARY_COVER_BACKFILL_CONFIRM: '1' },
+      (message) => lines.push(message),
+    );
+    expect(code).toBe(1);
+    expect(lines.join('\n')).toContain('output');
+    expect(existsSync(resolve(process.cwd(), 'docs/leak.json'))).toBe(false);
   });
 });
 
 describe('the operator commands are checked in', () => {
-  it('exposes the three modes as npm scripts', () => {
+  it('exposes the five modes as npm scripts', () => {
     const packageJson = JSON.parse(
       readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'),
     ) as { scripts?: Record<string, string> };
-    expect(packageJson.scripts?.['cover-backfill:inventory'])
-      .toBe('node --experimental-strip-types scripts/cover-backfill.ts inventory');
-    expect(packageJson.scripts?.['cover-backfill:execute'])
-      .toBe('node --experimental-strip-types scripts/cover-backfill.ts execute');
-    expect(packageJson.scripts?.['cover-backfill:verify'])
-      .toBe('node --experimental-strip-types scripts/cover-backfill.ts verify');
+    for (const mode of ['inventory', 'execute', 'dispatch', 'confirm', 'verify']) {
+      expect(packageJson.scripts?.[`cover-backfill:${mode}`])
+        .toBe(`node --experimental-strip-types scripts/cover-backfill.ts ${mode}`);
+    }
     expect(existsSync(resolve(process.cwd(), 'scripts/cover-backfill.ts'))).toBe(true);
   });
 });

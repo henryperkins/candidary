@@ -27,6 +27,8 @@
     "event-start-backfill:verify": "node --experimental-strip-types scripts/event-start-backfill.ts verify",
     "cover-backfill:inventory": "node --experimental-strip-types scripts/cover-backfill.ts inventory",
     "cover-backfill:execute": "node --experimental-strip-types scripts/cover-backfill.ts execute",
+    "cover-backfill:dispatch": "node --experimental-strip-types scripts/cover-backfill.ts dispatch",
+    "cover-backfill:confirm": "node --experimental-strip-types scripts/cover-backfill.ts confirm",
     "cover-backfill:verify": "node --experimental-strip-types scripts/cover-backfill.ts verify",
     "cf-typegen": "wrangler types",
     "verify:bindings": "wrangler types --check",
