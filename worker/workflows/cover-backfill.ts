@@ -1,5 +1,6 @@
 import { COVER_CLEANUP_ROWS_PER_CLASS } from '../../shared/constants';
 import {
+  LIVE_COVER_DISPATCH_STATES,
   blockCoverBackfillDispatchSql,
   confirmCoverBackfillDispatchSql,
   coverDispatchReadSql,
@@ -502,6 +503,23 @@ export async function coverBackfillPreflight(
   if (job.status === 'skipped' || job.status === 'resolved') return stage(job.status);
   if (job.status === 'needs_replacement') return stage('needs_replacement', job.failure_code);
   if (job.status === 'failed' && job.retryable === 0) return stage('failed', job.failure_code);
+
+  // A fence on its own is not permission, because the fence and the claim are
+  // opened by two different statements. The launcher's dispatch artifact inserts
+  // the fence first — the claim's own guard requires it to already be there — and
+  // only the claim that follows carries the in-flight, rolling-minute, and
+  // single-active-run bounds. A refused claim therefore leaves an open fence
+  // standing at the job's current generation with `dispatch_state` still
+  // `pending`, while the artifact's trigger command runs whether the claim landed
+  // or not. Without this, that instance would satisfy the generation check below
+  // and convert the cover outside every bound the claim exists to enforce.
+  //
+  // Nothing is written: the job is still `pending` and still `queued`, so the
+  // next batch can claim it properly. Recording a failure here would burn a row
+  // whose only misfortune was to be triggered a moment too early.
+  if (!(LIVE_COVER_DISPATCH_STATES as readonly string[]).includes(job.dispatch_state)) {
+    return stage('skipped');
+  }
 
   // A present, open, generation-matching fence for this event is permission;
   // anything else, including no row at all, is refusal. See the same guard in

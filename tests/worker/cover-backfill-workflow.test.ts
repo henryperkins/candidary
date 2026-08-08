@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import {
+  ROLLING_CLAIM_WINDOW_SQL,
+  claimCoverBackfillDispatchSql,
+} from '../../shared/cover-dispatch';
 import { COVER_PIPELINE_VERSIONS, EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import { EventsRepository } from '../../worker/db/events';
 import {
@@ -349,6 +353,68 @@ describe('backfill identity', () => {
   });
 });
 
+describe('the dispatch-claim clock', () => {
+  let access: Access;
+  beforeEach(async () => {
+    await resetDatabase();
+    access = await eventAccess();
+  });
+
+  /**
+   * The rolling-minute budget filters `event_cover_workflow_fences.updated_at`
+   * against the database's `now`. If the claim stamped that column from the
+   * artifact's own clock the two would never be on one timeline: an operator who
+   * generated a batch, ran its identity checks and applied it two minutes later
+   * would write twenty-five fences already outside the window, and the only
+   * bound on the creation rate would report a full minute of headroom however
+   * many claims had just landed.
+   */
+  it('stamps the claim from the database clock, not from the artifact carrying it', async () => {
+    const { instanceId, payload } = await seedJob(access, {
+      dispatchState: 'pending', dispatchGeneration: 0, fenceGeneration: 0,
+    });
+    const quoted = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+    // Long before this test runs, so a stamp taken from it is unmistakable.
+    const generatedAt = '2020-01-01T00:00:00.000Z';
+
+    const claim = claimCoverBackfillDispatchSql({
+      binding: quoted('COVER_BACKFILL_WORKFLOW'),
+      runId: quoted(payload.runId),
+      jobId: quoted(payload.jobId),
+      eventId: quoted(payload.eventId),
+      generation: '0',
+      now: quoted(generatedAt),
+      workflowInstanceId: quoted(instanceId),
+    }, { inFlight: 25, perMinute: 25 });
+
+    const applied = await testEnv.DB.batch([
+      testEnv.DB.prepare(claim.job),
+      testEnv.DB.prepare(claim.fence),
+    ]);
+    expect(applied[0]!.meta.changes).toBe(1);
+
+    const fence = await row<{ updated_at: string; dispatch_generation: number }>(
+      'SELECT updated_at, dispatch_generation FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
+      instanceId,
+    );
+    expect(fence.dispatch_generation).toBe(1);
+    expect(fence.updated_at).not.toBe(generatedAt);
+    // The exact shape the rest of the schema stores, so the window predicate can
+    // compare against it byte for byte.
+    expect(fence.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+    // And the budget can actually see it, which is the whole point.
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?1 AND dispatch_generation > 0
+        AND updated_at >= ${ROLLING_CLAIM_WINDOW_SQL}
+    `, instanceId)).toEqual({ count: 1 });
+
+    // The job keeps the artifact's timestamp: only the fence is the clock.
+    expect(await row('SELECT updated_at FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ updated_at: generatedAt });
+  });
+});
+
 describe('backfill preflight', () => {
   let access: Access;
   beforeEach(async () => {
@@ -386,6 +452,28 @@ describe('backfill preflight', () => {
     // catches an instance whose row is still live — the two cases below.
     expect(stage.outcome).toMatchObject({ status: 'failed', failureCode: 'EVENT_DELETED' });
     expect(recording.calls).toHaveLength(0);
+  });
+
+  /**
+   * The fence and the claim are two statements, and only the second carries the
+   * bounds. A refused claim leaves the first standing, so an instance triggered
+   * from the same artifact arrives with an open, generation-matching fence in
+   * front of a job nobody ever claimed.
+   */
+  it('refuses to work for a job whose claim was refused, and writes nothing', async () => {
+    const { payload } = await seedJob(access, {
+      dispatchState: 'pending', dispatchGeneration: 0, fenceGeneration: 0,
+    });
+
+    const recording = withRecordingImages();
+    const stage = await coverBackfillPreflight(recording.env, payload, now);
+
+    expect(stage.shouldContinue).toBe(false);
+    expect(stage.outcome.status).toBe('skipped');
+    expect(recording.calls).toHaveLength(0);
+    // Still dispatchable: the next batch must be able to claim it properly.
+    expect(await row('SELECT dispatch_state, status FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'pending', status: 'queued' });
   });
 
   it('refuses to work when no fence exists at all', async () => {

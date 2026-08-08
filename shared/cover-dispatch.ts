@@ -46,6 +46,24 @@ export const LIVE_COVER_DISPATCH_STATES = [
 /** The rolling creation window, measured by the database's clock, never the caller's. */
 export const ROLLING_CLAIM_WINDOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-60 seconds')";
 
+/**
+ * The instant a claim is *applied*, on the same clock the window above is read
+ * from, and the only value that may be written into the dispatch-claim column.
+ *
+ * The window and the column it filters have to come from one clock or the bound
+ * measures nothing. `values.now` is stamped when an artifact is *generated* — the
+ * operator then runs two identity checks, reads twenty-five trigger commands and
+ * applies the file, which is minutes later on a good day. Writing that instant
+ * into `updated_at` would make every rolling-minute predicate compare the
+ * database's now against the launcher's then, so the budget would report a full
+ * minute of headroom however many claims had just landed, and a workstation
+ * clock a minute slow would disable it outright.
+ *
+ * Emits exactly `YYYY-MM-DDTHH:MM:SS.sssZ`, so it stays byte-comparable with the
+ * `toISOString()` values the rest of the schema stores.
+ */
+export const CLAIM_APPLIED_AT_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+
 export interface CoverDispatchSqlValues {
   /** The workflow binding name, rendered as a value. */
   binding: string;
@@ -119,8 +137,9 @@ export function coverDispatchReadSql(values: {
  *
  * The fence statement carries `changes() = 1`, so the fence moves only when the
  * job actually moved. Its `updated_at` becomes the durable dispatch-claim clock
- * that the rolling-minute predicates below read; confirmation must never
- * rewrite it.
+ * that the rolling-minute predicates below read, and is therefore stamped from
+ * the database's own clock rather than from `values.now`; confirmation must
+ * never rewrite it.
  */
 export function claimCoverBackfillDispatchSql(
   values: CoverDispatchSqlValues & { workflowInstanceId: string },
@@ -160,7 +179,7 @@ export function claimCoverBackfillDispatchSql(
     fence: 'UPDATE event_cover_workflow_fences'
       + ' SET dispatch_generation = (SELECT j.dispatch_generation'
       + `   FROM event_cover_backfill_jobs j WHERE j.id = ${values.jobId}),`
-      + ` updated_at = ${values.now}`
+      + ` updated_at = ${CLAIM_APPLIED_AT_SQL}`
       + ` WHERE workflow_binding = ${values.binding}`
       + ` AND workflow_instance_id = ${values.workflowInstanceId}`
       + ` AND event_id = ${values.eventId} AND state = 'open' AND changes() = 1`,
