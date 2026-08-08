@@ -9,6 +9,10 @@ import {
   MAX_COVER_BACKFILL_IN_FLIGHT,
   MAX_COVER_BACKFILL_PAGE_SIZE,
 } from '../../shared/constants';
+import {
+  blockCoverBackfillDispatchSql,
+  confirmCoverBackfillDispatchSql,
+} from '../../shared/cover-dispatch';
 import { COVER_PIPELINE_VERSIONS } from '../../shared/event-cover';
 import {
   COVER_BACKFILL_BINDING,
@@ -20,6 +24,7 @@ import {
   COVER_BACKFILL_WORKFLOW_NAME,
   COVER_DISPATCH_STATES,
   COVER_FENCE_STATES,
+  LIVE_DISPATCH_STATES,
   WRANGLER_CONFIG_PATH,
   backfillInstanceId,
   buildBackfillRunPlan,
@@ -674,6 +679,101 @@ describe('remote targeting', () => {
   });
 });
 
+/**
+ * The claim is the one artifact that changes durable state before the platform
+ * is touched, so every refusal it can make is re-evaluated by the database at
+ * apply time rather than inherited from the read that produced it.
+ */
+describe('the transactional claim', () => {
+  const one = () => buildDispatchBatch({
+    runId: RUN, rows: [dispatchRow(1)], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
+    latestClaimAt: null, now: NOW,
+  });
+
+  it('opens the fence, then moves the job and the fence to the next generation', () => {
+    const [fence, job, fenceClaim, ...rest] = one().claimStatements;
+    expect(rest).toEqual([]);
+    expect(fence).toContain('INSERT INTO event_cover_workflow_fences');
+    expect(job).toContain("dispatch_state = 'creating'");
+    expect(job).toContain('dispatch_generation = dispatch_generation + 1');
+    expect(job).toContain("dispatch_state = 'pending'");
+    expect(job).toContain("status = 'queued'");
+    // The fence moves only if the job did, and it takes the job's new generation
+    // rather than a number the artifact carries.
+    expect(fenceClaim).toContain('UPDATE event_cover_workflow_fences');
+    expect(fenceClaim).toContain('changes() = 1');
+    expect(fenceClaim).toContain('SELECT j.dispatch_generation');
+  });
+
+  it('carries all four refusals into the statement itself', () => {
+    const job = one().claimStatements[1]!;
+    // Another run is active.
+    expect(job).toContain("r.status IN ('inventorying', 'executing')");
+    // In-flight headroom is zero — counted over live dispatch states, never over
+    // every queued row.
+    expect(job).toContain(`j.dispatch_state IN (${LIVE_DISPATCH_STATES.map((s) => `'${s}'`).join(', ')})`);
+    expect(job).toContain(`) < ${MAX_COVER_BACKFILL_IN_FLIGHT}`);
+    // This same job was claimed inside the last minute.
+    expect(job).toContain(dispatchRow(1).workflowInstanceId);
+    // Twenty-five fences were claimed inside the rolling minute.
+    expect(job).toContain(`) < ${MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE}`);
+    expect(job).toContain("'-60 seconds'");
+    // And the two the event owns: not deleted, not being purged.
+    expect(job).toContain('deleted_at IS NULL');
+    expect(job).toContain('event_cover_purge_progress');
+  });
+
+  /**
+   * The bound that matters is the one that holds between invocations. A batch
+   * that claims its twenty-five and then reads D1 again must find itself full,
+   * not merely decline to exceed itself inside a single call.
+   */
+  it('holds the in-flight and rolling-minute bounds across two invocations', () => {
+    const rows = Array.from({ length: 40 }, (_unused, index) => dispatchRow(index));
+    const first = buildDispatchBatch({
+      runId: RUN, rows, nonterminal: 0, activeRuns: 0, minuteClaims: 0, latestClaimAt: null, now: NOW,
+    });
+    expect(first.create).toHaveLength(MAX_COVER_BACKFILL_CREATE_BATCH);
+
+    // What D1 now reports: those claims are live and were made this minute.
+    const second = buildDispatchBatch({
+      runId: RUN,
+      rows: rows.slice(first.create.length),
+      nonterminal: first.create.length,
+      activeRuns: 0,
+      minuteClaims: first.create.length,
+      latestClaimAt: NOW,
+      now: '2026-08-05T10:00:30.000Z',
+    });
+    expect(second.create).toEqual([]);
+    expect(second.notBefore).toBe('2026-08-05T10:01:00.000Z');
+
+    // A minute later the rolling window has emptied, but the in-flight ceiling
+    // has not: those instances are still running.
+    const third = buildDispatchBatch({
+      runId: RUN,
+      rows: rows.slice(first.create.length),
+      nonterminal: first.create.length,
+      activeRuns: 0,
+      minuteClaims: 0,
+      latestClaimAt: NOW,
+      now: '2026-08-05T10:01:30.000Z',
+    });
+    expect(third.create).toEqual([]);
+    expect(third.limitingBound).toBe('in-flight');
+  });
+
+  it('counts only live dispatch states as in flight', () => {
+    const sql = dispatchSql(RUN);
+    // A run whose jobs are all still `pending` has nothing in flight; counting
+    // them would make any run longer than one batch refuse its own first
+    // dispatch and never recover.
+    expect(sql).toContain(`j.dispatch_state IN (${LIVE_DISPATCH_STATES.map((s) => `'${s}'`).join(', ')})`
+      .replace('j.dispatch_state', 'dispatch_state'));
+    expect(LIVE_DISPATCH_STATES).not.toContain('pending');
+  });
+});
+
 describe('the post-trigger confirmation', () => {
   it('reads one job and its fence together, and mutates nothing', () => {
     const sql = confirmSql({ runId: RUN, jobId: JOB, eventId: EVENT });
@@ -732,6 +832,41 @@ describe('the post-trigger confirmation', () => {
       expect(plan.commands, label).toEqual([]);
       expect(plan.reasons.length, label).toBeGreaterThan(0);
     }
+  });
+
+  /**
+   * The parity that matters. The operator's statement and the Worker's are the
+   * same predicates because there is exactly one place they are written, so a
+   * guard removed from the shared builder disappears from both sides at once and
+   * neither can quietly become the weaker contract.
+   */
+  it('emits exactly the shared predicates the Worker binds', () => {
+    const literals = {
+      binding: `'${COVER_BACKFILL_BINDING}'`,
+      runId: `'${RUN}'`,
+      jobId: `'${JOB}'`,
+      eventId: `'${EVENT}'`,
+      generation: '1',
+      now: `'${NOW}'`,
+    };
+    const confirmed = evaluateConfirmation(
+      parseConfirmPayload(envelope([confirmWireRow()])), expectation,
+    );
+    expect(confirmed.statements[0]).toBe(`${confirmCoverBackfillDispatchSql(literals)};`);
+
+    const blocked = evaluateConfirmation(
+      parseConfirmPayload(envelope([confirmWireRow({ fence_state: 'deletion-blocked' })])),
+      expectation,
+    );
+    expect(blocked.statements[0]).toBe(`${blockCoverBackfillDispatchSql(literals)};`);
+
+    for (const clause of [
+      "dispatch_state = 'creating'", 'dispatch_generation = 1',
+      "f.state = 'open'", 'f.dispatch_generation = 1', 'deleted_at IS NULL',
+    ]) expect(confirmCoverBackfillDispatchSql(literals)).toContain(clause);
+    for (const clause of [
+      "failure_code = 'EVENT_DELETED'", "f.state = 'deletion-blocked'", 'retryable = 0',
+    ]) expect(blockCoverBackfillDispatchSql(literals)).toContain(clause);
   });
 
   it('refuses a read that is not the job the operator claimed', () => {

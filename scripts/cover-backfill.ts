@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type * as ConstantsModule from '../shared/constants';
+import type * as CoverDispatchModule from '../shared/cover-dispatch';
 
 /**
  * The legacy-cover backfill launcher: inventory, execute, dispatch, confirm, verify.
@@ -36,6 +37,13 @@ import type * as ConstantsModule from '../shared/constants';
 
 const constantsModulePath = '../shared/constants.ts';
 const constants = await import(constantsModulePath) as typeof ConstantsModule;
+/**
+ * The claim and confirmation predicates the Worker also renders. Loaded the same
+ * way `constants` is, because Node's type stripping cannot follow the
+ * extensionless imports the rest of `shared/` uses.
+ */
+const coverDispatchModulePath = '../shared/cover-dispatch.ts';
+const dispatch = await import(coverDispatchModulePath) as typeof CoverDispatchModule;
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /**
@@ -56,7 +64,7 @@ const CONFIRM_ARTIFACT_KIND = 'candidary-cover-backfill-confirm' as const;
 const ARTIFACT_VERSION = 2 as const;
 
 export const COVER_BACKFILL_WORKFLOW_NAME = 'candidary-cover-backfill';
-export const COVER_BACKFILL_BINDING = 'COVER_BACKFILL_WORKFLOW';
+export const COVER_BACKFILL_BINDING = dispatch.COVER_BACKFILL_WORKFLOW_BINDING;
 export const COVER_BACKFILL_DATABASE_NAME = 'candidary-core';
 export const COVER_BACKFILL_DATABASE_ID = '60bec5de-c8c7-41b5-a26b-2d3f7d184c71';
 export const COVER_BACKFILL_WORKER_NAME = 'candidary';
@@ -105,10 +113,16 @@ export const COVER_BACKFILL_RUN_STATUSES = [
 ] as const;
 export const COVER_BACKFILL_RUN_MODES = ['inventory', 'execute', 'verify'] as const;
 
-/** The statuses that still occupy in-flight capacity. */
-export const NONTERMINAL_JOB_STATUSES = [
-  'queued', 'normalizing', 'rendering', 'finalizing',
-] as const;
+/** The statuses that still occupy ledger capacity. */
+export const NONTERMINAL_JOB_STATUSES = dispatch.NONTERMINAL_COVER_BACKFILL_STATUSES;
+/**
+ * The dispatch states that occupy *platform* capacity.
+ *
+ * Not the same set, and the difference is load-bearing: a `pending` job has no
+ * instance behind it, so counting it as in flight would leave any run of more
+ * than twenty-five jobs refusing its own first dispatch forever.
+ */
+export const LIVE_DISPATCH_STATES = dispatch.LIVE_COVER_DISPATCH_STATES;
 
 export type CoverDispatchState = typeof COVER_DISPATCH_STATES[number];
 export type CoverBackfillJobStatus = typeof COVER_BACKFILL_JOB_STATUSES[number];
@@ -183,6 +197,12 @@ export type DispatchBound = 'none' | 'active-run' | 'in-flight' | 'minute' | 'ba
 
 export interface DispatchBatch {
   create: DurableDispatchRow[];
+  /**
+   * The transactional first part of each unit, in apply order: open the fence at
+   * the job's current generation, move the job `pending → creating` at the next
+   * one, and carry that same generation and timestamp onto the fence.
+   */
+  claimStatements: string[];
   /** POSIX-quoted `wrangler workflows trigger` invocations. */
   commands: string[];
   /** The same invocations quoted for PowerShell, which this repository uses. */
@@ -329,9 +349,14 @@ export function dispatchSql(runId: string): string {
     ' AND e.deleted_at IS NULL',
     ' AND NOT EXISTS (SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = j.event_id)',
     ` ORDER BY j.created_at, j.id LIMIT ${constants.MAX_COVER_BACKFILL_CREATE_BATCH};`,
+    // In flight, not merely nonterminal: a `pending` job is queued in the ledger
+    // and has no instance behind it. Counting those would make a run of more
+    // than one batch refuse its own first dispatch and never recover.
     "SELECT 'nonterminal' AS kind, count(*) AS value, NULL AS at",
     ' FROM event_cover_backfill_jobs',
-    ` WHERE run_id = ${run} AND status IN (${NONTERMINAL_JOB_STATUSES.map(sqlString).join(', ')})`,
+    ` WHERE run_id = ${run}`,
+    ` AND dispatch_state IN (${LIVE_DISPATCH_STATES.map(sqlString).join(', ')})`,
+    ` AND status IN (${NONTERMINAL_JOB_STATUSES.map(sqlString).join(', ')})`,
     " UNION ALL SELECT 'activeRuns', count(*), NULL FROM event_cover_backfill_runs",
     ` WHERE id <> ${run} AND status IN ('inventorying', 'executing')`,
     " UNION ALL SELECT 'minuteClaims', count(*), NULL FROM event_cover_workflow_fences f",
@@ -344,23 +369,43 @@ export function dispatchSql(runId: string): string {
   ].join('');
 }
 
-/** The post-trigger read for exactly one dispatch unit, job and fence together. */
+/**
+ * The same predicate inputs the Worker binds, rendered as reviewable literals.
+ *
+ * A generated artifact has to be readable as text before an operator applies it,
+ * which is the one reason the two sides render differently at all. Everything
+ * between the values is the shared builder's.
+ */
+function dispatchSqlValues(input: {
+  runId: string; jobId: string; eventId: string; generation: number; now: string;
+}): CoverDispatchModule.CoverDispatchSqlValues {
+  return {
+    binding: sqlString(COVER_BACKFILL_BINDING),
+    runId: sqlString(assertUuid(input.runId, 'run ID')),
+    jobId: sqlString(assertUuid(input.jobId, 'job ID')),
+    eventId: sqlString(assertUuid(input.eventId, 'event ID')),
+    generation: String(assertGeneration(input.generation)),
+    now: sqlString(input.now),
+  };
+}
+
+/**
+ * The post-trigger read for exactly one dispatch unit, job and fence together.
+ *
+ * Rendered from the shared builder the Worker also uses, so the operator's
+ * confirmation and the Worker's backstop are answering from the same shape of
+ * evidence rather than two hand-written approximations of it.
+ */
 export function confirmSql(input: { runId: string; jobId: string; eventId: string }): string {
   assertUuid(input.runId, 'run ID');
   assertUuid(input.jobId, 'job ID');
   assertUuid(input.eventId, 'event ID');
-  return [
-    "SELECT 'confirm' AS kind, j.run_id AS run_id, j.id AS job_id,",
-    ' j.event_id AS event_id, j.workflow_instance_id AS workflow_instance_id,',
-    ' j.dispatch_state AS dispatch_state, j.dispatch_generation AS dispatch_generation,',
-    ' j.status AS status, f.state AS fence_state, f.dispatch_generation AS fence_generation',
-    ' FROM event_cover_backfill_jobs j',
-    ' LEFT JOIN event_cover_workflow_fences f',
-    `   ON f.workflow_binding = ${sqlString(COVER_BACKFILL_BINDING)}`,
-    '  AND f.workflow_instance_id = j.workflow_instance_id AND f.event_id = j.event_id',
-    ` WHERE j.id = ${sqlString(input.jobId)} AND j.run_id = ${sqlString(input.runId)}`,
-    ` AND j.event_id = ${sqlString(input.eventId)};`,
-  ].join('');
+  return `${dispatch.coverDispatchReadSql({
+    binding: sqlString(COVER_BACKFILL_BINDING),
+    runId: sqlString(input.runId),
+    jobId: sqlString(input.jobId),
+    eventId: sqlString(input.eventId),
+  })};`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -873,6 +918,7 @@ export function buildDispatchBatch(input: {
     withheld[bucket] = eligible.length;
     return {
       create: [],
+      claimStatements: [],
       commands: [],
       powershellCommands: [],
       fenceStatements: [],
@@ -922,6 +968,30 @@ export function buildDispatchBatch(input: {
     + ' ON CONFLICT (workflow_binding, workflow_instance_id) DO NOTHING;'
   ));
 
+  // The unit's first part, and the reason the bounds are not merely a property
+  // of the read that produced this artifact. A generated claim can sit in a
+  // terminal for minutes; every refusal is re-evaluated by the database at apply
+  // time, so a batch that has gone stale simply changes nothing.
+  const claimStatements = create.flatMap((row, index) => {
+    const claim = dispatch.claimCoverBackfillDispatchSql(
+      {
+        ...dispatchSqlValues({
+          runId: input.runId,
+          jobId: row.jobId,
+          eventId: row.eventId,
+          generation: row.dispatchGeneration,
+          now: input.now,
+        }),
+        workflowInstanceId: sqlString(row.workflowInstanceId),
+      },
+      {
+        inFlight: constants.MAX_COVER_BACKFILL_IN_FLIGHT,
+        perMinute: constants.MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
+      },
+    );
+    return [fenceStatements[index]!, `${claim.job};`, `${claim.fence};`];
+  });
+
   // Read off `wrangler workflows --help` at 4.113.0 rather than assumed: there is
   // no `workflows instances create`. The instance subcommands are list, describe,
   // send-event, terminate, restart, pause, and resume; creation is `trigger`,
@@ -949,6 +1019,7 @@ export function buildDispatchBatch(input: {
 
   return {
     create,
+    claimStatements,
     commands,
     powershellCommands,
     fenceStatements,
@@ -1001,20 +1072,7 @@ export function evaluateConfirmation(
     );
   }
 
-  const now = sqlString(expected.now);
-  const job = sqlString(expected.jobId);
-  const run = sqlString(expected.runId);
-  const event = sqlString(expected.eventId);
-  const binding = sqlString(COVER_BACKFILL_BINDING);
-  const fenceExists = (state: CoverFenceState, generation: number | 'any') => (
-    'EXISTS (SELECT 1 FROM event_cover_workflow_fences f'
-    + ` WHERE f.workflow_binding = ${binding}`
-    + '   AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id'
-    + '   AND f.event_id = event_cover_backfill_jobs.event_id'
-    + ` AND f.state = '${state}'`
-    + (generation === 'any' ? '' : ` AND f.dispatch_generation = ${generation}`)
-    + ')'
-  );
+  const values = dispatchSqlValues(expected);
 
   if (row.fenceState === null) {
     return nothing('stale', 'The fence for this instance no longer exists.');
@@ -1024,15 +1082,7 @@ export function evaluateConfirmation(
     return {
       outcome: 'blocked',
       reasons: ['An event purge owns this fence; the dispatch unit settles as EVENT_DELETED.'],
-      statements: [
-        'UPDATE event_cover_backfill_jobs'
-        + ` SET dispatch_state = 'blocked', status = 'failed', retryable = 0,`
-        + ` failure_code = 'EVENT_DELETED', terminal_at = ${now}, updated_at = ${now}`
-        + ` WHERE id = ${job} AND run_id = ${run} AND event_id = ${event}`
-        + ` AND dispatch_generation = ${expected.generation}`
-        + ` AND status IN (${NONTERMINAL_JOB_STATUSES.map(sqlString).join(', ')})`
-        + ` AND ${fenceExists('deletion-blocked', 'any')};`,
-      ],
+      statements: [`${dispatch.blockCoverBackfillDispatchSql(values)};`],
       commands: [terminateCommand(row.workflowInstanceId)],
       powershellCommands: [terminateCommand(row.workflowInstanceId)],
     };
@@ -1055,15 +1105,7 @@ export function evaluateConfirmation(
   return {
     outcome: 'confirm',
     reasons,
-    statements: [
-      'UPDATE event_cover_backfill_jobs'
-      + ` SET dispatch_state = 'confirmed', updated_at = ${now}`
-      + ` WHERE id = ${job} AND run_id = ${run} AND event_id = ${event}`
-      + ` AND dispatch_state = 'creating' AND dispatch_generation = ${expected.generation}`
-      + ` AND ${fenceExists('open', expected.generation)}`
-      + ' AND EXISTS (SELECT 1 FROM events e'
-      + '   WHERE e.id = event_cover_backfill_jobs.event_id AND e.deleted_at IS NULL);',
-    ],
+    statements: [`${dispatch.confirmCoverBackfillDispatchSql(values)};`],
     commands: [],
     powershellCommands: [],
   };
@@ -1340,25 +1382,41 @@ export function runCli(
       return 0;
     }
     const sqlFile = sqlPathFor(request.planFile);
-    writeArtifact(sqlFile, `${batch.fenceStatements.join('\n')}\n`);
+    writeArtifact(sqlFile, `${batch.claimStatements.join('\n')}\n`);
+    // The four ordered parts, in the order they must be run: claim, trigger,
+    // post-trigger read and confirm, then a receipt read that proves the
+    // generation and dispatch state the unit actually left behind.
+    const readFor = (row: DurableDispatchRow) => d1ReadCommands(
+      confirmSql({ runId: request.runId!, jobId: row.jobId, eventId: row.eventId }),
+    );
     const steps = [
       ...identityCheckCommands().map((command) => ({ kind: 'identity-check', command })),
-      { kind: 'fence-claim', command: d1FileCommand(sqlFile) },
+      { kind: 'claim', command: d1FileCommand(sqlFile) },
       ...batch.create.map((row, index) => ({
         kind: 'trigger',
         jobId: row.jobId,
         eventId: row.eventId,
         workflowInstanceId: row.workflowInstanceId,
-        dispatchGeneration: row.dispatchGeneration,
+        // The generation the claim moves this job to, which is the one the
+        // confirm step must be run with.
+        dispatchGeneration: row.dispatchGeneration + 1,
         command: batch.commands[index]!,
         powershellCommand: batch.powershellCommands[index]!,
       })),
       ...batch.create.map((row) => ({
         kind: 'confirm-read',
         jobId: row.jobId,
-        command: d1ReadCommands(
-          confirmSql({ runId: request.runId!, jobId: row.jobId, eventId: row.eventId }),
-        ).posix,
+        confirmWith: `npm run cover-backfill:confirm -- --run-id ${request.runId}`
+          + ` --job-id ${row.jobId} --event-id ${row.eventId}`
+          + ` --generation ${row.dispatchGeneration + 1}`,
+        command: readFor(row).posix,
+        powershellCommand: readFor(row).powershell,
+      })),
+      ...batch.create.map((row) => ({
+        kind: 'receipt-read',
+        jobId: row.jobId,
+        command: readFor(row).posix,
+        powershellCommand: readFor(row).powershell,
       })),
     ].map((step, index) => ({ order: index + 1, ...step }));
     writeArtifact(request.planFile, `${JSON.stringify({

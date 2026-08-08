@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { COVER_PIPELINE_VERSIONS, EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import { EventsRepository } from '../../worker/db/events';
 import {
+  confirmCoverBackfillDispatch,
+  coverBackfillConfirmStep,
   coverBackfillDependencyVersions,
   coverBackfillFinalize,
   coverBackfillInstanceId,
@@ -10,8 +12,10 @@ import {
   coverBackfillPreflight,
   coverBackfillProfileStep,
   proveZeroLegacyCovers,
+  recoverStaleInitialBackfillDispatches,
   resolveSupersededBackfillJobs,
 } from '../../worker/workflows/cover-backfill';
+import type { CoverBackfillWorkflowAccessor } from '../../worker/workflows/cover-platform';
 import { coverKeyFingerprint, coverMasterKey } from '../../worker/storage/event-cover-keys';
 import {
   reconcileEventCoverPurge,
@@ -63,10 +67,29 @@ async function row<T>(sql: string, ...binds: unknown[]): Promise<T> {
   return (await testEnv.DB.prepare(sql).bind(...binds).first<T>())!;
 }
 
+interface SeedOptions {
+  revision?: number;
+  /** Defaults to a job already past its dispatch, which is what most steps need. */
+  dispatchState?: string;
+  dispatchGeneration?: number;
+  /** Defaults to matching the job, which is what an uninterrupted claim leaves. */
+  fenceGeneration?: number;
+  fenceState?: string;
+  /** How long ago the claim was made, for the staleness threshold. */
+  claimedAt?: Date;
+  status?: string;
+}
+
 /** One legacy row, one run, and one job created against exactly that row. */
-async function seedJob(access: Access, options: { revision?: number } = {}) {
+async function seedJob(access: Access, options: SeedOptions = {}) {
   const key = legacyKey(access.event.id);
   const revision = options.revision ?? 0;
+  const dispatchState = options.dispatchState ?? 'confirmed';
+  const generation = options.dispatchGeneration ?? 0;
+  const fenceGeneration = options.fenceGeneration ?? generation;
+  const fenceState = options.fenceState ?? 'open';
+  const claimedAt = (options.claimedAt ?? now).toISOString();
+  const status = options.status ?? 'queued';
   await testEnv.MEDIA_BUCKET.put(key, new Uint8Array([0xff, 0xd8, 0xff, 0xe0]));
   await testEnv.DB.prepare(
     'UPDATE events SET cover_object_key = ?, cover_revision = ? WHERE id = ?',
@@ -82,19 +105,21 @@ async function seedJob(access: Access, options: { revision?: number } = {}) {
     INSERT INTO event_cover_backfill_jobs (
       id, run_id, event_id, expected_revision, legacy_key_fingerprint, workflow_instance_id,
       dispatch_state, dispatch_generation, status, dependency_versions_json, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'confirmed', 0, 'queued', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     JOB, RUN, access.event.id, revision, await coverKeyFingerprint(key), instanceId,
-    JSON.stringify(coverBackfillDependencyVersions()), now.toISOString(), now.toISOString(),
+    dispatchState, generation, status,
+    JSON.stringify(coverBackfillDependencyVersions()), now.toISOString(), claimedAt,
   ).run();
 
   await testEnv.DB.prepare(`
     INSERT INTO event_cover_workflow_fences (
       workflow_binding, workflow_instance_id, event_id, dispatch_generation, state,
       created_at, updated_at, expires_at
-    ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, 0, 'open', ?, ?, ?)
+    ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    instanceId, access.event.id, now.toISOString(), now.toISOString(),
+    instanceId, access.event.id, fenceGeneration, fenceState,
+    now.toISOString(), claimedAt,
     new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString(),
   ).run();
 
@@ -106,6 +131,200 @@ async function renderEveryProfile(env: AppEnv, payload: { runId: string; jobId: 
     await coverBackfillProfileStep(env, payload, profile.id, now);
   }
 }
+
+/**
+ * A platform that records what it was asked to create and refuses to be asked
+ * anything else. `lookup` throws on purpose: initial-create recovery replays an
+ * accepted claim with its own stored ID, so it must never consult instance
+ * status — inferring absence from a status read is the one thing the adapter
+ * refuses to certify.
+ */
+function recordingBackfillAccessor(options: { failCreate?: boolean } = {}) {
+  const created: string[] = [];
+  const accessor: CoverBackfillWorkflowAccessor = {
+    async lookup() { throw new Error('recovery must not look an instance up'); },
+    async createBatch(input) {
+      if (options.failCreate) throw new Error('platform unavailable');
+      for (const entry of input) created.push(entry.id);
+    },
+    async resume() { throw new Error('unreachable'); },
+    async restart() { throw new Error('unreachable'); },
+    async terminate() { throw new Error('unreachable'); },
+  };
+  return { accessor, created };
+}
+
+const STALE = new Date(now.getTime() - 5 * 60 * 1000);
+
+describe('initial dispatch confirmation', () => {
+  let access: Access;
+  beforeEach(async () => {
+    await resetDatabase();
+    access = await eventAccess();
+  });
+
+  const claimed = (extra: SeedOptions = {}) => seedJob(access, {
+    dispatchState: 'creating', dispatchGeneration: 1, ...extra,
+  });
+
+  it('confirms the claimed generation without moving the dispatch clock', async () => {
+    const { payload, instanceId } = await claimed();
+    const before = await row<{ updated_at: string }>(
+      'SELECT updated_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    );
+
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now }))
+      .toBe('confirmed');
+
+    expect(await row('SELECT dispatch_state, dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+    // The fence's `updated_at` is the durable dispatch-claim clock the rolling
+    // minute is measured from. Confirming must not hand the next batch a minute
+    // of capacity it never earned.
+    expect(await row('SELECT dispatch_generation, updated_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId))
+      .toEqual({ dispatch_generation: 1, updated_at: before.updated_at });
+  });
+
+  it('is a guarded replay the second time', async () => {
+    const { payload } = await claimed();
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now })).toBe('confirmed');
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now })).toBe('confirmed');
+    expect(await row('SELECT dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_generation: 1 });
+  });
+
+  it('refuses a generation the job is not standing at', async () => {
+    const { payload } = await claimed();
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 2, now })).toBe('stale');
+    expect(await row('SELECT dispatch_state FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'creating' });
+  });
+
+  it('refuses a fence that was swept, and one at another generation', async () => {
+    const { payload, instanceId } = await claimed({ fenceGeneration: 4 });
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now })).toBe('stale');
+
+    await testEnv.DB.prepare('DELETE FROM event_cover_workflow_fences WHERE workflow_instance_id = ?')
+      .bind(instanceId).run();
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now })).toBe('stale');
+    expect(await row('SELECT dispatch_state FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'creating' });
+  });
+
+  it('refuses a job that has not been claimed yet', async () => {
+    const { payload } = await seedJob(access, { dispatchState: 'pending', dispatchGeneration: 0 });
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 0, now })).toBe('stale');
+    expect(await row('SELECT dispatch_state FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'pending' });
+  });
+
+  /**
+   * The Workflow's own entry point carries no generation — the payload is
+   * immutable across restarts and the generation is not — so it confirms
+   * whichever one the ledger has the job standing at.
+   */
+  it('confirms from the payload alone, at whatever generation the ledger holds', async () => {
+    const { payload } = await claimed({ dispatchGeneration: 3, fenceGeneration: 3 });
+    expect(await coverBackfillConfirmStep(testEnv, payload, now)).toBe('confirmed');
+    expect(await row('SELECT dispatch_state, dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'confirmed', dispatch_generation: 3 });
+
+    await testEnv.DB.prepare('DELETE FROM event_cover_backfill_jobs WHERE id = ?').bind(JOB).run();
+    expect(await coverBackfillConfirmStep(testEnv, payload, now)).toBe('stale');
+  });
+
+  it('settles the unit as EVENT_DELETED when a purge owns the fence', async () => {
+    const { payload } = await claimed();
+    // Through the production coordinator, never a hand-written fence state.
+    const purge = await reconcileEventCoverPurge(testEnv, access.event.id, now, blockingAccessors());
+    expect(purge).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now })).toBe('blocked');
+
+    // The coordinator's own batch already made this job terminal, so the check
+    // above cannot show the confirmation writing anything. Put the job back to a
+    // live claim — the fence stays exactly as the coordinator left it — and the
+    // settlement statement is the only thing that can move it.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET dispatch_state = 'creating', status = 'queued', failure_code = NULL,
+          retryable = 0, terminal_at = NULL WHERE id = ?
+    `).bind(JOB).run();
+
+    expect(await confirmCoverBackfillDispatch(testEnv, { ...payload, generation: 1, now })).toBe('blocked');
+    expect(await row('SELECT dispatch_state, status, failure_code, retryable FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'blocked', status: 'failed', failure_code: 'EVENT_DELETED', retryable: 0 });
+  });
+});
+
+describe('stale initial dispatch recovery', () => {
+  let access: Access;
+  beforeEach(async () => {
+    await resetDatabase();
+    access = await eventAccess();
+  });
+
+  it('replays the stored instance ID and confirms it', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'creating', dispatchGeneration: 1, claimedAt: STALE,
+    });
+    const platform = recordingBackfillAccessor();
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, now, platform.accessor))
+      .toEqual({ inspected: 1, materialized: 1, confirmed: 1, blocked: 0, remainder: false });
+    // The immutable stored ID, never a freshly derived one: a second ID for the
+    // same job is a second instance nothing fences.
+    expect(platform.created).toEqual([instanceId]);
+    expect(await row('SELECT dispatch_state, dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+  });
+
+  it('leaves the claim recoverable when the platform refuses', async () => {
+    await seedJob(access, { dispatchState: 'creating', dispatchGeneration: 1, claimedAt: STALE });
+    const platform = recordingBackfillAccessor({ failCreate: true });
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, materialized: 0, confirmed: 0 });
+    expect(await row('SELECT dispatch_state FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ dispatch_state: 'creating' });
+  });
+
+  it('does not touch a claim that is still inside the stale window', async () => {
+    await seedJob(access, { dispatchState: 'creating', dispatchGeneration: 1 });
+    const platform = recordingBackfillAccessor();
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 0, materialized: 0 });
+    expect(platform.created).toEqual([]);
+  });
+
+  it('settles a purge-owned claim instead of creating an instance for it', async () => {
+    await seedJob(access, { dispatchState: 'creating', dispatchGeneration: 1, claimedAt: STALE });
+    await reconcileEventCoverPurge(testEnv, access.event.id, now, blockingAccessors());
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET dispatch_state = 'creating', status = 'queued', failure_code = NULL,
+          retryable = 0, terminal_at = NULL, updated_at = ? WHERE id = ?
+    `).bind(STALE.toISOString(), JOB).run();
+    const platform = recordingBackfillAccessor();
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, materialized: 0, blocked: 1 });
+    expect(platform.created).toEqual([]);
+    expect(await row('SELECT status, failure_code FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ status: 'failed', failure_code: 'EVENT_DELETED' });
+  });
+
+  it('ignores a claim whose job has already moved past dispatch', async () => {
+    await seedJob(access, {
+      dispatchState: 'creating', dispatchGeneration: 1, claimedAt: STALE, status: 'applied',
+    });
+    const platform = recordingBackfillAccessor();
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 0 });
+    expect(platform.created).toEqual([]);
+  });
+});
 
 describe('backfill identity', () => {
   it('derives the instance ID the launcher derives', async () => {

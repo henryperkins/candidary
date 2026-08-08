@@ -5,7 +5,10 @@ import { MediaRepository } from '../db/media';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
 import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
-import { COVER_BACKFILL_BINDING } from './cover-backfill';
+import {
+  COVER_BACKFILL_BINDING,
+  recoverStaleInitialBackfillDispatches,
+} from './cover-backfill';
 import {
   defaultCoverBackfillWorkflowAccessor,
   defaultCoverWorkflowAccessor,
@@ -932,6 +935,13 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // collected. Its own bound means a large backlog drains across passes rather
   // than making one scheduled run unbounded.
   await cleanupEventCovers(env, now);
+  // After the cover sweep and before the purge, because it is the phase that
+  // turns an interrupted dispatch back into an observable one: a claim left
+  // `creating` by a lost terminal is replayed through idempotent `createBatch`
+  // and confirmed, and a claim whose fence a purge has taken is settled here
+  // rather than being met as a surprise by the purge itself. Its own bound means
+  // a backlog drains across passes.
+  await recoverStaleInitialBackfillDispatches(env, now);
   // Notification delivery is no longer part of this run. It has its own hourly
   // trigger and its own durable state, so a mail failure and a retention purge no
   // longer share a failure boundary in either direction.

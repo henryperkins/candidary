@@ -7,6 +7,7 @@ import { processExport } from './workflows/export';
 import { scheduledCleanup } from './workflows/cleanup';
 import { EVENT_COVER_PROFILES } from '../shared/event-cover';
 import {
+  coverBackfillConfirmStep,
   coverBackfillFinalize,
   coverBackfillNormalize,
   coverBackfillPreflight,
@@ -71,6 +72,24 @@ export class CoverRenderWorkflow extends WorkflowEntrypoint<AppEnv, CoverRenderP
  */
 export class CoverBackfillWorkflow extends WorkflowEntrypoint<AppEnv, CoverBackfillPayload> {
   async run(event: WorkflowEvent<CoverBackfillPayload>, step: WorkflowStep) {
+    // Before anything else, and its own step so a crash between the operator's
+    // trigger and their confirm command heals here rather than leaving the
+    // ledger claiming a dispatch nobody ever observed landing. A `blocked`
+    // answer means a purge already owns this instance and the job has been
+    // settled, so there is nothing left to preflight. A `stale` one falls
+    // through: the preflight's own fence check is the barrier, and it fails
+    // closed on exactly the cases that make a confirmation stale.
+    const dispatch = await step.do(
+      'confirm cover backfill dispatch',
+      async () => coverBackfillConfirmStep(this.env, event.payload),
+    );
+    if (dispatch === 'blocked') {
+      return {
+        status: 'failed' as const, appliedRevision: null,
+        failureCode: 'EVENT_DELETED', retryable: false,
+      };
+    }
+
     const preflight = await step.do(
       'preflight cover backfill job',
       async () => coverBackfillPreflight(this.env, event.payload),

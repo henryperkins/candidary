@@ -1,3 +1,9 @@
+import { COVER_CLEANUP_ROWS_PER_CLASS } from '../../shared/constants';
+import {
+  blockCoverBackfillDispatchSql,
+  confirmCoverBackfillDispatchSql,
+  coverDispatchReadSql,
+} from '../../shared/cover-dispatch';
 import {
   COVER_PIPELINE_VERSIONS,
   EVENT_COVER_PROFILES,
@@ -10,7 +16,7 @@ import { coverPointerStatements } from '../db/events';
 import type { EventRow } from '../db/events';
 import type { CoverBackfillJobRow, CoverMasterRow, CoverRenderSetRow } from '../db/types';
 import type { AppEnv } from '../env';
-import { coverRequestDigest } from '../services/event-cover-publication';
+import { STALE_DISPATCH_CLAIM_MS, coverRequestDigest } from '../services/event-cover-publication';
 import {
   normalizeCoverMaster,
   renderCoverProfileObject,
@@ -18,6 +24,10 @@ import {
 } from '../storage/event-cover-images';
 import { coverKeyFingerprint } from '../storage/event-cover-keys';
 import { deriveCoverSlots, type CoverRenderSlot } from './cover-render';
+import {
+  defaultCoverBackfillWorkflowAccessor,
+  type CoverBackfillWorkflowAccessor,
+} from './cover-platform';
 
 /**
  * Converts one pre-`0012` legacy original onto the responsive pipeline.
@@ -273,6 +283,203 @@ async function recordTerminal(
   }
   statements.push(recomputeBackfillRunCounters(env.DB, payload.runId, now));
   await env.DB.batch(statements);
+}
+
+/* ------------------------------------------------------------------ *
+ * Dispatch confirmation and initial-create recovery
+ * ------------------------------------------------------------------ */
+
+/** The three answers a post-trigger read can support, and no fourth. */
+export type CoverBackfillDispatchConfirmation = 'confirmed' | 'blocked' | 'stale';
+
+interface DispatchReadRow {
+  run_id: string;
+  job_id: string;
+  event_id: string;
+  workflow_instance_id: string;
+  dispatch_state: string;
+  dispatch_generation: number;
+  status: string;
+  fence_state: string | null;
+  fence_generation: number | null;
+}
+
+/** The launcher renders these as literals; here they are bound. Same predicates. */
+const BOUND = {
+  binding: '?1', runId: '?2', jobId: '?3', eventId: '?4', generation: '?5', now: '?6',
+} as const;
+
+/**
+ * Records that one claimed dispatch generation really did reach the platform.
+ *
+ * The operator's generated `confirm` step runs the same statement from the other
+ * side, but a lost terminal or an interrupted shell cannot be trusted, so this
+ * is the authoritative caller: the Workflow's own first step, and the recovery
+ * pass below. Both render their SQL from `shared/cover-dispatch.ts`, which is
+ * what stops the two paths from drifting into different guarantees.
+ *
+ * It never bumps the generation and never writes the fence. The fence's
+ * `updated_at` is the durable dispatch-claim clock the rolling-minute budget is
+ * measured from; a confirmation that touched it would hand the next batch a
+ * minute of capacity nobody claimed.
+ */
+export async function confirmCoverBackfillDispatch(
+  env: AppEnv,
+  input: { runId: string; jobId: string; eventId: string; generation: number; now: Date },
+): Promise<CoverBackfillDispatchConfirmation> {
+  const row = await env.DB.prepare(coverDispatchReadSql({
+    binding: BOUND.binding, runId: BOUND.runId, jobId: BOUND.jobId, eventId: BOUND.eventId,
+  })).bind(COVER_BACKFILL_BINDING, input.runId, input.jobId, input.eventId)
+    .first<DispatchReadRow>();
+  if (!row) return 'stale';
+  if (row.dispatch_generation !== input.generation) return 'stale';
+
+  const binds = [
+    COVER_BACKFILL_BINDING, input.runId, input.jobId, input.eventId,
+    input.generation, input.now.toISOString(),
+  ];
+
+  // A purge owns this instance. Settle the unit rather than confirming it; the
+  // coordinator owns terminating the instance itself.
+  if (row.fence_state === 'deletion-blocked') {
+    await env.DB.batch([
+      env.DB.prepare(blockCoverBackfillDispatchSql(BOUND)).bind(...binds),
+      recomputeBackfillRunCounters(env.DB, input.runId, input.now),
+    ]);
+    return 'blocked';
+  }
+  // Absence is refusal, and a fence standing somewhere else is not this unit's.
+  if (row.fence_state !== 'open' || row.fence_generation !== input.generation) return 'stale';
+  if (row.dispatch_state === 'confirmed') return 'confirmed';
+  if (row.dispatch_state !== 'creating') return 'stale';
+
+  const results = await env.DB.batch([
+    env.DB.prepare(confirmCoverBackfillDispatchSql(BOUND)).bind(...binds),
+  ]);
+  if (results[0]!.meta.changes === 1) return 'confirmed';
+
+  // The guard refused at commit time, so the read is already out of date. Answer
+  // from what is actually there rather than from what was read.
+  const after = await env.DB.prepare(
+    'SELECT dispatch_state, dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?',
+  ).bind(input.jobId).first<{ dispatch_state: string; dispatch_generation: number }>();
+  return after?.dispatch_state === 'confirmed' && after.dispatch_generation === input.generation
+    ? 'confirmed'
+    : 'stale';
+}
+
+/**
+ * The Workflow's own first step.
+ *
+ * The payload carries no generation — it is immutable across restarts, while the
+ * generation is not — so the instance confirms whichever generation its job is
+ * standing at. That is the right one by construction: a restart reuses this
+ * instance ID and moves the job and its fence together, so the run that is
+ * executing is always the run the ledger points at.
+ */
+export async function coverBackfillConfirmStep(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  now = new Date(),
+): Promise<CoverBackfillDispatchConfirmation> {
+  const job = await env.DB.prepare(
+    'SELECT dispatch_generation FROM event_cover_backfill_jobs WHERE id = ? AND run_id = ? AND event_id = ?',
+  ).bind(payload.jobId, payload.runId, payload.eventId)
+    .first<{ dispatch_generation: number }>();
+  if (!job) return 'stale';
+  return confirmCoverBackfillDispatch(env, { ...payload, generation: job.dispatch_generation, now });
+}
+
+export interface StaleInitialDispatchSummary {
+  inspected: number;
+  materialized: number;
+  confirmed: number;
+  blocked: number;
+  remainder: boolean;
+}
+
+/**
+ * Heals a claim that was made but whose create may never have landed.
+ *
+ * A `creating` job older than the stale threshold is the durable trace of an
+ * accepted dispatch whose outcome nobody observed — the operator's terminal
+ * died, the shell was interrupted, or the trigger itself was lost. The claim is
+ * a commitment, not an inference, which is what makes replaying it safe:
+ * `createBatch` is documented to skip an ID it still retains and create one it
+ * does not, so the same call is correct whether or not the instance exists.
+ *
+ * Deliberately no lookup. Asking the platform what it thinks of this ID would
+ * make recovery depend on distinguishing "absent" from "invalid", which the
+ * adapter refuses to certify — and it does not need to be distinguished here.
+ *
+ * Any platform failure leaves the claim exactly as it was, so the next pass
+ * retries it; a purge-owned fence settles through the same confirmation path
+ * rather than being created for.
+ */
+export async function recoverStaleInitialBackfillDispatches(
+  env: AppEnv,
+  now = new Date(),
+  workflow: CoverBackfillWorkflowAccessor = defaultCoverBackfillWorkflowAccessor(env),
+): Promise<StaleInitialDispatchSummary> {
+  const stale = await env.DB.prepare(`
+    SELECT j.id AS job_id, j.run_id AS run_id, j.event_id AS event_id,
+           j.workflow_instance_id AS workflow_instance_id,
+           j.dispatch_generation AS dispatch_generation,
+           f.state AS fence_state, f.dispatch_generation AS fence_generation
+    FROM event_cover_backfill_jobs j
+    LEFT JOIN event_cover_workflow_fences f
+      ON f.workflow_binding = ?1 AND f.workflow_instance_id = j.workflow_instance_id
+     AND f.event_id = j.event_id
+    WHERE j.dispatch_state = 'creating' AND j.updated_at <= ?2
+      AND j.status IN ('queued', 'normalizing', 'rendering', 'finalizing')
+    ORDER BY j.updated_at, j.id LIMIT ?3
+  `).bind(
+    COVER_BACKFILL_BINDING,
+    new Date(now.getTime() - STALE_DISPATCH_CLAIM_MS).toISOString(),
+    COVER_CLEANUP_ROWS_PER_CLASS,
+  ).all<Pick<DispatchReadRow,
+    'job_id' | 'run_id' | 'event_id' | 'workflow_instance_id' | 'dispatch_generation'
+    | 'fence_state' | 'fence_generation'>>();
+
+  const summary: StaleInitialDispatchSummary = {
+    inspected: 0,
+    materialized: 0,
+    confirmed: 0,
+    blocked: 0,
+    remainder: stale.results.length >= COVER_CLEANUP_ROWS_PER_CLASS,
+  };
+
+  for (const claim of stale.results) {
+    summary.inspected += 1;
+    const input = {
+      runId: claim.run_id,
+      jobId: claim.job_id,
+      eventId: claim.event_id,
+      generation: claim.dispatch_generation,
+      now,
+    };
+    // No fence, a blocked fence, or one at another generation: there is nothing
+    // to materialize, only something to settle.
+    if (claim.fence_state !== 'open' || claim.fence_generation !== claim.dispatch_generation) {
+      if (await confirmCoverBackfillDispatch(env, input) === 'blocked') summary.blocked += 1;
+      continue;
+    }
+    try {
+      await workflow.createBatch([{
+        id: claim.workflow_instance_id,
+        params: { runId: claim.run_id, jobId: claim.job_id, eventId: claim.event_id },
+      }]);
+    } catch {
+      // The claim stays `creating` and is picked up again next pass. Recording a
+      // failure here would turn a platform blip into a terminal job.
+      continue;
+    }
+    summary.materialized += 1;
+    const outcome = await confirmCoverBackfillDispatch(env, input);
+    if (outcome === 'confirmed') summary.confirmed += 1;
+    if (outcome === 'blocked') summary.blocked += 1;
+  }
+  return summary;
 }
 
 /**
