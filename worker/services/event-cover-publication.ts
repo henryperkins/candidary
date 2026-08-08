@@ -17,6 +17,13 @@ import { coverPointerStatements } from '../db/events';
 import type { CoverDraftRow, CoverPublishReceiptRow, EventRecord } from '../db/types';
 import type { AppEnv } from '../env';
 import { coverKeyFingerprint } from '../storage/event-cover-keys';
+import {
+  defaultCoverWorkflowAccessor,
+  dispositionForLookup,
+  type CoverPlatformDisposition,
+  type CoverWorkflowAccessor,
+  type CoverWorkflowLookup,
+} from '../workflows/cover-platform';
 
 /**
  * Durable publication receipts, dispatch fences, and platform reconciliation.
@@ -45,121 +52,22 @@ export const STALE_DISPATCH_CLAIM_MS = 2 * 60 * 1000;
  */
 export const COVER_RENDER_BINDING = 'COVER_RENDER_WORKFLOW';
 
-/* ------------------------------------------------------------------ *
- * Platform status
- * ------------------------------------------------------------------ */
-
-export type CoverPlatformRecovery = 'none' | 'resume' | 'restart' | 'create';
-
-export interface CoverPlatformDisposition {
-  /** What the platform says, reduced to the four things Candidary does about it. */
-  kind: 'active' | 'recoverable' | 'complete' | 'unknown' | 'missing';
-  recovery: CoverPlatformRecovery;
-  /** What a manager should be told while D1 is still nonterminal. */
-  productStatus: 'preparing' | 'retryable-failed';
-  /** Whether any mutation predicate may be satisfied on this reading. */
-  mutates: boolean;
-  retryable: boolean;
-  /** Sanitized operations telemetry; never a raw platform status in a response. */
-  telemetry: string | null;
-}
-
 /**
- * The total map from §9.4, and deliberately total.
+ * Reads the recorded instance and reduces it to a disposition, never throwing.
  *
- * Its `default` preserves product state and emits telemetry rather than
- * guessing: an unrecognized status is the one case where treating the instance
- * as gone could destroy work that is actually running. No value other than the
- * ones named below is ever treated as non-running.
+ * The real adapter already classifies its own failures, so this guard exists for
+ * an injected accessor that rejects. It resolves to `unknown` for the same
+ * reason the adapter does: a lookup that established nothing must satisfy no
+ * mutation predicate and must not be reported to a manager as a failure.
  */
-export function mapPlatformStatus(status: string): CoverPlatformDisposition {
-  switch (status) {
-    case 'queued':
-    case 'running':
-    case 'waiting':
-    case 'waitingForPause':
-      return {
-        kind: 'active', recovery: 'none', productStatus: 'preparing',
-        mutates: false, retryable: true, telemetry: null,
-      };
-    // A paused instance is resumed on the same ID. Restarting it would discard
-    // completed steps that are still valid.
-    case 'paused':
-      return {
-        kind: 'recoverable', recovery: 'resume', productStatus: 'retryable-failed',
-        mutates: true, retryable: true, telemetry: null,
-      };
-    case 'errored':
-    case 'terminated':
-      return {
-        kind: 'recoverable', recovery: 'restart', productStatus: 'retryable-failed',
-        mutates: true, retryable: true, telemetry: null,
-      };
-    // Reconcile D1 first: an existing applied, conflict, or failed result wins.
-    // Only an unexpectedly nonterminal D1 becomes a retryable divergence.
-    case 'complete':
-      return {
-        kind: 'complete', recovery: 'restart', productStatus: 'retryable-failed',
-        mutates: true, retryable: true, telemetry: 'cover_platform_complete',
-      };
-    // Never satisfies a mutation predicate. Absence of information is not
-    // evidence of absence of work.
-    case 'unknown':
-      return {
-        kind: 'unknown', recovery: 'none', productStatus: 'preparing',
-        mutates: false, retryable: true, telemetry: 'cover_platform_unknown',
-      };
-    // A *confirmed* not-found may be recreated under the same fenced ID. This is
-    // recreation of the same operation, not a new publication.
-    case 'not-found':
-      return {
-        kind: 'missing', recovery: 'create', productStatus: 'retryable-failed',
-        mutates: true, retryable: true, telemetry: 'cover_platform_missing',
-      };
-    default:
-      return {
-        kind: 'active', recovery: 'none', productStatus: 'preparing',
-        mutates: false, retryable: true, telemetry: `cover_platform_unmapped:${status.slice(0, 32)}`,
-      };
-  }
-}
-
-/* ------------------------------------------------------------------ *
- * Workflow accessor
- * ------------------------------------------------------------------ */
-
-export interface CoverWorkflowAccessor {
-  create(id: string, payload: { eventId: string; operationId: string }): Promise<void>;
-  status(id: string): Promise<string>;
-  resume(id: string): Promise<void>;
-  restart(id: string): Promise<void>;
-  terminate(id: string): Promise<void>;
-}
-
-/**
- * Scoped to exactly what is unproven, and no wider.
- *
- * Binding *presence* under miniflare is already demonstrated by the export
- * route's 202. Instance *lifecycle* — get, status, resume, restart, terminate —
- * has no precedent anywhere in this repository, and every disposition above
- * depends on those calls. So the service takes its accessor as a dependency
- * that defaults to the real binding, and the tests drive the lifecycle through
- * a fake. The distance between that fake and the platform is a stated phase-1
- * limitation, not a silent one.
- */
-export function defaultCoverWorkflowAccessor(env: AppEnv): CoverWorkflowAccessor {
-  const workflow = env.COVER_RENDER_WORKFLOW;
-  return {
-    async create(id, payload) { await workflow.create({ id, params: payload }); },
-    async status(id) {
-      const instance = await workflow.get(id);
-      const status = await instance.status();
-      return String((status as { status?: string }).status ?? 'unknown');
-    },
-    async resume(id) { await (await workflow.get(id)).resume(); },
-    async restart(id) { await (await workflow.get(id)).restart(); },
-    async terminate(id) { await (await workflow.get(id)).terminate(); },
-  };
+async function lookupDisposition(
+  accessor: CoverWorkflowAccessor,
+  instanceId: string,
+): Promise<CoverPlatformDisposition> {
+  const lookup = await accessor.lookup(instanceId).catch(
+    (): CoverWorkflowLookup => ({ kind: 'unknown', telemetry: 'cover_platform_accessor_rejected' }),
+  );
+  return dispositionForLookup(lookup);
 }
 
 /* ------------------------------------------------------------------ *
@@ -291,10 +199,9 @@ export async function readCoverPublication(
   // not write one. The Workflow handler, the restart POST, and bounded cleanup
   // are the authoritative writers.
   const accessor = input.workflow ?? defaultCoverWorkflowAccessor(env);
-  // A failed status read is `unknown`, not absence: it must not satisfy any
+  // A failed lookup is `unknown`, not absence: it must not satisfy any
   // mutation predicate, and it must not be reported as a failure either.
-  const platform = await accessor.status(receipt.workflow_instance_id).catch(() => 'unknown');
-  const disposition = mapPlatformStatus(platform);
+  const disposition = await lookupDisposition(accessor, receipt.workflow_instance_id);
   if (disposition.productStatus === 'preparing') return view;
   return { ...view, status: 'retryable-failed', retryable: true };
 }
@@ -652,10 +559,9 @@ export async function restartCoverPublication(
   }
 
   const accessor = input.workflow ?? defaultCoverWorkflowAccessor(env);
-  // A failed status read is `unknown`, not absence: it must not satisfy any
+  // A failed lookup is `unknown`, not absence: it must not satisfy any
   // mutation predicate, and it must not be reported as a failure either.
-  const platform = await accessor.status(receipt.workflow_instance_id).catch(() => 'unknown');
-  const disposition = mapPlatformStatus(platform);
+  const disposition = await lookupDisposition(accessor, receipt.workflow_instance_id);
 
   // A permanently failed receipt is not restartable however the platform reads.
   if (receipt.status === 'failed' && receipt.retryable === 0) {

@@ -35,13 +35,15 @@ import {
   confirmCoverDispatch,
   coverRequestDigest,
   coverWorkflowInstanceId,
-  defaultCoverWorkflowAccessor,
-  mapPlatformStatus,
   markDispatchFailed,
   readCoverPublication,
   restartCoverPublication,
   selectEventCoverPreparation,
 } from '../services/event-cover-publication';
+import {
+  defaultCoverWorkflowAccessor,
+  dispositionForLookup,
+} from '../workflows/cover-platform';
 
 /**
  * The cover draft-and-publish surface.
@@ -504,8 +506,9 @@ async function dispatchCoverRender(
     // dispatch: a single `!== 'unknown'` compare treated `errored`,
     // `terminated`, and `complete` as success and answered 202 for work that
     // was never running.
-    const platform = await accessor.status(workflowInstanceId).catch(() => 'unknown');
-    if (mapPlatformStatus(platform).kind !== 'active') {
+    const lookup = await accessor.lookup(workflowInstanceId)
+      .catch(() => ({ kind: 'unknown' as const, telemetry: 'cover_platform_accessor_rejected' }));
+    if (dispositionForLookup(lookup).kind !== 'active') {
       await markDispatchFailed(context.env, eventId, operationId, now);
       return false;
     }

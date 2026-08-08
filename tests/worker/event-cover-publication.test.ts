@@ -10,14 +10,23 @@ import {
   applyRemovalPublication,
   confirmCoverDispatch,
   coverWorkflowInstanceId,
-  mapPlatformStatus,
   markDispatchFailed,
   readCoverPublication,
   restartCoverPublication,
   selectEventCoverPreparation,
-  type CoverWorkflowAccessor,
 } from '../../worker/services/event-cover-publication';
 import { coverMasterKey } from '../../worker/storage/event-cover-keys';
+import {
+  COVER_PLATFORM_STATUSES,
+  classifyInstanceStatus,
+  classifyWorkflowLookupError,
+  dispositionForLookup,
+  isCertifiedWorkflowNotFound,
+  mapPlatformStatus,
+  type CoverPlatformStatus,
+  type CoverWorkflowAccessor,
+  type CoverWorkflowLookup,
+} from '../../worker/workflows/cover-platform';
 import { eventAccess, resetDatabase, testEnv } from './helpers';
 
 const now = new Date('2026-08-04T12:00:00.000Z');
@@ -27,12 +36,25 @@ const OPERATION = '5f3a2b18-6c2d-4f0e-9a71-0c2d1e8b4a55';
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 
-/** Records every lifecycle call, because none of them has a precedent locally. */
-function fakeWorkflow(status = 'running', failures: Partial<Record<string, boolean>> = {}) {
+/**
+ * Records every lifecycle call, because none of them has a precedent locally.
+ *
+ * Takes a `CoverWorkflowLookup` rather than a status string: absence is a
+ * classification the adapter produces, not a value the platform can return, so
+ * a fake that accepted `'not-found'` as a status would model something that
+ * cannot happen.
+ */
+function fakeWorkflow(
+  outcome: CoverWorkflowLookup | CoverPlatformStatus = 'running',
+  failures: Partial<Record<string, boolean>> = {},
+) {
+  const lookup: CoverWorkflowLookup = typeof outcome === 'string'
+    ? { kind: 'status', status: outcome }
+    : outcome;
   const calls: string[] = [];
   const accessor: CoverWorkflowAccessor = {
     async create(id) { calls.push(`create:${id}`); if (failures.create) throw new Error('dispatch'); },
-    async status() { calls.push('status'); return status; },
+    async lookup() { calls.push('lookup'); return lookup; },
     async resume(id) { calls.push(`resume:${id}`); if (failures.resume) throw new Error('resume'); },
     async restart(id) { calls.push(`restart:${id}`); if (failures.restart) throw new Error('restart'); },
     async terminate(id) { calls.push(`terminate:${id}`); },
@@ -78,6 +100,16 @@ async function draftState(id: string): Promise<string> {
 }
 
 describe('platform status map', () => {
+  it('names exactly the documented binding union, which has no absence member', () => {
+    expect([...COVER_PLATFORM_STATUSES]).toEqual([
+      'queued', 'running', 'paused', 'errored', 'terminated',
+      'complete', 'waiting', 'waitingForPause', 'unknown',
+    ]);
+    // Absence is a lookup *result*, never a status the platform can report.
+    expect([...COVER_PLATFORM_STATUSES]).not.toContain('not-found');
+    expect([...COVER_PLATFORM_STATUSES]).not.toContain('missing');
+  });
+
   it('is total, and only the named values are ever treated as non-running', () => {
     for (const status of ['queued', 'running', 'waiting', 'waitingForPause']) {
       expect(mapPlatformStatus(status)).toMatchObject({
@@ -93,13 +125,93 @@ describe('platform status map', () => {
     expect(mapPlatformStatus('unknown')).toMatchObject({
       kind: 'unknown', mutates: false, productStatus: 'preparing',
     });
-    expect(mapPlatformStatus('not-found')).toMatchObject({ kind: 'missing', recovery: 'create' });
 
     // The preserving default: an unrecognized value keeps product state and
     // reports itself rather than being guessed at.
     const unmapped = mapPlatformStatus('someFutureState');
     expect(unmapped).toMatchObject({ kind: 'active', mutates: false, productStatus: 'preparing' });
     expect(unmapped.telemetry).toContain('someFutureState');
+  });
+
+  it('refuses to derive absence from any status string', () => {
+    // Phase 1 mapped this literal to `missing`, but the platform never emits it.
+    // It must now fall to the preserving default like any other unknown value,
+    // so no code path can reach `create` by inventing a status.
+    for (const invented of ['not-found', 'notFound', 'missing', 'deleted', '404']) {
+      const disposition = mapPlatformStatus(invented);
+      expect(disposition.kind).not.toBe('missing');
+      expect(disposition.recovery).not.toBe('create');
+      expect(disposition.mutates).toBe(false);
+    }
+  });
+});
+
+describe('workflow lookup classification', () => {
+  it('reports a real status as a status', () => {
+    expect(classifyInstanceStatus({ status: 'running' })).toEqual({
+      kind: 'status', status: 'running',
+    });
+    // An unrecognized value is still a status reading, not an unknown lookup:
+    // the instance answered. `mapPlatformStatus` decides what to do about it.
+    expect(classifyInstanceStatus({ status: 'someFutureState' })).toMatchObject({ kind: 'status' });
+  });
+
+  it('treats a shapeless status payload as the platform `unknown` status', () => {
+    expect(classifyInstanceStatus(null)).toEqual({ kind: 'status', status: 'unknown' });
+    expect(classifyInstanceStatus({})).toEqual({ kind: 'status', status: 'unknown' });
+  });
+
+  it('certifies nothing as missing, because no discriminator is proven yet', () => {
+    // Cloudflare documents only `e.message` and throws the same way for an
+    // absent ID and an invalid one. Until Task 11 proves a stable
+    // discriminator against the deployed platform, recreation stays disabled.
+    const candidates: unknown[] = [
+      new Error('failed to get instance cr1-abc: instance not found'),
+      new Error('not found'),
+      Object.assign(new Error('nope'), { code: 404, status: 404 }),
+      Object.assign(new Error('nope'), { name: 'NotFoundError' }),
+      { message: 'instance does not exist' },
+      'instance not found',
+      null,
+    ];
+    for (const candidate of candidates) {
+      expect(isCertifiedWorkflowNotFound(candidate)).toBe(false);
+      expect(classifyWorkflowLookupError(candidate).kind).toBe('unknown');
+    }
+  });
+
+  it('never puts an error message or instance ID into telemetry', () => {
+    // The documented failure message embeds the instance ID verbatim.
+    const lookup = classifyWorkflowLookupError(
+      new Error('failed to get instance cr1-deadbeefcafe: boom'),
+    );
+    expect(lookup.kind).toBe('unknown');
+    const telemetry = lookup.kind === 'unknown' ? lookup.telemetry : '';
+    expect(telemetry).not.toContain('cr1-deadbeefcafe');
+    expect(telemetry).not.toContain('boom');
+    expect(telemetry.length).toBeLessThanOrEqual(64);
+  });
+
+  it('gives an unknown lookup a mutation-free disposition', () => {
+    const disposition = dispositionForLookup({ kind: 'unknown', telemetry: 'x' });
+    expect(disposition).toMatchObject({
+      kind: 'unknown', mutates: false, recovery: 'none', productStatus: 'preparing',
+    });
+  });
+
+  it('gives a certified-missing lookup the create disposition', () => {
+    // Unreachable in this candidate by construction, but the disposition must
+    // exist and be exactly `create` for when Task 11 certifies a discriminator.
+    expect(dispositionForLookup({ kind: 'missing' })).toMatchObject({
+      kind: 'missing', recovery: 'create', mutates: true, retryable: true,
+    });
+  });
+
+  it('routes a status lookup through the same total map', () => {
+    for (const status of COVER_PLATFORM_STATUSES) {
+      expect(dispositionForLookup({ kind: 'status', status }))
+        .toEqual(mapPlatformStatus(status));
+    }
   });
 });
 
@@ -335,15 +447,25 @@ describe('side-effect-free status read', () => {
   }
 
   it('synthesizes a retryable view for a terminal platform state without writing it', async () => {
-    for (const platform of ['paused', 'errored', 'terminated', 'complete', 'not-found']) {
+    const terminal: CoverWorkflowLookup[] = [
+      { kind: 'status', status: 'paused' },
+      { kind: 'status', status: 'errored' },
+      { kind: 'status', status: 'terminated' },
+      { kind: 'status', status: 'complete' },
+      // Certified absence is terminal too, but it reaches this path only as a
+      // classified lookup — never by the platform reporting a status string.
+      { kind: 'missing' },
+    ];
+    for (const lookup of terminal) {
+      const label = lookup.kind === 'status' ? lookup.status : lookup.kind;
       const view = await readCoverPublication(testEnv, {
         eventId: access.event.id, operationId: OPERATION, now,
-        workflow: fakeWorkflow(platform).accessor,
+        workflow: fakeWorkflow(lookup).accessor,
       });
-      expect(view, platform).toMatchObject({ status: 'retryable-failed', retryable: true });
+      expect(view, label).toMatchObject({ status: 'retryable-failed', retryable: true });
       // Read-only: the Workflow handler, the restart POST, and bounded cleanup
       // are the authoritative writers.
-      expect(await storedStatus(), platform).toEqual({ status: 'queued', retryable: 0 });
+      expect(await storedStatus(), label).toEqual({ status: 'queued', retryable: 0 });
     }
   });
 
@@ -428,7 +550,7 @@ describe('operation restart', () => {
   });
 
   it('recreates a confirmed-missing instance under the same fenced ID', async () => {
-    const workflow = fakeWorkflow('not-found');
+    const workflow = fakeWorkflow({ kind: 'missing' });
     const result = await restartCoverPublication(testEnv, {
       eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
     });
