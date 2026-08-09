@@ -266,6 +266,26 @@ function envAfterAdoptedTupleRead(action: () => Promise<void>): AppEnv {
   return { ...testEnv, DB: db };
 }
 
+function envBeforeFirstBatch(action: () => Promise<void>): AppEnv {
+  let acted = false;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          if (!acted) {
+            acted = true;
+            await action();
+          }
+          return target.batch(statements);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
+}
+
 async function renderEveryProfile(env: AppEnv, payload: { runId: string; jobId: string; eventId: string }) {
   for (const profile of EVENT_COVER_PROFILES) {
     await coverBackfillProfileStep(env, payload, profile.id, now);
@@ -1023,9 +1043,9 @@ describe('platform reconciliation and the guarded restart edge', () => {
    * Resume is the one edge that keeps the instance's completed steps, so it
    * carries none of the restart predicates: no `failed`, no `retryable`, no
    * `terminal_at`. This job has none of the three.
-   */
+  */
   it('claims, resumes, and confirms a paused instance without a failure record', async () => {
-    const { instanceId } = await inFlight();
+    const { instanceId } = await inFlight({ status: 'normalizing' });
     const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
 
     expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
@@ -1034,7 +1054,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
     // The status is untouched: a resume continues the instance where it stopped.
     expect(await currentJob()).toMatchObject({
-      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 2,
+      status: 'normalizing', dispatch_state: 'confirmed', dispatch_generation: 2,
     });
     // The fence moved with the job, because a resume *is* a dispatch claim.
     expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
@@ -1043,7 +1063,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
   });
 
   it('leaves a refused resume recoverable at its claimed generation', async () => {
-    const { instanceId } = await inFlight();
+    const { instanceId } = await inFlight({ status: 'normalizing' });
     const platform = scriptedBackfillAccessor(
       { [instanceId]: { kind: 'status', status: 'paused' } }, { resume: true },
     );
@@ -1051,7 +1071,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
       .toMatchObject({ inspected: 1, resumed: 0 });
     expect(await currentJob()).toMatchObject({
-      status: 'rendering', dispatch_state: 'resuming', dispatch_generation: 2,
+      status: 'normalizing', dispatch_state: 'resuming', dispatch_generation: 2,
     });
     expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
   });
@@ -1086,6 +1106,36 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(await currentJob()).toMatchObject({ status: 'queued', dispatch_generation: 2 });
   });
 
+  it.each(['errored', 'terminated', 'complete'] as const)(
+    'immediately restarts a newly observed %s instance at the current D1 clock',
+    async (status) => {
+      const { instanceId } = await inFlight();
+      const clock = await row<{ current_time: string }>(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS current_time",
+      );
+      const reconciliationTime = new Date(clock.current_time);
+      const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status } });
+
+      expect(await reconcileCoverBackfillJobs(testEnv, reconciliationTime, platform.accessor))
+        .toMatchObject({ inspected: 1, failuresRecorded: 1, restarted: 1, unchanged: 0 });
+      expect(platform.calls).toEqual([`lookup:${instanceId}`, `restart:${instanceId}`]);
+      expect(await currentJob()).toMatchObject({
+        status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      });
+      expect(await row(`
+        SELECT state, dispatch_generation, expires_at
+        FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+      `, instanceId)).toEqual({
+        state: 'open', dispatch_generation: 2, expires_at: FENCE_HOLD,
+      });
+      expect(await row(`
+        SELECT count(*) AS count FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = ?
+          AND updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-60 seconds')
+      `, instanceId)).toEqual({ count: 1 });
+    },
+  );
+
   it('leaves an already-terminal failed job unchanged when its instance is complete', async () => {
     const { instanceId } = await failedRetryable();
     const before = await currentJob();
@@ -1097,6 +1147,32 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
     expect(platform.calls).toEqual([`lookup:${instanceId}`]);
     expect(await currentJob()).toEqual(before);
+  });
+
+  it.each([
+    ['active', { kind: 'status', status: 'running' }],
+    ['unknown', { kind: 'unknown', telemetry: 'cover_backfill_lookup_failed' }],
+  ] as const)('leaves a retryable failed job byte-identical on an %s reading', async (_name, lookup) => {
+    const { instanceId } = await failedRetryable();
+    const beforeJob = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    const beforeFence = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    );
+    const beforeRun = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN,
+    );
+    const platform = scriptedBackfillAccessor({ [instanceId]: lookup });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, unchanged: 1, resumed: 0, restarted: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await row('SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB)).toEqual(beforeJob);
+    expect(await row(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    )).toEqual(beforeFence);
+    expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN)).toEqual(beforeRun);
   });
 
   it('never inspects a job whose ledger row is already terminal', async () => {
@@ -1115,6 +1191,9 @@ describe('platform reconciliation and the guarded restart edge', () => {
    */
   it('recreates a certified-absent instance under its own fenced ID', async () => {
     const { instanceId } = await inFlight({ status: 'queued' });
+    const runBefore = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN,
+    );
     const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'missing' } });
 
     expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
@@ -1126,6 +1205,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
     expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId))
       .toEqual({ expires_at: FENCE_HOLD });
+    expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN)).toEqual(runBefore);
   });
 
   it('recreates a certified-absent retryable failure under the same fenced ID', async () => {
@@ -1143,7 +1223,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
   });
 
-  it('restores a failed job to queued before resuming its paused instance', async () => {
+  it('restores a failed job to normalizing before resuming its paused instance', async () => {
     const { instanceId } = await failedRetryable();
     const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
 
@@ -1152,12 +1232,142 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
     expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
     expect(await currentJob()).toEqual({
-      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      status: 'normalizing', dispatch_state: 'confirmed', dispatch_generation: 2,
       retryable: 0, failure_code: null, terminal_at: null,
       expires_at: null, reference_release_at: null,
     });
     expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
   });
+
+  it('restores an all-null failed pause at the retained post-preflight normalization seam', async () => {
+    const { instanceId, payload } = await failedRetryable();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 1, restarted: 0 });
+    expect(await currentJob()).toMatchObject({
+      status: 'normalizing', dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
+
+    const continuation = await coverBackfillNormalize(backfillEnv(), payload, now);
+    expect(continuation.shouldContinue).toBe(true);
+    expect(await row(`
+      SELECT status, master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toMatchObject({
+      status: 'rendering',
+      master_id: expect.any(String),
+      render_set_id: expect.any(String),
+      manifest_json: expect.any(String),
+      manifest_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+  });
+
+  it('refuses a nonterminal rendering pause whose derived quartet is all null', async () => {
+    const { instanceId } = await inFlight({ status: 'rendering' });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  it('resumes a valid pinned finalizing pause without changing any pin', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access, { adopted: PINNED_MANIFEST_SLOTS });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'finalizing', retryable = 0, failure_code = NULL, terminal_at = NULL
+      WHERE id = ?
+    `).bind(JOB).run();
+    const pinsBefore = await row<{
+      master_id: string; render_set_id: string; manifest_json: string; manifest_sha256: string;
+    }>(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB);
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 1, unchanged: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'finalizing', dispatch_generation: 2 });
+    expect(await row(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toEqual(pinsBefore);
+  });
+
+  it('refuses a nonterminal paused claim when a frozen pin drifts after validation', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'rendering', retryable = 0, failure_code = NULL, terminal_at = NULL
+      WHERE id = ?
+    `).bind(JOB).run();
+    const env = envAfterAdoptedTupleRead(async () => {
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_jobs SET manifest_sha256 = ? WHERE id = ?
+      `).bind('f'.repeat(64), JOB).run();
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(env, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  it('refuses recovery when the exact source key changes after fingerprint validation', async () => {
+    const { instanceId } = await failedRetryable();
+    const replacementKey = `events/${access.event.id}/cover/replaced-after-validation.jpg`;
+    const env = envBeforeFirstBatch(async () => {
+      await testEnv.DB.prepare(`
+        UPDATE events SET cover_object_key = ? WHERE id = ?
+      `).bind(replacementKey, access.event.id).run();
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(env, now, platform.accessor))
+      .toMatchObject({ inspected: 1, resumed: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'failed', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  it.each([
+    ['restart', 'terminated', 'queued'],
+    ['resume', 'paused', 'normalizing'],
+  ] as const)(
+    'atomically recomputes run counters after a failed-job %s claim',
+    async (platformCall, platformStatus, restoredStatus) => {
+      const { instanceId } = await failedRetryable();
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_runs
+        SET total_count = 1, queued_count = 0, failed_count = 1
+        WHERE id = ?
+      `).bind(RUN).run();
+      const platform = scriptedBackfillAccessor({
+        [instanceId]: { kind: 'status', status: platformStatus },
+      });
+
+      await reconcileCoverBackfillJobs(testEnv, now, platform.accessor);
+
+      expect(platform.calls).toEqual([
+        `lookup:${instanceId}`, `${platformCall}:${instanceId}`,
+      ]);
+      expect(await currentJob()).toMatchObject({ status: restoredStatus });
+      expect(await row(`
+        SELECT total_count, queued_count, failed_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `, RUN)).toEqual({ total_count: 1, queued_count: 1, failed_count: 0 });
+    },
+  );
 
   /* ---------------- deletion and fence ownership ---------------- */
 
@@ -1191,6 +1401,34 @@ describe('platform reconciliation and the guarded restart edge', () => {
 
     expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
       .toMatchObject({ inspected: 1, blocked: 1 });
+    expect(platform.calls).toEqual([]);
+    expect(await currentJob()).toMatchObject({
+      status: 'failed', dispatch_state: 'blocked',
+      failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+  });
+
+  it('settles a deletion-blocked fence even when its generation differs', async () => {
+    await inFlight({ fenceState: 'deletion-blocked', fenceGeneration: 4 });
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, blocked: 1, unchanged: 0 });
+    expect(platform.calls).toEqual([]);
+    expect(await currentJob()).toMatchObject({
+      status: 'failed', dispatch_state: 'blocked',
+      failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+  });
+
+  it('settles a deleted event before considering an open fence generation mismatch', async () => {
+    await inFlight({ fenceGeneration: 4 });
+    await testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+      .bind(now.toISOString(), access.event.id).run();
+    const platform = scriptedBackfillAccessor();
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, blocked: 1, unchanged: 0 });
     expect(platform.calls).toEqual([]);
     expect(await currentJob()).toMatchObject({
       status: 'failed', dispatch_state: 'blocked',
@@ -1288,10 +1526,38 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
   });
 
+  it('leaves a stale recovery claim byte-identical for an unmapped future status', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'restarting', dispatchGeneration: 2, fenceGeneration: 2,
+      status: 'queued', claimedAt: STALE,
+    });
+    const beforeJob = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    const beforeFence = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    );
+    const beforeRun = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN,
+    );
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'status', status: 'someFutureState' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, unchanged: 1, resumed: 0, restarted: 0 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await row('SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB)).toEqual(beforeJob);
+    expect(await row(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    )).toEqual(beforeFence);
+    expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN)).toEqual(beforeRun);
+  });
+
   it('resumes a stale resuming claim whose instance is still paused', async () => {
     const { instanceId } = await seedJob(access, {
       dispatchState: 'resuming', dispatchGeneration: 2, fenceGeneration: 2,
-      status: 'rendering', claimedAt: STALE,
+      status: 'normalizing', claimedAt: STALE,
     });
     const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
 
@@ -1299,7 +1565,13 @@ describe('platform reconciliation and the guarded restart edge', () => {
       .toMatchObject({ inspected: 1, resumed: 1 });
     expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
     expect(await currentJob()).toMatchObject({
-      dispatch_state: 'confirmed', dispatch_generation: 3,
+      status: 'normalizing', dispatch_state: 'confirmed', dispatch_generation: 3,
+    });
+    expect(await row(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toEqual({
+      master_id: null, render_set_id: null, manifest_json: null, manifest_sha256: null,
     });
   });
 
@@ -1388,12 +1660,12 @@ describe('platform reconciliation and the guarded restart edge', () => {
   it.each([
     ['a malformed manifest shape', JSON.stringify({ slots: 'not-an-array' }), undefined],
     ['a duplicate manifest tuple', JSON.stringify({
-      slots: [PINNED_MANIFEST_SLOTS[0], ...PINNED_MANIFEST_SLOTS.slice(0, 11)],
+      slots: [...PINNED_MANIFEST_SLOTS, PINNED_MANIFEST_SLOTS[0]],
     }), undefined],
     ['an unknown manifest tuple', JSON.stringify({
       slots: [
+        ...PINNED_MANIFEST_SLOTS,
         { profile: 'unknown-profile', density: '1x', format: 'webp' },
-        ...PINNED_MANIFEST_SLOTS.slice(1),
       ],
     }), undefined],
     ['a manifest missing one mandatory 1x format', JSON.stringify({
@@ -1477,6 +1749,14 @@ describe('platform reconciliation and the guarded restart edge', () => {
 
   it('refuses finalizing when an adopted tuple disappears after the checkpoint read', async () => {
     const { instanceId } = await seedPinnedFailedJob(access, { adopted: PINNED_MANIFEST_SLOTS });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_runs
+      SET total_count = 1, queued_count = 0, failed_count = 1, updated_at = ?
+      WHERE id = ?
+    `).bind(STALE.toISOString(), RUN).run();
+    const runBefore = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN,
+    );
     const env = envAfterAdoptedTupleRead(async () => {
       await testEnv.DB.prepare(`
         DELETE FROM event_cover_render_objects
@@ -1490,6 +1770,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
       .toMatchObject({ inspected: 1, restarted: 0, unchanged: 1 });
     expect(platform.calls).toEqual([`lookup:${instanceId}`]);
     expect(await currentJob()).toMatchObject({ status: 'failed', dispatch_generation: 1 });
+    expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN)).toEqual(runBefore);
   });
 
   it('refuses rendering when an unexpected tuple appears after the checkpoint read', async () => {

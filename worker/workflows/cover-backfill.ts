@@ -593,7 +593,8 @@ const CLAIM_BOUND = {
   now: '?6',
   workflowInstanceId: '?7',
   dependencies: '?8',
-  windowFloor: '?9',
+  sourceObjectKey: '?9',
+  windowFloor: '?10',
 } as const;
 
 /**
@@ -641,7 +642,10 @@ const CLAIM_GUARDS = ` AND ${coverBackfillCurrentSourceSql()}`
   + ` AND ${coverBackfillNoPurgeGuardSql()}`
   + ` AND ${coverBackfillFenceGuardSql(CLAIM_BOUND.binding, 'open', CLAIM_BOUND.generation)}`
   + ` AND ${coverBackfillMinuteBudgetSql(CLAIM_BOUND.binding, MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE)}`
-  + ` AND ${coverBackfillInstanceIdleSql(CLAIM_BOUND.binding, CLAIM_BOUND.workflowInstanceId)}`;
+  + ` AND ${coverBackfillInstanceIdleSql(CLAIM_BOUND.binding, CLAIM_BOUND.workflowInstanceId)}`
+  + ' AND EXISTS (SELECT 1 FROM events e'
+  + ' WHERE e.id = event_cover_backfill_jobs.event_id'
+  + ` AND e.cover_object_key = ${CLAIM_BOUND.sourceObjectKey})`;
 
 const CLAIM_IDENTITY = ` WHERE id = ${CLAIM_BOUND.jobId} AND run_id = ${CLAIM_BOUND.runId}`
   + ` AND event_id = ${CLAIM_BOUND.eventId}`
@@ -649,27 +653,17 @@ const CLAIM_IDENTITY = ` WHERE id = ${CLAIM_BOUND.jobId} AND run_id = ${CLAIM_BO
   + ` AND dispatch_state IN ${RECOVERABLE_CLAIM_STATES}`
   + ` AND dependency_versions_json = ${CLAIM_BOUND.dependencies}`;
 
-/** `confirmed|resuming|restarting → resuming|creating`, leaving the status alone. */
-function recoveryClaimSql(target: 'resuming' | 'creating'): string {
-  return 'UPDATE event_cover_backfill_jobs'
-    + ` SET dispatch_state = '${target}', dispatch_generation = dispatch_generation + 1,`
-    + ` updated_at = ${CLAIM_BOUND.now}`
-    + CLAIM_IDENTITY
-    + ` AND status IN (${NONTERMINAL_SQL})`
-    + CLAIM_GUARDS;
-}
-
 /**
  * Restore one retained instance at the stage D1 can prove durably.
  *
- * `?10` is derived from the immutable quartet and exact adopted-object tuples;
- * `?11` through `?14` pin the read values into the write predicate. SQLite's
+ * `?11` is derived from the immutable quartet and exact adopted-object tuples;
+ * `?12` through `?15` pin the read values into the write predicate. SQLite's
  * `IS` is intentional: it gives exact equality for text and NULL-safe equality
  * for the legitimate all-null, pre-normalization checkpoint.
  */
 function restorationClaimSql(target: 'resuming' | 'creating' | 'restarting'): string {
   return 'UPDATE event_cover_backfill_jobs'
-    + ` SET status = ?10, dispatch_state = '${target}',`
+    + ` SET status = ?11, dispatch_state = '${target}',`
     + ' dispatch_generation = dispatch_generation + 1,'
     + ' failure_code = NULL, retryable = 0, terminal_at = NULL,'
     + ' reference_release_at = NULL, expires_at = NULL,'
@@ -678,12 +672,12 @@ function restorationClaimSql(target: 'resuming' | 'creating' | 'restarting'): st
     + ` AND ((status IN (${NONTERMINAL_SQL})) OR (`
     + "status = 'failed' AND retryable = 1"
     + ` AND terminal_at IS NOT NULL AND terminal_at > ${CLAIM_BOUND.windowFloor}))`
-    + ' AND master_id IS ?11 AND render_set_id IS ?12'
-    + ' AND manifest_json IS ?13 AND manifest_sha256 IS ?14'
+    + ' AND master_id IS ?12 AND render_set_id IS ?13'
+    + ' AND manifest_json IS ?14 AND manifest_sha256 IS ?15'
     // The object read used to derive the checkpoint is deliberately repeated
     // inside the claim. Otherwise an adopted tuple can disappear, or an
     // unexpected tuple can arrive, between that read and this generation bump.
-    + ` AND (?10 = 'queued' OR NOT EXISTS (`
+    + ` AND (?11 = 'queued' OR NOT EXISTS (`
     + ' SELECT 1 FROM event_cover_render_objects o'
     + ' WHERE o.render_set_id = event_cover_backfill_jobs.render_set_id'
     + ' AND o.event_id = event_cover_backfill_jobs.event_id'
@@ -693,7 +687,7 @@ function restorationClaimSql(target: 'resuming' | 'creating' | 'restarting'): st
     + " AND json_extract(slot.value, '$.density') = o.density"
     + " AND json_extract(slot.value, '$.format') = o.format"
     + ')))'
-    + ` AND (?10 <> 'finalizing' OR NOT EXISTS (`
+    + ` AND (?11 <> 'finalizing' OR NOT EXISTS (`
     + " SELECT 1 FROM json_each(event_cover_backfill_jobs.manifest_json, '$.slots') slot"
     + ' WHERE NOT EXISTS ('
     + ' SELECT 1 FROM event_cover_render_objects o'
@@ -737,7 +731,7 @@ async function settleUnreachableBackfillJob(
           WHERE f.workflow_binding = ?1
             AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id
             AND f.event_id = event_cover_backfill_jobs.event_id
-            AND f.dispatch_generation = ?6 AND f.state = 'deletion-blocked'
+            AND f.state = 'deletion-blocked'
         )`
       : `NOT EXISTS (
           SELECT 1 FROM event_cover_workflow_fences f
@@ -785,11 +779,11 @@ async function recordReconcilePlatformFailure(
     ),
     env.DB.prepare(`
       UPDATE event_cover_workflow_fences
-      SET expires_at = ?, updated_at = ?
+      SET expires_at = ?
       WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
         AND dispatch_generation = ? AND state = 'open' AND changes() = 1
     `).bind(
-      coverWorkflowFenceTerminalExpiry(now), timestamp, COVER_BACKFILL_BINDING,
+      coverWorkflowFenceTerminalExpiry(now), COVER_BACKFILL_BINDING,
       job.workflow_instance_id, job.event_id, job.dispatch_generation,
     ),
     recomputeBackfillRunCounters(env.DB, job.run_id, now, true),
@@ -815,7 +809,7 @@ async function backfillJobIsRestorable(job: ReconcileRow): Promise<boolean> {
   return await coverKeyFingerprint(job.cover_object_key) === job.legacy_key_fingerprint;
 }
 
-type BackfillRecoveryStatus = 'queued' | 'rendering' | 'finalizing';
+type BackfillRecoveryStatus = 'queued' | 'normalizing' | 'rendering' | 'finalizing';
 
 interface BackfillRecoveryCheckpoint {
   status: BackfillRecoveryStatus;
@@ -888,11 +882,12 @@ function parseFrozenBackfillManifest(raw: string): CoverRenderSlot[] | null {
 async function deriveBackfillRecoveryCheckpoint(
   env: AppEnv,
   job: ReconcileRow,
+  allNullStatus: 'queued' | 'normalizing' = 'queued',
 ): Promise<BackfillRecoveryCheckpoint | null> {
   const quartet = [job.master_id, job.render_set_id, job.manifest_json, job.manifest_sha256];
   if (quartet.every((value) => value === null)) {
     return {
-      status: 'queued', masterId: null, renderSetId: null,
+      status: allNullStatus, masterId: null, renderSetId: null,
       manifestJson: null, manifestSha256: null,
     };
   }
@@ -933,18 +928,59 @@ async function deriveBackfillRecoveryCheckpoint(
   };
 }
 
+/**
+ * A resume continues retained Workflow history, so its D1 stage is preserved
+ * only when the frozen evidence is compatible with that exact continuation.
+ */
+async function derivePausedRecoveryCheckpoint(
+  env: AppEnv,
+  job: ReconcileRow,
+): Promise<BackfillRecoveryCheckpoint | null> {
+  if (job.status === 'failed') {
+    return deriveBackfillRecoveryCheckpoint(env, job, 'normalizing');
+  }
+  if (job.status === 'queued' || job.status === 'normalizing') {
+    const checkpoint = await deriveBackfillRecoveryCheckpoint(env, job, job.status);
+    return checkpoint?.status === job.status && checkpoint.masterId === null
+      ? checkpoint
+      : null;
+  }
+  if (job.status === 'rendering') {
+    const checkpoint = await deriveBackfillRecoveryCheckpoint(env, job);
+    return checkpoint && checkpoint.masterId !== null
+      ? { ...checkpoint, status: 'rendering' }
+      : null;
+  }
+  if (job.status === 'finalizing') {
+    const checkpoint = await deriveBackfillRecoveryCheckpoint(env, job);
+    return checkpoint?.status === 'finalizing' ? checkpoint : null;
+  }
+  return null;
+}
+
 async function applyClaim(
   env: AppEnv,
   job: ReconcileRow,
   statement: string,
   binds: unknown[],
+  recomputeRestoredRunAt?: Date,
 ): Promise<boolean> {
-  const results = await env.DB.batch([
+  const statements = [
     env.DB.prepare(statement).bind(...binds),
     env.DB.prepare(FENCE_CLAIM_SQL).bind(
       COVER_BACKFILL_BINDING, job.id, job.event_id, job.workflow_instance_id,
     ),
-  ]);
+  ];
+  // A restoration moves a failed job back into the run's queued capacity. The
+  // fence statement is immediately before this recompute, so `changes() = 1`
+  // requires both the guarded job claim and its generation-matched fence move.
+  // Ordinary nonterminal recovery leaves its run summary untouched.
+  if (recomputeRestoredRunAt) {
+    statements.push(recomputeBackfillRunCounters(
+      env.DB, job.run_id, recomputeRestoredRunAt, true,
+    ));
+  }
+  const results = await env.DB.batch(statements);
   return results[0]!.meta.changes === 1;
 }
 
@@ -952,7 +988,7 @@ function claimBinds(job: ReconcileRow, now: Date): unknown[] {
   return [
     COVER_BACKFILL_BINDING, job.run_id, job.id, job.event_id,
     job.dispatch_generation, now.toISOString(), job.workflow_instance_id,
-    JSON.stringify(coverBackfillDependencyVersions()),
+    JSON.stringify(coverBackfillDependencyVersions()), job.cover_object_key,
   ];
 }
 
@@ -1016,20 +1052,18 @@ export async function reconcileCoverBackfillJobs(
     // 1. Deletion and fence ownership, decided before the platform is contacted
     // at all. A job whose event is going away routes to the purge coordinator,
     // which owns terminating the instance; reconciliation only settles the row.
-    // A fence standing at another generation belongs to another claim. This is
-    // supersession, not failure, and writing a terminal status would poison
-    // whichever run actually owns the instance.
-    if (job.fence_state !== null && job.fence_generation !== job.dispatch_generation) {
-      summary.unchanged += 1;
+    // Deletion ownership is generation-independent and therefore precedes open
+    // fence supersession. The job write still pins its selected generation.
+    if (job.event_deleted_at !== null) {
+      const settled = await settleUnreachableBackfillJob(
+        env, job, 'event-deleted', now,
+      );
+      if (settled) summary.blocked += 1;
+      else summary.unchanged += 1;
       continue;
     }
-    if (job.event_deleted_at !== null || job.fence_state === 'deletion-blocked') {
-      const settled = await settleUnreachableBackfillJob(
-        env,
-        job,
-        job.event_deleted_at !== null ? 'event-deleted' : 'blocked-fence',
-        now,
-      );
+    if (job.fence_state === 'deletion-blocked') {
+      const settled = await settleUnreachableBackfillJob(env, job, 'blocked-fence', now);
       if (settled) summary.blocked += 1;
       else summary.unchanged += 1;
       continue;
@@ -1042,6 +1076,12 @@ export async function reconcileCoverBackfillJobs(
       const settled = await settleUnreachableBackfillJob(env, job, 'missing-fence', now);
       if (settled) summary.blocked += 1;
       else summary.unchanged += 1;
+      continue;
+    }
+    if (job.fence_generation !== job.dispatch_generation) {
+      // Only an open fence reaches here. Its other generation belongs to a
+      // different claim, so terminalizing this selected job would poison it.
+      summary.unchanged += 1;
       continue;
     }
 
@@ -1058,7 +1098,9 @@ export async function reconcileCoverBackfillJobs(
       // A recovery claim whose instance turns out to be running did land: the
       // interruption was between the platform call and the confirmation. Record
       // that, so the ledger stops describing a claim nobody ever resolved.
-      if (disposition.kind === 'active'
+      if (lookup.kind === 'status'
+        && (lookup.status === 'queued' || lookup.status === 'running'
+          || lookup.status === 'waiting' || lookup.status === 'waitingForPause')
         && (job.dispatch_state === 'resuming' || job.dispatch_state === 'restarting')) {
         await confirmCoverBackfillDispatch(env, {
           ...payload,
@@ -1094,6 +1136,7 @@ export async function reconcileCoverBackfillJobs(
         job,
         restorationClaimSql('creating'),
         restorationClaimBinds(job, now, restartFloor, checkpoint),
+        nonterminal ? undefined : now,
       )) {
         summary.unchanged += 1;
         continue;
@@ -1120,16 +1163,18 @@ export async function reconcileCoverBackfillJobs(
         summary.unchanged += 1;
         continue;
       }
-      const checkpoint = nonterminal ? null : await deriveBackfillRecoveryCheckpoint(env, job);
-      if (!nonterminal && !checkpoint) {
+      const checkpoint = await derivePausedRecoveryCheckpoint(env, job);
+      if (!checkpoint) {
         summary.unchanged += 1;
         continue;
       }
-      const claim = nonterminal ? recoveryClaimSql('resuming') : restorationClaimSql('resuming');
-      const binds = nonterminal
-        ? claimBinds(job, now)
-        : restorationClaimBinds(job, now, restartFloor, checkpoint!);
-      if (!await applyClaim(env, job, claim, binds)) {
+      if (!await applyClaim(
+        env,
+        job,
+        restorationClaimSql('resuming'),
+        restorationClaimBinds(job, now, restartFloor, checkpoint),
+        nonterminal ? undefined : now,
+      )) {
         summary.unchanged += 1;
         continue;
       }
@@ -1167,6 +1212,7 @@ export async function reconcileCoverBackfillJobs(
       job,
       restorationClaimSql('restarting'),
       restorationClaimBinds(job, now, restartFloor, checkpoint),
+      now,
     )) {
       summary.unchanged += 1;
       continue;
