@@ -1,0 +1,460 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-09T19:59:13.378Z",
+  "title": "Design System: Candidary",
+  "extensions": {
+    "colorMeta": {
+      "parchment": {
+        "role": "neutral",
+        "displayName": "Parchment",
+        "canonical": "#f7f1e7",
+        "tonalRamp": ["oklch(15% 0.015 80.7)", "oklch(26% 0.015 80.7)", "oklch(37% 0.015 80.7)", "oklch(48% 0.015 80.7)", "oklch(59% 0.015 80.7)", "oklch(70% 0.015 80.7)", "oklch(82% 0.015 80.7)", "oklch(94% 0.015 80.7)"]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#fffaf3",
+        "tonalRamp": ["oklch(15% 0.011 76.6)", "oklch(26% 0.011 76.6)", "oklch(37% 0.011 76.6)", "oklch(48% 0.011 76.6)", "oklch(59% 0.011 76.6)", "oklch(70% 0.011 76.6)", "oklch(82% 0.011 76.6)", "oklch(94% 0.011 76.6)"]
+      },
+      "field": {
+        "role": "neutral",
+        "displayName": "Field",
+        "canonical": "#fffdf8",
+        "tonalRamp": ["oklch(15% 0.007 88.6)", "oklch(26% 0.007 88.6)", "oklch(37% 0.007 88.6)", "oklch(48% 0.007 88.6)", "oklch(59% 0.007 88.6)", "oklch(70% 0.007 88.6)", "oklch(82% 0.007 88.6)", "oklch(94% 0.007 88.6)"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#2b1d17",
+        "tonalRamp": ["oklch(15% 0.025 44.2)", "oklch(26% 0.025 44.2)", "oklch(37% 0.025 44.2)", "oklch(48% 0.025 44.2)", "oklch(59% 0.025 44.2)", "oklch(70% 0.025 44.2)", "oklch(82% 0.025 44.2)", "oklch(94% 0.025 44.2)"]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "#766c70",
+        "tonalRamp": ["oklch(15% 0.014 351.3)", "oklch(26% 0.014 351.3)", "oklch(37% 0.014 351.3)", "oklch(48% 0.014 351.3)", "oklch(59% 0.014 351.3)", "oklch(70% 0.014 351.3)", "oklch(82% 0.014 351.3)", "oklch(94% 0.014 351.3)"]
+      },
+      "chestnut": {
+        "role": "primary",
+        "displayName": "Chestnut",
+        "canonical": "#4a2415",
+        "tonalRamp": ["oklch(15% 0.063 41.7)", "oklch(26% 0.063 41.7)", "oklch(37% 0.063 41.7)", "oklch(48% 0.063 41.7)", "oklch(59% 0.063 41.7)", "oklch(70% 0.063 41.7)", "oklch(82% 0.063 41.7)", "oklch(94% 0.063 41.7)"]
+      },
+      "chestnut-strong": {
+        "role": "primary",
+        "displayName": "Chestnut Strong",
+        "canonical": "#31170c",
+        "tonalRamp": ["oklch(15% 0.046 43.1)", "oklch(26% 0.046 43.1)", "oklch(37% 0.046 43.1)", "oklch(48% 0.046 43.1)", "oklch(59% 0.046 43.1)", "oklch(70% 0.046 43.1)", "oklch(82% 0.046 43.1)", "oklch(94% 0.046 43.1)"]
+      },
+      "denim": {
+        "role": "secondary",
+        "displayName": "Denim",
+        "canonical": "#3f6d95",
+        "tonalRamp": ["oklch(15% 0.081 246.4)", "oklch(26% 0.081 246.4)", "oklch(37% 0.081 246.4)", "oklch(48% 0.081 246.4)", "oklch(59% 0.081 246.4)", "oklch(70% 0.081 246.4)", "oklch(82% 0.081 246.4)", "oklch(94% 0.081 246.4)"]
+      },
+      "denim-soft": {
+        "role": "secondary",
+        "displayName": "Denim Soft",
+        "canonical": "#dde7f0",
+        "tonalRamp": ["oklch(15% 0.016 245.1)", "oklch(26% 0.016 245.1)", "oklch(37% 0.016 245.1)", "oklch(48% 0.016 245.1)", "oklch(59% 0.016 245.1)", "oklch(70% 0.016 245.1)", "oklch(82% 0.016 245.1)", "oklch(94% 0.016 245.1)"]
+      },
+      "moss": {
+        "role": "tertiary",
+        "displayName": "Moss",
+        "canonical": "#68763d",
+        "tonalRamp": ["oklch(15% 0.082 120.6)", "oklch(26% 0.082 120.6)", "oklch(37% 0.082 120.6)", "oklch(48% 0.082 120.6)", "oklch(59% 0.082 120.6)", "oklch(70% 0.082 120.6)", "oklch(82% 0.082 120.6)", "oklch(94% 0.082 120.6)"]
+      },
+      "moss-soft": {
+        "role": "tertiary",
+        "displayName": "Moss Soft",
+        "canonical": "#e8ecd8",
+        "tonalRamp": ["oklch(15% 0.027 116.1)", "oklch(26% 0.027 116.1)", "oklch(37% 0.027 116.1)", "oklch(48% 0.027 116.1)", "oklch(59% 0.027 116.1)", "oklch(70% 0.027 116.1)", "oklch(82% 0.027 116.1)", "oklch(94% 0.027 116.1)"]
+      },
+      "completion-ink": {
+        "role": "tertiary",
+        "displayName": "Completion Ink",
+        "canonical": "#4e5b28",
+        "tonalRamp": ["oklch(15% 0.076 121.4)", "oklch(26% 0.076 121.4)", "oklch(37% 0.076 121.4)", "oklch(48% 0.076 121.4)", "oklch(59% 0.076 121.4)", "oklch(70% 0.076 121.4)", "oklch(82% 0.076 121.4)", "oklch(94% 0.076 121.4)"]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "Danger",
+        "canonical": "#b54033",
+        "tonalRamp": ["oklch(15% 0.154 29.4)", "oklch(26% 0.154 29.4)", "oklch(37% 0.154 29.4)", "oklch(48% 0.154 29.4)", "oklch(59% 0.154 29.4)", "oklch(70% 0.154 29.4)", "oklch(82% 0.154 29.4)", "oklch(94% 0.154 29.4)"]
+      },
+      "danger-soft": {
+        "role": "tertiary",
+        "displayName": "Danger Soft",
+        "canonical": "#fff1ee",
+        "tonalRamp": ["oklch(15% 0.016 32.0)", "oklch(26% 0.016 32.0)", "oklch(37% 0.016 32.0)", "oklch(48% 0.016 32.0)", "oklch(59% 0.016 32.0)", "oklch(70% 0.016 32.0)", "oklch(82% 0.016 32.0)", "oklch(94% 0.016 32.0)"]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Border",
+        "canonical": "#d9cec2",
+        "tonalRamp": ["oklch(15% 0.020 70.0)", "oklch(26% 0.020 70.0)", "oklch(37% 0.020 70.0)", "oklch(48% 0.020 70.0)", "oklch(59% 0.020 70.0)", "oklch(70% 0.020 70.0)", "oklch(82% 0.020 70.0)", "oklch(94% 0.020 70.0)"]
+      },
+      "focus": {
+        "role": "secondary",
+        "displayName": "Focus",
+        "canonical": "#2c5c85",
+        "tonalRamp": ["oklch(15% 0.085 246.8)", "oklch(26% 0.085 246.8)", "oklch(37% 0.085 246.8)", "oklch(48% 0.085 246.8)", "oklch(59% 0.085 246.8)", "oklch(70% 0.085 246.8)", "oklch(82% 0.085 246.8)", "oklch(94% 0.085 246.8)"]
+      },
+      "manager-ground": {
+        "role": "neutral",
+        "displayName": "Manager Ground",
+        "canonical": "#faf6ee",
+        "tonalRamp": ["oklch(15% 0.011 84.6)", "oklch(26% 0.011 84.6)", "oklch(37% 0.011 84.6)", "oklch(48% 0.011 84.6)", "oklch(59% 0.011 84.6)", "oklch(70% 0.011 84.6)", "oklch(82% 0.011 84.6)", "oklch(94% 0.011 84.6)"]
+      },
+      "manager-rail": {
+        "role": "neutral",
+        "displayName": "Manager Rail",
+        "canonical": "#f2eadf",
+        "tonalRamp": ["oklch(15% 0.017 76.1)", "oklch(26% 0.017 76.1)", "oklch(37% 0.017 76.1)", "oklch(48% 0.017 76.1)", "oklch(59% 0.017 76.1)", "oklch(70% 0.017 76.1)", "oklch(82% 0.017 76.1)", "oklch(94% 0.017 76.1)"]
+      },
+      "white": {
+        "role": "neutral",
+        "displayName": "White",
+        "canonical": "#ffffff",
+        "tonalRamp": ["oklch(15% 0.000 0.0)", "oklch(26% 0.000 0.0)", "oklch(37% 0.000 0.0)", "oklch(48% 0.000 0.0)", "oklch(59% 0.000 0.0)", "oklch(70% 0.000 0.0)", "oklch(82% 0.000 0.0)", "oklch(94% 0.000 0.0)"]
+      },
+      "candidary-default-hero-start": {
+        "role": "primary",
+        "displayName": "Candidary Default Hero Start",
+        "canonical": "#634134",
+        "tonalRamp": ["oklch(15% 0.052 41.7)", "oklch(26% 0.052 41.7)", "oklch(37% 0.052 41.7)", "oklch(48% 0.052 41.7)", "oklch(59% 0.052 41.7)", "oklch(70% 0.052 41.7)", "oklch(82% 0.052 41.7)", "oklch(94% 0.052 41.7)"]
+      },
+      "candidary-default-hero-mid": {
+        "role": "primary",
+        "displayName": "Candidary Default Hero Mid",
+        "canonical": "#a06e5a",
+        "tonalRamp": ["oklch(15% 0.071 42.6)", "oklch(26% 0.071 42.6)", "oklch(37% 0.071 42.6)", "oklch(48% 0.071 42.6)", "oklch(59% 0.071 42.6)", "oklch(70% 0.071 42.6)", "oklch(82% 0.071 42.6)", "oklch(94% 0.071 42.6)"]
+      },
+      "candidary-default-hero-end": {
+        "role": "primary",
+        "displayName": "Candidary Default Hero End",
+        "canonical": "#d98b6a",
+        "tonalRamp": ["oklch(15% 0.106 43.6)", "oklch(26% 0.106 43.6)", "oklch(37% 0.106 43.6)", "oklch(48% 0.106 43.6)", "oklch(59% 0.106 43.6)", "oklch(70% 0.106 43.6)", "oklch(82% 0.106 43.6)", "oklch(94% 0.106 43.6)"]
+      },
+      "garden-party-page": {
+        "role": "neutral",
+        "displayName": "Garden Party Page",
+        "canonical": "#f2f1e8",
+        "tonalRamp": ["oklch(15% 0.012 101.5)", "oklch(26% 0.012 101.5)", "oklch(37% 0.012 101.5)", "oklch(48% 0.012 101.5)", "oklch(59% 0.012 101.5)", "oklch(70% 0.012 101.5)", "oklch(82% 0.012 101.5)", "oklch(94% 0.012 101.5)"]
+      },
+      "garden-party-primary": {
+        "role": "primary",
+        "displayName": "Garden Party Primary",
+        "canonical": "#245c46",
+        "tonalRamp": ["oklch(15% 0.070 164.7)", "oklch(26% 0.070 164.7)", "oklch(37% 0.070 164.7)", "oklch(48% 0.070 164.7)", "oklch(59% 0.070 164.7)", "oklch(70% 0.070 164.7)", "oklch(82% 0.070 164.7)", "oklch(94% 0.070 164.7)"]
+      },
+      "garden-party-accent": {
+        "role": "secondary",
+        "displayName": "Garden Party Accent",
+        "canonical": "#c36f42",
+        "tonalRamp": ["oklch(15% 0.122 47.6)", "oklch(26% 0.122 47.6)", "oklch(37% 0.122 47.6)", "oklch(48% 0.122 47.6)", "oklch(59% 0.122 47.6)", "oklch(70% 0.122 47.6)", "oklch(82% 0.122 47.6)", "oklch(94% 0.122 47.6)"]
+      },
+      "midnight-film-page": {
+        "role": "neutral",
+        "displayName": "Midnight Film Page",
+        "canonical": "#eef1f7",
+        "tonalRamp": ["oklch(15% 0.009 264.5)", "oklch(26% 0.009 264.5)", "oklch(37% 0.009 264.5)", "oklch(48% 0.009 264.5)", "oklch(59% 0.009 264.5)", "oklch(70% 0.009 264.5)", "oklch(82% 0.009 264.5)", "oklch(94% 0.009 264.5)"]
+      },
+      "midnight-film-primary": {
+        "role": "primary",
+        "displayName": "Midnight Film Primary",
+        "canonical": "#263868",
+        "tonalRamp": ["oklch(15% 0.087 266.5)", "oklch(26% 0.087 266.5)", "oklch(37% 0.087 266.5)", "oklch(48% 0.087 266.5)", "oklch(59% 0.087 266.5)", "oklch(70% 0.087 266.5)", "oklch(82% 0.087 266.5)", "oklch(94% 0.087 266.5)"]
+      },
+      "midnight-film-accent": {
+        "role": "secondary",
+        "displayName": "Midnight Film Accent",
+        "canonical": "#b7693f",
+        "tonalRamp": ["oklch(15% 0.115 47.8)", "oklch(26% 0.115 47.8)", "oklch(37% 0.115 47.8)", "oklch(48% 0.115 47.8)", "oklch(59% 0.115 47.8)", "oklch(70% 0.115 47.8)", "oklch(82% 0.115 47.8)", "oklch(94% 0.115 47.8)"]
+      },
+      "coastal-light-page": {
+        "role": "neutral",
+        "displayName": "Coastal Light Page",
+        "canonical": "#edf7f5",
+        "tonalRamp": ["oklch(15% 0.011 182.9)", "oklch(26% 0.011 182.9)", "oklch(37% 0.011 182.9)", "oklch(48% 0.011 182.9)", "oklch(59% 0.011 182.9)", "oklch(70% 0.011 182.9)", "oklch(82% 0.011 182.9)", "oklch(94% 0.011 182.9)"]
+      },
+      "coastal-light-primary": {
+        "role": "primary",
+        "displayName": "Coastal Light Primary",
+        "canonical": "#0c6370",
+        "tonalRamp": ["oklch(15% 0.076 211.0)", "oklch(26% 0.076 211.0)", "oklch(37% 0.076 211.0)", "oklch(48% 0.076 211.0)", "oklch(59% 0.076 211.0)", "oklch(70% 0.076 211.0)", "oklch(82% 0.076 211.0)", "oklch(94% 0.076 211.0)"]
+      },
+      "coastal-light-accent": {
+        "role": "secondary",
+        "displayName": "Coastal Light Accent",
+        "canonical": "#c85f50",
+        "tonalRamp": ["oklch(15% 0.137 29.9)", "oklch(26% 0.137 29.9)", "oklch(37% 0.137 29.9)", "oklch(48% 0.137 29.9)", "oklch(59% 0.137 29.9)", "oklch(70% 0.137 29.9)", "oklch(82% 0.137 29.9)", "oklch(94% 0.137 29.9)"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Public hero statements and page-level identity."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section hierarchy and major Manager destinations."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Cards, panels, event names, and focused task headings."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Guest instructions, forms, product explanation, and operational prose."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Controls, fields, compact navigation, and action copy."
+      },
+      "eyebrow": {
+        "displayName": "Eyebrow",
+        "purpose": "Rare category labels and compact textual statuses."
+      }
+    },
+    "shadows": [
+      {
+        "name": "paper-card",
+        "value": "0 18px 50px rgb(74 36 21 / 5%)",
+        "purpose": "Barely visible warm lift for creation, account, legal, and recovery panels."
+      },
+      {
+        "name": "photographic-print",
+        "value": "0 22px 70px rgb(54 38 30 / 13%)",
+        "purpose": "Diffuse physical lift for overlapping guest prints and framed event surfaces."
+      },
+      {
+        "name": "event-preview-frame",
+        "value": "0 16px 40px var(--event-frame-shadow)",
+        "purpose": "Preset-owned lift around authenticated event appearance previews."
+      },
+      {
+        "name": "guest-task-card",
+        "value": "0 10px 28px var(--event-primary-shadow)",
+        "purpose": "Contained themed lift for RSVP and other framed guest tasks."
+      },
+      {
+        "name": "selection-ring",
+        "value": "0 0 0 2px var(--denim)",
+        "purpose": "State boundary for selected media and active operational rows, not physical elevation."
+      }
+    ],
+    "motion": [
+      {
+        "name": "selection-fast",
+        "value": "160ms ease",
+        "purpose": "Border and selection-state changes on media cards."
+      },
+      {
+        "name": "control-standard",
+        "value": "180ms ease",
+        "purpose": "Button, link, header, and disclosure state changes."
+      },
+      {
+        "name": "disclosure-slow",
+        "value": "220ms ease",
+        "purpose": "The upper bound for purposeful disclosure or selection movement."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0.01ms",
+        "purpose": "Nonessential animations and transitions collapse under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "media-two-up",
+        "value": "431px"
+      },
+      {
+        "name": "form-wide",
+        "value": "560px"
+      },
+      {
+        "name": "labelled-rail",
+        "value": "761px"
+      },
+      {
+        "name": "manager-wide",
+        "value": "1101px"
+      },
+      {
+        "name": "guest-framed",
+        "value": "min-width: 700px and min-height: 760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The global filled action for one clear next step.",
+      "html": "<button class=\"ds-button-primary\">Create your event <svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M5 12h14\"></path><path d=\"m13 6 6 6-6 6\"></path></svg></button>",
+      "css": ".ds-button-primary { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; background: var(--chestnut, #4a2415); color: #fff; font: 600 16px \"DM Sans\", sans-serif; cursor: pointer; transition: background 180ms ease, transform 180ms ease; } .ds-button-primary:hover { background: var(--chestnut-strong, #31170c); transform: translateY(-1px); } .ds-button-primary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } .ds-button-primary:active { transform: translateY(0); } .ds-button-primary svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A transparent Chestnut outline for a real but subordinate action.",
+      "html": "<button class=\"ds-button-secondary\">See how it works</button>",
+      "css": ".ds-button-secondary { min-height: 48px; padding: 12px 20px; border: 1px solid var(--chestnut, #4a2415); border-radius: 8px; background: transparent; color: var(--chestnut, #4a2415); font: 600 16px \"DM Sans\", sans-serif; cursor: pointer; transition: background 180ms ease, color 180ms ease, transform 180ms ease; } .ds-button-secondary:hover { background: var(--chestnut, #4a2415); color: #fff; transform: translateY(-1px); } .ds-button-secondary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } .ds-button-secondary:active { transform: translateY(0); }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "The standard labelled 48px field on the quiet inset Field surface.",
+      "html": "<label class=\"ds-field\"><span>Event name</span><input value=\"Maya &amp; Theo\" aria-label=\"Event name\"></label>",
+      "css": ".ds-field { width: min(420px, 100%); display: grid; gap: 8px; color: var(--ink, #2b1d17); font: 600 14px \"DM Sans\", sans-serif; } .ds-field input { box-sizing: border-box; width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border, #d9cec2); border-radius: 7px; background: var(--field, #fffdf8); color: var(--ink, #2b1d17); font: 600 16px \"DM Sans\", sans-serif; } .ds-field input:hover { border-color: var(--muted, #766c70); } .ds-field input:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 2px; }"
+    },
+    {
+      "name": "Paper Card",
+      "kind": "card",
+      "refersTo": "paper-card",
+      "description": "A major working surface separated by tone, one rule, and only a trace of lift.",
+      "html": "<article class=\"ds-paper-card\"><p class=\"ds-paper-card__label\">EVENT STATUS</p><h3>Ready for guests</h3><p>The printed event QR and schedule are prepared.</p></article>",
+      "css": ".ds-paper-card { box-sizing: border-box; width: min(420px, 100%); padding: 28px; border: 1px solid var(--border, #d9cec2); border-radius: 12px; background: var(--paper, #fffaf3); color: var(--ink, #2b1d17); box-shadow: 0 18px 50px rgb(74 36 21 / 5%); font-family: \"DM Sans\", sans-serif; } .ds-paper-card__label { margin: 0 0 10px; color: var(--chestnut, #4a2415); font-size: 12px; font-weight: 600; letter-spacing: .13em; } .ds-paper-card h3 { margin: 0; font: 700 26px/1.12 Manrope, sans-serif; letter-spacing: -.035em; } .ds-paper-card p:last-child { margin: 12px 0 0; color: var(--muted, #766c70); line-height: 1.6; }"
+    },
+    {
+      "name": "Completion Status",
+      "kind": "chip",
+      "refersTo": "status-success",
+      "description": "A compact textual receipt marker; Moss supports the state but never carries it alone.",
+      "html": "<span class=\"ds-status-success\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m5 12 4 4L19 6\"></path></svg> Delivered</span>",
+      "css": ".ds-status-success { width: fit-content; padding: 6px 10px; display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; background: var(--moss-soft, #e8ecd8); color: var(--completion-ink, #4e5b28); font: 700 12px \"DM Sans\", sans-serif; } .ds-status-success svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.25; } .ds-status-success:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 2px; }"
+    },
+    {
+      "name": "Public Header",
+      "kind": "nav",
+      "refersTo": "public-header",
+      "description": "Opaque Paper chrome with the three-stroke mark and a deliberately small exit set.",
+      "html": "<header class=\"ds-public-header\"><a class=\"ds-brand\" href=\"#\" aria-label=\"Candidary home\"><span class=\"ds-brand__mark\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>Candidary</span></a><nav aria-label=\"Primary\"><a href=\"#\">Sign in</a><a class=\"ds-header-cta\" href=\"#\">Create</a></nav></header>",
+      "css": ".ds-public-header { box-sizing: border-box; width: 100%; min-height: 88px; padding: 0 5vw; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border, #d9cec2); background: var(--paper, #fffaf3); color: var(--ink, #2b1d17); font-family: \"DM Sans\", sans-serif; } .ds-brand { min-height: 44px; display: inline-flex; align-items: center; gap: 11px; color: var(--chestnut, #4a2415); font: 700 21.6px Manrope, sans-serif; letter-spacing: -.035em; text-decoration: none; } .ds-brand__mark { width: 28px; height: 27px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; transform: rotate(-3deg); } .ds-brand__mark i { width: 7px; display: block; border-radius: 5px 5px 2px 2px; background: var(--denim, #3f6d95); } .ds-brand__mark i:nth-child(1) { height: 15px; transform: rotate(-14deg); } .ds-brand__mark i:nth-child(2) { height: 25px; background: var(--chestnut, #4a2415); } .ds-brand__mark i:nth-child(3) { height: 17px; transform: rotate(12deg); } .ds-public-header nav { display: flex; align-items: center; gap: 12px; } .ds-public-header nav a { min-height: 44px; padding: 0 8px; display: inline-flex; align-items: center; color: var(--muted, #766c70); font-weight: 600; text-decoration: none; } .ds-public-header .ds-header-cta { padding: 10px 15px; border: 1px solid var(--chestnut, #4a2415); border-radius: 8px; color: var(--chestnut, #4a2415); } .ds-public-header a:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 2px; } @media (max-width: 760px) { .ds-public-header { min-height: 70px; padding: 0 20px; } .ds-brand { font-size: 16.8px; } }"
+    },
+    {
+      "name": "Manager Navigation Item",
+      "kind": "nav",
+      "refersTo": "manager-nav-active",
+      "description": "A visibly labelled destination whose Denim surface and Chestnut edge identify the active workspace.",
+      "html": "<button class=\"ds-manager-nav-item\" aria-current=\"page\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 4h16v16H4z\"></path><circle cx=\"9\" cy=\"9\" r=\"2\"></circle><path d=\"m20 15-4-4L7 20\"></path></svg><span>Intake</span><strong>24</strong></button>",
+      "css": ".ds-manager-nav-item { box-sizing: border-box; min-width: 184px; min-height: 46px; padding: 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 6px; background: var(--denim-soft, #dde7f0); color: var(--chestnut, #4a2415); font: 600 14px \"DM Sans\", sans-serif; text-align: left; cursor: pointer; } .ds-manager-nav-item svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; } .ds-manager-nav-item strong { min-width: 20px; height: 20px; margin-left: auto; padding: 0 5px; display: grid; place-items: center; border-radius: 999px; background: var(--chestnut, #4a2415); color: #fff; font-size: 12px; } .ds-manager-nav-item:hover { background: color-mix(in srgb, var(--denim-soft, #dde7f0) 74%, var(--denim, #3f6d95)); } .ds-manager-nav-item:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 2px; }"
+    },
+    {
+      "name": "Candidary Default Event Hero",
+      "kind": "custom",
+      "refersTo": "event-hero-default",
+      "description": "The default no-cover event identity: verified text over a preset-owned warm gradient.",
+      "html": "<section class=\"ds-event-hero\"><p>SEPTEMBER 19, 2026</p><h3>Maya &amp; Theo</h3><span>We're so glad you're here. Add the moments only you noticed.</span></section>",
+      "css": ".ds-event-hero { box-sizing: border-box; width: min(620px, 100%); min-height: 218px; padding: 26px 22px 24px; display: flex; flex-direction: column; justify-content: flex-end; gap: 10px; overflow: hidden; border-radius: 25px; background: linear-gradient(180deg, rgb(31 15 9 / 10%), rgb(31 15 9 / 52%)), linear-gradient(145deg, #634134 0%, #a06e5a 53%, #d98b6a 100%); color: #fff; box-shadow: 0 16px 40px rgb(54 37 30 / 13%); } .ds-event-hero p { margin: 0; color: var(--denim-soft, #dde7f0); font: 700 11.5px \"DM Sans\", sans-serif; letter-spacing: .12em; } .ds-event-hero h3 { max-width: 15ch; margin: 0; font: 700 clamp(28px, 6vw, 39px)/1.04 Manrope, sans-serif; letter-spacing: -.04em; text-shadow: 0 2px 18px rgb(31 15 9 / 64%); } .ds-event-hero span { max-width: 46ch; font: 400 14.4px/1.45 \"DM Sans\", sans-serif; }"
+    },
+    {
+      "name": "RSVP Person Card",
+      "kind": "custom",
+      "refersTo": "rsvp-person-card",
+      "description": "A themed, per-person attendance decision with native radios and a geometric selected state.",
+      "html": "<fieldset class=\"ds-rsvp-person\"><legend>Avery Perkins</legend><div><label><input type=\"radio\" name=\"rsvp-demo\" checked><span>Attending</span></label><label><input type=\"radio\" name=\"rsvp-demo\"><span>Not attending</span></label></div></fieldset>",
+      "css": ".ds-rsvp-person { box-sizing: border-box; width: min(420px, 100%); margin: 0; padding: 15px 13px; border: 1px solid var(--event-border, #e3dcd8); border-radius: var(--event-card-radius, 10px); background: var(--event-raised-surface, #fff); color: var(--event-text, #352924); font-family: \"DM Sans\", sans-serif; } .ds-rsvp-person legend { padding: 0 5px; color: var(--event-page-text, #2b1d17); font: 800 16px Manrope, sans-serif; } .ds-rsvp-person div { margin-top: 5px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .ds-rsvp-person label { min-width: 0; min-height: 44px; padding: 9px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--event-input-border, #928a84); border-radius: var(--event-input-radius, 11px); background: var(--event-surface, #fffaf3); font-size: 13px; font-weight: 700; cursor: pointer; } .ds-rsvp-person label:has(input:checked) { border: 2px solid var(--event-primary, #4a2415); } .ds-rsvp-person input { width: 20px; height: 20px; margin: 0; accent-color: var(--event-primary, #4a2415); } .ds-rsvp-person input:focus-visible + span { outline: 3px solid var(--event-focus, #2c5c85); outline-offset: 3px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Event Ledger",
+    "overview": "The Quiet Event Ledger treats each event as a private record being carefully kept. Warm paper, dark ink, and restrained accents make the product intimate enough for weddings and private gatherings, while its hierarchy remains operationally precise: every phase, credential, delivery, and recovery state should be understood without interpretation.\n\nPhotography carries the emotion; interface chrome carries the truth. Public surfaces may feel editorial and generous, Manager surfaces become structured and compact, and guest surfaces narrow to one calm task at a time. The system rejects generic wedding SaaS, gallery-first social feeds, cold enterprise dashboards, and glassy or translucent effects that weaken legibility.",
+    "keyCharacteristics": [
+      "Warm, opaque paper grounds with dark ink and thin rules.",
+      "Chestnut for action, Denim for selection and active state, Moss for completion, and Danger red for refusal or loss.",
+      "Manrope for compact editorial hierarchy; DM Sans for direct, readable operation.",
+      "Mobile-first composition with visible labels and 44–48px controls.",
+      "Flat-by-default surfaces with lift reserved for paper cards, event frames, and photographs.",
+      "Globally branded chrome with a curated, scoped event-theme overlay."
+    ],
+    "rules": [
+      {
+        "name": "The Semantic Color Rule",
+        "body": "Chestnut acts, Denim selects or informs, Moss confirms completion, and Danger red names refusal or loss. Never exchange those meanings for decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Global Chrome Rule",
+        "body": "Public, account, create, host, Manager, browser, loading, and pre-authentication surfaces stay on the global palette. Curated event themes are confined to authenticated guest, RSVP, fullscreen, and preview surfaces.",
+        "section": "colors"
+      },
+      {
+        "name": "The Constrained Theme Rule",
+        "body": "Event appearance comes from the four server-resolved presets and optional validated primary/accent overrides. Never generate raw CSS, new font choices, arbitrary URLs, or a parallel image system.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two-Face Rule",
+        "body": "Use only the bundled Manrope and DM Sans families for product UI. A private event may change semantic colors and radii, never typography.",
+        "section": "typography"
+      },
+      {
+        "name": "The Compact Heading Rule",
+        "body": "Headings use short measures, high weight, tight tracking, and no script or ornamental wedding type.",
+        "section": "typography"
+      },
+      {
+        "name": "The Narrow-First Rule",
+        "body": "Resolve the complete task at 320px before opening columns, rails, or decorative breathing room.",
+        "section": "layout"
+      },
+      {
+        "name": "The One Primary Canvas Rule",
+        "body": "RSVP, before-start, waiting, and photo delivery share one narrow guest frame; secondary gallery, notes, and prior deliveries never compete with the current task.",
+        "section": "layout"
+      },
+      {
+        "name": "The Labeled Navigation Rule",
+        "body": "Every Manager destination remains visibly named at every width; icon-only navigation is not part of this system.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-by-Default Rule",
+        "body": "Use ground color, surface color, and one-pixel rules to establish structure. Add a shadow only when the element behaves like held paper, a framed event surface, or a physical photograph.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Arch and Print Rule",
+        "body": "Reserve the tall arch and overlapping square prints for photographic storytelling; ordinary product panels remain gently rectangular.",
+        "section": "shapes"
+      },
+      {
+        "name": "The No Bubble Drift Rule",
+        "body": "Pills belong to compact statuses, counts, and completion markers. Do not turn navigation, prose, or ordinary cards into floating capsules.",
+        "section": "shapes"
+      },
+      {
+        "name": "The State Before Ornament Rule",
+        "body": "Every selected, pending, delivered, failed, and disabled state must remain legible through text, geometry, or an icon in addition to color.",
+        "section": "components"
+      },
+      {
+        "name": "The Quiet Tactility Rule",
+        "body": "Controls may move by one pixel, deepen one semantic color, or reveal a focus outline; they do not glow, bounce, blur, or perform decorative motion.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "**Do** use the global Parchment, Paper, Ink, Chestnut, Denim, Moss, Danger, Border, and Focus roles before adding any new visual value.",
+      "**Do** keep core controls at least 44px high, with 48px as the standard field and button height.",
+      "**Do** let photographs carry celebration while surrounding controls remain calm, opaque, and specific.",
+      "**Do** preserve visible labels, textual status, focus movement, reduced-motion behavior, and narrow-width containment.",
+      "**Do** resolve event appearance through the existing preset registry and semantic token adapter."
+    ],
+    "donts": [
+      "**Don't** introduce script fonts, confetti motifs, pastel wedding clichés, glass panels, or generic SaaS gradients.",
+      "**Don't** make gallery, notes, badges, or decorative metrics compete with the current RSVP or delivery task.",
+      "**Don't** hide Manager labels, use color as the only state signal, or shrink controls below the touch floor.",
+      "**Don't** spread shadows across every surface; most hierarchy comes from spacing, paper tones, and rules.",
+      "**Don't** permit raw event CSS, arbitrary fonts, external assets, unvalidated colors, or unknown theme fields.",
+      "**Don't** reinterpret browser emulation as proof of a physical phone, camera picker, VoiceOver, or TalkBack."
+    ]
+  }
+}
