@@ -478,7 +478,7 @@ export async function recordZeroLegacyVerification(
 
 Put the four canonical predicates in one pure SQL-builder module imported by both Worker and Node so the proof query and guarded update cannot drift. The Worker function is called by `sweepCoverBackfillLedger`; it is not dead test-only code.
 
-The `verified` UPDATE itself contains all four zero predicates and requires the target run to be `inventorying`/`executing`, mode `execute`/`verify`, and otherwise closable. The update sets `status = 'verified'`, `verified_at`, `updated_at`, and the closed-run expiry in the same statement. If it changes zero rows, re-read the counts for diagnostics and guardedly close a genuinely closable red run as `failed`; never turn an active/incomplete run into failed merely because one count was nonzero.
+The `verified` UPDATE itself contains all four zero predicates and requires the target run to be `executing`, mode `execute`/`verify`, and otherwise closable; an `inventorying` run is never closable. The update sets `status = 'verified'`, `verified_at`, `updated_at`, and the closed-run expiry in the same statement. If it changes zero rows, re-read the counts for diagnostics and guardedly close a genuinely closable red run as `failed`; never turn an active/incomplete run into failed merely because one count was nonzero.
 
 The CLI's saved count payload is display evidence only. Missing/duplicate/negative count rows make its evaluation red, but even a syntactically green payload emits no verified UPDATE. Tests must include a race in which the displayed payload is green and D1 becomes red before the Worker transition; the run must not be verified. A second call must not restamp `verified_at`.
 
