@@ -9,6 +9,55 @@ import type { AppEnv } from '../../worker/env';
 export const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 export const origin = env.APP_ORIGIN;
 
+/**
+ * Execute prepared statements without ever exceeding D1's 100-statement batch
+ * ceiling. Rehearsals use this for large deterministic fixtures; callers still
+ * receive every result in statement order.
+ */
+export async function batchD1Statements(
+  db: D1Database,
+  statements: readonly D1PreparedStatement[],
+  batchSize = 100,
+): Promise<D1Result[]> {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) {
+    throw new RangeError('D1 rehearsal batches must contain between 1 and 100 statements.');
+  }
+  const results: D1Result[] = [];
+  for (let offset = 0; offset < statements.length; offset += batchSize) {
+    results.push(...await db.batch(statements.slice(offset, offset + batchSize)));
+  }
+  return results;
+}
+
+export interface RecordedR2Put {
+  key: string;
+}
+
+/**
+ * Observe R2 writes while delegating every operation to the real test bucket.
+ * The body is never inspected or consumed, so the storage path under rehearsal
+ * is byte-for-byte the same one production code invokes.
+ */
+export function withRecordingR2Puts(base: AppEnv = testEnv): {
+  env: AppEnv;
+  puts: RecordedR2Put[];
+} {
+  const puts: RecordedR2Put[] = [];
+  const bucket = new Proxy(base.MEDIA_BUCKET, {
+    get(target, property) {
+      if (property === 'put') {
+        return (...args: Parameters<R2Bucket['put']>) => {
+          puts.push({ key: args[0] });
+          return Reflect.apply(target.put, target, args) as ReturnType<R2Bucket['put']>;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { env: { ...base, MEDIA_BUCKET: bucket }, puts };
+}
+
 export interface Migration { name: string; queries: string[] }
 
 const migrationEnv = env as AppEnv & { TEST_MIGRATIONS: string };
