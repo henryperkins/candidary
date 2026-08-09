@@ -20,7 +20,7 @@ import {
   proveZeroLegacyCovers,
   reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
-  resolveSupersededBackfillJobs,
+  resolveSupersededBackfillJobsBounded,
 } from '../../worker/workflows/cover-backfill';
 import type {
   CoverBackfillWorkflowAccessor,
@@ -31,7 +31,13 @@ import {
   reconcileEventCoverPurge,
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
-import { eventAccess, resetDatabase, testEnv, withRecordingImages } from './helpers';
+import {
+  eventAccess,
+  resetDatabase,
+  seedEventCoverGraph,
+  testEnv,
+  withRecordingImages,
+} from './helpers';
 import type { AppEnv } from '../../worker/env';
 
 const now = new Date('2026-08-05T12:00:00.000Z');
@@ -168,6 +174,71 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
   return { key, instanceId, payload: { runId, jobId, eventId: access.event.id } };
 }
 
+interface LedgerSeed {
+  runId: string;
+  jobId: string;
+  eventId: string;
+  fingerprint: string;
+  updatedAt: string;
+  status?: 'needs_replacement' | 'failed';
+  expectedRevision?: number;
+  retryable?: 0 | 1;
+  failureCode?: string;
+  terminalAt?: string | null;
+  referenceReleaseAt?: string | null;
+  expiresAt?: string | null;
+  workflowInstanceId?: string;
+  dispatchState?: string;
+  dispatchGeneration?: number;
+  fence?: boolean;
+}
+
+/** Minimal truthful ledger rows for global sweep tests, without a Workflow call. */
+async function seedLedgerRows(seeds: readonly LedgerSeed[]) {
+  const statements = seeds.flatMap((seed) => {
+    const status = seed.status ?? 'needs_replacement';
+    return [
+      testEnv.DB.prepare(`
+        INSERT OR IGNORE INTO event_cover_backfill_runs (
+          id, mode, total_count, failed_count, needs_replacement_count,
+          status, created_at, updated_at
+        ) VALUES (?, 'execute', 1, ?, ?, 'executing', ?, ?)
+      `).bind(
+        seed.runId, status === 'failed' ? 1 : 0, status === 'needs_replacement' ? 1 : 0,
+        seed.updatedAt, seed.updatedAt,
+      ),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_jobs (
+          id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+          workflow_instance_id, dispatch_state, dispatch_generation, status,
+          dependency_versions_json, failure_code, retryable, terminal_at,
+          reference_release_at, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        seed.jobId, seed.runId, seed.eventId, seed.expectedRevision ?? 0, seed.fingerprint,
+        seed.workflowInstanceId ?? `instance-${seed.jobId}`,
+        seed.dispatchState ?? 'confirmed', seed.dispatchGeneration ?? 1, status,
+        JSON.stringify(coverBackfillDependencyVersions()), seed.failureCode ?? null,
+        seed.retryable ?? 0, seed.terminalAt ?? null,
+        seed.referenceReleaseAt ?? null, seed.expiresAt ?? null,
+        seed.updatedAt, seed.updatedAt,
+      ),
+      ...(seed.fence ? [testEnv.DB.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, ?, 'open', ?, ?, ?)
+      `).bind(
+        seed.workflowInstanceId ?? `instance-${seed.jobId}`, seed.eventId,
+        seed.dispatchGeneration ?? 1, seed.updatedAt, seed.updatedAt, FENCE_HOLD,
+      )] : []),
+    ];
+  });
+  for (let offset = 0; offset < statements.length; offset += 100) {
+    await testEnv.DB.batch(statements.slice(offset, offset + 100));
+  }
+}
+
 async function testSha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return [...new Uint8Array(digest)]
@@ -279,6 +350,82 @@ function envBeforeFirstBatch(action: () => Promise<void>): AppEnv {
           return target.batch(statements);
         };
       }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
+}
+
+/** Injects a classification-to-write race while every read still uses real D1. */
+function envBeforeFirstLedgerWrite(action: () => Promise<void>): AppEnv {
+  let acted = false;
+  const beforeWrite = async () => {
+    if (acted) return;
+    acted = true;
+    await action();
+  };
+  const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(
+    statement,
+    {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values), sql);
+        }
+        if (property === 'run') {
+          return async <T>() => {
+            if (sql.includes('UPDATE event_cover_backfill_jobs')) await beforeWrite();
+            return target.run<T>();
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    },
+  );
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (sql: string) => wrap(target.prepare(sql), sql);
+      }
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          await beforeWrite();
+          return target.batch(statements);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
+}
+
+function envWithLedgerReadTransform(
+  transform: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>,
+): AppEnv {
+  const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(
+    statement,
+    {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values), sql);
+        }
+        if (property === 'all') {
+          return async <T>() => {
+            const result = await target.all<T>();
+            if (!sql.includes('AS event_exists')) return result;
+            return { ...result, results: transform(result.results as Array<Record<string, unknown>>) };
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    },
+  );
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') return (sql: string) => wrap(target.prepare(sql), sql);
       const value = Reflect.get(target, property, target) as unknown;
       return typeof value === 'function' ? value.bind(target) : value;
     },
@@ -1941,7 +2088,14 @@ describe('superseded jobs and the zero-legacy proof', () => {
     await coverBackfillPreflight(env, payload, now);
     await coverBackfillNormalize(env, payload, now);
 
-    expect(await resolveSupersededBackfillJobs(testEnv, RUN, now)).toBe(0);
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toEqual({
+      inspectedJobs: 1,
+      resolvedJobs: 0,
+      closedVerifiedRuns: 0,
+      closedFailedRuns: 0,
+      expiredRunsStamped: 0,
+      remainder: true,
+    });
     expect(await row('SELECT status FROM event_cover_backfill_jobs WHERE id = ?', JOB))
       .toEqual({ status: 'needs_replacement' });
     expect((await proveZeroLegacyCovers(testEnv)).proven).toBe(false);
@@ -1955,7 +2109,14 @@ describe('superseded jobs and the zero-legacy proof', () => {
 
     await testEnv.DB.prepare('UPDATE events SET cover_object_key = NULL WHERE id = ?')
       .bind(access.event.id).run();
-    expect(await resolveSupersededBackfillJobs(testEnv, RUN, now)).toBe(1);
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toEqual({
+      inspectedJobs: 1,
+      resolvedJobs: 1,
+      closedVerifiedRuns: 0,
+      closedFailedRuns: 0,
+      expiredRunsStamped: 0,
+      remainder: false,
+    });
 
     const job = await row<{ status: string; expires_at: string }>(
       'SELECT status, expires_at FROM event_cover_backfill_jobs WHERE id = ?', JOB,
@@ -1967,6 +2128,440 @@ describe('superseded jobs and the zero-legacy proof', () => {
 
     const proof = await proveZeroLegacyCovers(testEnv);
     expect(proof).toMatchObject({ legacyRows: 0, blockingJobs: 0, proven: true });
+  });
+
+  it('uses the ID tie-break while rotating 100 blockers so the 101st is reached next', async () => {
+    await resetDatabase();
+    const current = await eventAccess('Current source');
+    const superseded = await eventAccess('Superseded source');
+    const currentKey = legacyKey(current.event.id);
+    await testEnv.DB.prepare(`
+      UPDATE events SET cover_object_key = ?, cover_revision = 9 WHERE id = ?
+    `).bind(currentKey, current.event.id).run();
+    const fingerprint = await coverKeyFingerprint(currentKey);
+    const blockers = Array.from({ length: 100 }, (_unused, index): LedgerSeed => ({
+      runId: `fair-run-${index.toString().padStart(3, '0')}`,
+      jobId: `fair-job-${index.toString().padStart(3, '0')}`,
+      eventId: current.event.id,
+      fingerprint,
+      expectedRevision: 1,
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      failureCode: 'COVER_SOURCE_NEEDS_REPLACEMENT',
+    }));
+    await seedLedgerRows([
+      ...blockers,
+      {
+        runId: 'fair-run-superseded',
+        jobId: 'fair-job-superseded',
+        eventId: superseded.event.id,
+        fingerprint,
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]);
+
+    const before = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_backfill_jobs WHERE id LIKE 'fair-job-0%' ORDER BY id
+    `).all<Record<string, unknown>>();
+    const first = await resolveSupersededBackfillJobsBounded(testEnv, now);
+
+    expect(first).toEqual({
+      inspectedJobs: 100,
+      resolvedJobs: 0,
+      closedVerifiedRuns: 0,
+      closedFailedRuns: 0,
+      expiredRunsStamped: 0,
+      remainder: true,
+    });
+    const after = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_backfill_jobs WHERE id LIKE 'fair-job-0%' ORDER BY id
+    `).all<Record<string, unknown>>();
+    expect(after.results).toHaveLength(100);
+    for (const [index, currentRow] of after.results.entries()) {
+      const original = before.results[index]!;
+      expect({ ...currentRow, updated_at: original.updated_at }).toEqual(original);
+      expect(Date.parse(String(currentRow.updated_at))).toBeGreaterThan(now.getTime());
+      expect(Date.parse(String(currentRow.updated_at))).toBeGreaterThan(
+        Date.parse(String(original.updated_at)),
+      );
+    }
+    expect(await row<{ status: string }>(
+      'SELECT status FROM event_cover_backfill_jobs WHERE id = ?', 'fair-job-superseded',
+    )).toEqual({ status: 'needs_replacement' });
+
+    const second = await resolveSupersededBackfillJobsBounded(testEnv, now);
+    expect(second).toMatchObject({ inspectedJobs: 100, resolvedJobs: 1, remainder: true });
+    expect(await row<{ status: string }>(
+      'SELECT status FROM event_cover_backfill_jobs WHERE id = ?', 'fair-job-superseded',
+    )).toEqual({ status: 'resolved' });
+  });
+
+  it('loses the rotation CAS when the observed event snapshot changes after classification', async () => {
+    await resetDatabase();
+    const current = await eventAccess('Rotation race');
+    const key = legacyKey(current.event.id);
+    await testEnv.DB.prepare(`
+      UPDATE events SET cover_object_key = ?, cover_revision = 3 WHERE id = ?
+    `).bind(key, current.event.id).run();
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows([{
+      runId: 'rotation-race-run', jobId: 'rotation-race-job', eventId: current.event.id,
+      fingerprint: await coverKeyFingerprint(key), expectedRevision: 1, updatedAt,
+    }]);
+    const racingEnv = envBeforeFirstLedgerWrite(async () => {
+      await testEnv.DB.prepare('UPDATE events SET cover_revision = 4 WHERE id = ?')
+        .bind(current.event.id).run();
+    });
+
+    expect(await resolveSupersededBackfillJobsBounded(racingEnv, now)).toMatchObject({
+      inspectedJobs: 1, resolvedJobs: 0, remainder: true,
+    });
+    expect(await row<{ status: string; updated_at: string }>(`
+      SELECT status, updated_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'rotation-race-job')).toEqual({ status: 'needs_replacement', updated_at: updatedAt });
+  });
+
+  it('loses the resolution CAS when the observed event snapshot changes after classification', async () => {
+    await resetDatabase();
+    const superseded = await eventAccess('Resolution race');
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows([{
+      runId: 'resolution-race-run', jobId: 'resolution-race-job',
+      eventId: superseded.event.id, fingerprint: 'a'.repeat(64), updatedAt,
+    }]);
+    const racingEnv = envBeforeFirstLedgerWrite(async () => {
+      await testEnv.DB.prepare('UPDATE events SET cover_revision = cover_revision + 1 WHERE id = ?')
+        .bind(superseded.event.id).run();
+    });
+
+    expect(await resolveSupersededBackfillJobsBounded(racingEnv, now)).toMatchObject({
+      inspectedJobs: 1, resolvedJobs: 0, remainder: true,
+    });
+    expect(await row<{ status: string; updated_at: string }>(`
+      SELECT status, updated_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'resolution-race-job')).toEqual({ status: 'needs_replacement', updated_at: updatedAt });
+  });
+
+  it('loses the resolution CAS when the selected job fingerprint changes', async () => {
+    await resetDatabase();
+    const superseded = await eventAccess('Job race');
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows([{
+      runId: 'job-race-run', jobId: 'job-race-job', eventId: superseded.event.id,
+      fingerprint: 'a'.repeat(64), updatedAt,
+    }]);
+    const racingEnv = envBeforeFirstLedgerWrite(async () => {
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_jobs SET legacy_key_fingerprint = ? WHERE id = ?
+      `).bind('b'.repeat(64), 'job-race-job').run();
+    });
+
+    expect(await resolveSupersededBackfillJobsBounded(racingEnv, now)).toMatchObject({
+      inspectedJobs: 1, resolvedJobs: 0, remainder: true,
+    });
+    expect(await row<{ status: string; updated_at: string }>(`
+      SELECT status, updated_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'job-race-job')).toEqual({ status: 'needs_replacement', updated_at: updatedAt });
+  });
+
+  it('recounts an actually changed run once and stamps only the fence whose job won its CAS', async () => {
+    await resetDatabase();
+    const firstEvent = await eventAccess('First superseded job');
+    const secondEvent = await eventAccess('Second superseded job');
+    const thirdEvent = await eventAccess('Third superseded job');
+    const originalUpdatedAt = '2026-08-01T00:00:00.000Z';
+    const runId = 'atomic-resolve-run';
+    await seedLedgerRows([
+      {
+        runId, jobId: 'atomic-resolve-a', eventId: firstEvent.event.id,
+        fingerprint: 'a'.repeat(64), updatedAt: originalUpdatedAt, fence: true,
+      },
+      {
+        runId, jobId: 'atomic-resolve-b', eventId: secondEvent.event.id,
+        fingerprint: 'b'.repeat(64), updatedAt: originalUpdatedAt, fence: true,
+      },
+      {
+        runId, jobId: 'atomic-resolve-c', eventId: thirdEvent.event.id,
+        fingerprint: 'c'.repeat(64), updatedAt: originalUpdatedAt, fence: true,
+      },
+    ]);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_runs
+      SET total_count = 3, needs_replacement_count = 3 WHERE id = ?
+    `).bind(runId).run();
+    await testEnv.DB.prepare(`
+      CREATE TABLE task5_run_recount_audit (run_id TEXT NOT NULL)
+    `).run();
+    await testEnv.DB.prepare(`
+      CREATE TRIGGER task5_run_recount_once
+      AFTER UPDATE ON event_cover_backfill_runs
+      WHEN NEW.id = '${runId}'
+      BEGIN INSERT INTO task5_run_recount_audit (run_id) VALUES (NEW.id); END
+    `).run();
+    const racingEnv = envBeforeFirstLedgerWrite(async () => {
+      await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+        .bind(secondEvent.event.id).run();
+    });
+
+    expect(await resolveSupersededBackfillJobsBounded(racingEnv, now)).toMatchObject({
+      inspectedJobs: 3, resolvedJobs: 2, remainder: true,
+    });
+    expect(await row(`
+      SELECT total_count, resolved_count, needs_replacement_count, updated_at
+      FROM event_cover_backfill_runs WHERE id = ?
+    `, runId)).toEqual({
+      total_count: 3, resolved_count: 2, needs_replacement_count: 1,
+      updated_at: now.toISOString(),
+    });
+    expect(await row<{ count: number }>(
+      'SELECT count(*) AS count FROM task5_run_recount_audit WHERE run_id = ?', runId,
+    )).toEqual({ count: 1 });
+    expect(await row(`
+      SELECT status, terminal_at, reference_release_at, expires_at
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'atomic-resolve-a')).toEqual({
+      status: 'resolved',
+      terminal_at: now.toISOString(),
+      reference_release_at: '2026-08-12T12:00:00.000Z',
+      expires_at: '2026-09-04T12:00:00.000Z',
+    });
+    expect(await row(`
+      SELECT status, updated_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'atomic-resolve-b')).toEqual({
+      status: 'needs_replacement', updated_at: originalUpdatedAt,
+    });
+    expect(await row(`
+      SELECT updated_at, expires_at FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?
+    `, 'instance-atomic-resolve-a')).toEqual({
+      updated_at: now.toISOString(), expires_at: '2026-09-05T12:00:00.000Z',
+    });
+    expect(await row(`
+      SELECT updated_at, expires_at FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?
+    `, 'instance-atomic-resolve-b')).toEqual({
+      updated_at: originalUpdatedAt, expires_at: FENCE_HOLD,
+    });
+    expect(await row(`
+      SELECT updated_at, expires_at FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?
+    `, 'instance-atomic-resolve-c')).toEqual({
+      updated_at: now.toISOString(), expires_at: '2026-09-05T12:00:00.000Z',
+    });
+  });
+
+  it('rolls a job resolution back when its atomic run recount fails', async () => {
+    await resetDatabase();
+    const superseded = await eventAccess('Atomic rollback');
+    const runId = 'atomic-rollback-run';
+    const jobId = 'atomic-rollback-job';
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows([{
+      runId, jobId, eventId: superseded.event.id, fingerprint: 'a'.repeat(64),
+      updatedAt, fence: true,
+    }]);
+    await testEnv.DB.prepare(`
+      CREATE TRIGGER task5_recount_abort BEFORE UPDATE ON event_cover_backfill_runs
+      WHEN NEW.id = '${runId}' BEGIN SELECT RAISE(ABORT, 'forced recount failure'); END
+    `).run();
+
+    await expect(resolveSupersededBackfillJobsBounded(testEnv, now))
+      .rejects.toThrow(/forced recount failure/u);
+    expect(await row(`
+      SELECT status, updated_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, jobId)).toEqual({ status: 'needs_replacement', updated_at: updatedAt });
+    expect(await row(`
+      SELECT updated_at, expires_at FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?
+    `, `instance-${jobId}`)).toEqual({ updated_at: updatedAt, expires_at: FENCE_HOLD });
+  });
+
+  it('recounts a resolved run even when the job has no matching fence', async () => {
+    await resetDatabase();
+    const superseded = await eventAccess('No retained fence');
+    const runId = 'missing-fence-recount-run';
+    await seedLedgerRows([{
+      runId, jobId: 'missing-fence-recount-job', eventId: superseded.event.id,
+      fingerprint: 'a'.repeat(64), updatedAt: '2026-08-01T00:00:00.000Z',
+    }]);
+
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toMatchObject({
+      inspectedJobs: 1, resolvedJobs: 1, remainder: false,
+    });
+    expect(await row(`
+      SELECT resolved_count, needs_replacement_count, updated_at
+      FROM event_cover_backfill_runs WHERE id = ?
+    `, runId)).toEqual({
+      resolved_count: 1, needs_replacement_count: 0, updated_at: now.toISOString(),
+    });
+  });
+
+  it('requires a confirming empty pass after exactly 100 resolved jobs', async () => {
+    await resetDatabase();
+    const superseded = await eventAccess('One hundred superseded jobs');
+    await seedLedgerRows(Array.from({ length: 100 }, (_unused, index): LedgerSeed => ({
+      runId: `saturated-run-${index.toString().padStart(3, '0')}`,
+      jobId: `saturated-job-${index.toString().padStart(3, '0')}`,
+      eventId: superseded.event.id,
+      fingerprint: 'a'.repeat(64),
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    })));
+
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toMatchObject({
+      inspectedJobs: 100, resolvedJobs: 100, remainder: true,
+    });
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toEqual({
+      inspectedJobs: 0,
+      resolvedJobs: 0,
+      closedVerifiedRuns: 0,
+      closedFailedRuns: 0,
+      expiredRunsStamped: 0,
+      remainder: false,
+    });
+  });
+
+  it('keeps 99 current blockers pending and preserves every field except the fairness clock', async () => {
+    await resetDatabase();
+    const current = await eventAccess('Ninety-nine current jobs');
+    const key = legacyKey(current.event.id);
+    await testEnv.DB.prepare(`
+      UPDATE events SET cover_object_key = ?, cover_revision = 17 WHERE id = ?
+    `).bind(key, current.event.id).run();
+    const fingerprint = await coverKeyFingerprint(key);
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows(Array.from({ length: 99 }, (_unused, index): LedgerSeed => ({
+      runId: `current-run-${index.toString().padStart(3, '0')}`,
+      jobId: `current-job-${index.toString().padStart(3, '0')}`,
+      eventId: current.event.id,
+      fingerprint,
+      expectedRevision: 2,
+      updatedAt,
+      status: index >= 97 ? 'failed' : 'needs_replacement',
+      retryable: index === 98 ? 1 : 0,
+      failureCode: index === 98
+        ? 'COVER_RENDER_UNAVAILABLE'
+        : index === 97 ? 'COVER_SOURCE_UNSUPPORTED' : 'COVER_SOURCE_NEEDS_REPLACEMENT',
+      terminalAt: index === 98
+        ? '2026-08-05T11:00:00.000Z'
+        : index === 97 ? '2026-07-01T00:00:00.000Z' : null,
+      referenceReleaseAt: index === 97 ? '2026-07-08T00:00:00.000Z' : null,
+      expiresAt: index === 97 ? '2026-07-31T00:00:00.000Z' : null,
+    })));
+    const before = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_backfill_jobs WHERE id LIKE 'current-job-%' ORDER BY id
+    `).all<Record<string, unknown>>();
+
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toMatchObject({
+      inspectedJobs: 99, resolvedJobs: 0, remainder: true,
+    });
+    const after = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_backfill_jobs WHERE id LIKE 'current-job-%' ORDER BY id
+    `).all<Record<string, unknown>>();
+    for (const [index, currentRow] of after.results.entries()) {
+      const original = before.results[index]!;
+      expect({ ...currentRow, updated_at: original.updated_at }).toEqual(original);
+      expect(currentRow.updated_at).toBe('2026-08-05T12:00:00.001Z');
+    }
+    expect(after.results[98]).toMatchObject({
+      status: 'failed', retryable: 1, failure_code: 'COVER_RENDER_UNAVAILABLE',
+      terminal_at: '2026-08-05T11:00:00.000Z',
+      reference_release_at: null, expires_at: null,
+    });
+    expect(after.results[97]).toMatchObject({
+      status: 'failed', retryable: 0, failure_code: 'COVER_SOURCE_UNSUPPORTED',
+      terminal_at: '2026-07-01T00:00:00.000Z',
+      reference_release_at: '2026-07-08T00:00:00.000Z',
+      expires_at: '2026-07-31T00:00:00.000Z',
+    });
+    expect(await row<{ updated_at: string }>(`
+      SELECT updated_at FROM event_cover_backfill_runs WHERE id = ?
+    `, 'current-run-000')).toEqual({ updated_at: updatedAt });
+  });
+
+  it('resolves every failed currentness predicate on a retained event', async () => {
+    await resetDatabase();
+    const deleted = await eventAccess('Deleted source');
+    const noKey = await eventAccess('Removed source');
+    const rendered = await eventAccess('Rendered source');
+    const replaced = await eventAccess('Fingerprint changed');
+    const deletedKey = legacyKey(deleted.event.id);
+    const replacedKey = legacyKey(replaced.event.id);
+    await testEnv.DB.prepare(`
+      UPDATE events SET cover_object_key = ?, deleted_at = ? WHERE id = ?
+    `).bind(deletedKey, now.toISOString(), deleted.event.id).run();
+    await seedEventCoverGraph(testEnv.DB, rendered.event.id);
+    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
+      .bind(replacedKey, replaced.event.id).run();
+    const originalTerminalAt = '2026-08-05T11:00:00.000Z';
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows([
+      {
+        runId: 'reason-deleted-run', jobId: 'reason-deleted-job', eventId: deleted.event.id,
+        fingerprint: await coverKeyFingerprint(deletedKey), updatedAt,
+        status: 'failed', retryable: 1, terminalAt: originalTerminalAt, fence: true,
+      },
+      {
+        runId: 'reason-no-key-run', jobId: 'reason-no-key-job', eventId: noKey.event.id,
+        fingerprint: 'a'.repeat(64), updatedAt,
+      },
+      {
+        runId: 'reason-rendered-run', jobId: 'reason-rendered-job', eventId: rendered.event.id,
+        fingerprint: 'b'.repeat(64), updatedAt,
+      },
+      {
+        runId: 'reason-fingerprint-run', jobId: 'reason-fingerprint-job',
+        eventId: replaced.event.id, fingerprint: 'c'.repeat(64), updatedAt,
+      },
+    ]);
+    expect(await resolveSupersededBackfillJobsBounded(testEnv, now)).toMatchObject({
+      inspectedJobs: 4, resolvedJobs: 4, remainder: false,
+    });
+    expect((await testEnv.DB.prepare(`
+      SELECT id, status FROM event_cover_backfill_jobs WHERE id LIKE 'reason-%'
+      ORDER BY id
+    `).all<{ id: string; status: string }>()).results)
+      .toEqual([
+        { id: 'reason-deleted-job', status: 'resolved' },
+        { id: 'reason-fingerprint-job', status: 'resolved' },
+        { id: 'reason-no-key-job', status: 'resolved' },
+        { id: 'reason-rendered-job', status: 'resolved' },
+      ]);
+    expect(await row(`
+      SELECT terminal_at, reference_release_at, expires_at
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'reason-deleted-job')).toEqual({
+      terminal_at: originalTerminalAt,
+      reference_release_at: '2026-08-12T12:00:00.000Z',
+      expires_at: '2026-09-04T12:00:00.000Z',
+    });
+    expect(await row(`
+      SELECT updated_at, expires_at FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = 'instance-reason-deleted-job'
+    `)).toEqual({
+      updated_at: now.toISOString(), expires_at: '2026-09-05T12:00:00.000Z',
+    });
+  });
+
+  it('does not confuse an observed missing event with an existing all-null event snapshot', async () => {
+    await resetDatabase();
+    const existing = await eventAccess('Existing null snapshot');
+    const updatedAt = '2026-08-01T00:00:00.000Z';
+    await seedLedgerRows([{
+      runId: 'existence-sentinel-run', jobId: 'existence-sentinel-job',
+      eventId: existing.event.id, fingerprint: 'a'.repeat(64), updatedAt,
+    }]);
+    const staleMissingRead = envWithLedgerReadTransform((rows) => rows.map((candidate) => ({
+      ...candidate,
+      event_exists: 0,
+    })));
+
+    expect(await resolveSupersededBackfillJobsBounded(staleMissingRead, now)).toMatchObject({
+      inspectedJobs: 1, resolvedJobs: 0, remainder: true,
+    });
+    expect(await row(`
+      SELECT status, updated_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, 'existence-sentinel-job')).toEqual({
+      status: 'needs_replacement', updated_at: updatedAt,
+    });
   });
 
   it('is red while any legacy row remains', async () => {

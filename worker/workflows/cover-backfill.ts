@@ -265,8 +265,13 @@ export function recomputeBackfillRunCounters(
   db: D1Database,
   runId: string,
   now: Date,
-  onlyIfPriorStatementChanged = false,
+  onlyIfPriorStatementChanged: boolean | 'any' = false,
 ): D1PreparedStatement {
+  const changeGuard = onlyIfPriorStatementChanged === 'any'
+    ? ' AND changes() > 0'
+    : onlyIfPriorStatementChanged
+      ? ' AND changes() = 1'
+      : '';
   return db.prepare(`
     UPDATE event_cover_backfill_runs SET
       total_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1),
@@ -279,7 +284,7 @@ export function recomputeBackfillRunCounters(
       needs_replacement_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ?1
                                    AND status = 'needs_replacement'),
       updated_at = ?2
-    WHERE id = ?1${onlyIfPriorStatementChanged ? ' AND changes() = 1' : ''}
+    WHERE id = ?1${changeGuard}
   `).bind(runId, now.toISOString());
 }
 
@@ -1582,40 +1587,210 @@ export async function coverBackfillFinalize(
  * Nothing about the job's history changes — it simply stops counting against a
  * proof it can no longer say anything true about.
  */
-export async function resolveSupersededBackfillJobs(
+export interface CoverBackfillLedgerSweepSummary {
+  inspectedJobs: number;
+  resolvedJobs: number;
+  closedVerifiedRuns: number;
+  closedFailedRuns: number;
+  expiredRunsStamped: number;
+  remainder: boolean;
+}
+
+interface CoverBackfillLedgerSweepRow extends CoverBackfillJobRow {
+  event_exists: number;
+  event_cover_object_key: string | null;
+  event_deleted_at: string | null;
+  event_cover_render_set_id: string | null;
+  event_cover_revision: number | null;
+}
+
+interface CoverBackfillLedgerCandidate {
+  id: string;
+  runId: string;
+  eventId: string;
+  workflowInstanceId: string;
+  dispatchState: string;
+  dispatchGeneration: number;
+  expectedRevision: number;
+  status: string;
+  updatedAt: string;
+  legacyKeyFingerprint: string;
+  terminalAt: string | null;
+  eventExists: number;
+  eventCoverObjectKey: string | null;
+  eventDeletedAt: string | null;
+  eventCoverRenderSetId: string | null;
+  eventCoverRevision: number | null;
+  rotatedAt: string;
+}
+
+function ledgerSweepCandidate(job: CoverBackfillLedgerSweepRow, now: Date): CoverBackfillLedgerCandidate {
+  const selectedUpdatedAt = Date.parse(job.updated_at);
+  return {
+    id: job.id,
+    runId: job.run_id,
+    eventId: job.event_id,
+    workflowInstanceId: job.workflow_instance_id,
+    dispatchState: job.dispatch_state,
+    dispatchGeneration: job.dispatch_generation,
+    expectedRevision: job.expected_revision,
+    status: job.status,
+    updatedAt: job.updated_at,
+    legacyKeyFingerprint: job.legacy_key_fingerprint,
+    terminalAt: job.terminal_at,
+    eventExists: job.event_exists,
+    eventCoverObjectKey: job.event_cover_object_key,
+    eventDeletedAt: job.event_deleted_at,
+    eventCoverRenderSetId: job.event_cover_render_set_id,
+    eventCoverRevision: job.event_cover_revision,
+    rotatedAt: new Date(
+      Math.max(now.getTime(), Number.isFinite(selectedUpdatedAt) ? selectedUpdatedAt : 0) + 1,
+    ).toISOString(),
+  };
+}
+
+function ledgerCandidateEventSnapshotSql(jobRef: string): string {
+  return `(
+    (json_extract(candidate.value, '$.eventExists') = 0 AND NOT EXISTS (
+      SELECT 1 FROM events e WHERE e.id = ${jobRef}.event_id
+    )) OR (
+      json_extract(candidate.value, '$.eventExists') = 1 AND EXISTS (
+        SELECT 1 FROM events e WHERE e.id = ${jobRef}.event_id
+          AND e.cover_object_key IS json_extract(candidate.value, '$.eventCoverObjectKey')
+          AND e.deleted_at IS json_extract(candidate.value, '$.eventDeletedAt')
+          AND e.cover_render_set_id IS json_extract(candidate.value, '$.eventCoverRenderSetId')
+          AND e.cover_revision IS json_extract(candidate.value, '$.eventCoverRevision')
+      )
+    )
+  )`;
+}
+
+function ledgerCandidateJobSnapshotSql(jobRef: string): string {
+  return `
+    json_extract(candidate.value, '$.id') = ${jobRef}.id
+    AND json_extract(candidate.value, '$.runId') = ${jobRef}.run_id
+    AND json_extract(candidate.value, '$.eventId') = ${jobRef}.event_id
+    AND json_extract(candidate.value, '$.workflowInstanceId') = ${jobRef}.workflow_instance_id
+    AND json_extract(candidate.value, '$.dispatchState') = ${jobRef}.dispatch_state
+    AND json_extract(candidate.value, '$.dispatchGeneration') = ${jobRef}.dispatch_generation
+    AND json_extract(candidate.value, '$.expectedRevision') = ${jobRef}.expected_revision
+    AND json_extract(candidate.value, '$.status') = ${jobRef}.status
+    AND json_extract(candidate.value, '$.updatedAt') = ${jobRef}.updated_at
+    AND json_extract(candidate.value, '$.legacyKeyFingerprint') = ${jobRef}.legacy_key_fingerprint
+    AND ${ledgerCandidateEventSnapshotSql(jobRef)}
+  `;
+}
+
+export async function resolveSupersededBackfillJobsBounded(
   env: AppEnv,
-  runId: string,
   now = new Date(),
-  limit = 100,
-): Promise<number> {
+): Promise<CoverBackfillLedgerSweepSummary> {
   const { results } = await env.DB.prepare(`
-    SELECT * FROM event_cover_backfill_jobs
-    WHERE run_id = ? AND status IN ('needs_replacement', 'failed')
-    ORDER BY updated_at LIMIT ?
-  `).bind(runId, limit).all<CoverBackfillJobRow>();
+    SELECT j.*, e.id IS NOT NULL AS event_exists,
+      e.cover_object_key AS event_cover_object_key,
+      e.deleted_at AS event_deleted_at,
+      e.cover_render_set_id AS event_cover_render_set_id,
+      e.cover_revision AS event_cover_revision
+    FROM event_cover_backfill_jobs j
+    LEFT JOIN events e ON e.id = j.event_id
+    WHERE j.status IN ('needs_replacement', 'failed')
+    ORDER BY j.updated_at, j.id LIMIT ?
+  `).bind(COVER_CLEANUP_ROWS_PER_CLASS).all<CoverBackfillLedgerSweepRow>();
+
+  const classified = await Promise.all(results.map(async (job) => {
+    const stillCurrent = job.event_exists === 1
+      && job.event_deleted_at === null
+      && job.event_cover_object_key !== null
+      && job.event_cover_render_set_id === null
+      && await coverKeyFingerprint(job.event_cover_object_key) === job.legacy_key_fingerprint;
+    return { candidate: ledgerSweepCandidate(job, now), stillCurrent };
+  }));
+
+  const currentCandidates = classified
+    .filter(({ stillCurrent }) => stillCurrent)
+    .map(({ candidate }) => candidate);
+  const supersededByRun = new Map<string, CoverBackfillLedgerCandidate[]>();
+  for (const { candidate, stillCurrent } of classified) {
+    if (stillCurrent) continue;
+    const group = supersededByRun.get(candidate.runId) ?? [];
+    group.push(candidate);
+    supersededByRun.set(candidate.runId, group);
+  }
+
+  if (currentCandidates.length > 0) {
+    const candidatesJson = JSON.stringify(currentCandidates);
+    await env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET updated_at = (
+        SELECT json_extract(candidate.value, '$.rotatedAt')
+        FROM json_each(?1) candidate
+        WHERE json_extract(candidate.value, '$.id') = event_cover_backfill_jobs.id
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM json_each(?1) candidate
+        WHERE ${ledgerCandidateJobSnapshotSql('event_cover_backfill_jobs')}
+      )
+    `).bind(candidatesJson).run();
+  }
 
   let resolved = 0;
-  for (const job of results) {
-    const event = await env.DB.prepare('SELECT * FROM events WHERE id = ?')
-      .bind(job.event_id).first<EventRow>();
-    const stillCurrent = event !== null
-      && !event.deleted_at
-      && event.cover_object_key !== null
-      && event.cover_render_set_id === null
-      && await coverKeyFingerprint(event.cover_object_key) === job.legacy_key_fingerprint;
-    if (stillCurrent) continue;
-
-    const { terminalAt, referenceReleaseAt, expiresAt } = terminalTimestamps(now, true);
-    const updated = await env.DB.prepare(`
-      UPDATE event_cover_backfill_jobs
-      SET status = 'resolved', retryable = 0, terminal_at = COALESCE(terminal_at, ?),
-          reference_release_at = ?, expires_at = ?, updated_at = ?
-      WHERE id = ? AND status IN ('needs_replacement', 'failed')
-    `).bind(terminalAt, referenceReleaseAt, expiresAt, terminalAt, job.id).run();
-    if (updated.meta.changes === 1) resolved += 1;
+  const { terminalAt, referenceReleaseAt, expiresAt } = terminalTimestamps(now, true);
+  for (const [runId, candidates] of supersededByRun) {
+    const candidatesJson = JSON.stringify(candidates);
+    const batch = await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE event_cover_backfill_jobs
+        SET status = 'resolved', retryable = 0,
+            terminal_at = COALESCE(terminal_at, ?1),
+            reference_release_at = ?2, expires_at = ?3, updated_at = ?1
+        WHERE EXISTS (
+          SELECT 1 FROM json_each(?4) candidate
+          WHERE ${ledgerCandidateJobSnapshotSql('event_cover_backfill_jobs')}
+        )
+      `).bind(terminalAt, referenceReleaseAt, expiresAt, candidatesJson),
+      // Adjacency is load-bearing: a missing fence must not replace the job
+      // UPDATE's changes() value and suppress this one-per-run recount.
+      recomputeBackfillRunCounters(env.DB, runId, now, 'any'),
+      env.DB.prepare(`
+        UPDATE event_cover_workflow_fences
+        SET expires_at = ?1, updated_at = ?2
+        WHERE workflow_binding = ?3 AND state = 'open' AND changes() = 1
+          AND EXISTS (
+            SELECT 1 FROM json_each(?4) candidate
+            JOIN event_cover_backfill_jobs j
+              ON json_extract(candidate.value, '$.id') = j.id
+            WHERE j.run_id = ?5
+              AND j.event_id = event_cover_workflow_fences.event_id
+              AND j.workflow_instance_id = event_cover_workflow_fences.workflow_instance_id
+              AND j.dispatch_generation = event_cover_workflow_fences.dispatch_generation
+              AND j.status = 'resolved' AND j.retryable = 0
+              AND j.updated_at = ?2 AND j.reference_release_at = ?6 AND j.expires_at = ?7
+              AND j.terminal_at IS COALESCE(
+                json_extract(candidate.value, '$.terminalAt'), ?2
+              )
+              AND j.legacy_key_fingerprint = json_extract(
+                candidate.value, '$.legacyKeyFingerprint'
+              )
+              AND j.expected_revision = json_extract(candidate.value, '$.expectedRevision')
+              AND j.dispatch_state = json_extract(candidate.value, '$.dispatchState')
+              AND ${ledgerCandidateEventSnapshotSql('j')}
+          )
+      `).bind(
+        coverWorkflowFenceTerminalExpiry(now), terminalAt, COVER_BACKFILL_BINDING,
+        candidatesJson, runId, referenceReleaseAt, expiresAt,
+      ),
+    ]);
+    resolved += batch[0]?.meta.changes ?? 0;
   }
-  if (resolved > 0) await recomputeBackfillRunCounters(env.DB, runId, now).run();
-  return resolved;
+  const unresolved = results.length - resolved;
+  return {
+    inspectedJobs: results.length,
+    resolvedJobs: resolved,
+    closedVerifiedRuns: 0,
+    closedFailedRuns: 0,
+    expiredRunsStamped: 0,
+    remainder: results.length === COVER_CLEANUP_ROWS_PER_CLASS || unresolved > 0,
+  };
 }
 
 export interface ZeroLegacyProof {

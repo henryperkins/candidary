@@ -1950,6 +1950,93 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_rate_events', access.event.id)).toBe(0);
   });
 
+  it('runs resolver, stale-create recovery, reconciliation, cover cleanup, then purge', async () => {
+    const phases: string[] = [];
+    const note = (phase: string) => {
+      if (!phases.includes(phase)) phases.push(phase);
+    };
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => {
+            if (sql.includes('AS event_exists')
+              && sql.includes("j.status IN ('needs_replacement', 'failed')")) note('resolver');
+            if (sql.includes("j.dispatch_state = 'creating'")
+              && sql.includes('fence_state')) note('stale-create recovery');
+            if (sql.includes("j.dispatch_state = 'confirmed'")
+              && sql.includes('event_deleted_at')) note('reconciliation');
+            if (sql.includes('WITH terminal_owners AS')) note('cover cleanup');
+            if (sql.includes('LEFT JOIN event_cover_purge_progress p')
+              && sql.includes('SELECT e.id FROM events e')) note('purge');
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await scheduledCleanup({ ...testEnv, DB: db }, NOW);
+
+    expect(phases).toEqual([
+      'resolver', 'stale-create recovery', 'reconciliation', 'cover cleanup', 'purge',
+    ]);
+  });
+
+  it('continues cover cleanup and purge when the global resolver reports a remainder', async () => {
+    for (let index = 0; index < COVER_CLEANUP_ROWS_PER_CLASS; index += 1) {
+      await insertBackfillJob(`schedule-job-${index}`, `schedule-run-${index}`, {
+        status: 'needs_replacement',
+      });
+    }
+    await insertBackfillJob('schedule-stale-create', 'schedule-stale-create-run', {
+      status: 'queued',
+    });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET dispatch_state = 'creating', terminal_at = NULL WHERE id = 'schedule-stale-create'
+    `).run();
+    await insertFence('COVER_BACKFILL_WORKFLOW', 'backfill-schedule-stale-create', {
+      state: 'deletion-blocked',
+    });
+    await insertBackfillJob('schedule-reconcile', 'schedule-reconcile-run', {
+      status: 'rendering',
+    });
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_rate_events (
+        id, event_id, action, replay_key, request_sha256, window_start, created_at, expires_at
+      ) VALUES ('schedule-rate', ?, 'reservation', 'schedule-replay', ?, 1785196800, ?, ?)
+    `).bind(access.event.id, HEX, PAST, PAST).run();
+    const due = await eventAccess('Due after saturated resolver');
+    await testEnv.DB.prepare('UPDATE events SET purge_after = ? WHERE id = ?')
+      .bind(PAST, due.event.id).run();
+
+    await scheduledCleanup(testEnv, NOW);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_backfill_jobs
+      WHERE id LIKE 'schedule-job-%' AND status = 'resolved'
+    `).first<{ count: number }>()).toEqual({ count: COVER_CLEANUP_ROWS_PER_CLASS });
+    expect(await testEnv.DB.prepare(`
+      SELECT id, status, dispatch_state, failure_code FROM event_cover_backfill_jobs
+      WHERE id IN ('schedule-stale-create', 'schedule-reconcile') ORDER BY id
+    `).all()).toMatchObject({
+      results: [
+        {
+          id: 'schedule-reconcile', status: 'failed', dispatch_state: 'blocked',
+          failure_code: 'EVENT_DELETED',
+        },
+        {
+          id: 'schedule-stale-create', status: 'failed', dispatch_state: 'blocked',
+          failure_code: 'EVENT_DELETED',
+        },
+      ],
+    });
+    expect(await countRows('event_cover_rate_events', access.event.id)).toBe(0);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(due.event.id).first()).toBeNull();
+  });
+
   it('runs inside the scheduled pass, ahead of the retention purge', async () => {
     await insertReceipt('op-swept', { status: 'applied', expiresAt: PAST });
     const other = await eventAccess('Nadia & Sam');
@@ -1971,10 +2058,10 @@ describe('bounded cover storage sweep', () => {
    * Reconciliation is wired between initial-create recovery and the purge.
    *
    * Proved with the one branch that needs no platform call: a job the ledger
-   * believes is running whose fence has gone. Nothing else in the pass settles
-   * that, so seeing it terminal is proof reconciliation ran — and the assertion
-   * cannot drift onto whatever a test binding happens to report for an instance
-   * that was never really created.
+   * believes is running whose fence has gone. A missing retained fence is
+   * terminal deletion evidence, so seeing the job settle as EVENT_DELETED is
+   * proof reconciliation ran — and the assertion cannot drift onto whatever a
+   * test binding happens to report for an instance that was never really created.
    */
   it('reconciles the backfill ledger inside the scheduled pass', async () => {
     await testEnv.DB.batch([
@@ -1999,7 +2086,7 @@ describe('bounded cover storage sweep', () => {
       FROM event_cover_backfill_jobs WHERE id = 'job-reconciled'
     `).first()).toEqual({
       status: 'failed', dispatch_state: 'blocked',
-      failure_code: 'COVER_RENDER_UNAVAILABLE', retryable: 0,
+      failure_code: 'EVENT_DELETED', retryable: 0,
     });
     expect(await foreignKeyCheck()).toEqual([]);
   });

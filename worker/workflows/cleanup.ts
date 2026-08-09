@@ -17,6 +17,7 @@ import {
   COVER_BACKFILL_BINDING,
   reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
+  resolveSupersededBackfillJobsBounded,
 } from './cover-backfill';
 import {
   defaultCoverBackfillWorkflowAccessor,
@@ -1339,14 +1340,14 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   await cleanupRsvpScratch(env, now);
   await cleanupExpiredReservations(env, now);
   await cleanupExpiredExports(env, now);
-  // Before the purge, not after: an event whose retention is due may own cover
-  // rows this sweep is the only thing that removes, and a purge that ran first
-  // would meet them as foreign-key failures instead of finding them already
-  // collected. Its own bound means a large backlog drains across passes rather
-  // than making one scheduled run unbounded.
-  await cleanupEventCovers(env, now);
-  // After the cover sweep and before the purge, because it is the phase that
-  // turns an interrupted dispatch back into an observable one: a claim left
+  // Global before per-instance recovery: a job whose exact legacy source is no
+  // longer current has nothing left to restart, and current blockers rotate so
+  // newer superseded rows cannot starve behind the same oldest hundred. Its
+  // conservative remainder is scheduling information only; every later safety
+  // phase still runs within its own bound.
+  await resolveSupersededBackfillJobsBounded(env, now);
+  // Before reconciliation and the purge, because it is the phase that turns an
+  // interrupted dispatch back into an observable one: a claim left
   // `creating` by a lost terminal is replayed through idempotent `createBatch`
   // and confirmed, and a claim whose fence a purge has taken is settled here
   // rather than being met as a surprise by the purge itself. Its own bound means
@@ -1357,6 +1358,12 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // going away must be settled by the coordinator that owns the fence rather
   // than resumed or restarted into a prefix that is about to be swept.
   await reconcileCoverBackfillJobs(env, now);
+  // Before the purge, not after: an event whose retention is due may own cover
+  // rows this sweep is the only thing that removes, and a purge that ran first
+  // would meet them as foreign-key failures instead of finding them already
+  // collected. Its own bound means a large backlog drains across passes rather
+  // than making one scheduled run unbounded.
+  await cleanupEventCovers(env, now);
   // Notification delivery is no longer part of this run. It has its own hourly
   // trigger and its own durable state, so a mail failure and a retention purge no
   // longer share a failure boundary in either direction.
