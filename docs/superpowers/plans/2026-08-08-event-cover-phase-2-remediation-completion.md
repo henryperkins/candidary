@@ -72,8 +72,11 @@ paused -> resume regardless of retryable failed/nonterminal D1 status;
 complete + already-terminal D1 -> no mutation;
 certified missing + restorable confirmed job -> recreate same ID;
 blocked or missing fence -> EVENT_DELETED;
-restart with pinned derived state -> begin at the first incomplete profile/finalize step,
-preserving master_id, render_set_id, manifest_json, and manifest_sha256 byte-for-byte.
+restart with pinned derived state -> validate the frozen manifest and at most 24 exact
+render-object rows, use whole-profile completeness only to claim rendering vs finalizing,
+preserve master_id, render_set_id, manifest_json, and manifest_sha256 byte-for-byte,
+then call restart(id) without from options;
+restart without pinned derived state -> claim queued and call restart(id) without from options.
 ```
 
 - [ ] **Step 4: Verify documentation consistency and Wrangler syntax**
@@ -277,13 +280,12 @@ git commit -m "fix: trigger only committed cover backfill claims"
 
 - Modify: `worker/workflows/cover-platform.ts`
 - Modify: `worker/workflows/cover-backfill.ts`
-- Modify: `worker/index.ts`
 - Modify: `tests/worker/event-cover-publication.test.ts`
 - Modify: `tests/worker/cover-backfill-workflow.test.ts`
 
 **Interfaces:**
 
-- Produces: `CoverBackfillWorkflowAccessor.restart(id, options?)`, `backfillRestartOptions(job)` returning `WorkflowInstanceRestartOptions | undefined`, and a restart claim that restores the correct D1 stage without changing pinned derived fields.
+- Produces: `CoverBackfillWorkflowAccessor.restart(id)` and a migration-free restart claim that derives the guarded D1 stage from the frozen manifest plus exact adopted-object rows without changing pinned fields.
 - Preserves: the same Workflow instance ID, dependency equality, current-source fingerprint/revision, rate, fence, purge, and restart-window guards.
 
 - [ ] **Step 1: Write RED total-map tests**
@@ -304,23 +306,26 @@ Branch on platform disposition first. Paused always takes the guarded resume cla
 
 - [ ] **Step 3: Write RED immutable-restart tests**
 
-Seed a retryable failed job with literal existing `master_id`, `render_set_id`, `manifest_json`, `manifest_sha256`, and `completed_profiles`. After reconciliation and Workflow replay, assert those four values are byte-identical, no replacement master/render set is inserted, and the first rerun step is the first incomplete profile or finalize. Also cover a failure before normalization, which legitimately restarts from the beginning.
+Seed a retryable failed job with literal existing `master_id`, `render_set_id`, `manifest_json`, and `manifest_sha256`. The frozen manifest contains the expected `(profile, density, format)` tuples. Query at most 24 `event_cover_render_objects` rows using the exact `(render_set_id, event_id)` pair, then validate the manifest SHA, shape, unique known tuples, and every actual row against it. A profile is durably complete only when every expected tuple for that profile exists; one or more rows for a partial profile never count as profile completion.
 
-- [ ] **Step 4: Restart from the first incomplete durable stage**
+Cover complete profiles, a partial profile, no adopted objects, invalid SHA/shape, duplicate or unknown manifest tuples, and unexpected object tuples. Invalid manifest/object evidence refuses the guarded restart claim and makes no platform call. After valid reconciliation and Workflow replay, assert the four pinned fields are byte-identical, no replacement master/render set is inserted, and the restart accessor receives only the same Workflow ID. Also cover a failure before normalization, which legitimately claims `queued` and restarts from the beginning.
 
-Implement options using the Workflow's exact step names:
+- [ ] **Step 4: Derive the D1 stage and restart from the beginning**
+
+Use durable object adoption only to choose the guarded D1 stage:
 
 ```ts
 if (!job.master_id || !job.render_set_id || !job.manifest_json || !job.manifest_sha256) {
-  return undefined; // restart from beginning; normalization has not committed
+  restartStatus = 'queued';
+} else if (everyManifestProfileIsDurablyComplete(manifest, adoptedRows)) {
+  restartStatus = 'finalizing';
+} else {
+  restartStatus = 'rendering';
 }
-const profile = EVENT_COVER_PROFILES[job.completed_profiles];
-return profile
-  ? { from: { name: `render backfill profile ${profile.id}` } }
-  : { from: { name: 'finalize cover backfill job' } };
+await workflow.restart(job.workflow_instance_id);
 ```
 
-The restart claim sets `status = 'rendering'` when a profile remains and `status = 'finalizing'` otherwise; it sets `queued` only when no pinned derived state exists. It clears terminal/reference/expiry fields, restores the fence hold sentinel, increments job/fence generation transactionally, and never rewrites the pinned fields.
+Do not pass `from` options. Cloudflare requires `from.name` to exist in Workflow execution history, while D1 object adoption may commit before that step reaches history and the binding exposes no history API. Restart therefore begins at the Workflow start. Preflight and normalization no-op for guarded `rendering`/`finalizing` jobs, and profile writes replay idempotently against frozen object keys and tuple UPSERTs. The claim sets `queued` only when no pinned derived state exists, clears terminal/reference/expiry fields, restores the fence hold sentinel, increments job/fence generation transactionally, and never rewrites `master_id`, `render_set_id`, `manifest_json`, or `manifest_sha256`.
 
 - [ ] **Step 5: Run the focused gate and commit**
 
@@ -328,7 +333,7 @@ The restart claim sets `status = 'rendering'` when a profile remains and `status
 npx vitest run --config vitest.worker.config.ts tests/worker/event-cover-publication.test.ts tests/worker/cover-backfill-workflow.test.ts
 npm run typecheck
 npm run lint
-git add -- worker/workflows/cover-platform.ts worker/workflows/cover-backfill.ts worker/index.ts tests/worker/event-cover-publication.test.ts tests/worker/cover-backfill-workflow.test.ts
+git add -- worker/workflows/cover-platform.ts worker/workflows/cover-backfill.ts tests/worker/event-cover-publication.test.ts tests/worker/cover-backfill-workflow.test.ts
 git commit -m "fix: preserve derived state across backfill recovery"
 ```
 
@@ -540,7 +545,7 @@ Workflow commands use `--config wrangler.jsonc` and never `--remote` or `--local
 
 - [ ] **Step 3: Dry-walk commands against disposable local D1**
 
-Apply migrations locally, seed the rehearsal fixture, and substitute `--local` only in the disposable test invocation. Verify every generated command, exit code, artifact path, and JSON parser without authenticating or contacting remote resources.
+Apply migrations locally and seed the rehearsal fixture. Execute only the generated D1 equivalents, substituting `--local` for `--remote` in the disposable D1 invocation. Do not execute any generated Workflow command during this dry-walk, including trigger or terminate; validate Workflow syntax and ordering only as generated artifact strings. Production Workflow commands remain `--config wrangler.jsonc` with neither `--local` nor `--remote`. Verify D1 exit codes, artifact paths, JSON parsing, and Workflow artifact ordering without authenticating or contacting remote resources.
 
 - [ ] **Step 4: Run documentation/static checks and commit**
 

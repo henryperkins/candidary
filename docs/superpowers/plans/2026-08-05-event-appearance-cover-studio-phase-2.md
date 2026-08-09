@@ -362,13 +362,17 @@ Apply the total lookup map:
 
 - active status → no mutation;
 - paused → resume regardless of retryable failed/nonterminal D1 status; atomically claim `resuming`, require unchanged immutable dependencies/current source, an open matching fence, rate capacity, and no purge, then call `resume()`, recheck the fence, and confirm;
-- errored/terminated → first persist a safe retryable platform failure (`status = 'failed'`, `retryable = 1`, `terminal_at`, failure code, run recount), then take Task 5's guarded `failed → queued` restart claim;
+- errored/terminated → first persist a safe retryable platform failure (`status = 'failed'`, `retryable = 1`, `terminal_at`, failure code, run recount), then take Task 5's guarded restart claim;
 - complete + already-terminal D1 → no mutation; complete with D1 nonterminal → persist the same retryable divergence failure before restart;
 - certified missing + restorable confirmed job → recreate same ID; claim `creating`, call `createBatch()` with the immutable payload, recheck, and confirm;
 - unknown → sanitized telemetry only, no D1 write and no platform call;
 - blocked or missing fence → `EVENT_DELETED`, never resume/restart/create.
 
-The one `failed → queued` edge requires all predicates together: retryable; exact `coverBackfillDependencyVersions()` equality; unchanged derived manifest digest when present; current legacy fingerprint/revision/null-set predicates; `terminal_at` inside `BACKFILL_RESTART_WINDOW_MS`; open matching fence; rolling-minute capacity; and no event purge. Restart with pinned derived state begins at the first incomplete profile/finalize step, preserving `master_id`, `render_set_id`, `manifest_json`, and `manifest_sha256` byte-for-byte. The claim clears terminal/reference/expiry fields, increments job and fence generation in one `DB.batch()`, and sets `dispatch_state = 'restarting'` before the platform call. A replay while `restarting` is a no-op and cannot call the platform twice.
+The one guarded restart edge requires all predicates together: retryable; exact `coverBackfillDependencyVersions()` equality; unchanged derived manifest digest when present; current legacy fingerprint/revision/null-set predicates; `terminal_at` inside `BACKFILL_RESTART_WINDOW_MS`; open matching fence; rolling-minute capacity; and no event purge.
+
+Restart recovery is migration-free and never guesses a Workflow history checkpoint. For pinned `master_id`, `render_set_id`, `manifest_json`, and `manifest_sha256`, validate the manifest SHA and shape, require unique known `(profile, density, format)` tuples, and query at most 24 exact `event_cover_render_objects` rows by `(render_set_id, event_id)`. Validate every actual row against the frozen manifest. Invalid manifest/object evidence refuses the guarded restart claim and makes no platform call. A profile is durably complete only when every expected tuple for that profile exists; a partial profile never counts as complete. Use that checkpoint only to set the guarded D1 status to `rendering` when any profile remains incomplete or `finalizing` when every profile is complete, preserving all four pinned fields byte-for-byte. With no pinned derived state, set `queued` for a legitimate beginning restart.
+
+In every case call `workflow.restart(id)` with no `from` option. Cloudflare requires `from.name` to exist in Workflow execution history, but object adoption may commit in D1 before that step appears in history and the binding exposes no history API. A restart begins at the start; preflight and normalization no-op for guarded `rendering`/`finalizing` jobs, and profile writes replay idempotently against frozen object keys and tuple UPSERTs. The claim clears terminal/reference/expiry fields, increments job and fence generation in one `DB.batch()`, and sets `dispatch_state = 'restarting'` before the platform call. A replay while `restarting` is a no-op and cannot call the platform twice.
 
 `scheduledCleanup` runs stale-initial recovery and reconciliation after cover ledger resolution but before event purge. A job belonging to a deleted event routes to the purge coordinator rather than ordinary reconciliation.
 
@@ -557,7 +561,9 @@ The runbook must stand alone and contain, in order:
 `docs/deployment.md` places phase-2 candidate verification, staging deployment/conformance, and production backfill as three separate authorization gates. `docs/operations.md` documents only support signals the candidate actually produces. `design-qa.md` distinguishes deterministic fake-transform orchestration evidence from real Images/codec evidence.
 
 - [ ] **Step 1: Write the runbook and reconcile all three documents**
-- [ ] **Step 2: Dry-walk every command against a disposable local database; do not contact remote resources**
+- [ ] **Step 2: Dry-walk local D1 equivalents and validate Workflow command artifacts; do not contact remote resources**
+
+Execute only D1 equivalents after substituting `--local` for `--remote` in a disposable D1 invocation. Never execute a generated Workflow command during the dry-walk, including trigger or terminate; validate Workflow syntax and ordering only as generated artifact strings. Do not add `--local` or `--remote` to production Workflow commands, which retain only `--config wrangler.jsonc`.
 - [ ] **Step 3: Run documentation/static checks and commit**
 
 ```powershell
