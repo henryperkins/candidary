@@ -246,6 +246,7 @@ export interface CoverBackfillWorkflowAccessor {
   lookup(id: string): Promise<CoverWorkflowLookup>;
   createBatch(input: Array<{ id: string; params: CoverBackfillPayload }>): Promise<void>;
   resume(id: string): Promise<void>;
+  /** Restart the retained instance from Workflow entry; step-history options are forbidden. */
   restart(id: string): Promise<void>;
   terminate(id: string): Promise<void>;
 }
@@ -297,7 +298,12 @@ export function defaultCoverBackfillWorkflowAccessor(env: AppEnv): CoverBackfill
     async lookup(id) { return lookupInstance(workflow, id); },
     async createBatch(input) { await workflow.createBatch(input); },
     async resume(id) { await (await workflow.get(id)).resume(); },
-    async restart(id) { await (await workflow.get(id)).restart(); },
+    async restart(id) {
+      const instance = await workflow.get(id);
+      // D1 adoption can commit before the corresponding step reaches platform
+      // history. Only a history-free restart is safe for every derived stage.
+      await instance.restart();
+    },
     async terminate(id) { await (await workflow.get(id)).terminate(); },
   };
 }

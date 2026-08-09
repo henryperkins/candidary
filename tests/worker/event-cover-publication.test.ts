@@ -5,6 +5,7 @@ import type { EventCoverPublishRequestV1 } from '../../shared/event-cover';
 import { createCoverDraft, insertCoverMaster } from '../../worker/db/event-covers';
 import { EventsRepository } from '../../worker/db/events';
 import type { EventRecord } from '../../worker/db/types';
+import type { AppEnv } from '../../worker/env';
 import {
   acceptCoverPublication,
   applyRemovalPublication,
@@ -20,6 +21,7 @@ import {
   COVER_PLATFORM_STATUSES,
   classifyInstanceStatus,
   classifyWorkflowLookupError,
+  defaultCoverBackfillWorkflowAccessor,
   dispositionForLookup,
   isCertifiedWorkflowNotFound,
   mapPlatformStatus,
@@ -212,6 +214,30 @@ describe('workflow lookup classification', () => {
       expect(dispositionForLookup({ kind: 'status', status }))
         .toEqual(mapPlatformStatus(status));
     }
+  });
+});
+
+describe('backfill restart accessor', () => {
+  it('restarts the same instance from the beginning without step options', async () => {
+    const instanceId = 'cb1-0123456789abcdef';
+    const gets: string[] = [];
+    const restartArguments: unknown[][] = [];
+    const env = {
+      ...testEnv,
+      COVER_BACKFILL_WORKFLOW: {
+        async get(id: string) {
+          gets.push(id);
+          return {
+            async restart(...args: unknown[]) { restartArguments.push(args); },
+          };
+        },
+      },
+    } as unknown as AppEnv;
+
+    await defaultCoverBackfillWorkflowAccessor(env).restart(instanceId);
+
+    expect(gets).toEqual([instanceId]);
+    expect(restartArguments).toEqual([[]]);
   });
 });
 

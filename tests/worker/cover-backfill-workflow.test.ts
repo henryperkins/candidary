@@ -38,6 +38,24 @@ const now = new Date('2026-08-05T12:00:00.000Z');
 const RUN = '11111111-1111-4111-8111-111111111111';
 const JOB = '22222222-2222-4222-8222-222222222222';
 const FENCE_HOLD = '9999-12-31T23:59:59.999Z';
+const PINNED_MASTER = '33333333-3333-4333-8333-333333333333';
+const PINNED_RENDER_SET = '44444444-4444-4444-8444-444444444444';
+
+const PINNED_MANIFEST_SLOTS = [
+  { profile: 'short-lookup', density: '1x', format: 'webp' },
+  { profile: 'short-lookup', density: '1x', format: 'jpeg' },
+  { profile: 'compact-default', density: '1x', format: 'webp' },
+  { profile: 'compact-default', density: '1x', format: 'jpeg' },
+  { profile: 'standard-default', density: '1x', format: 'webp' },
+  { profile: 'standard-default', density: '1x', format: 'jpeg' },
+  { profile: 'framed-default', density: '1x', format: 'webp' },
+  { profile: 'framed-default', density: '1x', format: 'jpeg' },
+  { profile: 'compact-expanded', density: '1x', format: 'webp' },
+  { profile: 'compact-expanded', density: '1x', format: 'jpeg' },
+  { profile: 'wide-expanded', density: '1x', format: 'webp' },
+  { profile: 'wide-expanded', density: '1x', format: 'jpeg' },
+] as const;
+const PINNED_MANIFEST_JSON = JSON.stringify({ slots: PINNED_MANIFEST_SLOTS });
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 
@@ -79,6 +97,8 @@ async function row<T>(sql: string, ...binds: unknown[]): Promise<T> {
 }
 
 interface SeedOptions {
+  runId?: string;
+  jobId?: string;
   revision?: number;
   /** Defaults to a job already past its dispatch, which is what most steps need. */
   dispatchState?: string;
@@ -98,6 +118,8 @@ interface SeedOptions {
 
 /** One legacy row, one run, and one job created against exactly that row. */
 async function seedJob(access: Access, options: SeedOptions = {}) {
+  const runId = options.runId ?? RUN;
+  const jobId = options.jobId ?? JOB;
   const key = legacyKey(access.event.id);
   const revision = options.revision ?? 0;
   const dispatchState = options.dispatchState ?? 'confirmed';
@@ -112,11 +134,11 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
   ).bind(key, revision, access.event.id).run();
 
   await testEnv.DB.prepare(`
-    INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+    INSERT OR IGNORE INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
     VALUES (?, 'execute', 'executing', ?, ?)
-  `).bind(RUN, now.toISOString(), now.toISOString()).run();
+  `).bind(runId, now.toISOString(), now.toISOString()).run();
 
-  const instanceId = await coverBackfillInstanceId(RUN, JOB, access.event.id);
+  const instanceId = await coverBackfillInstanceId(runId, jobId, access.event.id);
   await testEnv.DB.prepare(`
     INSERT INTO event_cover_backfill_jobs (
       id, run_id, event_id, expected_revision, legacy_key_fingerprint, workflow_instance_id,
@@ -124,7 +146,7 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
       failure_code, retryable, terminal_at, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    JOB, RUN, access.event.id, revision, await coverKeyFingerprint(key), instanceId,
+    jobId, runId, access.event.id, revision, await coverKeyFingerprint(key), instanceId,
     dispatchState, generation, status,
     JSON.stringify(options.dependencyVersions ?? coverBackfillDependencyVersions()),
     options.failureCode ?? null, options.retryable ?? 0,
@@ -143,7 +165,105 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
     FENCE_HOLD,
   ).run();
 
-  return { key, instanceId, payload: { runId: RUN, jobId: JOB, eventId: access.event.id } };
+  return { key, instanceId, payload: { runId, jobId, eventId: access.event.id } };
+}
+
+async function testSha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function seedPinnedFailedJob(
+  access: Access,
+  options: {
+    manifestJson?: string;
+    manifestSha256?: string;
+    adopted?: readonly { profile: string; density: string; format: string }[];
+  } = {},
+) {
+  const seeded = await seedJob(access, {
+    dispatchState: 'confirmed', dispatchGeneration: 1, fenceGeneration: 1,
+    status: 'failed', retryable: 1, failureCode: 'COVER_RENDER_UNAVAILABLE',
+    terminalAt: new Date(now.getTime() - 60_000),
+  });
+  const manifestJson = options.manifestJson ?? PINNED_MANIFEST_JSON;
+  const manifestSha256 = options.manifestSha256 ?? await testSha256(manifestJson);
+  const masterKey = `events/${access.event.id}/cover/masters/${PINNED_MASTER}.webp`;
+
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_masters (
+      id, event_id, object_key, mime_type, byte_size, width, height, sha256,
+      normalization_version, normalization_rung, auto_focus_x, auto_focus_y,
+      composition_model_version, created_at
+    ) VALUES (?, ?, ?, 'image/webp', 1000, 1200, 800, ?, 1, 1, 0.5, 0.5, 1, ?)
+  `).bind(PINNED_MASTER, access.event.id, masterKey, 'c'.repeat(64), now.toISOString()).run();
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_sets (
+      id, event_id, master_id, draft_id, recipe_json, recipe_sha256,
+      state, required_slots, created_at
+    ) VALUES (?, ?, ?, NULL, ?, ?, 'staging', 12, ?)
+  `).bind(
+    PINNED_RENDER_SET, access.event.id, PINNED_MASTER,
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    'd'.repeat(64), now.toISOString(),
+  ).run();
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_backfill_jobs
+    SET master_id = ?, render_set_id = ?, manifest_json = ?, manifest_sha256 = ?
+    WHERE id = ?
+  `).bind(PINNED_MASTER, PINNED_RENDER_SET, manifestJson, manifestSha256, JOB).run();
+
+  for (const [index, slot] of (options.adopted ?? []).entries()) {
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_render_objects (
+        id, render_set_id, event_id, profile_id, density, format, object_key,
+        content_type, byte_size, width, height, quality_rung, sha256, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, 360, 168, 1, ?, ?)
+    `).bind(
+      `pinned-object-${index}`, PINNED_RENDER_SET, access.event.id,
+      slot.profile, slot.density, slot.format,
+      `events/${access.event.id}/cover/rendered/${PINNED_RENDER_SET}/${slot.profile}-${slot.density}.${slot.format}`,
+      slot.format === 'webp' ? 'image/webp' : 'image/jpeg', 'e'.repeat(64), now.toISOString(),
+    ).run();
+  }
+  return seeded;
+}
+
+function envAfterAdoptedTupleRead(action: () => Promise<void>): AppEnv {
+  let acted = false;
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+    get(target, property) {
+      if (property === 'bind') {
+        return (...values: unknown[]) => wrap(target.bind(...values));
+      }
+      if (property === 'all') {
+        return async <T>() => {
+          const result = await target.all<T>();
+          if (!acted) {
+            acted = true;
+            await action();
+          }
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (sql: string) => sql.includes('FROM event_cover_render_objects')
+          ? wrap(target.prepare(sql))
+          : target.prepare(sql);
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
 }
 
 async function renderEveryProfile(env: AppEnv, payload: { runId: string; jobId: string; eventId: string }) {
@@ -966,6 +1086,19 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(await currentJob()).toMatchObject({ status: 'queued', dispatch_generation: 2 });
   });
 
+  it('leaves an already-terminal failed job unchanged when its instance is complete', async () => {
+    const { instanceId } = await failedRetryable();
+    const before = await currentJob();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'complete' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, resumed: 0, restarted: 0, recreated: 0,
+      failuresRecorded: 0, unchanged: 1,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toEqual(before);
+  });
+
   it('never inspects a job whose ledger row is already terminal', async () => {
     await inFlight({ status: 'applied' });
     const platform = scriptedBackfillAccessor();
@@ -981,7 +1114,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
    * platform can still reach, and that it recreates under the *fenced* ID.
    */
   it('recreates a certified-absent instance under its own fenced ID', async () => {
-    const { instanceId } = await inFlight();
+    const { instanceId } = await inFlight({ status: 'queued' });
     const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'missing' } });
 
     expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
@@ -989,10 +1122,41 @@ describe('platform reconciliation and the guarded restart edge', () => {
     });
     expect(platform.calls).toEqual([`lookup:${instanceId}`, `createBatch:${instanceId}`]);
     expect(await currentJob()).toMatchObject({
-      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 2,
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
     });
     expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId))
       .toEqual({ expires_at: FENCE_HOLD });
+  });
+
+  it('recreates a certified-absent retryable failure under the same fenced ID', async () => {
+    const { instanceId } = await failedRetryable();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'missing' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, recreated: 1, restarted: 0, resumed: 0, failuresRecorded: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `createBatch:${instanceId}`]);
+    expect(await currentJob()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      retryable: 0, failure_code: null, terminal_at: null,
+      expires_at: null, reference_release_at: null,
+    });
+  });
+
+  it('restores a failed job to queued before resuming its paused instance', async () => {
+    const { instanceId } = await failedRetryable();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'paused' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, resumed: 1, restarted: 0, recreated: 0, failuresRecorded: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
+    expect(await currentJob()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      retryable: 0, failure_code: null, terminal_at: null,
+      expires_at: null, reference_release_at: null,
+    });
+    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
   });
 
   /* ---------------- deletion and fence ownership ---------------- */
@@ -1030,8 +1194,64 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(platform.calls).toEqual([]);
     expect(await currentJob()).toMatchObject({
       status: 'failed', dispatch_state: 'blocked',
-      failure_code: 'COVER_RENDER_UNAVAILABLE', retryable: 0,
+      failure_code: 'EVENT_DELETED', retryable: 0,
     });
+  });
+
+  it('does not rewrite the run when a newer claim appears after an absent-fence read', async () => {
+    const first = await inFlight({
+      jobId: '10000000-0000-4000-8000-000000000001', claimedAt: STALE,
+    });
+    const secondAccess = await eventAccess('Second event');
+    const second = await seedJob(secondAccess, {
+      runId: RUN, jobId: '20000000-0000-4000-8000-000000000002',
+      dispatchState: 'confirmed', dispatchGeneration: 1, fenceGeneration: 1,
+      status: 'rendering',
+    });
+    await testEnv.DB.prepare(`
+      DELETE FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(second.instanceId).run();
+    const concurrentAt = '2026-08-05T12:00:01.000Z';
+    const calls: string[] = [];
+    const accessor: CoverBackfillWorkflowAccessor = {
+      async lookup(id) {
+        calls.push(`lookup:${id}`);
+        if (id === first.instanceId) {
+          await testEnv.DB.batch([
+            testEnv.DB.prepare(`
+              UPDATE event_cover_backfill_jobs
+              SET dispatch_generation = 2, updated_at = ? WHERE id = ?
+            `).bind(concurrentAt, second.payload.jobId),
+            testEnv.DB.prepare(`
+              INSERT INTO event_cover_workflow_fences (
+                workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+                state, created_at, updated_at, expires_at
+              ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, 2, 'open', ?, ?, ?)
+            `).bind(
+              second.instanceId, second.payload.eventId,
+              concurrentAt, concurrentAt, FENCE_HOLD,
+            ),
+            testEnv.DB.prepare(`
+              UPDATE event_cover_backfill_runs SET updated_at = ? WHERE id = ?
+            `).bind(concurrentAt, RUN),
+          ]);
+        }
+        return { kind: 'status', status: 'running' };
+      },
+      async createBatch() { throw new Error('unreachable'); },
+      async resume() { throw new Error('unreachable'); },
+      async restart() { throw new Error('unreachable'); },
+      async terminate() { throw new Error('unreachable'); },
+    };
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, accessor))
+      .toMatchObject({ inspected: 2, blocked: 0, unchanged: 2 });
+    expect(calls).toEqual([`lookup:${first.instanceId}`]);
+    expect(await row(`
+      SELECT status, dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?
+    `, second.payload.jobId)).toEqual({ status: 'rendering', dispatch_generation: 2 });
+    expect(await row('SELECT updated_at FROM event_cover_backfill_runs WHERE id = ?', RUN))
+      .toEqual({ updated_at: concurrentAt });
   });
 
   /**
@@ -1122,6 +1342,214 @@ describe('platform reconciliation and the guarded restart edge', () => {
       inspected: 1, restarted: 1, failuresRecorded: 0,
     });
     expect(await currentJob()).toMatchObject({ status: 'queued', dispatch_generation: 2 });
+  });
+
+  it('restores a fully adopted frozen manifest at finalizing without changing its pins', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access, { adopted: PINNED_MANIFEST_SLOTS });
+    const before = await row<{
+      master_id: string; render_set_id: string; manifest_json: string; manifest_sha256: string;
+    }>(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB);
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'terminated' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `restart:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'finalizing', dispatch_generation: 2 });
+    expect(await row(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toEqual(before);
+  });
+
+  it('restores a frozen manifest with no adopted objects at rendering', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access);
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 1 });
+    expect(await currentJob()).toMatchObject({ status: 'rendering', dispatch_generation: 2 });
+  });
+
+  it('does not count one adopted row as a complete profile', async () => {
+    const adopted = PINNED_MANIFEST_SLOTS.filter((slot) => (
+      slot.profile !== 'short-lookup' || slot.format === 'webp'
+    ));
+    const { instanceId } = await seedPinnedFailedJob(access, { adopted });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 1 });
+    expect(await currentJob()).toMatchObject({ status: 'rendering', dispatch_generation: 2 });
+  });
+
+  it.each([
+    ['a malformed manifest shape', JSON.stringify({ slots: 'not-an-array' }), undefined],
+    ['a duplicate manifest tuple', JSON.stringify({
+      slots: [PINNED_MANIFEST_SLOTS[0], ...PINNED_MANIFEST_SLOTS.slice(0, 11)],
+    }), undefined],
+    ['an unknown manifest tuple', JSON.stringify({
+      slots: [
+        { profile: 'unknown-profile', density: '1x', format: 'webp' },
+        ...PINNED_MANIFEST_SLOTS.slice(1),
+      ],
+    }), undefined],
+    ['a manifest missing one mandatory 1x format', JSON.stringify({
+      slots: [
+        { profile: 'short-lookup', density: '2x', format: 'webp' },
+        ...PINNED_MANIFEST_SLOTS.slice(1),
+      ],
+    }), undefined],
+    ['a manifest with only one 2x format', JSON.stringify({
+      slots: [
+        ...PINNED_MANIFEST_SLOTS,
+        { profile: 'short-lookup', density: '2x', format: 'webp' },
+      ],
+    }), undefined],
+    ['an invalid raw manifest digest', PINNED_MANIFEST_JSON, 'f'.repeat(64)],
+  ] as const)('refuses restart for %s', async (_name, manifestJson, manifestSha256) => {
+    const { instanceId } = await seedPinnedFailedJob(access, { manifestJson, manifestSha256 });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', dispatch_generation: 1 });
+  });
+
+  it('refuses restart when an adopted object tuple is not in the frozen manifest', async () => {
+    const unexpected = [
+      ...PINNED_MANIFEST_SLOTS,
+      { profile: 'short-lookup', density: '2x', format: 'webp' },
+    ];
+    const { instanceId } = await seedPinnedFailedJob(access, { adopted: unexpected });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', dispatch_generation: 1 });
+  });
+
+  it('refuses restart when only part of the pinned quartet is present', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET manifest_sha256 = NULL WHERE id = ?
+    `).bind(JOB).run();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', dispatch_generation: 1 });
+  });
+
+  it('reads at most 24 adopted tuples for the exact render-set and event pair', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access);
+    const statements: string[] = [];
+    const recordingDb = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => {
+            statements.push(sql);
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const env = { ...testEnv, DB: recordingDb };
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    await reconcileCoverBackfillJobs(env, now, platform.accessor);
+
+    const reads = statements.filter((sql) => (
+      sql.trimStart().startsWith('SELECT profile_id, density, format')
+    ));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]!.replace(/\s+/gu, ' ').trim()).toContain(
+      'WHERE render_set_id = ? AND event_id = ? ORDER BY profile_id, density, format LIMIT 24',
+    );
+  });
+
+  it('refuses finalizing when an adopted tuple disappears after the checkpoint read', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access, { adopted: PINNED_MANIFEST_SLOTS });
+    const env = envAfterAdoptedTupleRead(async () => {
+      await testEnv.DB.prepare(`
+        DELETE FROM event_cover_render_objects
+        WHERE render_set_id = ? AND profile_id = 'short-lookup'
+          AND density = '1x' AND format = 'jpeg'
+      `).bind(PINNED_RENDER_SET).run();
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(env, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', dispatch_generation: 1 });
+  });
+
+  it('refuses rendering when an unexpected tuple appears after the checkpoint read', async () => {
+    const { instanceId } = await seedPinnedFailedJob(access);
+    const env = envAfterAdoptedTupleRead(async () => {
+      await testEnv.DB.prepare(`
+        INSERT INTO event_cover_render_objects (
+          id, render_set_id, event_id, profile_id, density, format, object_key,
+          content_type, byte_size, width, height, quality_rung, sha256, created_at
+        ) VALUES ('late-object', ?, ?, 'short-lookup', '2x', 'webp', ?,
+          'image/webp', 100, 720, 336, 1, ?, ?)
+      `).bind(
+        PINNED_RENDER_SET, access.event.id,
+        `events/${access.event.id}/cover/rendered/${PINNED_RENDER_SET}/short-lookup-2x.webp`,
+        'e'.repeat(64), now.toISOString(),
+      ).run();
+    });
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(env, now, platform.accessor))
+      .toMatchObject({ inspected: 1, restarted: 0, unchanged: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({ status: 'failed', dispatch_generation: 1 });
+  });
+
+  it('replays pinned derived work without allocating a replacement master or render set', async () => {
+    const { payload, instanceId } = await inFlight({ status: 'queued' });
+    const env = backfillEnv();
+    await coverBackfillPreflight(env, payload, now);
+    await coverBackfillNormalize(env, payload, now);
+    await renderEveryProfile(env, payload);
+    const before = await row<{
+      master_id: string; render_set_id: string; manifest_json: string; manifest_sha256: string;
+    }>(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          terminal_at = ?, updated_at = ? WHERE id = ?
+    `).bind(new Date(now.getTime() - 60_000).toISOString(), now.toISOString(), JOB).run();
+    const platform = scriptedBackfillAccessor({ [instanceId]: { kind: 'status', status: 'errored' } });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+      .toMatchObject({ restarted: 1 });
+    expect((await coverBackfillPreflight(env, payload, now)).shouldContinue).toBe(true);
+    expect((await coverBackfillNormalize(env, payload, now)).shouldContinue).toBe(true);
+    await renderEveryProfile(env, payload);
+    expect(await coverBackfillFinalize(testEnv, payload, now))
+      .toMatchObject({ status: 'applied' });
+
+    expect(await row(`
+      SELECT master_id, render_set_id, manifest_json, manifest_sha256
+      FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toEqual(before);
+    expect(await row('SELECT count(*) AS count FROM event_cover_masters WHERE event_id = ?', access.event.id))
+      .toEqual({ count: 1 });
+    expect(await row('SELECT count(*) AS count FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ count: 1 });
   });
 
   it.each<[string, SeedOptions]>([
