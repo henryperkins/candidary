@@ -78,7 +78,7 @@ test.describe('mobile event-theme visual evidence', () => {
       messages: [TEST_NOTE],
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await page.locator('.event-extra summary').filter({ hasText: 'Leave a note' }).click();
+    await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
     await expect(page.locator('.notes-feed li')).toHaveCount(1);
     await settle(page);
     await expect(page.locator('.guest-secondary')).toHaveScreenshot('guest-default-notes-390.png');

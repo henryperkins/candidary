@@ -33,6 +33,7 @@ const LOAD_FAILURE_DECISION = {
   UPLOAD_OBJECT_MISSING: decision('retry'),
   UPLOAD_FINALIZE_CONFLICT: decision('retry'),
   MEDIA_STATE_CONFLICT: decision('retry'),
+  MESSAGE_SUBMISSION_CONFLICT: decision('retry'),
   EXPORT_ALREADY_ACTIVE: decision('retry'),
   EXPORT_EMPTY: decision('retry'),
   EXPORT_LIMIT_EXCEEDED: decision('retry'),

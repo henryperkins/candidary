@@ -258,6 +258,7 @@ export interface MessageRecord {
   guestName: string | null;
   body: string;
   moderationStatus: ModerationStatus;
+  idempotencyKey: string | null;
   createdAt: string;
   approvedAt: string | null;
   deletedAt: string | null;

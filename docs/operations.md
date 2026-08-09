@@ -20,7 +20,7 @@ Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 ## Release identity and certification boundary
 
 The build embeds two Worker-only literals: the full clean Git SHA and the content-bound migration
-manifest SHA-256. `config/release.json` supplies the positive `guestJourneyVersion` (currently 1),
+manifest SHA-256. `config/release.json` supplies the positive `guestJourneyVersion` (currently 2),
 and the `CF_VERSION_METADATA` binding supplies Cloudflare's Worker version ID, deployment tag, and
 timestamp. Runtime identity is available only when all values are well formed and the version tag is
 exactly the embedded build SHA. A missing metadata binding, empty ID or tag, tag/SHA mismatch,
@@ -233,6 +233,7 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `FILE_TYPE_UNSUPPORTED`, `FILE_TOO_LARGE` — a selected or stored object failed type/signature/20 MB validation.
 - `EVENT_MEDIA_LIMIT`, `EVENT_STORAGE_LIMIT` — the 10,000-photo or 100-GiB event quota is full.
 - `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh.
+- `MESSAGE_SUBMISSION_CONFLICT` — a successful guest-note key was reused with different words. The client replaces the key and offers the preserved note for another send.
 - `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.

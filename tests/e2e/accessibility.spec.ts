@@ -607,7 +607,7 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
   for (const [summary, rendered] of [
     ['Shared gallery', '.photo-grid figure'],
     ['My deliveries', '.contributions li'],
-    ['Leave a note', '.note-form textarea'],
+    ['Guest notes', '.note-form textarea'],
   ] as const) {
     await page.locator('.event-extra summary').filter({ hasText: summary }).click();
     await expect(page.locator(rendered).first()).toBeVisible();

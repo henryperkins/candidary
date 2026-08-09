@@ -21,7 +21,7 @@ import {
   TEST_NOTE,
   makeMedia,
 } from './fixtures/ui-data';
-import { measureContrast, measureDocument, measureTarget } from './helpers/geometry';
+import { measureContrast, measureDocument, measureGridTracks, measureTarget } from './helpers/geometry';
 import { settleRendering } from './helpers/rendering';
 import {
   makeTextTransparent,
@@ -213,7 +213,7 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
       messages: [TEST_NOTE],
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    for (const summary of ['Shared gallery', 'My deliveries', 'Leave a note']) {
+    for (const summary of ['Shared gallery', 'My deliveries', 'Guest notes']) {
       await page.locator('.event-extra summary').filter({ hasText: summary }).click();
     }
     await expect(page.locator('.photo-grid figure')).toHaveCount(3);
@@ -517,11 +517,102 @@ test('Notes placeholder uses the approved themed muted text role', async ({ page
   await page.setViewportSize({ width: 390, height: 844 });
   await stubGuestRoutes(page, { event: { theme: eventTheme('candidary-default') } });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-  await page.locator('.event-extra summary').filter({ hasText: 'Leave a note' }).click();
-  const placeholderColor = await page.getByRole('textbox', { name: 'Note for Maya & Theo' }).evaluate(
+  await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+  const placeholderColor = await page.getByRole('textbox', { name: 'Your note for Maya & Theo' }).evaluate(
     (element) => getComputedStyle(element, '::placeholder').color,
   );
   expect(placeholderColor).toBe('rgb(119, 110, 106)');
+});
+
+test('Notes contain valid maximum text and expose private moderation states', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubGuestRoutes(page, {
+    event: { theme: eventTheme('candidary-default') },
+    messages: [
+      {
+        id: 'message-long',
+        kind: 'message',
+        guestName: 'Rowan',
+        body: 'W'.repeat(500),
+        moderationStatus: 'approved',
+        createdAt: '2026-09-19T20:00:00.000Z',
+        mediaId: null,
+      },
+      {
+        id: 'message-pending',
+        kind: 'message',
+        guestName: 'Taylor',
+        body: 'Waiting words.',
+        moderationStatus: 'pending',
+        createdAt: '2026-09-19T20:01:00.000Z',
+        mediaId: null,
+      },
+      {
+        id: 'message-rejected',
+        kind: 'caption',
+        guestName: 'Taylor',
+        body: 'A private photo caption.',
+        moderationStatus: 'rejected',
+        createdAt: '2026-09-19T20:02:00.000Z',
+        mediaId: '00000000-0000-4000-8000-000000000001',
+      },
+    ],
+  });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+  await expect(page.getByText('Awaiting host review')).toBeVisible();
+  await expect(page.getByText('Kept private')).toBeVisible();
+  await expect(page.getByText('Only you can see this until the host shares it.')).toBeVisible();
+  await expect(page.getByText('Only you can see this.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Taylor · Photo caption', { exact: true })).toBeVisible();
+  await expectContained(page, 'maximum guest note');
+});
+
+test('Guest notes reflow at 200 percent zoom and preserve bidirectional guest text', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  const eventName = 'M'.repeat(80);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await stubGuestRoutes(page, {
+    event: { name: eventName, theme: eventTheme('candidary-default') },
+    messages: [{
+      id: 'message-rtl',
+      kind: 'message',
+      guestName: 'G'.repeat(80),
+      body: 'ليلة جميلة مليئة بالذكريات',
+      moderationStatus: 'approved',
+      createdAt: '2026-09-19T20:00:00.000Z',
+      mediaId: null,
+    }],
+  });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+
+  const notes = page.locator('.notes-secondary');
+  const textarea = page.locator('.note-form textarea');
+  const body = page.locator('.notes-feed__body > p');
+  const send = page.getByRole('button', { name: 'Send note' });
+  expect(await measureGridTracks(notes)).toHaveLength(2);
+  await expect(textarea).toHaveAttribute('dir', 'auto');
+  await expect(body).toHaveAttribute('dir', 'auto');
+  await expect(page.locator('.notes-feed__meta bdi')).toHaveText('G'.repeat(80));
+  await expectContained(page, 'desktop guest notes');
+
+  await page.setViewportSize({ width: 640, height: 450 });
+  expect(await measureGridTracks(notes)).toHaveLength(1);
+  await expectContained(page, 'guest notes at 200 percent zoom');
+
+  await page.setViewportSize({ width: 320, height: 844 });
+  const [textareaBox, sendBox] = await Promise.all([textarea.boundingBox(), send.boundingBox()]);
+  expect(textareaBox).not.toBeNull();
+  expect(sendBox).not.toBeNull();
+  expect(Math.abs((textareaBox?.width ?? 0) - (sendBox?.width ?? 0))).toBeLessThanOrEqual(1);
+  await expectContained(page, 'narrow guest notes with long names');
+
+  await page.evaluate(() => { document.documentElement.dir = 'rtl'; });
+  const arrowTransform = await send.locator('svg').evaluate((icon) => getComputedStyle(icon).transform);
+  expect(arrowTransform).not.toBe('none');
+  await expectContained(page, 'RTL guest notes');
 });
 
 test('visible-pixel masking keeps straight edges and excludes rounded top corners', async ({ page }, testInfo) => {

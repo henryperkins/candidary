@@ -189,10 +189,12 @@ export const RSVP_HOUSEHOLD_LIST_FIXTURE: RsvpHouseholdListPage = {
 
 interface GuestMessage {
   id: string;
-  guestName: string;
+  kind?: 'message' | 'caption';
+  guestName: string | null;
   body: string;
-  moderationStatus: 'approved';
+  moderationStatus: 'pending' | 'approved' | 'rejected';
   createdAt: string;
+  mediaId?: string | null;
 }
 
 interface GuestRouteOptions {
@@ -290,7 +292,8 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   const event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
   const gallery = options.gallery ?? makeMedia(1);
   const contributions = options.contributions ?? gallery;
-  const messages = options.messages ?? [];
+  const messages = [...(options.messages ?? [])];
+  const submittedMessages = new Map<string, GuestMessage>();
   const base = `**/api/event/${event.slug}`;
 
   await page.route('**/api/media/*/preview', (route) => route.fulfill({
@@ -314,9 +317,37 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   await page.route(`${base}/contributions`, (route) => route.fulfill({
     json: { data: { media: contributions }, requestId: 'request-a' },
   }));
-  await page.route(`${base}/messages`, (route) => route.fulfill({
-    json: { data: { items: messages }, requestId: 'request-a' },
-  }));
+  await page.route(`${base}/messages*`, async (route) => {
+    if (route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON() as {
+        idempotencyKey: string;
+        guestName: string | null;
+        body: string;
+      };
+      const replayed = submittedMessages.get(payload.idempotencyKey);
+      const message = replayed ?? {
+        id: crypto.randomUUID(),
+        kind: 'message',
+        guestName: payload.guestName,
+        body: payload.body.trim(),
+        moderationStatus: event.moderationRequired ? 'pending' : 'approved',
+        createdAt: new Date().toISOString(),
+        mediaId: null,
+      };
+      if (!replayed) {
+        submittedMessages.set(payload.idempotencyKey, message);
+        messages.push(message);
+      }
+      await route.fulfill({
+        status: replayed ? 200 : 201,
+        json: { data: { message, replayed: Boolean(replayed) }, requestId: 'request-a' },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: { data: { items: messages, nextCursor: null }, requestId: 'request-a' },
+    });
+  });
   // The RSVP half of the guest API is deliberately stateful: a successful lookup
   // grants the session, a saved response becomes what a later visit reads back,
   // and a reload has to find the same answer a real household would.

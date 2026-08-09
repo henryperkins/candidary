@@ -9,6 +9,8 @@ import { MessagesRepository } from '../db/messages';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
+import { decodeMessageCursor, encodeMessageCursor } from '../http/message-cursor';
+import type { MessageRecord } from '../db/types';
 
 // Guest notes are a link-session surface; host moderation goes through the shared
 // manager check so an account session reaches it too.
@@ -23,30 +25,58 @@ async function guestAuth(context: Context<AppBindings>, write = false) {
 
 export const messageRoutes = new Hono<AppBindings>();
 
+function guestMessageView(message: MessageRecord) {
+  return {
+    id: message.id,
+    kind: 'message' as const,
+    guestName: message.guestName,
+    body: message.body,
+    moderationStatus: message.moderationStatus,
+    createdAt: message.createdAt,
+    mediaId: null,
+  };
+}
+
 messageRoutes.post('/event/:slug/messages', async (context) => {
   const auth = await guestAuth(context, true);
   const parsed = z.object({
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
     guestName: z.string().trim().max(80).nullish(),
     body: z.string().trim().min(1).max(500),
   }).safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Write a note between 1 and 500 characters.', 422);
+  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Write a note with 1 to 500 characters.', 422);
   const now = new Date().toISOString();
-  const message = await new MessagesRepository(context.env.DB).create({
+  const created = await new MessagesRepository(context.env.DB).create({
     id: crypto.randomUUID(),
     eventId: auth.event.id,
     guestSessionId: auth.session.id,
     guestName: parsed.data.guestName || null,
     body: parsed.data.body,
     moderationStatus: auth.event.moderationRequired ? 'pending' : 'approved',
+    idempotencyKey: parsed.data.idempotencyKey ?? null,
     createdAt: now,
   });
-  return context.json({ data: { message }, requestId: context.get('requestId') }, 201);
+  return context.json({
+    data: { message: guestMessageView(created.message), replayed: created.replayed },
+    requestId: context.get('requestId'),
+  }, created.replayed ? 200 : 201);
 });
 
 messageRoutes.get('/event/:slug/messages', async (context) => {
   const auth = await guestAuth(context);
-  const items = await new MessagesRepository(context.env.DB).listFeed(auth.event.id, auth.session.id);
-  return context.json({ data: { items }, requestId: context.get('requestId') });
+  const rawCursor = context.req.query('cursor');
+  const page = await new MessagesRepository(context.env.DB).listFeed(
+    auth.event.id,
+    auth.session.id,
+    rawCursor === undefined ? undefined : decodeMessageCursor(rawCursor),
+  );
+  return context.json({
+    data: {
+      items: page.items,
+      nextCursor: page.nextCursor ? encodeMessageCursor(page.nextCursor) : null,
+    },
+    requestId: context.get('requestId'),
+  });
 });
 
 messageRoutes.get('/manage/events/:eventId/messages', async (context) => {
@@ -81,4 +111,3 @@ messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (contex
     );
   return context.json({ data: { message }, requestId: context.get('requestId') });
 });
-

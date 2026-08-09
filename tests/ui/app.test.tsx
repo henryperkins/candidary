@@ -451,7 +451,7 @@ describe('guest event experience', () => {
     await user.click(screen.getByText(/Shared gallery/, { selector: 'span' }));
     expect(await screen.findByAltText('Golden hour')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await user.click(screen.getByText(/Leave a note/, { selector: 'span' }));
+    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
     expect(screen.getByText('To many happy years.')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -466,13 +466,199 @@ describe('guest event experience', () => {
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
-    await userEvent.setup().click(screen.getByText(/Leave a note/, { selector: 'span' }));
+    await userEvent.setup().click(screen.getByText(/Guest notes/, { selector: 'span' }));
     // A placeholder is not a name: it disappears on the first keystroke and is not announced as one.
-    const note = await screen.findByRole('textbox', { name: 'Note for Maya & Theo' });
+    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
     expect(note).toBeVisible();
     // Exactly the field's own name — no placeholder, no submit label, nothing else swept in with it.
-    expect(note).toHaveAccessibleName('Note for Maya & Theo');
+    expect(note).toHaveAccessibleName('Your note for Maya & Theo');
     expect(note).toHaveAttribute('name', 'body');
+    expect(note).toHaveAttribute('placeholder', 'Share a wish or memory…');
+    fireEvent.change(note, { target: { value: 'x'.repeat(499) } });
+    expect(screen.getByText('1 character left')).toBeVisible();
+  });
+
+  it('holds one note submission, confirms it, and labels its private moderation state', async () => {
+    let resolvePost!: (response: Response) => void;
+    const pendingPost = new Promise<Response>((resolve) => { resolvePost = resolve; });
+    let postCount = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/messages') && init?.method === 'POST') {
+        postCount += 1;
+        return pendingPost;
+      }
+      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    await user.type(note, 'What a perfect evening.');
+    const send = screen.getByRole('button', { name: 'Send note' });
+    await user.click(send);
+    expect(send).toBeDisabled();
+    await user.click(send);
+    expect(postCount).toBe(1);
+
+    resolvePost(await json({
+      message: {
+        id: 'message-a',
+        kind: 'message',
+        guestName: 'Avery',
+        body: 'What a perfect evening.',
+        moderationStatus: 'pending',
+        createdAt: '2026-09-19T20:00:00.000Z',
+        mediaId: null,
+      },
+      replayed: false,
+    }, 201));
+    expect(await screen.findByText(
+      'Your note was sent to the host for review. Only you can see it here for now.',
+    )).toBeVisible();
+    expect(note).toHaveValue('');
+    expect(screen.getByText('What a perfect evening.')).toBeVisible();
+    expect(screen.getByText('Awaiting host review')).toBeVisible();
+    expect(screen.getByText('Only you can see this until the host shares it.')).toBeVisible();
+  });
+
+  it('preserves a failed draft and reuses its idempotency key on retry', async () => {
+    const attempts: Array<{ idempotencyKey: string; body: string }> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/messages') && init?.method === 'POST') {
+        attempts.push(JSON.parse(String(init.body)) as { idempotencyKey: string; body: string });
+        if (attempts.length === 1) return Promise.reject(new TypeError('network dropped'));
+        return json({
+          message: {
+            id: 'message-a',
+            kind: 'message',
+            guestName: null,
+            body: 'Keep these words.',
+            moderationStatus: 'pending',
+            createdAt: '2026-09-19T20:00:00.000Z',
+            mediaId: null,
+          },
+          replayed: true,
+        });
+      }
+      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    await user.type(note, 'Keep these words.');
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('was not sent');
+    expect(note).toHaveValue('Keep these words.');
+    await user.click(screen.getByRole('button', { name: 'Send note again' }));
+    expect(await screen.findByText(
+      'Your note was sent to the host for review. Only you can see it here for now.',
+    )).toBeVisible();
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.idempotencyKey).toBe(attempts[1]?.idempotencyKey);
+  });
+
+  it('explains a changed-send conflict and uses a fresh key for the next attempt', async () => {
+    const keys: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/messages') && init?.method === 'POST') {
+        keys.push((JSON.parse(String(init.body)) as { idempotencyKey: string }).idempotencyKey);
+        if (keys.length === 1) {
+          return errorJson({
+            code: 'MESSAGE_SUBMISSION_CONFLICT',
+            message: 'This note changed after an earlier send attempt. Send it again.',
+            requestId: 'r',
+          }, 409);
+        }
+        return json({
+          message: {
+            id: 'message-a',
+            kind: 'message',
+            guestName: null,
+            body: 'The final words.',
+            moderationStatus: 'pending',
+            createdAt: '2026-09-19T20:00:00.000Z',
+            mediaId: null,
+          },
+          replayed: false,
+        }, 201);
+      }
+      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await user.type(
+      await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' }),
+      'The final words.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('changed after an earlier send attempt');
+    await user.click(screen.getByRole('button', { name: 'Send note again' }));
+    expect(await screen.findByText(
+      'Your note was sent to the host for review. Only you can see it here for now.',
+    )).toBeVisible();
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('keeps a note draft when its disclosure is closed and reopened', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    const user = userEvent.setup();
+    const summary = screen.getByText(/Guest notes/, { selector: 'span' });
+    await user.click(summary);
+    await user.type(await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' }), 'Still here.');
+    await user.click(summary);
+    expect(screen.queryByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeInTheDocument();
+    await user.click(summary);
+    expect(await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' })).toHaveValue('Still here.');
+  });
+
+  it('distinguishes a failed notes read from a confirmed empty feed and retries in place', async () => {
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/messages')) {
+        reads += 1;
+        return reads === 1
+          ? errorJson({ code: 'INTERNAL_ERROR', message: 'Notes are unavailable.', requestId: 'r' }, 503)
+          : json({ items: [], nextCursor: null });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Notes are unavailable.');
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('No notes or photo captions have been shared yet.')).toBeVisible();
+    expect(reads).toBe(2);
   });
 });
 
