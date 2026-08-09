@@ -219,6 +219,18 @@ const EXPIRABLE_COVER_DRAFT_STATES = "('reserved', 'transferred', 'inspected', '
 const TERMINAL_COVER_DRAFT_STATES = "('failed', 'expired', 'published')";
 
 /**
+ * Old purge code could write any plain ISO deadline after guessing from age.
+ * It could not write this suffix, so the exact tagged deadline is durable proof
+ * that the terminal-only coordinator, rather than an old escape hatch, released
+ * a deletion-blocked fence.
+ */
+const COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX = '|cf2';
+
+function coverPurgeFenceTerminalExpiry(now: Date): string {
+  return `${coverWorkflowFenceTerminalExpiry(now)}${COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX}`;
+}
+
+/**
  * Deletes an object and proves it is gone before its inventory row may go.
  *
  * The ordering is the whole point. A row removed before its object leaves bytes
@@ -342,43 +354,22 @@ export async function cleanupEventCovers(
       DELETE FROM event_cover_workflow_fences
       WHERE rowid IN (
         SELECT f.rowid FROM event_cover_workflow_fences f
-        WHERE f.expires_at <= ?1 AND (
+        WHERE f.expires_at <= (?1 || ?4) AND (
           (
-            f.state = 'deletion-blocked' AND (
-              f.expires_at = strftime(
-                '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
-              ) AND EXISTS (
-                SELECT 1 FROM event_cover_purge_progress p
-                WHERE p.event_id = f.event_id AND p.phase IN ('r2', 'relational')
-                  AND p.workflow_binding IN (?4, ?5, ?6)
-              )
-            )
-          )
-          OR (
-            -- The v2 relational transaction is the only writer that reverses a
-            -- blocked fence to open while deleting its event, owners, and
-            -- progress. Old purge code cannot synthesize this retired marker.
-            f.state = 'open'
+            f.state = 'deletion-blocked'
+            AND strftime(
+              '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
+            ) IS NOT NULL
             AND f.expires_at = strftime(
               '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
-            )
-            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.id = f.event_id)
-            AND NOT EXISTS (
-              SELECT 1 FROM event_cover_purge_progress p WHERE p.event_id = f.event_id
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM event_cover_publish_receipts r
-              WHERE r.event_id = f.event_id
-                AND r.workflow_instance_id = f.workflow_instance_id
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM event_cover_backfill_jobs j
-              WHERE j.event_id = f.event_id
-                AND j.workflow_instance_id = f.workflow_instance_id
-            )
+            ) || ?4
+            AND strftime(
+              '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
+            ) <= ?1
           )
           OR (
-            f.state = 'open' AND f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+            f.expires_at <= ?1 AND f.state = 'open'
+            AND f.workflow_binding = 'COVER_RENDER_WORKFLOW'
             AND EXISTS (
               SELECT 1 FROM event_cover_publish_receipts r
               WHERE r.event_id = f.event_id
@@ -395,7 +386,8 @@ export async function cleanupEventCovers(
             )
           )
           OR (
-            f.state = 'open' AND f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+            f.expires_at <= ?1 AND f.state = 'open'
+            AND f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
             AND EXISTS (
               SELECT 1 FROM event_cover_backfill_jobs j
               WHERE j.event_id = f.event_id
@@ -419,7 +411,7 @@ export async function cleanupEventCovers(
       )
     `).bind(
       timestamp, limit, backfillRestartFloor,
-      ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES,
+      COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX,
     ).run();
     summary.fencesDeleted = note(fences.meta.changes);
   }
@@ -887,16 +879,17 @@ async function settleEventCoverFences(
      AND j.dispatch_generation = f.dispatch_generation
     WHERE f.event_id = ?1 AND f.state = 'deletion-blocked'
       AND (
-        f.expires_at = ?2
-        OR strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
-        OR f.expires_at <> strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days')
+        strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
+        OR f.expires_at <> strftime(
+          '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
+        ) || ?2
       )
       AND (f.workflow_binding > ?3
         OR (f.workflow_binding = ?3 AND f.workflow_instance_id > ?4))
     ORDER BY f.workflow_binding, f.workflow_instance_id
     LIMIT ?5
   `).bind(
-    eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    eventId, COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX,
     cursorBinding ?? '', cursorInstance,
     MAX_COVER_PURGE_FENCES_PER_PASS,
   ).all<HeldFenceRow>();
@@ -969,14 +962,15 @@ async function settleEventCoverFences(
       SET expires_at = ?, updated_at = ?
       WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'deletion-blocked'
         AND (
-          expires_at = ?
-          OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
-          OR expires_at <> strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days')
+          strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
+          OR expires_at <> strftime(
+            '%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days'
+          ) || ?
         )
     `).bind(
-      coverWorkflowFenceTerminalExpiry(now), timestamp,
+      coverPurgeFenceTerminalExpiry(now), timestamp,
       fence.workflow_binding, fence.workflow_instance_id,
-      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX,
     ).run();
     if (released.meta.changes !== 1) {
       halted = true;
@@ -1005,11 +999,12 @@ async function settleEventCoverFences(
   const unresolved = await env.DB.prepare(`
     SELECT count(*) AS count FROM event_cover_workflow_fences
     WHERE event_id = ? AND state = 'deletion-blocked' AND (
-      expires_at = ?
-      OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
-      OR expires_at <> strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days')
+      strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') IS NULL
+      OR expires_at <> strftime(
+        '%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days'
+      ) || ?
     )
-  `).bind(eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT).first<{ count: number }>();
+  `).bind(eventId, COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX).first<{ count: number }>();
   return (unresolved?.count ?? 0) === 0;
 }
 
@@ -1109,10 +1104,14 @@ export async function reconcileEventCoverPurge(
         )
       )
     `).bind(COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp, eventId),
+    // The only open rows left have exact generation-matching self-recorded
+    // terminal proof from the predicate above. Preserve that terminal-relative
+    // clock while publishing the old-code-impossible per-fence proof tag.
     env.DB.prepare(`
-      UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+      UPDATE event_cover_workflow_fences
+      SET state = 'deletion-blocked', expires_at = expires_at || ?
       WHERE event_id = ? AND state = 'open'
-    `).bind(eventId),
+    `).bind(COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX, eventId),
     // Accepted work that can no longer be delivered is made terminal here rather
     // than left `preparing` forever behind a deleted event.
     env.DB.prepare(`
@@ -1189,17 +1188,16 @@ export async function reconcileEventCoverPurge(
         AND workflow_binding IN (?, ?, ?) AND EXISTS (
         SELECT 1 FROM event_cover_workflow_fences f
         WHERE f.event_id = ? AND f.state = 'deletion-blocked' AND (
-          f.expires_at = ?
-          OR strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
+          strftime('%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days') IS NULL
           OR f.expires_at <> strftime(
             '%Y-%m-%dT%H:%M:%fZ', f.updated_at, '+31 days'
-          )
+          ) || ?
         )
       )
     `).bind(
       encodedPurgeFenceCursor(null), timestamp, eventId,
       ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES,
-      eventId, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      eventId, COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX,
     ),
   ]);
 
@@ -1275,24 +1273,9 @@ async function purgeEventRelationalRows(
       SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL
       WHERE id = ? AND deleted_at IS NOT NULL
     `).bind(CANONICAL_NONE_COVER_CONFIG, eventId),
-    // Publish a per-fence retirement marker in the same transaction that
-    // removes every owner, the v2 progress marker, and the event. Old purge
-    // code only moved open -> deletion-blocked, so it cannot produce this
-    // open-without-event state. No dispatcher can use it: the event and durable
-    // owner disappear atomically, after terminal proof and fresh R2 absence.
-    env.DB.prepare(`
-      UPDATE event_cover_workflow_fences
-      SET state = 'open'
-      WHERE event_id = ? AND state = 'deletion-blocked'
-        AND expires_at = strftime(
-          '%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days'
-        )
-        AND EXISTS (
-          SELECT 1 FROM event_cover_purge_progress p
-          WHERE p.event_id = ? AND p.phase = 'relational'
-            AND p.workflow_binding IN (?, ?, ?)
-        )
-    `).bind(eventId, eventId, ...COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES),
+    // Terminal-proven fences deliberately stay deletion-blocked after their
+    // owners and event disappear. Their tagged deadline authorizes only the
+    // later bounded sweep; it never reopens dispatch admission.
     ...COVER_PURGE_ORDER.map((table) => env.DB
       .prepare(`DELETE FROM ${table} WHERE event_id = ?`).bind(eventId)),
     env.DB.prepare(`

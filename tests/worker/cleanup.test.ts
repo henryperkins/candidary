@@ -18,6 +18,7 @@ import {
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
 import type { CoverWorkflowLookup } from '../../worker/workflows/cover-platform';
+import { restartCoverPublication } from '../../worker/services/event-cover-publication';
 import worker from '../../worker/index';
 import {
   EVENT_COVER_TABLES,
@@ -533,7 +534,7 @@ describe('event cover purge coordinator', () => {
       .bind(access.event.id).first()).not.toBeNull();
   });
 
-  it('settles an already-terminal instance without terminating it', async () => {
+  it('keeps an already-terminal purge fence irreversibly blocked through relational completion', async () => {
     const { access, ids } = await seeded();
     const { accessors, calls } = purgeAccessors({
       [ids.workflowInstanceId]: { kind: 'status', status: 'errored' },
@@ -546,14 +547,79 @@ describe('event cover purge coordinator', () => {
     // Expiry is stamped only after terminal verification, and outlives the
     // platform's own retention.
     const fence = await fenceRow(ids.workflowInstanceId);
-    expect(fence?.state).toBe('open');
-    expect(fence?.expires_at).toBe(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString());
+    expect(fence?.state).toBe('deletion-blocked');
+    expect(fence?.expires_at).toBe('2026-09-04T12:00:00.000Z|cf2');
 
     const swept = await cleanupEventCovers(
       testEnv, new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000),
     );
     expect(swept.fencesDeleted).toBe(1);
     expect(await fenceRow(ids.workflowInstanceId)).toBeNull();
+  });
+
+  it('keeps a late restart blocked after relational cleanup removes its receipt', async () => {
+    const { access, ids } = await seeded();
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          dispatch_state = 'confirmed', updated_at = ?, expires_at = ?
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(
+      now.toISOString(), '2026-08-05T12:00:00.000Z', access.event.id, ids.operationId,
+    ).run();
+
+    let signalRestartStarted!: () => void;
+    let releaseRestart!: () => void;
+    const restartStarted = new Promise<void>((resolve) => { signalRestartStarted = resolve; });
+    const restartGate = new Promise<void>((resolve) => { releaseRestart = resolve; });
+    const lateCalls: string[] = [];
+    const restarting = restartCoverPublication(testEnv, {
+      eventId: access.event.id,
+      operationId: ids.operationId,
+      now,
+      workflow: {
+        async lookup(id) {
+          lateCalls.push(`lookup:${id}`);
+          return { kind: 'status', status: 'errored' };
+        },
+        async create(id) { lateCalls.push(`create:${id}`); },
+        async resume(id) { lateCalls.push(`resume:${id}`); },
+        async restart(id) {
+          lateCalls.push(`restart:${id}`);
+          signalRestartStarted();
+          await restartGate;
+        },
+        async terminate(id) { lateCalls.push(`terminate:${id}`); },
+      },
+    });
+    await restartStarted;
+
+    const purgeAt = new Date(now.getTime() + 121_000);
+    const purged = await reconcileEventCoverPurge(
+      testEnv,
+      access.event.id,
+      purgeAt,
+      purgeAccessors({
+        [ids.workflowInstanceId]: { kind: 'status', status: 'complete' },
+      }).accessors,
+    );
+    expect(purged).toMatchObject({ phase: 'complete', remainder: false });
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+    expect(await fenceRow(ids.workflowInstanceId)).toMatchObject({
+      state: 'deletion-blocked',
+      expires_at: '2026-09-04T12:02:01.000Z|cf2',
+    });
+
+    releaseRestart();
+    await expect(restarting).resolves.toMatchObject({
+      status: 'ineligible', view: null, retryAfterSeconds: null,
+    });
+    expect(lateCalls).toEqual([
+      `lookup:${ids.workflowInstanceId}`,
+      `restart:${ids.workflowInstanceId}`,
+      `terminate:${ids.workflowInstanceId}`,
+    ]);
   });
 
   it('terminates a live instance and settles it only after re-verifying', async () => {
@@ -1034,13 +1100,13 @@ describe('lifecycle cleanup', () => {
       const now = new Date('2026-08-04T12:00:00.000Z');
       await purgeSettled(access.event.id, now);
       expect(await countRows('event_cover_workflow_fences', access.event.id)).toBe(1);
-      // Relational completion atomically retires the proven fence to the
-      // old-code-impossible open-without-event marker. The exact terminal
-      // expiry still controls collection.
+      // Relational completion removes the owner and event without ever
+      // reopening the dispatch fence. Only the tagged terminal deadline lets
+      // the later bounded sweep collect it.
       const fence = await fenceRow(ids.workflowInstanceId);
-      expect(fence?.state).toBe('open');
+      expect(fence?.state).toBe('deletion-blocked');
       expect(fence?.expires_at)
-        .toBe(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000).toISOString());
+        .toBe('2026-09-04T12:00:00.000Z|cf2');
 
       const sweep = await cleanupEventCovers(
         testEnv, new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000),
@@ -1537,6 +1603,45 @@ describe('bounded cover storage sweep', () => {
       });
     },
   );
+
+  it('collects only a due canonical tagged blocked proof', async () => {
+    const dueAt = '2026-09-01T00:00:00.000Z';
+    const dueProof = `${dueAt}|cf2`;
+    const cases = [
+      { id: 'tag-valid-due', updatedAt: '2026-08-01T00:00:00.000Z', expiresAt: dueProof },
+      { id: 'tag-valid-future', updatedAt: '2026-08-10T00:00:00.000Z', expiresAt: '2026-09-10T00:00:00.000Z|cf2' },
+      { id: 'tag-plain', updatedAt: '2026-08-01T00:00:00.000Z', expiresAt: dueAt },
+      { id: 'tag-wrong', updatedAt: '2026-08-01T00:00:00.000Z', expiresAt: `${dueAt}|cf3` },
+      { id: 'tag-mismatch', updatedAt: '2026-08-01T00:00:00.000Z', expiresAt: '2026-09-02T00:00:00.000Z|cf2' },
+      { id: 'tag-duplicate', updatedAt: '2026-08-01T00:00:00.000Z', expiresAt: `${dueProof}|cf2` },
+      { id: 'tag-malformed-clock', updatedAt: 'legacy-invalid', expiresAt: dueProof },
+    ];
+    for (const fixture of cases) {
+      await insertFence('COVER_RENDER_WORKFLOW', fixture.id, {
+        state: 'deletion-blocked', eventId: 'retired-event', expiresAt: fixture.expiresAt,
+      });
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET updated_at = ? WHERE workflow_instance_id = ?
+      `).bind(fixture.updatedAt, fixture.id).run();
+    }
+
+    const summary = await cleanupEventCovers(testEnv, new Date('2026-09-02T00:00:00.000Z'));
+
+    expect(summary.fencesDeleted).toBe(1);
+    expect(await fenceRow('tag-valid-due')).toBeNull();
+    const remaining = await testEnv.DB.prepare(`
+      SELECT workflow_instance_id FROM event_cover_workflow_fences
+      WHERE event_id = 'retired-event' ORDER BY workflow_instance_id
+    `).all<{ workflow_instance_id: string }>();
+    expect(remaining.results.map((row) => row.workflow_instance_id)).toEqual([
+      'tag-duplicate',
+      'tag-malformed-clock',
+      'tag-mismatch',
+      'tag-plain',
+      'tag-valid-future',
+      'tag-wrong',
+    ]);
+  });
 
   it('upgrades both legacy terminal owners to a full owner-relative fence retention window', async () => {
     const terminalAt = '2026-08-09T12:00:00.000Z';
