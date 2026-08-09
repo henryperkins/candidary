@@ -1671,6 +1671,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
     ['a manifest missing one mandatory 1x format', JSON.stringify({
       slots: [
         { profile: 'short-lookup', density: '2x', format: 'webp' },
+        { profile: 'short-lookup', density: '2x', format: 'jpeg' },
         ...PINNED_MANIFEST_SLOTS.slice(1),
       ],
     }), undefined],
