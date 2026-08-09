@@ -7,15 +7,26 @@ Two triggers share one handler and are selected by `controller.cron`.
 The hourly `47 * * * *` handler delivers lifecycle email from the outbox. It is
 independent of retention cleanup: neither can abort the other.
 
-The daily `17 3 * * *` handler performs five idempotent jobs:
+The daily `17 3 * * *` handler performs these idempotent phases in order:
 
 1. Sweep expired and consumed pending registrations, expired login challenges, and rate-limit buckets older than the enforcement window, in repeated bounded passes until each table is drained.
 2. Sweep expired or revoked RSVP sessions and lookup rate windows older than one 15-minute bucket, in the same bounded 100-row passes capped at 50 per run. Both statements report counts only; neither can name a household, a guest, or a scope.
 3. Delete objects for upload reservations older than fifteen minutes and release event counters.
 4. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
-5. Retire retention-due events. This selects rows that are already soft-deleted as well as rows that have reached `purge_after`, so a purge whose object deletion failed is retried instead of stranding objects. Each purge revokes every credential and disables the printed entry, sweeps the R2 event prefix, then deletes `media` and `guest_messages` before the event row — those two tables reference event sessions with `ON DELETE RESTRICT`, so the event cascade alone cannot remove a populated event. The final delete lets the remaining cascades clear the entry credential, households, invitees, guest-submission and manager-batch receipts, RSVP sessions, and rate windows.
+5. Resolve globally bounded backfill jobs whose exact legacy source is no longer current, rotating still-current blockers fairly rather than letting the oldest 100 starve newer work.
+6. Recover stale initial backfill creates with the same stored Workflow ID, then confirm their existing generation/fence.
+7. Reconcile retryable backfill jobs with platform status. Guarded Worker transitions own resume and restart. The certified-missing recreation edge is disabled in this candidate because `CERTIFIED_NOT_FOUND_MATCHERS` is empty; every lookup error is `unknown` and changes nothing until a later exact-candidate staging gate proves and pins a stable discriminator.
+8. Close eligible backfill and verification runs. The Worker re-derives the four zero-legacy predicates inside the status-changing statement; no operator payload writes `verified_at`.
+9. Sweep cover drafts, previews, retired sets/masters/originals, receipts, fences, jobs, and closed runs in bounded classes, deleting R2 before the inventory row that named an object.
+10. Resume retention-due or already soft-deleted event purges. Cover fences are coordinated before R2, and cover children are deleted before the event. A failed purge remains selected on later passes rather than stranding objects.
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
+
+Backfill selection and each cover-cleanup class are bounded at 100 rows. One event-purge pass inspects
+at most 10 fences and performs at most five platform mutations. Saturation is scheduling information,
+not quiescence; later safety phases still run within their own bounds, and another pass must confirm a
+backlog is empty. These in-process summaries are not emitted as structured logs or exposed through an
+operator route.
 
 ## Release identity and certification boundary
 
@@ -301,6 +312,30 @@ Displaced cover originals are no longer deleted when they are replaced. Each is 
 `event_cover_retired_legacy_objects` with a seven-day `cleanup_after`, and only the bounded daily
 sweep removes it — R2 first, absence verified, then the row. Within that window the previous original
 is still recoverable by key from the inventory; after it, nothing is.
+
+### Backfill and deletion signals
+
+Document only signals this candidate actually produces:
+
+- Manager event deletion returns `202` with exactly `data.deletionScheduled === true` while cover
+  cleanup remains, or `200` with exactly `data.deleted === true` when the purge completes in that
+  request. The first response promises immediate access revocation and scheduled physical cleanup,
+  not that every object is already gone.
+- `event_cover_backfill_runs` stores the durable mode, status, cursor, rolling inventory digest,
+  counters, timestamps, `verified_at`, and expiry. `event_cover_backfill_jobs` stores job,
+  dispatch-generation, retryability, terminal, reference-release, and expiry state.
+- `event_cover_workflow_fences` stores the open or deletion-owned fence and generation;
+  `event_cover_purge_progress` stores `phase`, cumulative `fences_resolved`, cumulative
+  `platform_mutations`, and its update clock.
+- The launcher prints or writes ordered private artifacts and evaluates saved Wrangler `--json`
+  payloads. Its display proof is diagnostic only. The Worker is the only writer of a verified run.
+
+The candidate does **not** log the cleanup/reconciliation summary objects or lookup telemetry values,
+expose a cleanup endpoint, store an `unknown` platform marker, or publish a fence-backlog metric. An
+unchanged job/fence is therefore not evidence that an instance is missing. Observe the aggregate D1
+JSON queries in [cover-backfill-runbook.md](cover-backfill-runbook.md), compare snapshots across scheduled passes,
+and stop for engineering investigation when platform status is unknown or purge/fence state remains
+unexplained. Do not fill those observability gaps with raw D1 edits or operator resume/restart calls.
 
 ## Recovery boundaries
 

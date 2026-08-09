@@ -66,6 +66,39 @@ The asset matrix is regenerated with `npm run build:cover-presets`, which needs 
 A rebuild from unchanged sources reproduces all 720 files byte for byte; if it does not, the seeds
 or the browser version moved and the manifest checksums will say so.
 
+### Phase-2 backfill evidence boundary
+
+The distinct Phase-2 local rehearsal gate is:
+
+```powershell
+npx vitest run --config vitest.config.ts tests/unit/cover-backfill-operator-loop.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/cover-backfill-rehearsal.test.ts
+```
+
+The two Phase-2 rehearsals establish different local facts and must not be promoted beyond them:
+
+- `tests/worker/cover-backfill-rehearsal.test.ts` runs 101 migrated legacy events through literal
+  100/1/0 inventory pages and 25/25/25/25/1/0 dispatch observations. It exercises interruption,
+  deterministic IDs/generations, deletion fencing before confirmation and before R2, stale-create
+  recovery, unknown-with-no-mutation, retryable restart, paused resume, superseded resolution,
+  counters, proof, and Worker-only atomic closure. Its Images and Workflow implementations are
+  deterministic injected fakes.
+- `tests/unit/cover-backfill-operator-loop.test.ts` pins Wrangler 4.113.0, applies exactly migrations
+  `0001` through `0012` to a unique disposable local D1, walks the generated inventory/claim/read/
+  confirm/receipt/proof order, and proves a failing claim file rolls back. It inspects generated
+  Workflow command strings only and deliberately executes no trigger, terminate, resume, or restart.
+
+Together they prove local orchestration, observed Wrangler/local-D1 rollback atomicity, artifact
+ordering, replay behavior, and bounds.
+They do **not** prove Cloudflare Images output bytes, orientation/metadata stripping, JPEG/WebP codec
+limits, HEIC/vendor MIME behavior, Workflow create/status/retry/resume/restart/terminate semantics,
+completed-instance retention, or the production missing-instance discriminator. The candidate's
+matcher is empty, so certified-missing recreation is unreachable through the default adapter. Those
+behaviors require an exact-candidate staging deployment against real Images and Workflow resources
+before production backfill authorization; pinning a discriminator creates a new candidate and repeats
+both gates. The rehearsals also provide no physical-device, Safari, Android, native picker, remote D1,
+deployment, production-data, or Phase-3 evidence.
+
 ## Tracked visual baselines
 
 The two landing baselines were recaptured on Windows and inspected side by side at their natural
@@ -469,13 +502,13 @@ No waiting, automatic-transition, or manager photo-intake PNG is claimed.
   release and is fixed by the revision-scoped delivery routes, not by a client change.
 - **Miniflare proves Workflow creation and nothing else about a Workflow's life.**
   `EXPORT_WORKFLOW.create()` is awaited before a `202` and asserted by `export-api.test.ts:29`, so
-  binding presence and instance creation are genuinely demonstrated under the workerd pool. Instance
-  *lifecycle* — `get()`, `.status()`, `.resume()`, `.restart()`, `.terminate()` — has no precedent
-  anywhere in this repository and is exercised only against an injected fake. Every §9.4 disposition
-  depends on exactly those unproven calls. No local probe was run against real statuses, and none of
-  this candidate's tests should be read as evidence that the platform behaves as the fake does. This
-  is the largest single distance between what was tested and what production will do, and closing it
-  is the §15.5 staging gate's job.
+  binding presence and instance creation are genuinely demonstrated under the workerd pool. Cover
+  Workflow lifecycle calls — `get()`, `.status()`, `.resume()`, `.restart()`, `.terminate()`, and
+  `createBatch()` recovery — are exercised against injected fakes; the operator-loop rehearsal does
+  not execute its generated platform strings. Every §9.4 disposition depends on real platform
+  behavior those local tests cannot establish. No local probe was run against real statuses, and none
+  of this candidate's tests should be read as evidence that the platform behaves as the fake does.
+  Closing that distance is the exact-candidate §15.5 staging gate's job.
 - **Cover contrast is arithmetic, not screenshots.** All 720 preset, effect, theme, and profile
   contexts are composited by `coverTextContrast` over the brightest pixel each rendered profile
   actually contains, measured once at build time into the asset manifest. A separate monotonicity

@@ -535,6 +535,20 @@ explicitly separated releases, each with its own authorization:
 | 2 | Convert every pre-`0012` legacy cover with the backfill launcher and produce the zero-legacy proof. | Phase 3. A green proof authorizes opening that candidate and nothing else. |
 | 3 | `0013_event_cover_invariants.sql`, the new Manager and guest projections, the revision-scoped delivery routes, and Cover Studio. | Anything before its own review and release. |
 
+Phase 2 itself has three authorization gates. They are sequential evidence boundaries, not three
+steps authorized by one approval:
+
+| Phase-2 gate | Required evidence | What passing it does not authorize |
+| --- | --- | --- |
+| Candidate verification | One exact clean SHA; independent source review; exactly 12 migrations; the complete local release gate plus the populated Worker rehearsal and local-D1 operator loop; local claims only. | Remote migration, deployment, staging, production data, or the backfill. |
+| Staging deployment and conformance | Deploy that exact candidate to separately identified staging resources. Prove real Images/codec behavior and real `COVER_BACKFILL_WORKFLOW` create, status, retry, resume, restart, terminate, retained-ID, missing-instance, and deletion-fence behavior. The current certified-not-found matcher is empty, so proving a stable missing discriminator requires a code change, a new candidate, and this gate again before recreation can become reachable. Record the staging account/resources, deployed version ID/tag, candidate SHA, timestamps, sanitized results, and cleanup. | Production migration/data/backfill or any Phase-3 activity. Deterministic local fakes do not satisfy this gate. |
+| Production backfill | New explicit production authorization after both earlier gates pass; exact account/Worker/D1/Workflow/migration identity; the exact candidate at 100% traffic; an owned no-deploy window; and execution of the bounded claim/launch/confirm/proof protocol in the runbook. | `0013`, responsive projections/routes, Cover Studio activation, or a Phase-3 deployment. |
+
+A new commit, migration, deployed version/tag, binding change, or staging remediation invalidates later
+gate evidence until the affected gate is repeated on the new exact candidate. The current remediation
+plan deliberately stops before candidate verification; this section describes future gates and does
+not mark any of them passed.
+
 Two properties make the phase-1 apply safe to perform on its own. Every new column has a SQLite-safe
 constant default, so a populated database migrates without a data pass. And the compatibility reader
 keeps the current `coverObjectKey` projection and the current cover URL shape, so a deployed Worker
@@ -551,9 +565,10 @@ Every cover table's `event_id` is `ON DELETE RESTRICT`, the first such clauses i
 purge handles them in an explicit child-before-parent order. If a purge ever fails with a foreign-key
 error after this migration, the cause is a cover row the order does not cover, not a corrupt event.
 
-The backfill has its own plan and runbook; see
+The executable operator procedure is [cover-backfill-runbook.md](cover-backfill-runbook.md); the
+design-time task contract remains in
 `docs/superpowers/plans/2026-08-05-event-appearance-cover-studio-phase-2.md`. Applying `0012` and
-deploying does not start it, and nothing in this repository starts it automatically.
+deploying does not start the backfill, and nothing in this repository starts it automatically.
 
 ## Wedding rehearsal gate
 
