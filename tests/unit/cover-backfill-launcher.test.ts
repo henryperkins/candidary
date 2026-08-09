@@ -508,42 +508,78 @@ describe('the run plan', () => {
     expect(insert).toContain("r.status = 'inventorying'");
   });
 
-  it('cannot apply a saved inventory page after its run has closed', () => {
+  it('replays the full saved initial inventory page idempotently', () => {
     const database = migratedDatabase();
-    database.prepare(`
-      INSERT INTO events (
-        id, slug, name, event_date, welcome_message, cover_object_key,
-        guest_access_expires_at, management_access_expires_at, purge_after, created_at
-      ) VALUES (?, 'saved-page', 'Saved page', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
-    `).run(EVENT, 'events/a/cover/one', NOW, NOW, NOW, NOW);
-    database.prepare(`
-      INSERT INTO event_cover_backfill_runs (
-        id, mode, cursor, inventory_sha256, status, created_at, updated_at
-      ) VALUES (?, 'inventory', NULL, NULL, 'inventorying', ?, ?)
-    `).run(RUN, NOW, NOW);
-    const saved = buildBackfillRunPlan({
-      runId: RUN,
-      rows: [row(EVENT, 'events/a/cover/one')],
-      now: NOW,
-      runState: runState({ cursor: null, inventorySha256: null }),
-      makeJobId: () => JOB,
-    });
+    try {
+      database.prepare(`
+        INSERT INTO events (
+          id, slug, name, event_date, welcome_message, cover_object_key,
+          guest_access_expires_at, management_access_expires_at, purge_after, created_at
+        ) VALUES (?, 'saved-replay', 'Saved replay', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+      `).run(EVENT, 'events/a/cover/one', NOW, NOW, NOW, NOW);
+      const saved = buildBackfillRunPlan({
+        runId: RUN,
+        rows: [row(EVENT, 'events/a/cover/one')],
+        now: NOW,
+        runState: null,
+        makeJobId: () => JOB,
+      });
 
-    database.exec(saved.statements[0]!);
-    database.prepare(`
-      UPDATE event_cover_backfill_runs
-      SET mode = 'verify', status = 'verified', total_count = 7, queued_count = 7
-      WHERE id = ?
-    `).run(RUN);
-    database.exec(saved.statements.slice(1).join('\n'));
+      database.exec(saved.statements.join('\n'));
+      database.exec(saved.statements.join('\n'));
 
-    expect(database.prepare(
-      'SELECT count(*) AS count FROM event_cover_backfill_jobs WHERE run_id = ?',
-    ).get(RUN)).toEqual({ count: 0 });
-    expect(database.prepare(`
-      SELECT total_count, queued_count FROM event_cover_backfill_runs WHERE id = ?
-    `).get(RUN)).toEqual({ total_count: 7, queued_count: 7 });
-    database.close();
+      expect(database.prepare(`
+        SELECT cursor, inventory_sha256, total_count, queued_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        cursor: EVENT, inventory_sha256: saved.inventorySha256,
+        total_count: 1, queued_count: 1,
+      });
+      expect(database.prepare(
+        'SELECT count(*) AS count FROM event_cover_backfill_jobs WHERE run_id = ?',
+      ).get(RUN)).toEqual({ count: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('cannot apply the full saved initial inventory page after its run has closed', () => {
+    const database = migratedDatabase();
+    try {
+      database.prepare(`
+        INSERT INTO events (
+          id, slug, name, event_date, welcome_message, cover_object_key,
+          guest_access_expires_at, management_access_expires_at, purge_after, created_at
+        ) VALUES (?, 'saved-page', 'Saved page', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+      `).run(EVENT, 'events/a/cover/one', NOW, NOW, NOW, NOW);
+      const saved = buildBackfillRunPlan({
+        runId: RUN,
+        rows: [row(EVENT, 'events/a/cover/one')],
+        now: NOW,
+        runState: null,
+        makeJobId: () => JOB,
+      });
+
+      database.exec(saved.statements.join('\n'));
+      database.prepare(`
+        UPDATE event_cover_backfill_runs
+        SET mode = 'verify', status = 'verified', total_count = 7, queued_count = 7
+        WHERE id = ?
+      `).run(RUN);
+      database.exec(saved.statements.join('\n'));
+
+      expect(database.prepare(
+        'SELECT count(*) AS count FROM event_cover_backfill_jobs WHERE run_id = ?',
+      ).get(RUN)).toEqual({ count: 1 });
+      expect(database.prepare(`
+        SELECT mode, status, total_count, queued_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        mode: 'verify', status: 'verified', total_count: 7, queued_count: 7,
+      });
+    } finally {
+      database.close();
+    }
   });
 
   it('refreshes literal run counters after every accepted inventory page', () => {
@@ -632,6 +668,26 @@ describe('the run plan', () => {
       .toThrow(/UUID/u);
     expect(() => buildBackfillRunPlan({ runId: RUN, rows: [], now: 'yesterday', runState: null }))
       .toThrow(/instant/u);
+  });
+
+  it('replays the full saved empty initial page idempotently', () => {
+    const database = migratedDatabase();
+    try {
+      const empty = buildBackfillRunPlan({ runId: RUN, rows: [], now: NOW, runState: null });
+
+      database.exec(empty.statements.join('\n'));
+      database.exec(empty.statements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT mode, status, cursor, inventory_sha256, total_count, queued_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        mode: 'execute', status: 'executing', cursor: null,
+        inventory_sha256: inventoryDigest([]), total_count: 0, queued_count: 0,
+      });
+    } finally {
+      database.close();
+    }
   });
 
   /**

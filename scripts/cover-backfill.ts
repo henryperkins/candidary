@@ -982,8 +982,9 @@ export function buildBackfillRunPlan(input: {
     if (!state) {
       statements.push(
         'INSERT INTO event_cover_backfill_runs (id, mode, cursor, inventory_sha256, status, created_at, updated_at)'
-        + ` VALUES (${run}, 'inventory', NULL, ${sqlString(inventorySha256)},`
-        + ` 'inventorying', ${now}, ${now});`,
+        + ` SELECT ${run}, 'inventory', NULL, ${sqlString(inventorySha256)},`
+        + ` 'inventorying', ${now}, ${now}`
+        + ` WHERE NOT EXISTS (SELECT 1 FROM event_cover_backfill_runs WHERE id = ${run});`,
       );
     }
     const cursorGuard = cursor === null
@@ -1039,8 +1040,9 @@ export function buildBackfillRunPlan(input: {
   if (!state) {
     statements.push(
       'INSERT INTO event_cover_backfill_runs (id, mode, cursor, inventory_sha256, status, created_at, updated_at)'
-      + ` VALUES (${run}, 'inventory', ${cursor === null ? 'NULL' : sqlString(cursor)},`
-      + ` ${sqlString(inventorySha256)}, 'inventorying', ${now}, ${now});`,
+      + ` SELECT ${run}, 'inventory', ${cursor === null ? 'NULL' : sqlString(cursor)},`
+      + ` ${sqlString(inventorySha256)}, 'inventorying', ${now}, ${now}`
+      + ` WHERE NOT EXISTS (SELECT 1 FROM event_cover_backfill_runs WHERE id = ${run});`,
     );
   } else {
     // Guarded on the exact cursor and digest being replaced, so re-applying the

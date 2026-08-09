@@ -77,6 +77,13 @@ export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Prom
 const AUTH_SCRATCH_BATCH = 100;
 const AUTH_SCRATCH_MAX_PASSES = 50;
 
+function settledBackfillJobRetentionSql(restartFloorSql: string): string {
+  return `(status IN ('applied', 'skipped', 'resolved')
+    OR (status = 'failed' AND (
+      retryable = 0 OR (terminal_at IS NOT NULL AND terminal_at <= ${restartFloorSql})
+    )))`;
+}
+
 export async function cleanupAuthScratch(
   env: AppEnv,
   now = new Date(),
@@ -514,10 +521,11 @@ export async function cleanupEventCovers(
     WHERE id IN (
       SELECT id FROM event_cover_backfill_jobs
       WHERE reference_release_at IS NOT NULL AND reference_release_at <= ?1
+        AND ${settledBackfillJobRetentionSql('?3')}
         AND (master_id IS NOT NULL OR render_set_id IS NOT NULL)
       ORDER BY reference_release_at LIMIT ?2
     )
-  `).bind(timestamp, limit).run();
+  `).bind(timestamp, limit, backfillRestartFloor).run();
   summary.backfillJobsReleased = note(released.meta.changes);
 
   const expiredBackfillLedger = await env.DB.batch([
@@ -526,7 +534,7 @@ export async function cleanupEventCovers(
       WHERE rowid IN (
         SELECT rowid FROM event_cover_backfill_jobs
         WHERE expires_at IS NOT NULL AND expires_at <= ?1
-          AND status IN ('applied', 'skipped', 'resolved', 'failed')
+          AND ${settledBackfillJobRetentionSql('?3')}
           AND master_id IS NULL AND render_set_id IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM event_cover_workflow_fences f
@@ -536,7 +544,7 @@ export async function cleanupEventCovers(
           )
         ORDER BY expires_at, id LIMIT ?2
       )
-    `).bind(timestamp, limit),
+    `).bind(timestamp, limit, backfillRestartFloor),
     env.DB.prepare(`
       DELETE FROM event_cover_backfill_runs
       WHERE rowid IN (

@@ -1302,6 +1302,8 @@ describe('bounded cover storage sweep', () => {
     referenceReleaseAt?: string | null;
     expiresAt?: string | null;
     runExpiresAt?: string | null;
+    retryable?: number;
+    terminalAt?: string | null;
   }) {
     await testEnv.DB.prepare(`
       INSERT OR IGNORE INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at, expires_at)
@@ -1311,12 +1313,13 @@ describe('bounded cover storage sweep', () => {
       INSERT INTO event_cover_backfill_jobs (
         id, run_id, event_id, expected_revision, legacy_key_fingerprint, master_id,
         render_set_id, workflow_instance_id, dispatch_state, dispatch_generation,
-        status, dependency_versions_json, terminal_at, reference_release_at, expires_at,
+        status, dependency_versions_json, retryable, terminal_at, reference_release_at, expires_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, 'confirmed', 1, ?, '{"tonalEffect":1}', ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, 'confirmed', 1, ?, '{"tonalEffect":1}', ?, ?, ?, ?, ?, ?)
     `).bind(
       id, runId, access.event.id, HEX, options.masterId ?? null, options.setId ?? null,
-      `backfill-${id}`, options.status, PAST,
+      `backfill-${id}`, options.status, options.retryable ?? 0,
+      options.terminalAt === undefined ? PAST : options.terminalAt,
       options.referenceReleaseAt ?? null, options.expiresAt ?? null, PAST, PAST,
     ).run();
   }
@@ -1469,6 +1472,51 @@ describe('bounded cover storage sweep', () => {
     expect(await testEnv.DB.prepare('SELECT id FROM event_cover_backfill_runs WHERE id = ?')
       .bind('run-a').first()).toBeNull();
     expect(master).toContain('master-job');
+  });
+
+  it('releases due terminal job references but retains due nonterminal and replacement references', async () => {
+    for (const masterId of [
+      'master-terminal', 'master-live', 'master-replacement',
+      'master-failed-inside', 'master-failed-null', 'master-failed-boundary',
+    ]) {
+      await insertMaster(masterId);
+    }
+    await insertBackfillJob('release-terminal', 'release-terminal-run', {
+      status: 'applied', masterId: 'master-terminal', referenceReleaseAt: PAST,
+    });
+    await insertBackfillJob('release-live', 'release-live-run', {
+      status: 'queued', masterId: 'master-live', referenceReleaseAt: PAST,
+    });
+    await insertBackfillJob('release-replacement', 'release-replacement-run', {
+      status: 'needs_replacement', masterId: 'master-replacement', referenceReleaseAt: PAST,
+    });
+    await insertBackfillJob('release-failed-inside', 'release-failed-inside-run', {
+      status: 'failed', retryable: 1, terminalAt: '2026-08-09T12:00:00.001Z',
+      masterId: 'master-failed-inside', referenceReleaseAt: PAST,
+    });
+    await insertBackfillJob('release-failed-null', 'release-failed-null-run', {
+      status: 'failed', retryable: 1, terminalAt: null,
+      masterId: 'master-failed-null', referenceReleaseAt: PAST,
+    });
+    await insertBackfillJob('release-failed-boundary', 'release-failed-boundary-run', {
+      status: 'failed', retryable: 1, terminalAt: '2026-08-09T12:00:00.000Z',
+      masterId: 'master-failed-boundary', referenceReleaseAt: PAST,
+    });
+
+    const summary = await cleanupEventCovers(testEnv, NOW);
+
+    expect(summary.backfillJobsReleased).toBe(2);
+    expect((await testEnv.DB.prepare(`
+      SELECT id, master_id FROM event_cover_backfill_jobs
+      WHERE id LIKE 'release-%' ORDER BY id
+    `).all()).results).toEqual([
+      { id: 'release-failed-boundary', master_id: null },
+      { id: 'release-failed-inside', master_id: 'master-failed-inside' },
+      { id: 'release-failed-null', master_id: 'master-failed-null' },
+      { id: 'release-live', master_id: 'master-live' },
+      { id: 'release-replacement', master_id: 'master-replacement' },
+      { id: 'release-terminal', master_id: null },
+    ]);
   });
 
   it('keeps a backfill job that has not reached its reference release', async () => {
@@ -1991,13 +2039,29 @@ describe('bounded cover storage sweep', () => {
     await insertBackfillJob('expired-live-job', 'expired-live-run', {
       status: 'queued', expiresAt: PAST,
     });
+    await insertBackfillJob('expired-failed-inside-job', 'expired-failed-inside-run', {
+      status: 'failed', retryable: 1, terminalAt: '2026-08-09T12:00:00.001Z', expiresAt: PAST,
+    });
+    await insertBackfillJob('expired-failed-null-job', 'expired-failed-null-run', {
+      status: 'failed', retryable: 1, terminalAt: null, expiresAt: PAST,
+    });
+    await insertBackfillJob('expired-failed-boundary-job', 'expired-failed-boundary-run', {
+      status: 'failed', retryable: 1, terminalAt: '2026-08-09T12:00:00.000Z', expiresAt: PAST,
+    });
+    await insertBackfillJob('expired-failed-permanent-job', 'expired-failed-permanent-run', {
+      status: 'failed', retryable: 0, terminalAt: null, expiresAt: PAST,
+    });
 
     await cleanupEventCovers(testEnv, NOW);
 
     expect((await testEnv.DB.prepare(`
       SELECT id, status FROM event_cover_backfill_jobs
       WHERE id LIKE 'expired-%-job' ORDER BY id
-    `).all()).results).toEqual([{ id: 'expired-live-job', status: 'queued' }]);
+    `).all()).results).toEqual([
+      { id: 'expired-failed-inside-job', status: 'failed' },
+      { id: 'expired-failed-null-job', status: 'failed' },
+      { id: 'expired-live-job', status: 'queued' },
+    ]);
   });
 
   it('bounds expired closed-run cleanup by expiry and ID and reports saturation', async () => {
