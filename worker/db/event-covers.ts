@@ -658,6 +658,12 @@ export interface AdoptCoverRenderObjectInput {
   qualityRung: number;
   sha256: string;
   now: Date;
+  publicationAdmission?: {
+    operationId: string;
+    workflowInstanceId: string;
+    dispatchGeneration: number;
+    draftId: string;
+  };
 }
 
 /**
@@ -670,13 +676,42 @@ export interface AdoptCoverRenderObjectInput {
 export async function adoptCoverRenderObject(
   db: D1Database,
   input: AdoptCoverRenderObjectInput,
-): Promise<void> {
+): Promise<boolean> {
   const timestamp = input.now.toISOString();
-  await db.prepare(`
+  const admissionSql = input.publicationAdmission ? `
+    EXISTS (
+      SELECT 1
+      FROM event_cover_publish_receipts r
+      JOIN events e ON e.id = r.event_id
+      JOIN event_cover_render_sets s ON s.id = r.render_set_id AND s.event_id = r.event_id
+      JOIN event_cover_drafts d ON d.id = r.draft_id AND d.event_id = r.event_id
+      JOIN event_cover_workflow_fences f
+        ON f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+          AND f.workflow_instance_id = r.workflow_instance_id
+          AND f.event_id = r.event_id AND f.state = 'open'
+          AND f.dispatch_generation = r.dispatch_generation
+      WHERE r.event_id = ? AND r.operation_id = ? AND r.workflow_instance_id = ?
+        AND r.dispatch_generation = ? AND r.render_set_id = ? AND r.draft_id = ?
+        AND r.status = 'rendering' AND e.deleted_at IS NULL
+        AND e.cover_revision = r.expected_revision
+        AND s.state = 'staging' AND d.state = 'publishing'
+    )
+  ` : '1 = 1';
+  const admissionBindings = input.publicationAdmission ? [
+    input.eventId,
+    input.publicationAdmission.operationId,
+    input.publicationAdmission.workflowInstanceId,
+    input.publicationAdmission.dispatchGeneration,
+    input.renderSetId,
+    input.publicationAdmission.draftId,
+  ] : [];
+  const result = await db.prepare(`
     INSERT INTO event_cover_render_objects (
       id, render_set_id, event_id, profile_id, density, format, object_key, content_type,
       byte_size, width, height, quality_rung, sha256, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE ${admissionSql}
     ON CONFLICT (render_set_id, profile_id, density, format) DO UPDATE SET
       object_key = excluded.object_key, content_type = excluded.content_type,
       byte_size = excluded.byte_size, width = excluded.width, height = excluded.height,
@@ -685,7 +720,9 @@ export async function adoptCoverRenderObject(
     crypto.randomUUID(), input.renderSetId, input.eventId, input.profileId, input.density,
     input.format, input.objectKey, input.contentType, input.byteSize, input.width,
     input.height, input.qualityRung, input.sha256, timestamp,
+    ...admissionBindings,
   ).run();
+  return (result.meta.changes ?? 0) === 1;
 }
 
 /* ------------------------------------------------------------------ *
@@ -745,6 +782,7 @@ export async function chargeCoverRateEvent(
       SELECT count(*) FROM event_cover_rate_events
       WHERE event_id = ? AND action = ? AND window_start = ?
     ) < ?
+    ON CONFLICT (event_id, action, replay_key) DO NOTHING
   `).bind(
     crypto.randomUUID(), input.eventId, input.action, input.replayKey, input.requestDigest,
     windowStart, input.now.toISOString(),
@@ -758,6 +796,13 @@ export async function chargeCoverRateEvent(
       WHERE event_id = ? AND action = ? AND replay_key = ?
     `).bind(input.eventId, input.action, input.replayKey).first<{ request_sha256: string }>();
     if (raced?.request_sha256 === input.requestDigest) return { replayed: true };
+    if (raced) {
+      throw new ApiError(
+        input.action === 'publication' ? 'COVER_PUBLICATION_CONFLICT' : 'COVER_DRAFT_STATE_CONFLICT',
+        'That request was already used with different details. Start a new one.',
+        409,
+      );
+    }
     throw new ApiError(
       'RATE_LIMITED',
       'That is as many cover changes as this event can make in an hour. Try again shortly.',

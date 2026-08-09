@@ -111,6 +111,31 @@ export interface CoverPointerMove {
    * displaces are the ones the compatibility reader was still serving.
    */
   reason?: 'replaced' | 'removed' | 'backfilled';
+  /**
+   * Optional exact synchronous-removal owner. When present, the event pointer
+   * moves only while that accepted receipt is still the original nonterminal
+   * generation; a deletion settlement cannot be overwritten by the batch.
+   */
+  publicationGuard?: { operationId: string; requestSha256: string };
+  /** Exact durable owner for an uploaded-cover Workflow pointer move. */
+  renderPublicationGuard?: {
+    operationId: string;
+    requestSha256: string;
+    workflowInstanceId: string;
+    dispatchGeneration: number;
+    renderSetId: string;
+    draftId: string;
+  };
+  /** Exact durable owner for a release backfill Workflow pointer move. */
+  backfillGuard?: {
+    runId: string;
+    jobId: string;
+    workflowInstanceId: string;
+    dispatchGeneration: number;
+    masterId: string;
+    renderSetId: string;
+    legacyKeyFingerprint: string;
+  };
 }
 
 /**
@@ -145,6 +170,68 @@ export function coverPointerStatements(
   db: D1Database,
   input: CoverPointerMove,
 ): D1PreparedStatement[] {
+  const renderGuardSql = input.renderPublicationGuard ? `
+        AND EXISTS (
+          SELECT 1
+          FROM event_cover_publish_receipts r
+          JOIN event_cover_render_sets s
+            ON s.id = r.render_set_id AND s.event_id = r.event_id
+              AND s.draft_id = r.draft_id AND s.state IN ('staging', 'ready')
+          JOIN event_cover_drafts d
+            ON d.id = r.draft_id AND d.event_id = r.event_id AND d.state = 'publishing'
+          JOIN event_cover_workflow_fences f
+            ON f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+              AND f.workflow_instance_id = r.workflow_instance_id
+              AND f.event_id = r.event_id AND f.state = 'open'
+              AND f.dispatch_generation = r.dispatch_generation
+          WHERE r.event_id = events.id AND r.operation_id = ?
+            AND r.request_sha256 = ? AND r.workflow_instance_id = ?
+            AND r.dispatch_generation = ? AND r.render_set_id = ? AND r.draft_id = ?
+            AND r.status IN ('rendering', 'finalizing')
+        )
+  ` : '';
+  const backfillGuardSql = input.backfillGuard ? `
+        AND EXISTS (
+          SELECT 1
+          FROM event_cover_backfill_jobs j
+          JOIN event_cover_render_sets s
+            ON s.id = j.render_set_id AND s.event_id = j.event_id
+              AND s.master_id = j.master_id AND s.draft_id IS NULL
+              AND s.state IN ('staging', 'ready')
+          JOIN event_cover_workflow_fences f
+            ON f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+              AND f.workflow_instance_id = j.workflow_instance_id
+              AND f.event_id = j.event_id AND f.state = 'open'
+              AND f.dispatch_generation = j.dispatch_generation
+          WHERE j.event_id = events.id AND j.run_id = ? AND j.id = ?
+            AND j.workflow_instance_id = ? AND j.dispatch_generation = ?
+            AND j.master_id = ? AND j.render_set_id = ?
+            AND j.legacy_key_fingerprint = ?
+            AND j.status IN ('rendering', 'finalizing')
+        )
+  ` : '';
+  const ownerBindings: unknown[] = [];
+  if (input.renderPublicationGuard) {
+    ownerBindings.push(
+      input.renderPublicationGuard.operationId,
+      input.renderPublicationGuard.requestSha256,
+      input.renderPublicationGuard.workflowInstanceId,
+      input.renderPublicationGuard.dispatchGeneration,
+      input.renderPublicationGuard.renderSetId,
+      input.renderPublicationGuard.draftId,
+    );
+  }
+  if (input.backfillGuard) {
+    ownerBindings.push(
+      input.backfillGuard.runId,
+      input.backfillGuard.jobId,
+      input.backfillGuard.workflowInstanceId,
+      input.backfillGuard.dispatchGeneration,
+      input.backfillGuard.masterId,
+      input.backfillGuard.renderSetId,
+      input.backfillGuard.legacyKeyFingerprint,
+    );
+  }
   return [
     db.prepare(`
       UPDATE events SET
@@ -157,6 +244,18 @@ export function coverPointerStatements(
         AND cover_revision = ?
         AND cover_object_key IS ?
         AND cover_render_set_id IS ?
+        AND (
+          ? IS NULL OR EXISTS (
+            SELECT 1 FROM event_cover_publish_receipts r
+            WHERE r.event_id = events.id AND r.operation_id = ?
+              AND r.request_sha256 = ? AND r.action = 'remove'
+              AND r.expected_revision = ? AND r.status = 'queued' AND r.retryable = 0
+              AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL
+              AND r.dispatch_state = 'pending' AND r.dispatch_generation = 0
+          )
+        )
+        ${renderGuardSql}
+        ${backfillGuardSql}
     `).bind(
       input.nextConfig,
       input.nextObjectKey,
@@ -165,6 +264,11 @@ export function coverPointerStatements(
       input.expectedRevision,
       input.expectedCurrentKey,
       input.expectedCurrentRenderSetId,
+      input.publicationGuard?.operationId ?? null,
+      input.publicationGuard?.operationId ?? null,
+      input.publicationGuard?.requestSha256 ?? null,
+      input.expectedRevision,
+      ...ownerBindings,
     ),
     db.prepare(`
       INSERT INTO event_cover_retired_legacy_objects (

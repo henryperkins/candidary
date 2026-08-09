@@ -353,6 +353,50 @@ describe('persisted rate windows', () => {
     ...patch,
   });
 
+  function rateDbWithInsertRace(winnerDigest: string): D1Database {
+    let raced = false;
+    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(
+      statement,
+      {
+        get(target, property) {
+          if (property === 'bind') {
+            return (...values: unknown[]) => wrap(target.bind(...values), sql);
+          }
+          if (property === 'first') {
+            return async <T>() => {
+              const result = await target.first<T>();
+              if (!raced && sql.includes('SELECT request_sha256 FROM event_cover_rate_events')) {
+                raced = true;
+                await testEnv.DB.prepare(`
+                  INSERT INTO event_cover_rate_events (
+                    id, event_id, action, replay_key, request_sha256,
+                    window_start, created_at, expires_at
+                  ) VALUES (?, ?, 'publication', 'op-race', ?, ?, ?, ?)
+                `).bind(
+                  crypto.randomUUID(), access.event.id, winnerDigest,
+                  Math.floor(now.getTime() / 1000 / 3600) * 3600,
+                  now.toISOString(), '2026-08-05T14:00:00.000Z',
+                ).run();
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      },
+    );
+    return new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => wrap(target.prepare(sql), sql);
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  }
+
   it('counts a fixed hourly window, exempts replays, and reconstructs after a restart', async () => {
     for (let index = 0; index < 6; index += 1) await charge(`op-${index}`);
     await expect(charge('op-over')).rejects.toMatchObject({ code: 'RATE_LIMITED', status: 429 });
@@ -377,6 +421,26 @@ describe('persisted rate windows', () => {
   it('rejects a replay key reused with different bytes', async () => {
     await charge('op-a');
     await expect(charge('op-a', { requestDigest: OTHER_HEX }))
+      .rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
+  });
+
+  it('resolves a concurrent first insert as replay or digest conflict instead of a 500', async () => {
+    const input = {
+      eventId: access.event.id,
+      action: 'publication' as const,
+      replayKey: 'op-race',
+      requestDigest: HEX_64,
+      limit: 6,
+      now,
+    };
+    await expect(chargeCoverRateEvent(rateDbWithInsertRace(HEX_64), input))
+      .resolves.toEqual({ replayed: true });
+
+    await resetDatabase();
+    access = await eventAccess();
+    await expect(chargeCoverRateEvent(rateDbWithInsertRace(OTHER_HEX), {
+      ...input, eventId: access.event.id,
+    }))
       .rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
   });
 });

@@ -110,6 +110,8 @@ export const COVER_CLEANUP_ROWS_PER_CLASS = 100;
 /** Open dispatch fences do not expire until a terminal Workflow outcome is proven. */
 export const COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT = '9999-12-31T23:59:59.999Z';
 export const COVER_WORKFLOW_FENCE_TERMINAL_TTL_MS = 31 * 24 * 60 * 60 * 1000;
+/** Old purge code could not emit this suffix; it marks deletion-blocked terminal proof. */
+export const COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX = '|cf2';
 
 export function coverWorkflowFenceTerminalExpiry(now: Date): string {
   return new Date(now.getTime() + COVER_WORKFLOW_FENCE_TERMINAL_TTL_MS).toISOString();
