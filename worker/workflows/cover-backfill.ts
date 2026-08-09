@@ -2,6 +2,7 @@ import {
   COVER_CLEANUP_ROWS_PER_CLASS,
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
+  MAX_COVER_BACKFILL_IN_FLIGHT,
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import {
@@ -12,6 +13,7 @@ import {
   confirmCoverBackfillDispatchSql,
   coverBackfillCurrentSourceSql,
   coverBackfillFenceGuardSql,
+  coverBackfillInFlightBudgetSql,
   coverBackfillInstanceIdleSql,
   coverBackfillMinuteBudgetSql,
   coverBackfillNoPurgeGuardSql,
@@ -49,6 +51,7 @@ import { deriveCoverSlots, type CoverRenderSlot } from './cover-render';
 import {
   defaultCoverBackfillWorkflowAccessor,
   dispositionForLookup,
+  emitCoverPlatformTelemetry,
   type CoverBackfillWorkflowAccessor,
   type CoverWorkflowLookup,
 } from './cover-platform';
@@ -245,7 +248,9 @@ function terminalFenceStatement(
   env: AppEnv,
   payload: CoverBackfillPayload,
   now: Date,
+  onlyIfPriorStatementChanged = false,
 ): D1PreparedStatement {
+  const changeGuard = onlyIfPriorStatementChanged ? ' AND changes() = 1' : '';
   return env.DB.prepare(`
     UPDATE event_cover_workflow_fences
     SET expires_at = ?, updated_at = ?
@@ -255,7 +260,7 @@ function terminalFenceStatement(
         AND status IN ('applied', 'skipped', 'resolved', 'failed', 'needs_replacement')
     ) AND event_id = ? AND dispatch_generation = (
       SELECT dispatch_generation FROM event_cover_backfill_jobs WHERE id = ?
-    ) AND state = 'open'
+    ) AND state = 'open'${changeGuard}
   `).bind(
     coverWorkflowFenceTerminalExpiry(now), now.toISOString(), COVER_BACKFILL_BINDING,
     payload.jobId, payload.runId, payload.eventId, payload.eventId, payload.jobId,
@@ -301,6 +306,7 @@ async function recordTerminal(
   payload: CoverBackfillPayload,
   status: CoverBackfillStatus,
   now: Date,
+  expected: CoverBackfillJobRow,
   options: { failureCode?: string | null; retryable?: boolean; abandonSetId?: string | null } = {},
 ): Promise<void> {
   const retryable = options.retryable === true;
@@ -316,24 +322,45 @@ async function recordTerminal(
       UPDATE event_cover_backfill_jobs
       SET status = ?, failure_code = ?, retryable = ?, terminal_at = ?,
           reference_release_at = ?, expires_at = ?, updated_at = ?
-      WHERE id = ? AND status NOT IN ('applied', 'skipped', 'resolved')
+      WHERE id = ? AND run_id = ? AND event_id = ? AND workflow_instance_id = ?
+        AND status = ? AND retryable = ? AND dispatch_state = ? AND dispatch_generation = ?
+        AND NOT (status = 'failed' AND retryable = 0)
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ?
+            AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id
+            AND f.event_id = event_cover_backfill_jobs.event_id
+            AND f.state = 'open'
+            AND f.dispatch_generation = event_cover_backfill_jobs.dispatch_generation
+        )
+        AND (? IS NULL OR EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = ? AND s.event_id = event_cover_backfill_jobs.event_id
+            AND s.state IN ('staging', 'ready')
+        ))
     `).bind(
       status, options.failureCode ?? null, retryable ? 1 : 0, terminalAt,
-      referenceReleaseAt, expiresAt, terminalAt, payload.jobId,
+      referenceReleaseAt, expiresAt, terminalAt,
+      payload.jobId, payload.runId, payload.eventId, expected.workflow_instance_id,
+      expected.status, expected.retryable, expected.dispatch_state, expected.dispatch_generation,
+      COVER_BACKFILL_BINDING,
+      options.abandonSetId ?? null, options.abandonSetId ?? null,
     ),
-    terminalFenceStatement(env, payload, now),
   ];
   if (options.abandonSetId) {
     statements.push(env.DB.prepare(`
       UPDATE event_cover_render_sets
       SET state = 'abandoned', abandoned_reason = ?, abandoned_at = ?, cleanup_after = ?
-      WHERE id = ? AND state IN ('staging', 'ready')
+      WHERE id = ? AND state IN ('staging', 'ready') AND changes() = 1
     `).bind(
       options.failureCode ?? status, terminalAt,
       new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString(), options.abandonSetId,
     ));
   }
-  statements.push(recomputeBackfillRunCounters(env.DB, payload.runId, now));
+  statements.push(
+    terminalFenceStatement(env, payload, now, true),
+    recomputeBackfillRunCounters(env.DB, payload.runId, now, true),
+  );
   await env.DB.batch(statements);
 }
 
@@ -460,6 +487,17 @@ export interface StaleInitialDispatchSummary {
 }
 
 /**
+ * The database-stamped clock for an exact open claim.
+ *
+ * Purge ownership intentionally rewrites the fence clock while preserving the
+ * job clock, so every non-matching or non-open fence falls back to that preserved
+ * job value. Both recovery inventories use `j` and `f` for these rows.
+ */
+const EXACT_OPEN_CLAIM_CLOCK_SQL = `CASE
+  WHEN f.state = 'open' AND f.dispatch_generation = j.dispatch_generation
+  THEN f.updated_at ELSE j.updated_at END`;
+
+/**
  * Heals a claim that was made but whose create may never have landed.
  *
  * A `creating` job older than the stale threshold is the durable trace of an
@@ -491,9 +529,9 @@ export async function recoverStaleInitialBackfillDispatches(
     LEFT JOIN event_cover_workflow_fences f
       ON f.workflow_binding = ?1 AND f.workflow_instance_id = j.workflow_instance_id
      AND f.event_id = j.event_id
-    WHERE j.dispatch_state = 'creating' AND j.updated_at <= ?2
+    WHERE j.dispatch_state = 'creating' AND (${EXACT_OPEN_CLAIM_CLOCK_SQL}) <= ?2
       AND j.status IN ('queued', 'normalizing', 'rendering', 'finalizing')
-    ORDER BY j.updated_at, j.id LIMIT ?3
+    ORDER BY (${EXACT_OPEN_CLAIM_CLOCK_SQL}), j.id LIMIT ?3
   `).bind(
     COVER_BACKFILL_BINDING,
     new Date(now.getTime() - STALE_DISPATCH_CLAIM_MS).toISOString(),
@@ -603,11 +641,10 @@ const CLAIM_BOUND = {
   jobId: '?3',
   eventId: '?4',
   generation: '?5',
-  now: '?6',
-  workflowInstanceId: '?7',
-  dependencies: '?8',
-  sourceObjectKey: '?9',
-  windowFloor: '?10',
+  workflowInstanceId: '?6',
+  dependencies: '?7',
+  sourceObjectKey: '?8',
+  windowFloor: '?9',
 } as const;
 
 /**
@@ -637,10 +674,12 @@ const RECONCILE_SELECT_SQL = `
         (j.dispatch_state = 'confirmed' AND j.status IN (${NONTERMINAL_SQL}))
      OR (j.status = 'failed' AND j.retryable = 1
          AND j.terminal_at IS NOT NULL AND j.terminal_at > ?2)
-     OR (j.dispatch_state IN ('resuming', 'restarting') AND j.updated_at <= ?3
+     OR (j.dispatch_state IN ('resuming', 'restarting')
+         AND (${EXACT_OPEN_CLAIM_CLOCK_SQL}) <= ?3
          AND j.status IN (${NONTERMINAL_SQL}))
   )
-  ORDER BY j.updated_at, j.id LIMIT ?4
+  ORDER BY CASE WHEN j.dispatch_state IN ('resuming', 'restarting')
+    THEN (${EXACT_OPEN_CLAIM_CLOCK_SQL}) ELSE j.updated_at END, j.id LIMIT ?4
 `;
 
 /**
@@ -654,6 +693,9 @@ const RECONCILE_SELECT_SQL = `
 const CLAIM_GUARDS = ` AND ${coverBackfillCurrentSourceSql()}`
   + ` AND ${coverBackfillNoPurgeGuardSql()}`
   + ` AND ${coverBackfillFenceGuardSql(CLAIM_BOUND.binding, 'open', CLAIM_BOUND.generation)}`
+  + ` AND ${coverBackfillInFlightBudgetSql(
+    CLAIM_BOUND.runId, CLAIM_BOUND.jobId, MAX_COVER_BACKFILL_IN_FLIGHT,
+  )}`
   + ` AND ${coverBackfillMinuteBudgetSql(CLAIM_BOUND.binding, MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE)}`
   + ` AND ${coverBackfillInstanceIdleSql(CLAIM_BOUND.binding, CLAIM_BOUND.workflowInstanceId)}`
   + ' AND EXISTS (SELECT 1 FROM events e'
@@ -669,28 +711,28 @@ const CLAIM_IDENTITY = ` WHERE id = ${CLAIM_BOUND.jobId} AND run_id = ${CLAIM_BO
 /**
  * Restore one retained instance at the stage D1 can prove durably.
  *
- * `?11` is derived from the immutable quartet and exact adopted-object tuples;
- * `?12` through `?15` pin the read values into the write predicate. SQLite's
+ * `?10` is derived from the immutable quartet and exact adopted-object tuples;
+ * `?11` through `?14` pin the read values into the write predicate. SQLite's
  * `IS` is intentional: it gives exact equality for text and NULL-safe equality
  * for the legitimate all-null, pre-normalization checkpoint.
  */
 function restorationClaimSql(target: 'resuming' | 'creating' | 'restarting'): string {
   return 'UPDATE event_cover_backfill_jobs'
-    + ` SET status = ?11, dispatch_state = '${target}',`
+    + ` SET status = ?10, dispatch_state = '${target}',`
     + ' dispatch_generation = dispatch_generation + 1,'
     + ' failure_code = NULL, retryable = 0, terminal_at = NULL,'
     + ' reference_release_at = NULL, expires_at = NULL,'
-    + ` updated_at = ${CLAIM_BOUND.now}`
+    + ` updated_at = ${CLAIM_APPLIED_AT_SQL}`
     + CLAIM_IDENTITY
     + ` AND ((status IN (${NONTERMINAL_SQL})) OR (`
     + "status = 'failed' AND retryable = 1"
     + ` AND terminal_at IS NOT NULL AND terminal_at > ${CLAIM_BOUND.windowFloor}))`
-    + ' AND master_id IS ?12 AND render_set_id IS ?13'
-    + ' AND manifest_json IS ?14 AND manifest_sha256 IS ?15'
+    + ' AND master_id IS ?11 AND render_set_id IS ?12'
+    + ' AND manifest_json IS ?13 AND manifest_sha256 IS ?14'
     // The object read used to derive the checkpoint is deliberately repeated
     // inside the claim. Otherwise an adopted tuple can disappear, or an
     // unexpected tuple can arrive, between that read and this generation bump.
-    + ` AND (?11 = 'queued' OR NOT EXISTS (`
+    + ` AND (?10 = 'queued' OR NOT EXISTS (`
     + ' SELECT 1 FROM event_cover_render_objects o'
     + ' WHERE o.render_set_id = event_cover_backfill_jobs.render_set_id'
     + ' AND o.event_id = event_cover_backfill_jobs.event_id'
@@ -700,7 +742,7 @@ function restorationClaimSql(target: 'resuming' | 'creating' | 'restarting'): st
     + " AND json_extract(slot.value, '$.density') = o.density"
     + " AND json_extract(slot.value, '$.format') = o.format"
     + ')))'
-    + ` AND (?11 <> 'finalizing' OR NOT EXISTS (`
+    + ` AND (?10 <> 'finalizing' OR NOT EXISTS (`
     + " SELECT 1 FROM json_each(event_cover_backfill_jobs.manifest_json, '$.slots') slot"
     + ' WHERE NOT EXISTS ('
     + ' SELECT 1 FROM event_cover_render_objects o'
@@ -997,22 +1039,21 @@ async function applyClaim(
   return results[0]!.meta.changes === 1;
 }
 
-function claimBinds(job: ReconcileRow, now: Date): unknown[] {
+function claimBinds(job: ReconcileRow): unknown[] {
   return [
     COVER_BACKFILL_BINDING, job.run_id, job.id, job.event_id,
-    job.dispatch_generation, now.toISOString(), job.workflow_instance_id,
+    job.dispatch_generation, job.workflow_instance_id,
     JSON.stringify(coverBackfillDependencyVersions()), job.cover_object_key,
   ];
 }
 
 function restorationClaimBinds(
   job: ReconcileRow,
-  now: Date,
   restartFloor: string,
   checkpoint: BackfillRecoveryCheckpoint,
 ): unknown[] {
   return [
-    ...claimBinds(job, now), restartFloor, checkpoint.status,
+    ...claimBinds(job), restartFloor, checkpoint.status,
     checkpoint.masterId, checkpoint.renderSetId,
     checkpoint.manifestJson, checkpoint.manifestSha256,
   ];
@@ -1100,10 +1141,11 @@ export async function reconcileCoverBackfillJobs(
 
     const lookup = await workflow.lookup(job.workflow_instance_id).catch(
       (): CoverWorkflowLookup => ({
-        kind: 'unknown', telemetry: 'cover_backfill_lookup_failed',
+        kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
       }),
     );
     const disposition = dispositionForLookup(lookup);
+    emitCoverPlatformTelemetry('backfill', disposition.telemetry);
     const nonterminal = (NONTERMINAL_COVER_BACKFILL_STATUSES as readonly string[])
       .includes(job.status);
 
@@ -1148,7 +1190,7 @@ export async function reconcileCoverBackfillJobs(
         env,
         job,
         restorationClaimSql('creating'),
-        restorationClaimBinds(job, now, restartFloor, checkpoint),
+        restorationClaimBinds(job, restartFloor, checkpoint),
         nonterminal ? undefined : now,
       )) {
         summary.unchanged += 1;
@@ -1185,7 +1227,7 @@ export async function reconcileCoverBackfillJobs(
         env,
         job,
         restorationClaimSql('resuming'),
-        restorationClaimBinds(job, now, restartFloor, checkpoint),
+        restorationClaimBinds(job, restartFloor, checkpoint),
         nonterminal ? undefined : now,
       )) {
         summary.unchanged += 1;
@@ -1224,7 +1266,7 @@ export async function reconcileCoverBackfillJobs(
       env,
       job,
       restorationClaimSql('restarting'),
-      restorationClaimBinds(job, now, restartFloor, checkpoint),
+      restorationClaimBinds(job, restartFloor, checkpoint),
       now,
     )) {
       summary.unchanged += 1;
@@ -1294,7 +1336,7 @@ export async function coverBackfillPreflight(
   if (!fence
     || fence.state !== 'open'
     || fence.dispatch_generation !== job.dispatch_generation) {
-    await recordTerminal(env, payload, 'failed', now, {
+    await recordTerminal(env, payload, 'failed', now, job, {
       failureCode: 'COVER_RENDER_UNAVAILABLE',
       abandonSetId: job.render_set_id,
     });
@@ -1304,7 +1346,7 @@ export async function coverBackfillPreflight(
   // A row that changed after inventory is skipped, not failed. A host replacing
   // their own cover is not a defect; it is the guard working.
   if (!await backfillPredicatesHold(job, event)) {
-    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: job.render_set_id });
+    await recordTerminal(env, payload, 'skipped', now, job, { abandonSetId: job.render_set_id });
     return stage('skipped');
   }
 
@@ -1344,7 +1386,7 @@ export async function coverBackfillNormalize(
   if (job.status === 'rendering' || job.status === 'finalizing') return CONTINUE;
   if (job.status !== 'normalizing') return stage('skipped');
   if (!await backfillPredicatesHold(job, event)) {
-    await recordTerminal(env, payload, 'skipped', now);
+    await recordTerminal(env, payload, 'skipped', now, job);
     return stage('skipped');
   }
 
@@ -1382,7 +1424,7 @@ export async function coverBackfillNormalize(
       || code === 'COVER_SOURCE_TOO_SMALL'
       || code === 'COVER_MASTER_BUDGET_EXHAUSTED'
       || code === 'UPLOAD_OBJECT_MISSING';
-    await recordTerminal(env, payload, needsReplacement ? 'needs_replacement' : 'failed', now, {
+    await recordTerminal(env, payload, needsReplacement ? 'needs_replacement' : 'failed', now, job, {
       failureCode: code,
       retryable: !needsReplacement,
     });
@@ -1425,7 +1467,7 @@ export async function coverBackfillNormalize(
   ]);
 
   if ((results[1]?.meta.changes ?? 0) !== 1) {
-    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: renderSetId });
+    await recordTerminal(env, payload, 'skipped', now, job, { abandonSetId: renderSetId });
     return stage('skipped');
   }
   return CONTINUE;
@@ -1513,7 +1555,7 @@ export async function coverBackfillFinalize(
   if (!job.render_set_id || !job.master_id) return stage('skipped').outcome;
 
   if (!await backfillPredicatesHold(job, event)) {
-    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: job.render_set_id });
+    await recordTerminal(env, payload, 'skipped', now, job, { abandonSetId: job.render_set_id });
     return stage('skipped').outcome;
   }
 
@@ -1523,9 +1565,27 @@ export async function coverBackfillFinalize(
     .bind(job.master_id).first<CoverMasterRow>();
   if (!set || !master) return stage('skipped').outcome;
 
-  const verdict = await verifyCoverManifest(env, set.id);
-  if (!verdict.complete) {
-    await recordTerminal(env, payload, 'failed', now, {
+  const frozenSlots = job.manifest_json
+    ? parseFrozenBackfillManifest(job.manifest_json)
+    : null;
+  const frozenManifestSha256 = job.manifest_json
+    ? await coverRequestDigest(job.manifest_json)
+    : null;
+  if (!frozenSlots || !job.manifest_sha256
+    || frozenManifestSha256 !== job.manifest_sha256) {
+    await recordTerminal(env, payload, 'failed', now, job, {
+      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED',
+      abandonSetId: set.id,
+    });
+    return {
+      status: 'failed', appliedRevision: null,
+      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED', retryable: false,
+    };
+  }
+
+  const verdict = await verifyCoverManifest(env, set.id, frozenSlots);
+  if (!verdict.complete || verdict.manifestSha256 !== job.manifest_sha256) {
+    await recordTerminal(env, payload, 'failed', now, job, {
       failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED',
       abandonSetId: set.id,
     });
@@ -1552,6 +1612,15 @@ export async function coverBackfillFinalize(
       cleanupAfter: new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString(),
       retiredKeyFingerprint: job.legacy_key_fingerprint,
       reason: 'backfilled',
+      backfillGuard: {
+        runId: payload.runId,
+        jobId: payload.jobId,
+        workflowInstanceId: job.workflow_instance_id,
+        dispatchGeneration: job.dispatch_generation,
+        masterId: job.master_id,
+        renderSetId: job.render_set_id,
+        legacyKeyFingerprint: job.legacy_key_fingerprint,
+      },
     }),
     // Predicated on the revision having actually moved: a zero-change UPDATE does
     // not error a D1 batch, so without this a lost guard would still activate the
@@ -1561,27 +1630,63 @@ export async function coverBackfillFinalize(
       SET state = 'active', manifest_sha256 = ?, published_revision = ?,
           ready_at = COALESCE(ready_at, ?), published_at = ?
       WHERE id = ? AND state IN ('staging', 'ready')
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
     `).bind(
       job.manifest_sha256, nextRevision, timestamp, timestamp,
-      set.id, payload.eventId, nextRevision,
+      set.id, payload.eventId, nextRevision, master.object_key, set.id,
     ),
     env.DB.prepare(`
       UPDATE event_cover_backfill_jobs
       SET status = 'applied', failure_code = NULL, retryable = 0, terminal_at = ?,
           reference_release_at = ?, expires_at = ?, updated_at = ?
-      WHERE id = ? AND status IN ('rendering', 'finalizing')
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+      WHERE id = ? AND run_id = ? AND event_id = ? AND workflow_instance_id = ?
+        AND dispatch_generation = ? AND master_id = ? AND render_set_id = ?
+        AND status IN ('rendering', 'finalizing')
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+            AND f.event_id = ? AND f.state = 'open' AND f.dispatch_generation = ?
+        )
     `).bind(
       timestamp, referenceReleaseAt, expiresAt, timestamp,
-      payload.jobId, payload.eventId, nextRevision,
+      payload.jobId, payload.runId, payload.eventId, job.workflow_instance_id,
+      job.dispatch_generation, job.master_id, job.render_set_id,
+      payload.eventId, nextRevision, master.object_key, set.id,
+      COVER_BACKFILL_BINDING, job.workflow_instance_id, payload.eventId,
+      job.dispatch_generation,
     ),
-    terminalFenceStatement(env, payload, now),
-    recomputeBackfillRunCounters(env.DB, payload.runId, now),
+    terminalFenceStatement(env, payload, now, true),
+    recomputeBackfillRunCounters(env.DB, payload.runId, now, true),
   ]);
 
   if ((results[0]?.meta.changes ?? 0) !== 1) {
-    await recordTerminal(env, payload, 'skipped', now, { abandonSetId: set.id });
+    await recordTerminal(env, payload, 'skipped', now, job, { abandonSetId: set.id });
+    const current = await env.DB.prepare(`
+      SELECT status, failure_code, retryable FROM event_cover_backfill_jobs WHERE id = ?
+    `).bind(payload.jobId).first<{
+      status: CoverBackfillStatus; failure_code: string | null; retryable: number;
+    }>();
+    if (current?.status === 'applied') {
+      const applied = await env.DB.prepare('SELECT cover_revision FROM events WHERE id = ?')
+        .bind(payload.eventId).first<{ cover_revision: number }>();
+      return {
+        status: 'applied', appliedRevision: applied?.cover_revision ?? null,
+        failureCode: null, retryable: false,
+      };
+    }
+    if (current?.status === 'failed') {
+      return {
+        status: 'failed', appliedRevision: null,
+        failureCode: current.failure_code, retryable: current.retryable === 1,
+      };
+    }
     return stage('skipped').outcome;
   }
   return { status: 'applied', appliedRevision: nextRevision, failureCode: null, retryable: false };

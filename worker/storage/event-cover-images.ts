@@ -89,10 +89,18 @@ export interface CoverRenderObjectResult {
   adopted: boolean;
 }
 
+export interface CoverManifestSlot {
+  profile: EventCoverProfileId;
+  density: EventCoverDensity;
+  format: EventCoverFormat;
+}
+
 export interface CoverManifestVerdict {
   complete: boolean;
   missing: string[];
   mismatched: string[];
+  /** SHA-256 of the canonical, server-owned expected slot manifest. */
+  manifestSha256: string;
 }
 
 /**
@@ -499,16 +507,18 @@ function clamp01(value: number): number {
 export async function verifyCoverManifest(
   env: AppEnv,
   renderSetId: string,
+  expectedSlots: readonly CoverManifestSlot[],
 ): Promise<CoverManifestVerdict> {
   const set = await env.DB.prepare(
-    'SELECT required_slots FROM event_cover_render_sets WHERE id = ?',
-  ).bind(renderSetId).first<{ required_slots: number }>();
+    'SELECT event_id, required_slots FROM event_cover_render_sets WHERE id = ?',
+  ).bind(renderSetId).first<{ event_id: string; required_slots: number }>();
   const { results } = await env.DB.prepare(`
-    SELECT profile_id, density, format, object_key, content_type, byte_size, width, height,
-           quality_rung, sha256
+    SELECT event_id, profile_id, density, format, object_key, content_type, byte_size,
+           width, height, quality_rung, sha256
     FROM event_cover_render_objects WHERE render_set_id = ?
     ORDER BY profile_id, density, format
   `).bind(renderSetId).all<{
+    event_id: string;
     profile_id: EventCoverProfileId;
     density: EventCoverDensity;
     format: EventCoverFormat;
@@ -521,34 +531,62 @@ export async function verifyCoverManifest(
     sha256: string;
   }>();
 
-  const missing: string[] = [];
-  const mismatched: string[] = [];
+  const canonicalManifest = JSON.stringify({
+    slots: expectedSlots.map(({ profile, density, format }) => ({ profile, density, format })),
+  });
+  const encodedManifest = new TextEncoder().encode(canonicalManifest);
+  const manifestSha256 = await hexDigest(encodedManifest.buffer as ArrayBuffer);
+  const tupleKey = (slot: {
+    profile: EventCoverProfileId;
+    density: EventCoverDensity;
+    format: EventCoverFormat;
+  }) => `${slot.profile}/${slot.density}/${slot.format}`;
+  const expectedKeys = new Set(expectedSlots.map(tupleKey));
+  const actualKeys = new Set(results.map((row) => tupleKey({
+    profile: row.profile_id, density: row.density, format: row.format,
+  })));
+  const missing = new Set<string>();
+  const mismatched = new Set<string>();
+  for (const slot of expectedSlots) {
+    const key = tupleKey(slot);
+    if (!actualKeys.has(key)) missing.add(key);
+  }
+  if (expectedKeys.size !== expectedSlots.length) mismatched.add('manifest/duplicate-slot');
+  if (!set || set.required_slots !== expectedSlots.length) {
+    mismatched.add('render-set/required-slots');
+  }
   for (const row of results) {
     const slot = `${row.profile_id}/${row.density}/${row.format}`;
+    if (!expectedKeys.has(slot)) mismatched.add(slot);
     const object = await env.MEDIA_BUCKET.get(row.object_key);
     if (!object?.body) {
-      missing.push(slot);
+      missing.add(slot);
       continue;
     }
     const bytes = await object.arrayBuffer();
     const profile = coverProfile(row.profile_id);
     const scale = row.density === '2x' ? 2 : 1;
-    if (bytes.byteLength !== row.byte_size
+    if (row.event_id !== set?.event_id
+      || row.object_key !== coverRenderKey(set?.event_id ?? row.event_id, renderSetId,
+        row.profile_id, row.density, row.format)
+      || bytes.byteLength !== row.byte_size
       || bytes.byteLength > coverByteCeiling(profile, row.density, row.format)
       || row.content_type !== OUTPUT_CONTENT_TYPE[row.format]
       || row.width !== profile.width * scale
       || row.height !== profile.height * scale
       || row.quality_rung < 1 || row.quality_rung > 4
       || await hexDigest(bytes) !== row.sha256) {
-      mismatched.push(slot);
+      mismatched.add(slot);
     }
   }
 
   return {
-    complete: missing.length === 0
-      && mismatched.length === 0
-      && results.length === (set?.required_slots ?? -1),
-    missing,
-    mismatched,
+    complete: missing.size === 0
+      && mismatched.size === 0
+      && results.length === expectedSlots.length
+      && actualKeys.size === expectedKeys.size,
+    missing: [...missing],
+    mismatched: [...mismatched],
+    manifestSha256,
   };
 }

@@ -1131,6 +1131,38 @@ describe('the transactional claim', () => {
     expect(cleanup).toContain(`created_at = '${NOW}'`);
   });
 
+  it('stamps the job and fence when D1 applies the claim, not when the artifact was built', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [candidate],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+
+      database.exec(batch.claimStatements.join('\n'));
+
+      const job = database.prepare(`
+        SELECT updated_at FROM event_cover_backfill_jobs WHERE id = ?
+      `).get(JOB) as { updated_at: string };
+      const fence = database.prepare(`
+        SELECT updated_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId) as { updated_at: string };
+      expect(job.updated_at).not.toBe(NOW);
+      expect(fence.updated_at).not.toBe(NOW);
+      expect(job.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+      expect(Math.abs(Date.parse(job.updated_at) - Date.parse(fence.updated_at)))
+        .toBeLessThan(1_000);
+    } finally {
+      database.close();
+    }
+  });
+
   it('carries the run authorization and all capacity refusals into the statement itself', () => {
     const job = one().claimStatements[1]!;
     expect(job).toContain("r.mode = 'execute'");

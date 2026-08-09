@@ -426,8 +426,18 @@ describe('the populated interrupted cover-backfill rehearsal', () => {
     // 006/007: both accepted creates were interrupted. One was absent; one had
     // materialized while its output was lost. Replaying the stored IDs creates
     // only the absent one and confirms both without a lookup.
-    await testEnv.DB.prepare('UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id IN (?, ?)')
-      .bind(STALE.toISOString(), entries[6]!.jobId, entries[7]!.jobId).run();
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id IN (?, ?)
+      `).bind(STALE.toISOString(), entries[6]!.jobId, entries[7]!.jobId),
+      // Exact open fences own the claim clock. Backdate both durable copies to
+      // rehearse an honestly stale claim rather than artifact-clock skew.
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET updated_at = ?
+        WHERE workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+          AND workflow_instance_id IN (?, ?)
+      `).bind(STALE.toISOString(), entries[6]!.instanceId, entries[7]!.instanceId),
+    ]);
     const materialized = new Set([entries[7]!.instanceId]);
     const createCalls: string[] = [];
     const physicalCreates: string[] = [];
@@ -680,6 +690,12 @@ describe('the populated interrupted cover-backfill rehearsal', () => {
 
     // Terminal purge re-entry removes the two deleted events and their jobs,
     // then recomputes the already-verified retained run from its remaining rows.
+    // The rehearsal advances a fixed logical clock while D1 stamps claims from
+    // the wall clock, so align the preserved job claim clocks with that simulated
+    // apply instant before proving that the five-minute re-entry is stale.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id IN (?, ?)
+    `).bind(START.toISOString(), entries[3]!.jobId, entries[4]!.jobId).run();
     for (const entry of [entries[3]!, entries[4]!]) {
       expect(await reconcileEventCoverPurge(
         testEnv, entry.eventId, PURGE_REENTRY, completedPurgeAccessors(),

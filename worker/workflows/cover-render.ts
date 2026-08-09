@@ -77,7 +77,9 @@ function terminalFenceStatement(
   payload: CoverRenderPayload,
   generation: number,
   now: Date,
+  onlyIfPriorStatementChanged = false,
 ): D1PreparedStatement {
+  const changeGuard = onlyIfPriorStatementChanged ? ' AND changes() = 1' : '';
   return env.DB.prepare(`
     UPDATE event_cover_workflow_fences
     SET expires_at = ?, updated_at = ?
@@ -85,7 +87,7 @@ function terminalFenceStatement(
       SELECT workflow_instance_id FROM event_cover_publish_receipts
       WHERE event_id = ? AND operation_id = ? AND dispatch_generation = ?
         AND status IN ('applied', 'conflict', 'failed')
-    ) AND event_id = ? AND dispatch_generation = ? AND state = 'open'
+    ) AND event_id = ? AND dispatch_generation = ? AND state = 'open'${changeGuard}
   `).bind(
     coverWorkflowFenceTerminalExpiry(now), now.toISOString(), COVER_RENDER_BINDING,
     payload.eventId, payload.operationId, generation, payload.eventId, generation,
@@ -110,6 +112,54 @@ function terminal(
     outcome: { status, appliedRevision: null, failureCode, retryable },
     slots: [],
   };
+}
+
+function outcomeFromReceipt(receipt: CoverPublishReceiptRow): CoverRenderOutcome | null {
+  if (receipt.status === 'applied') {
+    return {
+      status: 'applied', appliedRevision: receipt.applied_revision,
+      failureCode: null, retryable: false,
+    };
+  }
+  if (receipt.status === 'conflict') {
+    return { status: 'conflict', appliedRevision: null, failureCode: null, retryable: false };
+  }
+  if (receipt.status === 'failed') {
+    return {
+      status: 'failed', appliedRevision: null,
+      failureCode: receipt.failure_code, retryable: receipt.retryable === 1,
+    };
+  }
+  return null;
+}
+
+function terminalFromReceipt(receipt: CoverPublishReceiptRow): CoverRenderPreflight {
+  return {
+    shouldRender: false,
+    outcome: outcomeFromReceipt(receipt)
+      ?? { status: 'skipped', appliedRevision: null, failureCode: null, retryable: false },
+    slots: [],
+  };
+}
+
+async function currentPreflightOutcome(
+  env: AppEnv,
+  payload: CoverRenderPayload,
+): Promise<CoverRenderPreflight> {
+  const receipt = await env.DB.prepare(`
+    SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+  `).bind(payload.eventId, payload.operationId).first<CoverPublishReceiptRow>();
+  return receipt ? terminalFromReceipt(receipt) : terminal('skipped');
+}
+
+async function currentRenderOutcome(
+  env: AppEnv,
+  payload: CoverRenderPayload,
+): Promise<CoverRenderOutcome> {
+  const receipt = await env.DB.prepare(`
+    SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+  `).bind(payload.eventId, payload.operationId).first<CoverPublishReceiptRow>();
+  return receipt ? terminalFromReceipt(receipt).outcome : terminal('skipped').outcome;
 }
 
 async function rehydrate(env: AppEnv, payload: CoverRenderPayload): Promise<RehydratedState | null> {
@@ -149,10 +199,7 @@ export async function coverRenderPreflight(
   const { receipt, event, draft, master, set } = state;
 
   // A late replay of an already-terminal receipt does nothing at all.
-  if (receipt.status === 'applied' || receipt.status === 'conflict') {
-    return terminal(receipt.status === 'applied' ? 'applied' : 'conflict');
-  }
-  if (receipt.status === 'failed' && receipt.retryable === 0) return terminal('failed');
+  if (outcomeFromReceipt(receipt)) return terminalFromReceipt(receipt);
 
   // The deletion fence, before Images or R2 work. A present, open,
   // generation-matching fence for this event is *permission*; anything else,
@@ -177,32 +224,34 @@ export async function coverRenderPreflight(
       env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
       receipt.dispatch_generation, set.id, draft.id,
     );
-    return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
+    return currentPreflightOutcome(env, payload);
   }
   // A generation this instance did not claim is supersession, not failure.
   // `restartCoverPublication` moves the receipt and the fence in one batch, so a
   // divergence means another generation owns this receipt now — and writing a
   // terminal status here would poison the run that does. The superseded run
   // leaves without touching anything.
-  if (fence.dispatch_generation !== receipt.dispatch_generation) return terminal('skipped');
+  if (fence.dispatch_generation !== receipt.dispatch_generation) {
+    return currentPreflightOutcome(env, payload);
+  }
 
   if (event.deleted_at) {
     await recordSafeFailure(
       env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
       receipt.dispatch_generation, set.id, draft.id,
     );
-    return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
+    return currentPreflightOutcome(env, payload);
   }
 
   // The event moved on while this was queued. Record the conflict, abandon the
   // empty set, and hand the still-valid draft back so the host can republish.
   if (event.cover_revision !== receipt.expected_revision) {
     await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
-    return terminal('conflict');
+    return currentPreflightOutcome(env, payload);
   }
   if (draft.state !== 'publishing') {
     await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
-    return terminal('conflict');
+    return currentPreflightOutcome(env, payload);
   }
 
   const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
@@ -211,7 +260,7 @@ export async function coverRenderPreflight(
       env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
       receipt.dispatch_generation, set.id, draft.id,
     );
-    return terminal('failed', 'COVER_RENDER_UNAVAILABLE');
+    return currentPreflightOutcome(env, payload);
   }
 
   const slots = deriveCoverSlots(master, config.focus);
@@ -220,20 +269,56 @@ export async function coverRenderPreflight(
   // a replay of this step cannot re-derive a different slot count.
   const results = await env.DB.batch([
     env.DB.prepare(`
-      UPDATE event_cover_render_sets SET required_slots = ?
-      WHERE id = ? AND state = 'staging'
-    `).bind(slots.length, set.id),
-    env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'rendering', required_profiles = ?, updated_at = ?
       WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
-        AND workflow_instance_id = ? AND status IN ('queued', 'rendering')
+        AND workflow_instance_id = ? AND dispatch_generation = ?
+        AND render_set_id = ? AND draft_id = ?
+        AND status = ? AND retryable = ? AND status IN ('queued', 'rendering')
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id
+            AND e.deleted_at IS NULL
+            AND e.cover_revision = event_cover_publish_receipts.expected_revision
+            AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = event_cover_publish_receipts.render_set_id
+            AND s.event_id = event_cover_publish_receipts.event_id
+            AND s.draft_id = event_cover_publish_receipts.draft_id
+            AND s.state = 'staging'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_drafts d
+          WHERE d.id = event_cover_publish_receipts.draft_id
+            AND d.event_id = event_cover_publish_receipts.event_id
+            AND d.state = 'publishing'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ?
+            AND f.workflow_instance_id = event_cover_publish_receipts.workflow_instance_id
+            AND f.event_id = event_cover_publish_receipts.event_id
+            AND f.state = 'open'
+            AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+        )
     `).bind(
       EVENT_COVER_PROFILES.length, timestamp,
       payload.eventId, payload.operationId, receipt.request_sha256, receipt.workflow_instance_id,
+      receipt.dispatch_generation, set.id, draft.id,
+      receipt.status, receipt.retryable,
+      event.cover_object_key, event.cover_render_set_id,
+      COVER_RENDER_BINDING,
     ),
+    env.DB.prepare(`
+      UPDATE event_cover_render_sets SET required_slots = ?
+      WHERE id = ? AND state = 'staging' AND changes() = 1
+    `).bind(slots.length, set.id),
   ]);
-  if ((results[1]?.meta.changes ?? 0) !== 1) return terminal('skipped');
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+    return currentPreflightOutcome(env, payload);
+  }
 
   return {
     shouldRender: true,
@@ -274,6 +359,38 @@ export function deriveCoverSlots(
   return slots;
 }
 
+async function coverRenderProfileAdmissionHolds(
+  env: AppEnv,
+  payload: CoverRenderPayload,
+  receipt: CoverPublishReceiptRow,
+  set: CoverRenderSetRow,
+  draft: CoverDraftRow,
+): Promise<boolean> {
+  if (!receipt.workflow_instance_id) return false;
+  const admitted = await env.DB.prepare(`
+    SELECT 1 AS admitted
+    FROM event_cover_publish_receipts r
+    JOIN events e ON e.id = r.event_id
+    JOIN event_cover_render_sets s ON s.id = r.render_set_id AND s.event_id = r.event_id
+    JOIN event_cover_drafts d ON d.id = r.draft_id AND d.event_id = r.event_id
+    JOIN event_cover_workflow_fences f
+      ON f.workflow_binding = ? AND f.workflow_instance_id = r.workflow_instance_id
+        AND f.event_id = r.event_id AND f.state = 'open'
+        AND f.dispatch_generation = r.dispatch_generation
+    WHERE r.event_id = ? AND r.operation_id = ? AND r.request_sha256 = ?
+      AND r.workflow_instance_id = ? AND r.dispatch_generation = ?
+      AND r.render_set_id = ? AND r.draft_id = ? AND r.status = 'rendering'
+      AND e.deleted_at IS NULL AND e.cover_revision = r.expected_revision
+      AND s.state = 'staging' AND d.state = 'publishing'
+  `).bind(
+    COVER_RENDER_BINDING,
+    payload.eventId, payload.operationId, receipt.request_sha256,
+    receipt.workflow_instance_id, receipt.dispatch_generation,
+    set.id, draft.id,
+  ).first<{ admitted: number }>();
+  return admitted !== null;
+}
+
 /**
  * One profile's slots, individually replay-safe.
  *
@@ -290,7 +407,13 @@ export async function coverRenderProfileStep(
 ): Promise<CoverRenderStepSummary> {
   const state = await rehydrate(env, payload);
   if (!state) return { profile, written: 0, adopted: 0, completedProfiles: 0 };
-  const { receipt, master, set } = state;
+  const { receipt, master, set, draft } = state;
+  if (!await coverRenderProfileAdmissionHolds(env, payload, receipt, set, draft)) {
+    return {
+      profile, written: 0, adopted: 0,
+      completedProfiles: receipt.completed_profiles,
+    };
+  }
 
   const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
   if (!config || !('focus' in config)) {
@@ -307,6 +430,7 @@ export async function coverRenderProfileStep(
   let adopted = 0;
   for (const slot of deriveCoverSlots(master, config.focus)) {
     if (slot.profile !== profile) continue;
+    if (!await coverRenderProfileAdmissionHolds(env, payload, receipt, set, draft)) break;
     const result = await renderCoverProfileObject(env, {
       eventId: payload.eventId,
       renderSetId: set.id,
@@ -318,7 +442,7 @@ export async function coverRenderProfileStep(
       density: slot.density,
       format: slot.format,
     });
-    await adoptCoverRenderObject(env.DB, {
+    const admitted = await adoptCoverRenderObject(env.DB, {
       renderSetId: set.id,
       eventId: payload.eventId,
       profileId: slot.profile,
@@ -332,7 +456,17 @@ export async function coverRenderProfileStep(
       qualityRung: result.rung,
       sha256: result.sha256,
       now,
+      publicationAdmission: {
+        operationId: payload.operationId,
+        workflowInstanceId: receipt.workflow_instance_id!,
+        dispatchGeneration: receipt.dispatch_generation,
+        draftId: draft.id,
+      },
     });
+    if (!admitted) {
+      if (!result.adopted) await env.MEDIA_BUCKET.delete(result.objectKey);
+      break;
+    }
     if (result.adopted) adopted += 1; else written += 1;
   }
 
@@ -346,11 +480,37 @@ export async function coverRenderProfileStep(
           WHERE render_set_id = ?
         )),
         updated_at = ?
-    WHERE event_id = ? AND operation_id = ? AND status = 'rendering'
+    WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
+      AND workflow_instance_id = ? AND dispatch_generation = ?
+      AND render_set_id = ? AND draft_id = ? AND status = 'rendering'
+      AND EXISTS (
+        SELECT 1 FROM events e
+        WHERE e.id = event_cover_publish_receipts.event_id
+          AND e.deleted_at IS NULL
+          AND e.cover_revision = event_cover_publish_receipts.expected_revision
+      )
+      AND EXISTS (
+        SELECT 1 FROM event_cover_render_sets s
+        WHERE s.id = event_cover_publish_receipts.render_set_id AND s.state = 'staging'
+      )
+      AND EXISTS (
+        SELECT 1 FROM event_cover_drafts d
+        WHERE d.id = event_cover_publish_receipts.draft_id AND d.state = 'publishing'
+      )
+      AND EXISTS (
+        SELECT 1 FROM event_cover_workflow_fences f
+        WHERE f.workflow_binding = ?
+          AND f.workflow_instance_id = event_cover_publish_receipts.workflow_instance_id
+          AND f.event_id = event_cover_publish_receipts.event_id
+          AND f.state = 'open'
+          AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+      )
     RETURNING completed_profiles
   `).bind(
     EVENT_COVER_PROFILES.length, set.id, now.toISOString(),
-    payload.eventId, payload.operationId,
+    payload.eventId, payload.operationId, receipt.request_sha256,
+    receipt.workflow_instance_id, receipt.dispatch_generation,
+    set.id, draft.id, COVER_RENDER_BINDING,
   ).first<{ completed_profiles: number }>();
 
   return {
@@ -385,8 +545,26 @@ export async function coverRenderFinalize(
   if (receipt.status === 'conflict') {
     return { status: 'conflict', appliedRevision: null, failureCode: null, retryable: false };
   }
+  if (receipt.status === 'failed') {
+    return {
+      status: 'failed', appliedRevision: null,
+      failureCode: receipt.failure_code, retryable: receipt.retryable === 1,
+    };
+  }
 
-  const verdict = await verifyCoverManifest(env, set.id);
+  const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
+  if (!config || !('focus' in config)) {
+    await recordSafeFailure(
+      env, payload, 'COVER_OUTPUT_BUDGET_EXHAUSTED', false, now,
+      receipt.dispatch_generation, set.id, draft.id,
+    );
+    return currentRenderOutcome(env, payload);
+  }
+  const verdict = await verifyCoverManifest(
+    env,
+    set.id,
+    deriveCoverSlots(master, config.focus),
+  );
   if (!verdict.complete) {
     // A controlled permanent failure: abandon the set and hand the draft back
     // so the host can correct it. The active cover is untouched throughout.
@@ -394,15 +572,11 @@ export async function coverRenderFinalize(
       env, payload, 'COVER_OUTPUT_BUDGET_EXHAUSTED', false, now,
       receipt.dispatch_generation, set.id, draft.id,
     );
-    return {
-      status: 'failed', appliedRevision: null,
-      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED', retryable: false,
-    };
+    return currentRenderOutcome(env, payload);
   }
 
   const timestamp = now.toISOString();
   const cleanupAfter = new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString();
-  const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown)!;
   const nextRevision = receipt.expected_revision + 1;
 
   const results = await env.DB.batch([
@@ -419,6 +593,14 @@ export async function coverRenderFinalize(
       retiredKeyFingerprint: event.cover_object_key
         ? await coverKeyFingerprint(event.cover_object_key)
         : '0'.repeat(64),
+      renderPublicationGuard: {
+        operationId: payload.operationId,
+        requestSha256: receipt.request_sha256,
+        workflowInstanceId: receipt.workflow_instance_id!,
+        dispatchGeneration: receipt.dispatch_generation,
+        renderSetId: set.id,
+        draftId: draft.id,
+      },
     }),
     // Everything below is predicated on the revision having actually moved. A
     // zero-change UPDATE does not error a D1 batch, so without this a lost guard
@@ -427,43 +609,136 @@ export async function coverRenderFinalize(
       UPDATE event_cover_render_sets
       SET state = 'retired', retired_at = ?, cleanup_after = ?
       WHERE event_id = ? AND state = 'active' AND id <> ?
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
-    `).bind(timestamp, cleanupAfter, payload.eventId, set.id, payload.eventId, nextRevision),
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
+    `).bind(
+      timestamp, cleanupAfter, payload.eventId, set.id,
+      payload.eventId, nextRevision, master.object_key, set.id,
+    ),
     env.DB.prepare(`
       UPDATE event_cover_render_sets
       SET state = 'active', manifest_sha256 = ?, published_revision = ?,
           ready_at = COALESCE(ready_at, ?), published_at = ?
       WHERE id = ? AND state IN ('staging', 'ready')
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
     `).bind(
-      set.recipe_sha256, nextRevision, timestamp, timestamp,
-      set.id, payload.eventId, nextRevision,
+      verdict.manifestSha256, nextRevision, timestamp, timestamp,
+      set.id, payload.eventId, nextRevision, master.object_key, set.id,
     ),
     env.DB.prepare(`
       UPDATE event_cover_drafts
       SET state = 'published', draft_revision = draft_revision + 1, updated_at = ?
       WHERE id = ? AND state = 'publishing'
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
-    `).bind(timestamp, draft.id, payload.eventId, nextRevision),
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
+    `).bind(timestamp, draft.id, payload.eventId, nextRevision, master.object_key, set.id),
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'applied', applied_revision = ?, result_cover_json = ?, retryable = 0,
           failure_code = NULL, completed_profiles = ?, updated_at = ?, expires_at = ?
       WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
-        AND workflow_instance_id = ? AND status NOT IN ('applied', 'conflict')
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+        AND workflow_instance_id = ? AND dispatch_generation = ?
+        AND render_set_id = ? AND draft_id = ?
+        AND status IN ('rendering', 'finalizing')
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+            AND f.event_id = ? AND f.state = 'open' AND f.dispatch_generation = ?
+        )
     `).bind(
       nextRevision, canonicalCoverConfig(config), EVENT_COVER_PROFILES.length, timestamp,
       new Date(now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
       payload.eventId, payload.operationId, receipt.request_sha256, receipt.workflow_instance_id,
-      payload.eventId, nextRevision,
+      receipt.dispatch_generation, set.id, draft.id,
+      payload.eventId, nextRevision, master.object_key, set.id,
+      COVER_RENDER_BINDING, receipt.workflow_instance_id, payload.eventId,
+      receipt.dispatch_generation,
     ),
-    terminalFenceStatement(env, payload, receipt.dispatch_generation, now),
+    terminalFenceStatement(env, payload, receipt.dispatch_generation, now, true),
   ]);
 
   if ((results[0]?.meta.changes ?? 0) !== 1) {
-    await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
-    return { status: 'conflict', appliedRevision: null, failureCode: null, retryable: false };
+    const [current, currentEvent, currentFence] = await Promise.all([
+      env.DB.prepare(`
+      SELECT *
+      FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+      `).bind(payload.eventId, payload.operationId).first<CoverPublishReceiptRow>(),
+      env.DB.prepare(`
+        SELECT deleted_at, cover_revision, cover_object_key, cover_render_set_id
+        FROM events WHERE id = ?
+      `).bind(payload.eventId).first<Pick<
+        EventRow, 'deleted_at' | 'cover_revision' | 'cover_object_key' | 'cover_render_set_id'
+      >>(),
+      env.DB.prepare(`
+        SELECT state, dispatch_generation FROM event_cover_workflow_fences
+        WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+      `).bind(COVER_RENDER_BINDING, receipt.workflow_instance_id, payload.eventId)
+        .first<{ state: string; dispatch_generation: number }>(),
+    ]);
+    if (current?.status === 'applied') {
+      return {
+        status: 'applied', appliedRevision: current.applied_revision,
+        failureCode: null, retryable: false,
+      };
+    }
+    if (current?.status === 'failed') {
+      return {
+        status: 'failed', appliedRevision: null,
+        failureCode: current.failure_code, retryable: current.retryable === 1,
+      };
+    }
+    if (current?.status === 'conflict') {
+      return { status: 'conflict', appliedRevision: null, failureCode: null, retryable: false };
+    }
+
+    const exactOwner = current?.workflow_instance_id === receipt.workflow_instance_id
+      && current.dispatch_generation === receipt.dispatch_generation
+      && (current.status === 'rendering' || current.status === 'finalizing');
+    const exactFence = currentFence?.state === 'open'
+      && currentFence.dispatch_generation === receipt.dispatch_generation;
+    const revisionLost = currentEvent !== null
+      && currentEvent.deleted_at === null
+      && (
+        currentEvent.cover_revision !== receipt.expected_revision
+        || currentEvent.cover_object_key !== event.cover_object_key
+        || currentEvent.cover_render_set_id !== event.cover_render_set_id
+      );
+    if (exactOwner && exactFence && revisionLost) {
+      await recordConflict(env, payload, set.id, draft.id, now, receipt.dispatch_generation);
+      const settled = await env.DB.prepare(`
+        SELECT status, applied_revision, failure_code, retryable
+        FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+      `).bind(payload.eventId, payload.operationId).first<Pick<
+        CoverPublishReceiptRow, 'status' | 'applied_revision' | 'failure_code' | 'retryable'
+      >>();
+      if (settled?.status === 'applied') {
+        return {
+          status: 'applied', appliedRevision: settled.applied_revision,
+          failureCode: null, retryable: false,
+        };
+      }
+      if (settled?.status === 'failed') {
+        return {
+          status: 'failed', appliedRevision: null,
+          failureCode: settled.failure_code, retryable: settled.retryable === 1,
+        };
+      }
+      if (settled?.status === 'conflict') {
+        return { status: 'conflict', appliedRevision: null, failureCode: null, retryable: false };
+      }
+    }
+    return { status: 'skipped', appliedRevision: null, failureCode: null, retryable: false };
   }
   return { status: 'applied', appliedRevision: nextRevision, failureCode: null, retryable: false };
 }
@@ -481,16 +756,26 @@ async function recordConflict(
   draftId: string,
   now: Date,
   generation: number,
-): Promise<void> {
+): Promise<boolean> {
   const timestamp = now.toISOString();
-  await env.DB.batch([
+  const results = await env.DB.batch([
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'conflict', retryable = 0, updated_at = ?, expires_at = ?
-      WHERE event_id = ? AND operation_id = ? AND status NOT IN ('applied', 'conflict')
+      WHERE event_id = ? AND operation_id = ? AND dispatch_generation = ?
+        AND (status IN ('queued', 'rendering', 'finalizing')
+          OR (status = 'failed' AND retryable = 1))
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ?
+            AND f.workflow_instance_id = event_cover_publish_receipts.workflow_instance_id
+            AND f.event_id = event_cover_publish_receipts.event_id
+            AND f.state = 'open'
+            AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+        )
     `).bind(
       timestamp, new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
-      payload.eventId, payload.operationId,
+      payload.eventId, payload.operationId, generation, COVER_RENDER_BINDING,
     ),
     env.DB.prepare(`
       UPDATE event_cover_render_sets
@@ -501,10 +786,11 @@ async function recordConflict(
     env.DB.prepare(`
       UPDATE event_cover_drafts
       SET state = 'ready', draft_revision = draft_revision + 1, updated_at = ?
-      WHERE id = ? AND state = 'publishing'
+      WHERE id = ? AND state = 'publishing' AND changes() = 1
     `).bind(timestamp, draftId),
-    terminalFenceStatement(env, payload, generation, now),
+    terminalFenceStatement(env, payload, generation, now, true),
   ]);
+  return (results[0]?.meta.changes ?? 0) === 1;
 }
 
 /**
@@ -523,18 +809,54 @@ async function recordSafeFailure(
   generation: number,
   renderSetId?: string,
   draftId?: string,
-): Promise<void> {
+): Promise<boolean> {
   const timestamp = now.toISOString();
   const statements = [
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'failed', failure_code = ?, retryable = ?, updated_at = ?, expires_at = ?
-      WHERE event_id = ? AND operation_id = ? AND status NOT IN ('applied', 'conflict')
-        AND dispatch_generation = ?
+      WHERE event_id = ? AND operation_id = ? AND dispatch_generation = ?
+        AND (status IN ('queued', 'rendering', 'finalizing')
+          OR (status = 'failed' AND retryable = 1))
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = ? AND s.event_id = event_cover_publish_receipts.event_id
+            AND s.state IN ('staging', 'ready')
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_drafts d
+          WHERE d.id = ? AND d.event_id = event_cover_publish_receipts.event_id
+            AND d.state = 'publishing'
+        )
+        AND (
+          EXISTS (
+            SELECT 1 FROM event_cover_workflow_fences f
+            WHERE f.workflow_binding = ?
+              AND f.workflow_instance_id = event_cover_publish_receipts.workflow_instance_id
+              AND f.event_id = event_cover_publish_receipts.event_id
+              AND f.state = 'open'
+              AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+          )
+          OR (
+            NOT EXISTS (
+              SELECT 1 FROM event_cover_workflow_fences f
+              WHERE f.workflow_binding = ?
+                AND f.workflow_instance_id = event_cover_publish_receipts.workflow_instance_id
+            )
+            AND EXISTS (
+              SELECT 1 FROM events e
+              WHERE e.id = event_cover_publish_receipts.event_id
+                AND e.deleted_at IS NULL
+                AND e.cover_revision = event_cover_publish_receipts.expected_revision
+            )
+          )
+        )
     `).bind(
       failureCode, retryable ? 1 : 0, timestamp,
       new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
       payload.eventId, payload.operationId, generation,
+      renderSetId ?? null, draftId ?? null,
+      COVER_RENDER_BINDING, COVER_RENDER_BINDING,
     ),
   ];
   // Only a permanent failure releases the draft. A retryable one keeps it
@@ -556,8 +878,9 @@ async function recordSafeFailure(
       `).bind(timestamp, draftId),
     );
   }
-  statements.push(terminalFenceStatement(env, payload, generation, now));
-  await env.DB.batch(statements);
+  statements.push(terminalFenceStatement(env, payload, generation, now, true));
+  const results = await env.DB.batch(statements);
+  return (results[0]?.meta.changes ?? 0) === 1;
 }
 
 export { COVER_PIPELINE_VERSIONS };

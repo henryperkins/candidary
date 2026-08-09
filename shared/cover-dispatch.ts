@@ -128,6 +128,26 @@ export function coverBackfillMinuteBudgetSql(binding: string, perMinute: number)
     + ` AND f.updated_at >= ${ROLLING_CLAIM_WINDOW_SQL}) < ${perMinute}`;
 }
 
+/**
+ * Run-local platform capacity, excluding the job whose claim is being moved.
+ *
+ * Recovery is capacity-neutral when an already-live job moves from confirmed
+ * to resuming or restarting. Counting that same row would strand a run at the
+ * ceiling: twenty-four other live jobs plus the target is still twenty-five,
+ * not a twenty-sixth platform instance. Initial dispatch targets are pending,
+ * so the same canonical predicate remains correct for the launcher.
+ */
+export function coverBackfillInFlightBudgetSql(
+  runId: string,
+  jobId: string,
+  inFlight: number,
+): string {
+  return '(SELECT count(*) FROM event_cover_backfill_jobs j'
+    + ` WHERE j.run_id = ${runId} AND j.id <> ${jobId}`
+    + ` AND j.dispatch_state IN (${LIVE_DISPATCH})`
+    + ` AND j.status IN (${NONTERMINAL})) < ${inFlight}`;
+}
+
 /** No claim has been made against this one instance inside the rolling minute. */
 export function coverBackfillInstanceIdleSql(
   binding: string,
@@ -194,10 +214,10 @@ export function coverDispatchReadSql(values: {
  * is that the database decides at apply time whether they still hold.
  *
  * The fence statement carries `changes() = 1`, so the fence moves only when the
- * job actually moved. Its `updated_at` becomes the durable dispatch-claim clock
- * that the rolling-minute predicates below read, and is therefore stamped from
- * the database's own clock rather than from `values.now`; confirmation must
- * never rewrite it.
+ * job actually moved. Both claim rows are stamped from the database's clock;
+ * the fence is authoritative while it remains exact and open, while the job
+ * preserves that same clock if purge ownership later rewrites the fence.
+ * Confirmation must never rewrite the fence clock.
  */
 export function claimCoverBackfillDispatchSql(
   values: CoverDispatchSqlValues & { workflowInstanceId: string },
@@ -207,17 +227,16 @@ export function claimCoverBackfillDispatchSql(
     values.binding, values.workflowInstanceId,
   );
   const minuteBudget = coverBackfillMinuteBudgetSql(values.binding, bounds.perMinute);
-  const inFlightBudget = '(SELECT count(*) FROM event_cover_backfill_jobs j'
-    + ` WHERE j.run_id = ${values.runId}`
-    + ` AND j.dispatch_state IN (${LIVE_DISPATCH})`
-    + ` AND j.status IN (${NONTERMINAL})) < ${bounds.inFlight}`;
+  const inFlightBudget = coverBackfillInFlightBudgetSql(
+    values.runId, values.jobId, bounds.inFlight,
+  );
   const noOtherActiveRun = 'NOT EXISTS (SELECT 1 FROM event_cover_backfill_runs r'
     + ` WHERE r.id <> ${values.runId} AND r.status IN ('inventorying', 'executing'))`;
 
   return {
     job: 'UPDATE event_cover_backfill_jobs'
       + " SET dispatch_state = 'creating', dispatch_generation = dispatch_generation + 1,"
-      + ` updated_at = ${values.now}`
+      + ` updated_at = ${CLAIM_APPLIED_AT_SQL}`
       + ` WHERE id = ${values.jobId} AND run_id = ${values.runId} AND event_id = ${values.eventId}`
       + ` AND dispatch_state = 'pending' AND status = 'queued'`
       + ` AND dispatch_generation = ${values.generation}`

@@ -298,6 +298,11 @@ describe('cover profile rendering', () => {
 describe('manifest verification', () => {
   beforeEach(resetDatabase);
 
+  const oneXManifest = () => EVENT_COVER_PROFILES.flatMap((profile) => ([
+    { profile: profile.id, density: '1x' as const, format: 'webp' as const },
+    { profile: profile.id, density: '1x' as const, format: 'jpeg' as const },
+  ]));
+
   async function seedSet(requiredSlots: number) {
     const now = '2026-08-04T00:00:00.000Z';
     await testEnv.DB.prepare(`
@@ -341,15 +346,18 @@ describe('manifest verification', () => {
     for (const profile of EVENT_COVER_PROFILES) {
       for (const format of ['webp', 'jpeg'] as const) await adopt(profile.id, '1x', format);
     }
-    expect(await verifyCoverManifest(testEnv, 's1')).toEqual({ complete: true, missing: [], mismatched: [] });
+    expect(await verifyCoverManifest(testEnv, 's1', oneXManifest())).toMatchObject({
+      complete: true, missing: [], mismatched: [],
+      manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
   });
 
   it('fails an incomplete set even when every present slot is valid', async () => {
     await seedSet(12);
     await adopt('wide-expanded', '1x', 'webp');
-    const verdict = await verifyCoverManifest(testEnv, 's1');
+    const verdict = await verifyCoverManifest(testEnv, 's1', oneXManifest());
     expect(verdict.complete).toBe(false);
-    expect(verdict.missing).toEqual([]);
+    expect(verdict.missing).toHaveLength(11);
   });
 
   it('catches a missing object and a drifted checksum', async () => {
@@ -363,8 +371,8 @@ describe('manifest verification', () => {
     await testEnv.DB.prepare('UPDATE event_cover_render_objects SET sha256 = ? WHERE object_key = ?')
       .bind('b'.repeat(64), drifted.objectKey).run();
 
-    const verdict = await verifyCoverManifest(testEnv, 's1');
-    expect(verdict).toEqual({
+    const verdict = await verifyCoverManifest(testEnv, 's1', oneXManifest());
+    expect(verdict).toMatchObject({
       complete: false,
       missing: ['wide-expanded/1x/webp'],
       mismatched: ['wide-expanded/1x/jpeg'],

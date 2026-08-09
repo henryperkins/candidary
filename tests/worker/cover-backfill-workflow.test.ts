@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE } from '../../shared/constants';
+import {
+  MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE,
+  MAX_COVER_BACKFILL_IN_FLIGHT,
+} from '../../shared/constants';
 import {
   ROLLING_CLAIM_WINDOW_SQL,
   claimCoverBackfillDispatchSql,
@@ -48,6 +51,7 @@ const JOB = '22222222-2222-4222-8222-222222222222';
 const FENCE_HOLD = '9999-12-31T23:59:59.999Z';
 const PINNED_MASTER = '33333333-3333-4333-8333-333333333333';
 const PINNED_RENDER_SET = '44444444-4444-4444-8444-444444444444';
+const SENSITIVE_PLATFORM_DETAIL = 'events/private/cover/cr1-secret';
 
 const PINNED_MANIFEST_SLOTS = [
   { profile: 'short-lookup', density: '1x', format: 'webp' },
@@ -174,6 +178,46 @@ async function seedJob(access: Access, options: SeedOptions = {}) {
   ).run();
 
   return { key, instanceId, payload: { runId, jobId, eventId: access.event.id } };
+}
+
+/** Complete but reconciliation-ineligible initial claims that occupy run capacity. */
+async function seedOtherLiveBackfillJobs(count: number): Promise<void> {
+  const claimedAt = '2020-01-01T00:00:00.000Z';
+  const statements = [];
+  for (let index = 0; index < count; index += 1) {
+    const suffix = String(index + 1).padStart(12, '0');
+    const eventId = `90000000-0000-4000-8000-${suffix}`;
+    const jobId = `80000000-0000-4000-8000-${suffix}`;
+    const instanceId = `cb1-${String(index + 1).padStart(48, '0')}`;
+    statements.push(
+      testEnv.DB.prepare(`
+        INSERT INTO events (
+          id, slug, name, event_date, welcome_message, cover_object_key,
+          guest_access_expires_at, management_access_expires_at, purge_after, created_at
+        ) VALUES (?, ?, 'Capacity', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+      `).bind(
+        eventId, `capacity-${index}`, legacyKey(eventId),
+        now.toISOString(), now.toISOString(), now.toISOString(), now.toISOString(),
+      ),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_jobs (
+          id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+          workflow_instance_id, dispatch_state, dispatch_generation, status,
+          dependency_versions_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?, 'creating', 1, 'queued', ?, ?, ?)
+      `).bind(
+        jobId, RUN, eventId, 'c'.repeat(64), instanceId,
+        JSON.stringify(coverBackfillDependencyVersions()), claimedAt, claimedAt,
+      ),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
+      `).bind(instanceId, eventId, claimedAt, claimedAt, FENCE_HOLD),
+    );
+  }
+  if (statements.length > 0) await testEnv.DB.batch(statements);
 }
 
 interface LedgerSeed {
@@ -481,7 +525,7 @@ function scriptedBackfillAccessor(
     async lookup(id) {
       calls.push(`lookup:${id}`);
       const entry = scripted.get(id);
-      if (entry === 'throw') throw new Error('binding unavailable');
+      if (entry === 'throw') throw new Error(SENSITIVE_PLATFORM_DETAIL);
       return entry ?? { kind: 'status', status: 'running' };
     },
     async createBatch(input) {
@@ -649,6 +693,40 @@ describe('stale initial dispatch recovery', () => {
     expect(platform.created).toEqual([]);
   });
 
+  it('uses the exact open fence clock when a legacy job clock is 119 seconds older', async () => {
+    await seedJob(access, {
+      dispatchState: 'creating', dispatchGeneration: 1, claimedAt: now,
+    });
+    // Models a claim written by the old launcher from an artifact generated on
+    // another clock. The exact open fence is the database-stamped authority.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id = ?
+    `).bind('2020-01-01T00:00:00.000Z', JOB).run();
+    const platform = recordingBackfillAccessor();
+    const recoveryAt = new Date(now.getTime() + 119_000);
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, recoveryAt, platform.accessor))
+      .toMatchObject({ inspected: 0, materialized: 0 });
+    expect(platform.created).toEqual([]);
+  });
+
+  it('uses the exact open fence clock when a legacy job clock is 121 seconds newer', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'creating', dispatchGeneration: 1, claimedAt: now,
+    });
+    // The inverse drift must not postpone recovery: the same exact fence clock
+    // becomes stale two minutes after the database applied the claim.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id = ?
+    `).bind('2040-01-01T00:00:00.000Z', JOB).run();
+    const platform = recordingBackfillAccessor();
+    const recoveryAt = new Date(now.getTime() + 121_000);
+
+    expect(await recoverStaleInitialBackfillDispatches(testEnv, recoveryAt, platform.accessor))
+      .toEqual({ inspected: 1, materialized: 1, confirmed: 1, blocked: 0, remainder: false });
+    expect(platform.created).toEqual([instanceId]);
+  });
+
   it('settles a purge-owned claim instead of creating an instance for it', async () => {
     await seedJob(access, { dispatchState: 'creating', dispatchGeneration: 1, claimedAt: STALE });
     await reconcileEventCoverPurge(testEnv, access.event.id, now, blockingAccessors());
@@ -757,9 +835,12 @@ describe('the dispatch-claim clock', () => {
         AND updated_at >= ${ROLLING_CLAIM_WINDOW_SQL}
     `, instanceId)).toEqual({ count: 1 });
 
-    // The job keeps the artifact's timestamp: only the fence is the clock.
-    expect(await row('SELECT updated_at FROM event_cover_backfill_jobs WHERE id = ?', JOB))
-      .toEqual({ updated_at: generatedAt });
+    const job = await row<{ updated_at: string }>(
+      'SELECT updated_at FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    expect(job.updated_at).not.toBe(generatedAt);
+    expect(job.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+    expect(Math.abs(Date.parse(job.updated_at) - Date.parse(fence.updated_at))).toBeLessThan(1_000);
   });
 });
 
@@ -1082,6 +1163,65 @@ describe('backfill finalize', () => {
       .toEqual({ status: 'skipped' });
   });
 
+  it('cannot adopt a competing removal that reached the same next revision', async () => {
+    const raced = envBeforeFirstBatch(async () => {
+      await testEnv.DB.prepare(`
+        UPDATE events
+        SET cover_revision = 1, cover_object_key = NULL, cover_render_set_id = NULL
+        WHERE id = ?
+      `).bind(access.event.id).run();
+    });
+
+    const outcome = await coverBackfillFinalize(raced, payload, now);
+    expect(outcome.status).toBe('skipped');
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual({
+      cover_revision: 1, cover_object_key: null, cover_render_set_id: null,
+    });
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ state: 'abandoned' });
+    expect(await row('SELECT status FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+      .toEqual({ status: 'skipped' });
+  });
+
+  it('cannot overwrite a permanent deletion settlement that wins before finalize', async () => {
+    const set = await row<{ id: string }>(
+      'SELECT render_set_id AS id FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    const raced = envBeforeFirstBatch(async () => {
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_backfill_jobs
+          SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED'
+          WHERE id = ?
+        `).bind(JOB),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_render_sets SET state = 'abandoned' WHERE id = ?
+        `).bind(set.id),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+          WHERE event_id = ?
+        `).bind(access.event.id),
+      ]);
+    });
+    const beforeEvent = await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id);
+
+    expect(await coverBackfillFinalize(raced, payload, now)).toMatchObject({
+      status: 'failed', failureCode: 'EVENT_DELETED', retryable: false,
+    });
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual(beforeEvent);
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE id = ?', set.id))
+      .toEqual({ state: 'abandoned' });
+    expect(await row(`
+      SELECT status, retryable, failure_code FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toEqual({ status: 'failed', retryable: 0, failure_code: 'EVENT_DELETED' });
+  });
+
   it('refuses to activate an incomplete manifest', async () => {
     await testEnv.DB.prepare("DELETE FROM event_cover_render_objects WHERE profile_id = 'short-lookup'").run();
 
@@ -1092,6 +1232,55 @@ describe('backfill finalize', () => {
     expect(event.coverObjectKey).toBe(key);
     expect(event.coverRenderSetId).toBeNull();
     expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ state: 'abandoned' });
+  });
+
+  it('refuses a frozen manifest whose recorded SHA no longer matches its bytes', async () => {
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET manifest_sha256 = ? WHERE id = ?
+    `).bind('f'.repeat(64), JOB).run();
+
+    const outcome = await coverBackfillFinalize(testEnv, payload, now);
+
+    expect(outcome).toMatchObject({ status: 'failed', retryable: false });
+    expect((await new EventsRepository(testEnv.DB).getById(access.event.id))!.coverObjectKey)
+      .toBe(key);
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
+      .toEqual({ state: 'abandoned' });
+  });
+
+  it('refuses a count-preserving substitution outside the frozen tuple set', async () => {
+    await resetDatabase();
+    access = await eventAccess();
+    const seeded = await seedPinnedFailedJob(access);
+    payload = seeded.payload;
+    key = seeded.key;
+    await testEnv.MEDIA_BUCKET.put(
+      coverMasterKey(access.event.id, PINNED_MASTER), new Uint8Array(2_000),
+    );
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'rendering', failure_code = NULL, retryable = 0,
+          terminal_at = NULL, reference_release_at = NULL, expires_at = NULL
+      WHERE id = ?
+    `).bind(JOB).run();
+    await renderEveryProfile(backfillEnv(), payload);
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_render_objects WHERE render_set_id = ?
+    `, PINNED_RENDER_SET)).toEqual({ count: 12 });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_render_objects
+      SET density = '2x', width = 720, height = 336
+      WHERE render_set_id = ? AND profile_id = 'short-lookup'
+        AND density = '1x' AND format = 'webp'
+    `).bind(PINNED_RENDER_SET).run();
+
+    const outcome = await coverBackfillFinalize(testEnv, payload, now);
+
+    expect(outcome).toMatchObject({ status: 'failed', retryable: false });
+    expect((await new EventsRepository(testEnv.DB).getById(access.event.id))!.coverObjectKey)
+      .toBe(key);
+    expect(await row('SELECT state FROM event_cover_render_sets WHERE id = ?', PINNED_RENDER_SET))
       .toEqual({ state: 'abandoned' });
   });
 });
@@ -1156,36 +1345,70 @@ describe('platform reconciliation and the guarded restart edge', () => {
   );
 
   /**
-   * A status this release has never seen is the one case where acting could
-   * destroy work that is still running, so the preserving default arm must reach
-   * reconciliation intact rather than being flattened into a recoverable reading.
+   * Unknown information is never permission to mutate D1 or the platform. Its
+   * sole observable effect is one bounded operations event whose source and
+   * code come from fixed vocabularies rather than from platform-controlled text.
    */
-  it('preserves a job whose instance reports an unmapped status', async () => {
+  it.each<[string, CoverWorkflowLookup | 'throw', string]>([
+    [
+      'an unmapped status',
+      { kind: 'status', status: SENSITIVE_PLATFORM_DETAIL },
+      'cover_platform_unmapped',
+    ],
+    [
+      "the platform's own unknown",
+      { kind: 'status', status: 'unknown' },
+      'cover_platform_unknown',
+    ],
+    [
+      'an unknown lookup with an untrusted label',
+      { kind: 'unknown', telemetry: SENSITIVE_PLATFORM_DETAIL },
+      'cover_platform_unknown',
+    ],
+    ['a thrown lookup', 'throw', 'cover_platform_lookup_failed'],
+  ])('preserves state and emits only sanitized telemetry for %s', async (
+    _name,
+    entry,
+    expectedCode,
+  ) => {
     const { instanceId } = await inFlight();
-    const platform = scriptedBackfillAccessor({
-      [instanceId]: { kind: 'status', status: 'someFutureState' },
-    });
-
-    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
-      .toMatchObject({ inspected: 1, unchanged: 1 });
-    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
-    expect(await currentJob()).toMatchObject({ status: 'rendering', dispatch_generation: 1 });
-  });
-
-  it.each<[string, CoverWorkflowLookup | 'throw']>([
-    ["the platform's own unknown", { kind: 'status', status: 'unknown' }],
-    ['a lookup that established nothing', 'throw'],
-  ])('writes nothing and calls nothing further for %s', async (_name, entry) => {
-    const { instanceId } = await inFlight();
+    const beforeJob = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    const beforeFence = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    );
+    const beforeRun = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN,
+    );
     const platform = scriptedBackfillAccessor({ [instanceId]: entry });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
-      .toMatchObject({ inspected: 1, unchanged: 1, resumed: 0, restarted: 0, recreated: 0 });
-    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
-    expect(await currentJob()).toMatchObject({
-      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
-    });
-    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 1 });
+    try {
+      expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+        .toMatchObject({ inspected: 1, unchanged: 1, resumed: 0, restarted: 0, recreated: 0 });
+      expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+      expect(await row('SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB))
+        .toEqual(beforeJob);
+      expect(await row(
+        'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+      )).toEqual(beforeFence);
+      expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN))
+        .toEqual(beforeRun);
+
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(reported.mock.calls[0]).toHaveLength(1);
+      const serialized = String(reported.mock.calls[0]![0]);
+      expect(JSON.parse(serialized) as Record<string, unknown>).toEqual({
+        event: 'cover_platform_observation',
+        source: 'backfill',
+        code: expectedCode,
+      });
+      expect(serialized).not.toContain(SENSITIVE_PLATFORM_DETAIL);
+      expect(serialized).not.toContain(instanceId);
+    } finally {
+      reported.mockRestore();
+    }
   });
 
   /**
@@ -1660,6 +1883,42 @@ describe('platform reconciliation and the guarded restart edge', () => {
 
   /* ---------------- stale recovery claims ---------------- */
 
+  it('does not select a recovery claim at 119 seconds from its exact open fence clock', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'resuming', dispatchGeneration: 2, fenceGeneration: 2,
+      status: 'normalizing', claimedAt: now,
+    });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id = ?
+    `).bind('2020-01-01T00:00:00.000Z', JOB).run();
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'status', status: 'paused' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(
+      testEnv, new Date(now.getTime() + 119_000), platform.accessor,
+    )).toMatchObject({ inspected: 0, resumed: 0 });
+    expect(platform.calls).toEqual([]);
+  });
+
+  it('selects a recovery claim at 121 seconds from its exact open fence clock', async () => {
+    const { instanceId } = await seedJob(access, {
+      dispatchState: 'resuming', dispatchGeneration: 2, fenceGeneration: 2,
+      status: 'normalizing', claimedAt: now,
+    });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_jobs SET updated_at = ? WHERE id = ?
+    `).bind('2040-01-01T00:00:00.000Z', JOB).run();
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'status', status: 'paused' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(
+      testEnv, new Date(now.getTime() + 121_000), platform.accessor,
+    )).toMatchObject({ inspected: 1, resumed: 1 });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
+  });
+
   it('confirms a stale recovery claim whose instance is in fact running', async () => {
     const { instanceId } = await seedJob(access, {
       dispatchState: 'restarting', dispatchGeneration: 2, fenceGeneration: 2,
@@ -2060,18 +2319,75 @@ describe('platform reconciliation and the guarded restart edge', () => {
     expect(await currentJob()).toMatchObject({ status: 'failed', retryable: 1 });
   });
 
+  it('leaves a recovery byte-identical when twenty-five other live jobs fill capacity', async () => {
+    const { instanceId } = await inFlight({ status: 'normalizing' });
+    await seedOtherLiveBackfillJobs(MAX_COVER_BACKFILL_IN_FLIGHT);
+    const beforeJob = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    const beforeFence = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    );
+    const beforeRun = await row<Record<string, unknown>>(
+      'SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN,
+    );
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'status', status: 'paused' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, resumed: 0, restarted: 0, recreated: 0, unchanged: 1,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`]);
+    expect(await row('SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB)).toEqual(beforeJob);
+    expect(await row(
+      'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
+    )).toEqual(beforeFence);
+    expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN)).toEqual(beforeRun);
+  });
+
+  it('allows a capacity-neutral recovery beside twenty-four other live jobs', async () => {
+    const { instanceId } = await inFlight({ status: 'normalizing' });
+    await seedOtherLiveBackfillJobs(MAX_COVER_BACKFILL_IN_FLIGHT - 1);
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'status', status: 'paused' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, resumed: 1, restarted: 0, recreated: 0, unchanged: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `resume:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'normalizing', dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
+  });
+
   it('leaves a refused restart recoverable rather than terminal', async () => {
     const { instanceId } = await inFlight();
     const platform = scriptedBackfillAccessor(
       { [instanceId]: { kind: 'status', status: 'errored' } }, { restart: true },
     );
 
-    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+    const callerNow = new Date('2040-01-01T00:00:00.000Z');
+
+    expect(await reconcileCoverBackfillJobs(testEnv, callerNow, platform.accessor))
       .toMatchObject({ inspected: 1, failuresRecorded: 1, restarted: 0 });
     // The claim stands, so the next pass finds it as a stale recovery claim.
     expect(await currentJob()).toMatchObject({
       status: 'queued', dispatch_state: 'restarting', dispatch_generation: 2,
     });
+    const claimClocks = await row<{ job_updated_at: string; fence_updated_at: string }>(`
+      SELECT j.updated_at AS job_updated_at, f.updated_at AS fence_updated_at
+      FROM event_cover_backfill_jobs j
+      JOIN event_cover_workflow_fences f
+        ON f.workflow_instance_id = j.workflow_instance_id AND f.event_id = j.event_id
+      WHERE j.id = ?
+    `, JOB);
+    expect(claimClocks.job_updated_at).not.toBe(callerNow.toISOString());
+    expect(claimClocks.fence_updated_at).not.toBe(callerNow.toISOString());
+    expect(Math.abs(
+      Date.parse(claimClocks.job_updated_at) - Date.parse(claimClocks.fence_updated_at),
+    )).toBeLessThan(1_000);
   });
 });
 
