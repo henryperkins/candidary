@@ -493,7 +493,11 @@ describe('publication acceptance', () => {
       request: { operationId: OPERATION, expectedRevision: 0, source: { kind: 'none' } },
       requestDigest: OTHER_HEX,
       now,
-    })).rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
+    })).rejects.toMatchObject({
+      code: 'COVER_PUBLICATION_CONFLICT',
+      message: 'This event has as much cover history as it can hold. Try again after the next daily cleanup.',
+      status: 409,
+    });
 
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM event_cover_publish_receipts WHERE event_id = ?
