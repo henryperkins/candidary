@@ -15,6 +15,7 @@ import { STALE_DISPATCH_CLAIM_MS } from '../services/event-cover-publication';
 import {
   BACKFILL_RESTART_WINDOW_MS,
   COVER_BACKFILL_BINDING,
+  closeCoverBackfillRuns,
   reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
   resolveSupersededBackfillJobsBounded,
@@ -519,12 +520,13 @@ export async function cleanupEventCovers(
   `).bind(timestamp, limit).run();
   summary.backfillJobsReleased = note(released.meta.changes);
 
-  await env.DB.batch([
+  const expiredBackfillLedger = await env.DB.batch([
     env.DB.prepare(`
       DELETE FROM event_cover_backfill_jobs
       WHERE rowid IN (
         SELECT rowid FROM event_cover_backfill_jobs
         WHERE expires_at IS NOT NULL AND expires_at <= ?1
+          AND status IN ('applied', 'skipped', 'resolved', 'failed')
           AND master_id IS NULL AND render_set_id IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM event_cover_workflow_fences f
@@ -532,17 +534,27 @@ export async function cleanupEventCovers(
               AND f.event_id = event_cover_backfill_jobs.event_id
               AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id
           )
-        ORDER BY expires_at LIMIT ?2
+        ORDER BY expires_at, id LIMIT ?2
       )
     `).bind(timestamp, limit),
     env.DB.prepare(`
       DELETE FROM event_cover_backfill_runs
-      WHERE expires_at IS NOT NULL AND expires_at <= ?
-        AND NOT EXISTS (
-          SELECT 1 FROM event_cover_backfill_jobs j WHERE j.run_id = event_cover_backfill_runs.id
-        )
-    `).bind(timestamp),
+      WHERE rowid IN (
+        SELECT rowid FROM event_cover_backfill_runs
+        WHERE status IN ('verified', 'failed')
+          AND expires_at IS NOT NULL AND expires_at <= ?1
+          AND NOT EXISTS (
+            SELECT 1 FROM event_cover_backfill_jobs j
+            WHERE j.run_id = event_cover_backfill_runs.id
+          )
+        ORDER BY expires_at, id LIMIT ?2
+      )
+    `).bind(timestamp, limit),
   ]);
+  // Jobs and runs are independent bounded classes even though the second sees
+  // the first statement's committed deletions in the same atomic batch.
+  note(expiredBackfillLedger[0]?.meta.changes ?? 0);
+  note(expiredBackfillLedger[1]?.meta.changes ?? 0);
 
   // 5. Persisted budgets age out on their own recorded expiry. Dispatch fences
   // were handled before their owner rows so terminal proof could not be lost.
@@ -1308,6 +1320,7 @@ async function purgeEventRelationalRows(
     env.DB.prepare(`
       DELETE FROM event_cover_backfill_runs
       WHERE id IN (SELECT value FROM json_each(?))
+        AND status IN ('verified', 'failed')
         AND expires_at IS NOT NULL AND expires_at <= ?
         AND NOT EXISTS (
           SELECT 1 FROM event_cover_backfill_jobs j WHERE j.run_id = event_cover_backfill_runs.id
@@ -1335,6 +1348,23 @@ export async function deleteEventData(
   return reconcileEventCoverPurge(env, eventId, now);
 }
 
+/** The final bounded cover phase, extracted so its ordering is directly testable. */
+export async function resumeDeletedEventPurges(
+  env: AppEnv,
+  now = new Date(),
+): Promise<number> {
+  // Least-recently-attempted first. A stalled purge must rotate behind events
+  // that have never had a chance to start, and the ID is the stable tie-break.
+  const purged = await env.DB.prepare(`
+    SELECT e.id FROM events e
+    LEFT JOIN event_cover_purge_progress p ON p.event_id = e.id
+    WHERE e.deleted_at IS NOT NULL OR e.purge_after <= ?
+    ORDER BY COALESCE(p.updated_at, ''), e.id LIMIT 100
+  `).bind(now.toISOString()).all<{ id: string }>();
+  for (const event of purged.results) await deleteEventData(env, event.id, now);
+  return purged.results.length;
+}
+
 export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {
   await cleanupAuthScratch(env, now);
   await cleanupRsvpScratch(env, now);
@@ -1358,6 +1388,10 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // going away must be settled by the coordinator that owns the fence rather
   // than resumed or restarted into a prefix that is about to be swept.
   await reconcileCoverBackfillJobs(env, now);
+  // A run closes only after every recovery/reconciliation edge has had this
+  // pass, and the proof is re-derived inside the status-changing statement.
+  // Saturation is scheduling information; cover cleanup and purge still run.
+  await closeCoverBackfillRuns(env, now);
   // Before the purge, not after: an event whose retention is due may own cover
   // rows this sweep is the only thing that removes, and a purge that ran first
   // would meet them as foreign-key failures instead of finding them already
@@ -1372,18 +1406,5 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // failed is retried here until it succeeds, rather than being left behind with
   // objects no later pass would look for.
   //
-  // Least-recently-attempted first, and that ordering is load-bearing rather
-  // than tidiness. A purge can now legitimately return unfinished — an
-  // unresolved fence parks it in the `fences` phase — and an unordered
-  // `LIMIT 100` would hand every future pass the same hundred stalled rows, so
-  // an event deleted today would never be selected at all. An event that has
-  // never been attempted has no progress row and sorts first; one the last pass
-  // already worked on sorts behind it.
-  const purged = await env.DB.prepare(`
-    SELECT e.id FROM events e
-    LEFT JOIN event_cover_purge_progress p ON p.event_id = e.id
-    WHERE e.deleted_at IS NOT NULL OR e.purge_after <= ?
-    ORDER BY COALESCE(p.updated_at, '') , e.id LIMIT 100
-  `).bind(now.toISOString()).all<{ id: string }>();
-  for (const event of purged.results) await deleteEventData(env, event.id, now);
+  await resumeDeletedEventPurges(env, now);
 }

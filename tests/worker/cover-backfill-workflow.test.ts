@@ -17,7 +17,9 @@ import {
   coverBackfillNormalize,
   coverBackfillPreflight,
   coverBackfillProfileStep,
+  closeCoverBackfillRuns,
   proveZeroLegacyCovers,
+  recordZeroLegacyVerification,
   reconcileCoverBackfillJobs,
   recoverStaleInitialBackfillDispatches,
   resolveSupersededBackfillJobsBounded,
@@ -2600,6 +2602,58 @@ describe('superseded jobs and the zero-legacy proof', () => {
     expect(proof.proven).toBe(false);
   });
 
+  it('rejects an active set with no manifest digest or with a cross-event object', async () => {
+    const env = backfillEnv();
+    await coverBackfillPreflight(env, payload, now);
+    await coverBackfillNormalize(env, payload, now);
+    await renderEveryProfile(env, payload);
+    await coverBackfillFinalize(testEnv, payload, now);
+    const set = await row<{ id: string; manifest_sha256: string }>(
+      'SELECT id, manifest_sha256 FROM event_cover_render_sets WHERE event_id = ?',
+      access.event.id,
+    );
+
+    await testEnv.DB.prepare('UPDATE event_cover_render_sets SET manifest_sha256 = NULL WHERE id = ?')
+      .bind(set.id).run();
+    expect(await proveZeroLegacyCovers(testEnv)).toMatchObject({
+      incompleteActiveSets: 1, proven: false,
+    });
+
+    await testEnv.DB.prepare('UPDATE event_cover_render_sets SET manifest_sha256 = ? WHERE id = ?')
+      .bind(set.manifest_sha256, set.id).run();
+    const other = await eventAccess('Cross-event object owner');
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_render_objects SET event_id = ?
+      WHERE id = (SELECT id FROM event_cover_render_objects WHERE render_set_id = ? ORDER BY id LIMIT 1)
+    `).bind(other.event.id, set.id).run();
+    expect(await proveZeroLegacyCovers(testEnv)).toMatchObject({
+      incompleteActiveSets: 1, proven: false,
+    });
+  });
+
+  it('requires an uploaded event to point at its active set master and normalized key', async () => {
+    const env = backfillEnv();
+    await coverBackfillPreflight(env, payload, now);
+    await coverBackfillNormalize(env, payload, now);
+    await renderEveryProfile(env, payload);
+    await coverBackfillFinalize(testEnv, payload, now);
+    const event = await row<{ cover_object_key: string }>(
+      'SELECT cover_object_key FROM events WHERE id = ?', access.event.id,
+    );
+
+    await testEnv.DB.prepare('UPDATE events SET cover_object_key = NULL WHERE id = ?')
+      .bind(access.event.id).run();
+    expect(await proveZeroLegacyCovers(testEnv)).toMatchObject({
+      uploadsWithoutActiveSet: 1, proven: false,
+    });
+
+    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
+      .bind(`${event.cover_object_key}.mismatch`, access.event.id).run();
+    expect(await proveZeroLegacyCovers(testEnv)).toMatchObject({
+      uploadsWithoutActiveSet: 1, proven: false,
+    });
+  });
+
   it('uses the master key the backfilled event now points at', async () => {
     const env = backfillEnv();
     await coverBackfillPreflight(env, payload, now);
@@ -2612,5 +2666,332 @@ describe('superseded jobs and the zero-legacy proof', () => {
     );
     expect((await new EventsRepository(testEnv.DB).getById(access.event.id))!.coverObjectKey)
       .toBe(coverMasterKey(access.event.id, master.id));
+  });
+});
+
+describe('atomic zero-legacy run closure', () => {
+  const OLD = '2026-08-01T00:00:00.000Z';
+  const DIGEST = 'a'.repeat(64);
+
+  interface ClosureJob {
+    id: string;
+    eventId: string;
+    status: string;
+    retryable?: 0 | 1;
+    terminalAt?: string | null;
+  }
+
+  async function seedClosureRun(input: {
+    id: string;
+    mode?: 'inventory' | 'execute' | 'verify';
+    status?: 'inventorying' | 'executing' | 'verified' | 'failed';
+    inventorySha256?: string | null;
+    updatedAt?: string;
+    jobs?: readonly ClosureJob[];
+  }) {
+    const mode = input.mode ?? 'verify';
+    const status = input.status ?? 'executing';
+    const updatedAt = input.updatedAt ?? OLD;
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_backfill_runs (
+        id, mode, inventory_sha256, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      input.id,
+      mode,
+      input.inventorySha256 === undefined
+        ? (mode === 'execute' ? DIGEST : null)
+        : input.inventorySha256,
+      status,
+      updatedAt,
+      updatedAt,
+    ).run();
+    for (const [index, job] of (input.jobs ?? []).entries()) {
+      await testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_jobs (
+          id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+          workflow_instance_id, dispatch_state, dispatch_generation, status,
+          dependency_versions_json, retryable, terminal_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?, 'confirmed', 1, ?, '{}', ?, ?, ?, ?)
+      `).bind(
+        job.id, input.id, job.eventId, DIGEST, `closure-${input.id}-${index}`,
+        job.status, job.retryable ?? 0, job.terminalAt ?? null, updatedAt, updatedAt,
+      ).run();
+    }
+  }
+
+  function envBeforeFailedProofWrite(action: () => Promise<void>): AppEnv {
+    let acted = false;
+    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(
+      statement,
+      {
+        get(target, property) {
+          if (property === 'bind') {
+            return (...values: unknown[]) => wrap(target.bind(...values), sql);
+          }
+          if (property === 'run') {
+            return async <T>() => {
+              if (!acted && sql.includes("SET status = 'failed'")) {
+                acted = true;
+                await action();
+              }
+              return target.run<T>();
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      },
+    );
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') return (sql: string) => wrap(target.prepare(sql), sql);
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return { ...testEnv, DB: db };
+  }
+
+  function envAfterClosureSelection(action: () => Promise<void>): AppEnv {
+    let acted = false;
+    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(
+      statement,
+      {
+        get(target, property) {
+          if (property === 'bind') {
+            return (...values: unknown[]) => wrap(target.bind(...values), sql);
+          }
+          if (property === 'all') {
+            return async <T>() => {
+              const result = await target.all<T>();
+              if (!acted && sql.includes('SELECT r.id FROM event_cover_backfill_runs r')) {
+                acted = true;
+                await action();
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      },
+    );
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') return (sql: string) => wrap(target.prepare(sql), sql);
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return { ...testEnv, DB: db };
+  }
+
+  beforeEach(resetDatabase);
+
+  it('verifies from the guarded live proof, stamps expiry atomically, and is idempotent', async () => {
+    await seedClosureRun({ id: 'verify-green' });
+
+    expect(await recordZeroLegacyVerification(testEnv, 'verify-green', now)).toEqual({
+      proof: {
+        legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0,
+        uploadsWithoutActiveSet: 0, proven: true,
+      },
+      transition: 'verified',
+    });
+    const first = await row<{
+      status: string; verified_at: string; updated_at: string; expires_at: string;
+    }>(`SELECT status, verified_at, updated_at, expires_at
+        FROM event_cover_backfill_runs WHERE id = ?`, 'verify-green');
+    expect(first).toEqual({
+      status: 'verified', verified_at: now.toISOString(), updated_at: now.toISOString(),
+      expires_at: '2026-09-04T12:00:00.000Z',
+    });
+
+    expect((await recordZeroLegacyVerification(
+      testEnv, 'verify-green', new Date('2026-08-06T12:00:00.000Z'),
+    )).transition).toBe('unchanged');
+    expect(await row(`SELECT status, verified_at, updated_at, expires_at
+      FROM event_cover_backfill_runs WHERE id = ?`, 'verify-green')).toEqual(first);
+  });
+
+  it('fails a closable run from a guarded red proof, never a stale diagnostic read', async () => {
+    const access = await eventAccess('Atomic red proof');
+    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
+      .bind(legacyKey(access.event.id), access.event.id).run();
+    await seedClosureRun({ id: 'verify-red' });
+
+    expect((await recordZeroLegacyVerification(testEnv, 'verify-red', now)).transition).toBe('failed');
+    expect(await row(`SELECT status, verified_at, updated_at, expires_at
+      FROM event_cover_backfill_runs WHERE id = ?`, 'verify-red')).toEqual({
+      status: 'failed', verified_at: null, updated_at: now.toISOString(),
+      expires_at: '2026-09-04T12:00:00.000Z',
+    });
+
+    await resetDatabase();
+    const raced = await eventAccess('Proof turns green');
+    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
+      .bind(legacyKey(raced.event.id), raced.event.id).run();
+    await seedClosureRun({ id: 'verify-race' });
+    const racingEnv = envBeforeFailedProofWrite(async () => {
+      await testEnv.DB.prepare('UPDATE events SET cover_object_key = NULL WHERE id = ?')
+        .bind(raced.event.id).run();
+    });
+    expect(await recordZeroLegacyVerification(racingEnv, 'verify-race', now)).toMatchObject({
+      proof: { proven: true }, transition: 'unchanged',
+    });
+    expect(await row('SELECT status, expires_at FROM event_cover_backfill_runs WHERE id = ?', 'verify-race'))
+      .toEqual({ status: 'executing', expires_at: null });
+  });
+
+  it('uses the later of closure and the latest job terminal clock for run expiry', async () => {
+    const access = await eventAccess('Future terminal clock');
+    await seedClosureRun({
+      id: 'verify-latest-terminal', mode: 'execute', jobs: [{
+        id: 'latest-terminal-job', eventId: access.event.id, status: 'applied',
+        terminalAt: '2026-08-05T13:00:00.000Z',
+      }],
+    });
+
+    expect((await recordZeroLegacyVerification(testEnv, 'verify-latest-terminal', now)).transition)
+      .toBe('verified');
+    expect(await row('SELECT expires_at FROM event_cover_backfill_runs WHERE id = ?', 'verify-latest-terminal'))
+      .toEqual({ expires_at: '2026-09-04T13:00:00.000Z' });
+  });
+
+  it('allows a retryable failure at the exact 24-hour boundary', async () => {
+    const access = await eventAccess('Restart boundary');
+    await seedClosureRun({
+      id: 'restart-boundary', mode: 'execute', jobs: [{
+        id: 'restart-boundary-job', eventId: access.event.id, status: 'failed', retryable: 1,
+        terminalAt: new Date(now.getTime() - BACKFILL_RESTART_WINDOW_MS).toISOString(),
+      }],
+    });
+    await seedClosureRun({
+      id: 'inside-restart-boundary', mode: 'execute', jobs: [{
+        id: 'inside-restart-boundary-job', eventId: access.event.id,
+        status: 'failed', retryable: 1,
+        terminalAt: new Date(now.getTime() - BACKFILL_RESTART_WINDOW_MS + 1).toISOString(),
+      }],
+    });
+
+    expect(await closeCoverBackfillRuns(testEnv, now)).toMatchObject({
+      closedVerifiedRuns: 1, closedFailedRuns: 0, expiredRunsStamped: 1,
+    });
+    expect(await row('SELECT status FROM event_cover_backfill_runs WHERE id = ?', 'restart-boundary'))
+      .toEqual({ status: 'verified' });
+    expect(await row('SELECT status FROM event_cover_backfill_runs WHERE id = ?', 'inside-restart-boundary'))
+      .toEqual({ status: 'executing' });
+  });
+
+  it('refuses every incomplete or restartable run shape without stamping expiry', async () => {
+    const access = await eventAccess('Closure blockers');
+    const key = legacyKey(access.event.id);
+    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
+      .bind(key, access.event.id).run();
+    await seedClosureRun({ id: 'inventorying', mode: 'inventory', status: 'inventorying' });
+    await seedClosureRun({ id: 'execute-no-inventory', mode: 'execute', inventorySha256: null });
+    await seedClosureRun({ id: 'nonterminal', mode: 'execute', jobs: [{
+      id: 'nonterminal-job', eventId: access.event.id, status: 'queued',
+    }] });
+    await seedClosureRun({ id: 'replacement', mode: 'execute', jobs: [{
+      id: 'replacement-job', eventId: access.event.id, status: 'needs_replacement',
+      terminalAt: '2026-08-05T11:00:00.000Z',
+    }] });
+    await seedClosureRun({ id: 'retryable', mode: 'execute', jobs: [{
+      id: 'retryable-job', eventId: access.event.id, status: 'failed', retryable: 1,
+      terminalAt: '2026-08-05T11:00:00.000Z',
+    }] });
+    await seedClosureRun({ id: 'terminal-without-clock', mode: 'execute', jobs: [{
+      id: 'clockless-job', eventId: access.event.id, status: 'applied', terminalAt: null,
+    }] });
+
+    expect(await closeCoverBackfillRuns(testEnv, now)).toEqual({
+      inspectedJobs: 0, resolvedJobs: 0, closedVerifiedRuns: 0, closedFailedRuns: 0,
+      expiredRunsStamped: 0, remainder: false,
+    });
+    expect((await testEnv.DB.prepare(`
+      SELECT id, status, expires_at FROM event_cover_backfill_runs ORDER BY id
+    `).all()).results).toEqual([
+      { id: 'execute-no-inventory', status: 'executing', expires_at: null },
+      { id: 'inventorying', status: 'inventorying', expires_at: null },
+      { id: 'nonterminal', status: 'executing', expires_at: null },
+      { id: 'replacement', status: 'executing', expires_at: null },
+      { id: 'retryable', status: 'executing', expires_at: null },
+      { id: 'terminal-without-clock', status: 'executing', expires_at: null },
+    ]);
+  });
+
+  it('closes only the globally oldest 100 runs and requires a confirming pass', async () => {
+    const statements = Array.from({ length: 101 }, (_unused, index) => testEnv.DB.prepare(`
+      INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+      VALUES (?, 'verify', 'executing', ?, ?)
+    `).bind(
+      `bounded-${index.toString().padStart(3, '0')}`,
+      OLD,
+      OLD,
+    ));
+    for (let offset = 0; offset < statements.length; offset += 100) {
+      await testEnv.DB.batch(statements.slice(offset, offset + 100));
+    }
+
+    expect(await closeCoverBackfillRuns(testEnv, now)).toEqual({
+      inspectedJobs: 0, resolvedJobs: 0, closedVerifiedRuns: 100, closedFailedRuns: 0,
+      expiredRunsStamped: 100, remainder: true,
+    });
+    expect(await row('SELECT status FROM event_cover_backfill_runs WHERE id = ?', 'bounded-100'))
+      .toEqual({ status: 'executing' });
+    expect(await closeCoverBackfillRuns(testEnv, now)).toEqual({
+      inspectedJobs: 0, resolvedJobs: 0, closedVerifiedRuns: 1, closedFailedRuns: 0,
+      expiredRunsStamped: 1, remainder: false,
+    });
+    expect(await closeCoverBackfillRuns(testEnv, now)).toEqual({
+      inspectedJobs: 0, resolvedJobs: 0, closedVerifiedRuns: 0, closedFailedRuns: 0,
+      expiredRunsStamped: 0, remainder: false,
+    });
+  });
+
+  it('filters blockers before the bound so 100 older incomplete runs cannot starve a closer', async () => {
+    const access = await eventAccess('Blocked closure queue');
+    for (let index = 0; index < 100; index += 1) {
+      await seedClosureRun({
+        id: `blocked-${index.toString().padStart(3, '0')}`,
+        mode: 'execute',
+        updatedAt: OLD,
+        jobs: [{
+          id: `blocked-job-${index.toString().padStart(3, '0')}`,
+          eventId: access.event.id,
+          status: 'queued',
+        }],
+      });
+    }
+    await seedClosureRun({
+      id: 'newer-closable', mode: 'verify', updatedAt: '2026-08-02T00:00:00.000Z',
+    });
+
+    expect(await closeCoverBackfillRuns(testEnv, now)).toMatchObject({
+      closedVerifiedRuns: 1, closedFailedRuns: 0, expiredRunsStamped: 1, remainder: false,
+    });
+    expect(await row('SELECT status FROM event_cover_backfill_runs WHERE id = ?', 'newer-closable'))
+      .toEqual({ status: 'verified' });
+    expect(await row<{ count: number }>(`
+      SELECT count(*) AS count FROM event_cover_backfill_runs WHERE status = 'executing'
+    `)).toEqual({ count: 100 });
+  });
+
+  it('reports a conservative remainder when a selected run loses its closure CAS', async () => {
+    await seedClosureRun({ id: 'closure-cas', mode: 'verify' });
+    const racingEnv = envAfterClosureSelection(async () => {
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_runs SET status = 'failed' WHERE id = ?
+      `).bind('closure-cas').run();
+    });
+
+    expect(await closeCoverBackfillRuns(racingEnv, now)).toEqual({
+      inspectedJobs: 0, resolvedJobs: 0, closedVerifiedRuns: 0, closedFailedRuns: 0,
+      expiredRunsStamped: 0, remainder: true,
+    });
+    expect(await row('SELECT status, expires_at FROM event_cover_backfill_runs WHERE id = ?', 'closure-cas'))
+      .toEqual({ status: 'failed', expires_at: null });
   });
 });

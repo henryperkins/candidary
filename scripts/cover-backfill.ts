@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import type * as ConstantsModule from '../shared/constants';
 import type * as CoverDispatchModule from '../shared/cover-dispatch';
+import type * as CoverBackfillProofModule from '../shared/cover-backfill-proof';
 
 /**
  * The legacy-cover backfill launcher: inventory, execute, dispatch, launch,
@@ -47,6 +48,8 @@ const constants = await import(constantsModulePath) as typeof ConstantsModule;
  */
 const coverDispatchModulePath = '../shared/cover-dispatch.ts';
 const dispatch = await import(coverDispatchModulePath) as typeof CoverDispatchModule;
+const coverBackfillProofModulePath = '../shared/cover-backfill-proof.ts';
+const proof = await import(coverBackfillProofModulePath) as typeof CoverBackfillProofModule;
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /**
@@ -203,7 +206,10 @@ export interface BackfillRunPlan {
   /** True when a resumed page came back empty: the durable end-of-inventory marker. */
   inventoryExhausted: boolean;
   jobs: PlannedJob[];
-  /** Read-only when the plan is a dry run; the caller decides whether to apply. */
+  /**
+   * One ordered `wrangler d1 execute --file` unit. D1 rolls the file back on a
+   * failed execution; explicit BEGIN/COMMIT statements are not D1-compatible.
+   */
   statements: string[];
 }
 
@@ -309,21 +315,7 @@ export function inventorySql(cursor: string | null): string {
 
 /** The four independent counts the zero-legacy proof is made of. */
 export function proofSql(): string {
-  return [
-    "SELECT 'legacyRows' AS name, count(*) AS value FROM events",
-    ' WHERE cover_object_key IS NOT NULL AND cover_render_set_id IS NULL AND deleted_at IS NULL',
-    " UNION ALL SELECT 'blockingJobs', count(*) FROM event_cover_backfill_jobs j",
-    ' JOIN events e ON e.id = j.event_id',
-    " WHERE j.status IN ('needs_replacement', 'failed') AND e.deleted_at IS NULL",
-    ' AND e.cover_object_key IS NOT NULL AND e.cover_render_set_id IS NULL',
-    " UNION ALL SELECT 'incompleteActiveSets', count(*) FROM event_cover_render_sets s",
-    " WHERE s.state = 'active' AND s.required_slots <> (",
-    '   SELECT count(*) FROM event_cover_render_objects o WHERE o.render_set_id = s.id)',
-    " UNION ALL SELECT 'uploadsWithoutActiveSet', count(*) FROM events e",
-    " WHERE e.deleted_at IS NULL AND json_extract(e.cover_config, '$.source.kind') = 'upload'",
-    ' AND NOT EXISTS (SELECT 1 FROM event_cover_render_sets s',
-    "   WHERE s.id = e.cover_render_set_id AND s.event_id = e.id AND s.state = 'active');",
-  ].join('');
+  return `${proof.zeroLegacyProofRowsSql()};`;
 }
 
 /** The job-status counts a run reports, kept for operator display. */
@@ -980,20 +972,46 @@ export function buildBackfillRunPlan(input: {
   const run = sqlString(input.runId);
   const statements: string[] = [];
 
-  // A resumed page that comes back empty is the durable end-of-inventory
-  // marker, and the only one. It must not rewrite the cursor: doing that is
-  // what made the next pass restart from the first event and re-propose a job
-  // for every row already committed.
-  if (state && input.rows.length === 0) {
+  // An empty page is the durable end-of-inventory marker, and the only one. A
+  // new empty run first saves its null cursor and digest; a resumed run keeps
+  // the cursor it already saved. The handoff then compares that exact saved
+  // cursor/digest and recounts in the same D1 --file unit.
+  if (input.rows.length === 0) {
+    const cursor = state?.cursor ?? null;
+    const inventorySha256 = state?.inventorySha256 ?? inventoryDigest(input.rows);
+    if (!state) {
+      statements.push(
+        'INSERT INTO event_cover_backfill_runs (id, mode, cursor, inventory_sha256, status, created_at, updated_at)'
+        + ` VALUES (${run}, 'inventory', NULL, ${sqlString(inventorySha256)},`
+        + ` 'inventorying', ${now}, ${now});`,
+      );
+    }
+    const cursorGuard = cursor === null
+      ? 'cursor IS NULL'
+      : `cursor = ${sqlString(cursor)}`;
+    const digestGuard = state?.inventorySha256 === null
+      ? 'inventory_sha256 IS NULL'
+      : `inventory_sha256 = ${sqlString(inventorySha256)}`;
     statements.push(
       'UPDATE event_cover_backfill_runs'
-      + ` SET mode = 'execute', status = 'executing', updated_at = ${now}`
-      + ` WHERE id = ${run} AND status = 'inventorying' AND mode = 'inventory';`,
+      + " SET mode = 'execute', status = 'executing',"
+      + ` total_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run}),`
+      + ` queued_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run}`
+      + "   AND status IN ('queued', 'normalizing', 'rendering', 'finalizing')) ,"
+      + ` applied_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'applied'),`
+      + ` skipped_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'skipped'),`
+      + ` resolved_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'resolved'),`
+      + ` failed_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'failed'),`
+      + ` needs_replacement_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run}`
+      + "   AND status = 'needs_replacement'),"
+      + ` updated_at = ${now}`
+      + ` WHERE id = ${run} AND status = 'inventorying' AND mode = 'inventory'`
+      + ` AND ${cursorGuard} AND ${digestGuard};`,
     );
     return {
       runId: input.runId,
-      cursor: state.cursor,
-      inventorySha256: state.inventorySha256,
+      cursor,
+      inventorySha256,
       inventoryExhausted: true,
       jobs: [],
       statements,
@@ -1056,10 +1074,35 @@ export function buildBackfillRunPlan(input: {
       + ' WHERE EXISTS (SELECT 1 FROM events WHERE id = ' + sqlString(job.eventId)
       + ' AND deleted_at IS NULL AND cover_object_key IS NOT NULL AND cover_render_set_id IS NULL'
       + ` AND cover_revision = ${job.expectedRevision})`
+      // The cursor/digest write and its job inserts are one page. A saved page
+      // replayed after inventory exhaustion or closure must not append work to a
+      // run whose proof has already been recorded.
+      + ' AND EXISTS (SELECT 1 FROM event_cover_backfill_runs r'
+      + ` WHERE r.id = ${run} AND r.mode = 'inventory' AND r.status = 'inventorying'`
+      + ` AND r.cursor = ${sqlString(cursor!)} AND r.inventory_sha256 = ${sqlString(inventorySha256)})`
       + ' AND NOT EXISTS (SELECT 1 FROM event_cover_backfill_jobs'
       + ` WHERE run_id = ${run} AND event_id = ${sqlString(job.eventId)});`,
     );
   }
+
+  // The page header, every guarded job, and this literal recount are applied as
+  // one D1 --file unit. Exact post-page cursor/digest guards make a lost header
+  // refuse both the jobs and the counters; an accepted replay may only recount.
+  statements.push(
+    'UPDATE event_cover_backfill_runs SET'
+    + ` total_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run}),`
+    + ` queued_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run}`
+    + "   AND status IN ('queued', 'normalizing', 'rendering', 'finalizing')) ,"
+    + ` applied_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'applied'),`
+    + ` skipped_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'skipped'),`
+    + ` resolved_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'resolved'),`
+    + ` failed_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run} AND status = 'failed'),`
+    + ` needs_replacement_count = (SELECT count(*) FROM event_cover_backfill_jobs WHERE run_id = ${run}`
+    + "   AND status = 'needs_replacement'),"
+    + ` updated_at = ${now}`
+    + ` WHERE id = ${run} AND mode = 'inventory' AND status = 'inventorying'`
+    + ` AND cursor = ${sqlString(cursor!)} AND inventory_sha256 = ${sqlString(inventorySha256)};`,
+  );
 
   return { runId: input.runId, cursor, inventorySha256, inventoryExhausted: false, jobs, statements };
 }
@@ -1429,18 +1472,44 @@ export interface ZeroLegacyEvaluation {
  * otherwise read as four zeroes and authorize phase 3 on no evidence at all.
  */
 export function evaluateZeroLegacyProof(payload: unknown): ZeroLegacyEvaluation {
-  const counts = parseCountPayload(payload);
-  const required = [
-    'legacyRows',
-    'blockingJobs',
-    'incompleteActiveSets',
-    'uploadsWithoutActiveSet',
-  ] as const;
+  const counts: Record<string, number> = {};
   const issues: string[] = [];
-  for (const name of required) {
+  let sets: unknown[][];
+  try {
+    sets = resultSets(payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'The proof payload is malformed.';
+    return { counts, issues: [message], proven: false };
+  }
+  if (sets.length !== 1) {
+    issues.push(`The proof payload has ${sets.length} result sets; it must have exactly one.`);
+  }
+  const occurrences = new Map<string, number>();
+  for (const [index, value] of (sets[0] ?? []).entries()) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      issues.push(`Proof row ${index} is not an object.`);
+      continue;
+    }
+    const entry = value as Record<string, unknown>;
+    const name = entry['name'];
+    const count = entry['value'];
+    if (typeof name !== 'string' || !(proof.ZERO_LEGACY_PROOF_NAMES as readonly string[]).includes(name)) {
+      issues.push(`Proof row ${index} has an unknown name.`);
+      continue;
+    }
+    occurrences.set(name, (occurrences.get(name) ?? 0) + 1);
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+      issues.push(`${name} is not a non-negative integer.`);
+      continue;
+    }
+    if (!(name in counts)) counts[name] = count;
+  }
+  for (const name of proof.ZERO_LEGACY_PROOF_NAMES) {
+    const occurrence = occurrences.get(name) ?? 0;
+    if (occurrence === 0) issues.push(`${name} is missing from the proof payload.`);
+    else if (occurrence !== 1) issues.push(`${name} appears ${occurrence} times in the proof payload.`);
     const value = counts[name];
-    if (value === undefined) issues.push(`${name} is missing from the proof payload.`);
-    else if (value !== 0) issues.push(`${name} is ${value}.`);
+    if (occurrence === 1 && value !== undefined && value !== 0) issues.push(`${name} is ${value}.`);
   }
   return { counts, issues, proven: issues.length === 0 };
 }

@@ -21,6 +21,10 @@ import {
   blockCoverBackfillDispatchSql,
   confirmCoverBackfillDispatchSql,
 } from '../../shared/cover-dispatch';
+import {
+  ZERO_LEGACY_PROOF_NAMES,
+  zeroLegacyProofRowsSql,
+} from '../../shared/cover-backfill-proof';
 import { COVER_PIPELINE_VERSIONS } from '../../shared/event-cover';
 import {
   COVER_BACKFILL_BINDING,
@@ -173,7 +177,7 @@ const row = (id: string, key: string, revision = 0): InventoryRow => ({
   cover_revision: revision,
 });
 
-const envelope = (rows: unknown[]) => [{ results: rows, success: true }];
+const envelope = (rows: readonly unknown[]) => [{ results: rows, success: true }];
 const envelopes = (...sets: unknown[][]) => sets.map((rows) => ({ results: rows, success: true }));
 
 const dispatchRow = (index: number, overrides: Partial<DurableDispatchRow> = {}): DurableDispatchRow => ({
@@ -500,10 +504,124 @@ describe('the run plan', () => {
     expect(insert).toContain("'queued'");
     expect(insert).toContain("'pending'");
     expect(insert).toContain(JSON.stringify(COVER_BACKFILL_DEPENDENCY_VERSIONS));
+    expect(insert).toContain("r.mode = 'inventory'");
+    expect(insert).toContain("r.status = 'inventorying'");
+  });
+
+  it('cannot apply a saved inventory page after its run has closed', () => {
+    const database = migratedDatabase();
+    database.prepare(`
+      INSERT INTO events (
+        id, slug, name, event_date, welcome_message, cover_object_key,
+        guest_access_expires_at, management_access_expires_at, purge_after, created_at
+      ) VALUES (?, 'saved-page', 'Saved page', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+    `).run(EVENT, 'events/a/cover/one', NOW, NOW, NOW, NOW);
+    database.prepare(`
+      INSERT INTO event_cover_backfill_runs (
+        id, mode, cursor, inventory_sha256, status, created_at, updated_at
+      ) VALUES (?, 'inventory', NULL, NULL, 'inventorying', ?, ?)
+    `).run(RUN, NOW, NOW);
+    const saved = buildBackfillRunPlan({
+      runId: RUN,
+      rows: [row(EVENT, 'events/a/cover/one')],
+      now: NOW,
+      runState: runState({ cursor: null, inventorySha256: null }),
+      makeJobId: () => JOB,
+    });
+
+    database.exec(saved.statements[0]!);
+    database.prepare(`
+      UPDATE event_cover_backfill_runs
+      SET mode = 'verify', status = 'verified', total_count = 7, queued_count = 7
+      WHERE id = ?
+    `).run(RUN);
+    database.exec(saved.statements.slice(1).join('\n'));
+
+    expect(database.prepare(
+      'SELECT count(*) AS count FROM event_cover_backfill_jobs WHERE run_id = ?',
+    ).get(RUN)).toEqual({ count: 0 });
+    expect(database.prepare(`
+      SELECT total_count, queued_count FROM event_cover_backfill_runs WHERE id = ?
+    `).get(RUN)).toEqual({ total_count: 7, queued_count: 7 });
+    database.close();
+  });
+
+  it('refreshes literal run counters after every accepted inventory page', () => {
+    const database = migratedDatabase();
+    try {
+      for (const [id, slug, key, revision] of [
+        [EVENT, 'counter-a', 'events/a/cover/one', 3],
+        [OTHER_EVENT, 'counter-b', 'events/b/cover/two', 0],
+      ] as const) {
+        database.prepare(`
+          INSERT INTO events (
+            id, slug, name, event_date, welcome_message, cover_object_key,
+            cover_revision, guest_access_expires_at, management_access_expires_at,
+            purge_after, created_at
+          ) VALUES (?, ?, 'Counter', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?, ?)
+        `).run(id, slug, key, revision, NOW, NOW, NOW, NOW);
+      }
+      const saved = plan(true);
+      database.exec(saved.statements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT total_count, queued_count, applied_count, failed_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        total_count: 2, queued_count: 2, applied_count: 0, failed_count: 0,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('lets a lost page-header guard change neither jobs nor counters', () => {
+    const database = migratedDatabase();
+    try {
+      database.prepare(`
+        INSERT INTO events (
+          id, slug, name, event_date, welcome_message, cover_object_key,
+          guest_access_expires_at, management_access_expires_at, purge_after, created_at
+        ) VALUES (?, 'lost-header', 'Lost header', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+      `).run(EVENT, 'events/a/cover/one', NOW, NOW, NOW, NOW);
+      database.prepare(`
+        INSERT INTO event_cover_backfill_runs (
+          id, mode, cursor, inventory_sha256, total_count, queued_count,
+          status, created_at, updated_at
+        ) VALUES (?, 'inventory', ?, ?, 7, 7, 'inventorying', ?, ?)
+      `).run(RUN, OTHER_EVENT, 'f'.repeat(64), NOW, NOW);
+      const stale = buildBackfillRunPlan({
+        runId: RUN,
+        rows: [row(EVENT, 'events/a/cover/one')],
+        now: NOW,
+        runState: runState({ cursor: null, inventorySha256: null }),
+        makeJobId: () => JOB,
+      });
+
+      database.exec(stale.statements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT cursor, inventory_sha256, total_count, queued_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        cursor: OTHER_EVENT, inventory_sha256: 'f'.repeat(64), total_count: 7, queued_count: 7,
+      });
+      expect(database.prepare(`
+        SELECT count(*) AS count FROM event_cover_backfill_jobs WHERE run_id = ?
+      `).get(RUN)).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
   });
 
   it('has a null cursor for an empty page and refuses an oversized one', () => {
-    expect(buildBackfillRunPlan({ runId: RUN, rows: [], now: NOW, runState: null }).cursor).toBeNull();
+    const empty = buildBackfillRunPlan({ runId: RUN, rows: [], now: NOW, runState: null });
+    expect(empty.cursor).toBeNull();
+    expect(empty.inventorySha256).toBe(inventoryDigest([]));
+    expect(empty.inventoryExhausted).toBe(true);
+    expect(empty.statements).toHaveLength(2);
+    expect(empty.statements[1]).toContain('cursor IS NULL');
+    expect(empty.statements[1]).toContain(`inventory_sha256 = '${inventoryDigest([])}'`);
     expect(() => buildBackfillRunPlan({
       runId: RUN,
       rows: Array.from({ length: MAX_COVER_BACKFILL_PAGE_SIZE + 1 }, () => row(EVENT, 'k')),
@@ -531,7 +649,9 @@ describe('the run plan', () => {
     expect(resumed.cursor).toBe(OTHER_EVENT);
     expect(resumed.inventorySha256).toBe('c'.repeat(64));
     expect(resumed.statements).toHaveLength(1);
-    expect(resumed.statements[0]).not.toContain('cursor =');
+    expect(resumed.statements[0]).not.toContain('SET cursor =');
+    expect(resumed.statements[0]).toContain(`AND cursor = '${OTHER_EVENT}'`);
+    expect(resumed.statements[0]).toContain(`inventory_sha256 = '${'c'.repeat(64)}'`);
     expect(resumed.statements[0]).not.toContain('NULL');
   });
 
@@ -548,6 +668,80 @@ describe('the run plan', () => {
     expect(resumed.statements[0]).toContain("status = 'executing'");
     expect(resumed.statements[0]).toContain("status = 'inventorying'");
     expect(resumed.jobs).toEqual([]);
+  });
+
+  it('recomputes counters in the exact empty-page inventory handoff', () => {
+    const database = migratedDatabase();
+    try {
+      for (const [id, slug] of [[EVENT, 'handoff-a'], [OTHER_EVENT, 'handoff-b']] as const) {
+        database.prepare(`
+          INSERT INTO events (
+            id, slug, name, event_date, welcome_message,
+            guest_access_expires_at, management_access_expires_at, purge_after, created_at
+          ) VALUES (?, ?, 'Handoff', '2026-08-08', 'Welcome', ?, ?, ?, ?)
+        `).run(id, slug, NOW, NOW, NOW, NOW);
+      }
+      database.prepare(`
+        INSERT INTO event_cover_backfill_runs (
+          id, mode, cursor, inventory_sha256, status, created_at, updated_at
+        ) VALUES (?, 'inventory', ?, ?, 'inventorying', ?, ?)
+      `).run(RUN, OTHER_EVENT, 'd'.repeat(64), NOW, NOW);
+      const insertJob = database.prepare(`
+        INSERT INTO event_cover_backfill_jobs (
+          id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+          workflow_instance_id, dispatch_state, dispatch_generation, status,
+          dependency_versions_json, terminal_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?, 'confirmed', 1, ?, '{}', ?, ?, ?)
+      `);
+      insertJob.run(JOB, RUN, EVENT, 'a'.repeat(64), `cb1-${'1'.repeat(48)}`, 'queued', null, NOW, NOW);
+      insertJob.run(
+        '55555555-5555-4555-8555-555555555555', RUN, OTHER_EVENT, 'b'.repeat(64),
+        `cb1-${'2'.repeat(48)}`, 'applied', NOW, NOW, NOW,
+      );
+      const exhausted = buildBackfillRunPlan({
+        runId: RUN, rows: [], now: NOW,
+        runState: runState({ cursor: OTHER_EVENT, inventorySha256: 'd'.repeat(64) }),
+      });
+
+      database.exec(exhausted.statements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT mode, status, total_count, queued_count, applied_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        mode: 'execute', status: 'executing', total_count: 2, queued_count: 1, applied_count: 1,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('refuses a stale empty-page handoff after a newer page advanced the run', () => {
+    const database = migratedDatabase();
+    try {
+      database.prepare(`
+        INSERT INTO event_cover_backfill_runs (
+          id, mode, cursor, inventory_sha256, total_count, queued_count,
+          status, created_at, updated_at
+        ) VALUES (?, 'inventory', ?, ?, 7, 7, 'inventorying', ?, ?)
+      `).run(RUN, OTHER_EVENT, 'f'.repeat(64), NOW, NOW);
+      const staleEmpty = buildBackfillRunPlan({
+        runId: RUN, rows: [], now: NOW,
+        runState: runState({ cursor: EVENT, inventorySha256: 'd'.repeat(64) }),
+      });
+
+      database.exec(staleEmpty.statements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT mode, status, cursor, inventory_sha256, total_count, queued_count
+        FROM event_cover_backfill_runs WHERE id = ?
+      `).get(RUN)).toEqual({
+        mode: 'inventory', status: 'inventorying', cursor: OTHER_EVENT,
+        inventory_sha256: 'f'.repeat(64), total_count: 7, queued_count: 7,
+      });
+    } finally {
+      database.close();
+    }
   });
 
   it('chains the stored digest and refuses to rewind the cursor', () => {
@@ -1559,6 +1753,13 @@ describe('the zero-legacy proof', () => {
     })).proven).toBe(true);
   });
 
+  it('renders the shared canonical proof query exactly once', () => {
+    expect(proofSql()).toBe(`${zeroLegacyProofRowsSql()};`);
+    for (const name of ZERO_LEGACY_PROOF_NAMES) {
+      expect(proofSql().match(new RegExp(`'${name}'`, 'gu'))).toHaveLength(1);
+    }
+  });
+
   it('treats a missing count as an issue rather than a zero', () => {
     const evaluation = evaluateZeroLegacyProof(counts({
       legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0,
@@ -1573,6 +1774,41 @@ describe('the zero-legacy proof', () => {
     }));
     expect(evaluation.proven).toBe(false);
     expect(evaluation.issues).toEqual(['legacyRows is 4.', 'blockingJobs is 1.']);
+  });
+
+  it.each([
+    ['duplicate', [
+      { name: 'legacyRows', value: 0 }, { name: 'legacyRows', value: 0 },
+      { name: 'blockingJobs', value: 0 }, { name: 'incompleteActiveSets', value: 0 },
+      { name: 'uploadsWithoutActiveSet', value: 0 },
+    ]],
+    ['negative', [
+      { name: 'legacyRows', value: -1 }, { name: 'blockingJobs', value: 0 },
+      { name: 'incompleteActiveSets', value: 0 }, { name: 'uploadsWithoutActiveSet', value: 0 },
+    ]],
+    ['noninteger', [
+      { name: 'legacyRows', value: 0.5 }, { name: 'blockingJobs', value: 0 },
+      { name: 'incompleteActiveSets', value: 0 }, { name: 'uploadsWithoutActiveSet', value: 0 },
+    ]],
+    ['unknown', [
+      { name: 'legacyRows', value: 0 }, { name: 'blockingJobs', value: 0 },
+      { name: 'incompleteActiveSets', value: 0 }, { name: 'uploadsWithoutActiveSet', value: 0 },
+      { name: 'surprise', value: 0 },
+    ]],
+  ] as const)('treats a %s proof row as red display evidence', (_name, rows) => {
+    const evaluation = evaluateZeroLegacyProof(envelope(rows));
+    expect(evaluation.proven).toBe(false);
+    expect(evaluation.issues.length).toBeGreaterThan(0);
+  });
+
+  it('rejects more than one result set even when the first is green', () => {
+    const rows = [
+      { name: 'legacyRows', value: 0 }, { name: 'blockingJobs', value: 0 },
+      { name: 'incompleteActiveSets', value: 0 }, { name: 'uploadsWithoutActiveSet', value: 0 },
+    ];
+    expect(evaluateZeroLegacyProof([
+      { results: rows }, { results: [] },
+    ])).toMatchObject({ proven: false });
   });
 });
 
@@ -1609,6 +1845,50 @@ describe('the command line', () => {
     expect(runCli(['verify'], {}, (message) => lines.push(message))).toBe(0);
     expect(lines.join('\n')).toContain('legacyRows');
     expect(lines.join('\n')).not.toContain('INSERT');
+  });
+
+  it('lets a saved green payload open only an executing run while current D1 can turn red', () => {
+    const payloadFile = resolve(process.cwd(), 'output/cover-backfill-green-proof.json');
+    mkdirSync(resolve(process.cwd(), 'output'), { recursive: true });
+    writeFileSync(payloadFile, JSON.stringify(envelope([
+      { name: 'legacyRows', value: 0 },
+      { name: 'blockingJobs', value: 0 },
+      { name: 'incompleteActiveSets', value: 0 },
+      { name: 'uploadsWithoutActiveSet', value: 0 },
+    ])));
+    try {
+      const lines: string[] = [];
+      expect(runCli(
+        ['verify', '--payload-file', 'output/cover-backfill-green-proof.json', '--run-id', RUN, '--now', NOW],
+        { CANDIDARY_COVER_BACKFILL_CONFIRM: '1' },
+        (message) => lines.push(message),
+      )).toBe(0);
+      const output = lines.join('\n');
+      expect(output).toContain("'verify', 'executing'");
+      expect(output).not.toMatch(/UPDATE[\s\S]*status\s*=\s*'verified'/u);
+      expect(output).not.toContain('verified_at');
+
+      const database = migratedDatabase();
+      try {
+        database.exec(verificationRunStatement({ runId: RUN, now: NOW }));
+        database.prepare(`
+          INSERT INTO events (
+            id, slug, name, event_date, welcome_message, cover_object_key,
+            guest_access_expires_at, management_access_expires_at, purge_after, created_at
+          ) VALUES (?, 'proof-race', 'Proof race', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+        `).run(EVENT, 'events/proof-race/cover/legacy.jpg', NOW, NOW, NOW, NOW);
+        expect(database.prepare(zeroLegacyProofRowsSql()).all()).toContainEqual({
+          name: 'legacyRows', value: 1,
+        });
+        expect(database.prepare(`
+          SELECT status, verified_at FROM event_cover_backfill_runs WHERE id = ?
+        `).get(RUN)).toEqual({ status: 'executing', verified_at: null });
+      } finally {
+        database.close();
+      }
+    } finally {
+      rmSync(payloadFile, { force: true });
+    }
   });
 
   it('prints the durable dispatch read before it will plan anything', () => {

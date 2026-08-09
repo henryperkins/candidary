@@ -19,6 +19,14 @@ import {
   type CoverDispatchClaimState,
 } from '../../shared/cover-dispatch';
 import {
+  ZERO_LEGACY_PROOF_NAMES,
+  zeroLegacyProofAllZeroSql,
+  zeroLegacyProofAnyRedSql,
+  zeroLegacyProofRowsSql,
+  type ZeroLegacyProofCounts,
+  type ZeroLegacyProofName,
+} from '../../shared/cover-backfill-proof';
+import {
   COVER_PIPELINE_VERSIONS,
   EVENT_COVER_PROFILES,
   type EventCoverProfileId,
@@ -1793,12 +1801,91 @@ export async function resolveSupersededBackfillJobsBounded(
   };
 }
 
-export interface ZeroLegacyProof {
-  legacyRows: number;
-  blockingJobs: number;
-  incompleteActiveSets: number;
-  uploadsWithoutActiveSet: number;
+export interface ZeroLegacyProof extends ZeroLegacyProofCounts {
   proven: boolean;
+}
+
+const TERMINAL_COVER_BACKFILL_STATUSES = "('applied', 'skipped', 'resolved', 'needs_replacement', 'failed')";
+
+/**
+ * One run-eligibility predicate used by candidate selection and both guarded
+ * closure transitions. Counters are diagnostic; the jobs themselves decide.
+ */
+function closableCoverBackfillRunSql(
+  runAlias: string,
+  restartFloorSql: string,
+): string {
+  return `${runAlias}.status = 'executing'
+    AND (
+      ${runAlias}.mode = 'verify'
+      OR (${runAlias}.mode = 'execute' AND ${runAlias}.inventory_sha256 IS NOT NULL)
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM event_cover_backfill_jobs j
+      WHERE j.run_id = ${runAlias}.id AND (
+        j.status IN ('queued', 'normalizing', 'rendering', 'finalizing')
+        OR (
+          j.status = 'needs_replacement'
+          AND EXISTS (
+            SELECT 1 FROM events e
+            WHERE e.id = j.event_id AND e.deleted_at IS NULL
+              AND e.cover_object_key IS NOT NULL AND e.cover_render_set_id IS NULL
+          )
+        )
+        OR (
+          j.status = 'failed' AND j.retryable = 1
+          AND (j.terminal_at IS NULL OR j.terminal_at > ${restartFloorSql})
+        )
+        OR (j.status IN ${TERMINAL_COVER_BACKFILL_STATUSES} AND j.terminal_at IS NULL)
+      )
+    )`;
+}
+
+/** Run rows have no terminal_at; the closure statement's clock is authoritative. */
+function closedRunExpirySql(runAlias: string, closureClockSql: string): string {
+  return `strftime(
+    '%Y-%m-%dT%H:%M:%fZ',
+    max(
+      ${closureClockSql},
+      coalesce(
+        (SELECT max(j.terminal_at) FROM event_cover_backfill_jobs j
+          WHERE j.run_id = ${runAlias}.id),
+        ${closureClockSql}
+      )
+    ),
+    '+30 days'
+  )`;
+}
+
+function zeroProof(): ZeroLegacyProof {
+  return {
+    legacyRows: 0,
+    blockingJobs: 0,
+    incompleteActiveSets: 0,
+    uploadsWithoutActiveSet: 0,
+    proven: true,
+  };
+}
+
+async function readZeroLegacyProof(env: AppEnv): Promise<ZeroLegacyProof> {
+  const { results } = await env.DB.prepare(zeroLegacyProofRowsSql())
+    .all<{ name: string; value: number }>();
+  const byName = new Map<ZeroLegacyProofName, number>();
+  for (const name of ZERO_LEGACY_PROOF_NAMES) {
+    const matches = results.filter((candidate) => candidate.name === name);
+    const value = matches.length === 1 ? matches[0]!.value : -1;
+    byName.set(name, Number.isInteger(value) && value >= 0 ? value : -1);
+  }
+  const counts: ZeroLegacyProofCounts = {
+    legacyRows: byName.get('legacyRows') ?? -1,
+    blockingJobs: byName.get('blockingJobs') ?? -1,
+    incompleteActiveSets: byName.get('incompleteActiveSets') ?? -1,
+    uploadsWithoutActiveSet: byName.get('uploadsWithoutActiveSet') ?? -1,
+  };
+  return {
+    ...counts,
+    proven: ZERO_LEGACY_PROOF_NAMES.every((name) => counts[name] === 0),
+  };
 }
 
 /**
@@ -1811,50 +1898,81 @@ export interface ZeroLegacyProof {
  * replaced, but it must not be ignorable while that source is still current.
  */
 export async function proveZeroLegacyCovers(env: AppEnv): Promise<ZeroLegacyProof> {
-  const legacy = await env.DB.prepare(`
-    SELECT count(*) AS count FROM events
-    WHERE cover_object_key IS NOT NULL AND cover_render_set_id IS NULL AND deleted_at IS NULL
-  `).first<{ count: number }>();
+  return readZeroLegacyProof(env);
+}
 
-  const blocking = await env.DB.prepare(`
-    SELECT count(*) AS count FROM event_cover_backfill_jobs j
-    JOIN events e ON e.id = j.event_id
-    WHERE j.status IN ('needs_replacement', 'failed')
-      AND e.deleted_at IS NULL
-      AND e.cover_object_key IS NOT NULL
-      AND e.cover_render_set_id IS NULL
-  `).first<{ count: number }>();
+export interface ZeroLegacyVerificationResult {
+  proof: ZeroLegacyProof;
+  transition: 'verified' | 'failed' | 'unchanged';
+}
 
-  const incomplete = await env.DB.prepare(`
-    SELECT count(*) AS count FROM event_cover_render_sets s
-    WHERE s.state = 'active'
-      AND s.required_slots <> (
-        SELECT count(*) FROM event_cover_render_objects o WHERE o.render_set_id = s.id
-      )
-  `).first<{ count: number }>();
+/**
+ * The only authority that records the global proof.
+ *
+ * A displayed count payload never reaches this function. Both outcomes recheck
+ * their proof and run eligibility inside the status-changing SQL statement, so
+ * neither a stale green read nor a stale red diagnostic can close the run.
+ */
+export async function recordZeroLegacyVerification(
+  env: AppEnv,
+  runId: string,
+  now = new Date(),
+): Promise<ZeroLegacyVerificationResult> {
+  const timestamp = now.toISOString();
+  const restartFloor = new Date(now.getTime() - BACKFILL_RESTART_WINDOW_MS).toISOString();
+  const run = 'event_cover_backfill_runs';
+  const verified = await env.DB.prepare(`
+    UPDATE event_cover_backfill_runs
+    SET status = 'verified', verified_at = ?2, updated_at = ?2,
+        expires_at = ${closedRunExpirySql(run, '?2')}
+    WHERE id = ?1
+      AND ${closableCoverBackfillRunSql(run, '?3')}
+      AND (${zeroLegacyProofAllZeroSql()})
+  `).bind(runId, timestamp, restartFloor).run();
+  if (verified.meta.changes === 1) return { proof: zeroProof(), transition: 'verified' };
 
-  const orphaned = await env.DB.prepare(`
-    SELECT count(*) AS count FROM events e
-    WHERE e.deleted_at IS NULL
-      AND json_extract(e.cover_config, '$.source.kind') = 'upload'
-      AND NOT EXISTS (
-        SELECT 1 FROM event_cover_render_sets s
-        WHERE s.id = e.cover_render_set_id AND s.event_id = e.id AND s.state = 'active'
-      )
-  `).first<{ count: number }>();
+  const diagnostic = await readZeroLegacyProof(env);
+  if (diagnostic.proven) return { proof: diagnostic, transition: 'unchanged' };
 
-  const counts = {
-    legacyRows: legacy?.count ?? -1,
-    blockingJobs: blocking?.count ?? -1,
-    incompleteActiveSets: incomplete?.count ?? -1,
-    uploadsWithoutActiveSet: orphaned?.count ?? -1,
-  };
+  const failed = await env.DB.prepare(`
+    UPDATE event_cover_backfill_runs
+    SET status = 'failed', verified_at = NULL, updated_at = ?2,
+        expires_at = ${closedRunExpirySql(run, '?2')}
+    WHERE id = ?1
+      AND ${closableCoverBackfillRunSql(run, '?3')}
+      AND (${zeroLegacyProofAnyRedSql()})
+  `).bind(runId, timestamp, restartFloor).run();
+  if (failed.meta.changes === 1) return { proof: diagnostic, transition: 'failed' };
+  return { proof: await readZeroLegacyProof(env), transition: 'unchanged' };
+}
+
+/** Globally bounded run closure, after Task 5 has reconciled every reachable edge. */
+export async function closeCoverBackfillRuns(
+  env: AppEnv,
+  now = new Date(),
+): Promise<CoverBackfillLedgerSweepSummary> {
+  const restartFloor = new Date(now.getTime() - BACKFILL_RESTART_WINDOW_MS).toISOString();
+  const { results } = await env.DB.prepare(`
+    SELECT r.id FROM event_cover_backfill_runs r
+    WHERE ${closableCoverBackfillRunSql('r', '?1')}
+    ORDER BY r.updated_at, r.id LIMIT ?2
+  `).bind(restartFloor, COVER_CLEANUP_ROWS_PER_CLASS).all<{ id: string }>();
+  let closedVerifiedRuns = 0;
+  let closedFailedRuns = 0;
+  let unchanged = 0;
+  for (const run of results) {
+    const recorded = await recordZeroLegacyVerification(env, run.id, now);
+    if (recorded.transition === 'verified') closedVerifiedRuns += 1;
+    else if (recorded.transition === 'failed') closedFailedRuns += 1;
+    else unchanged += 1;
+  }
   return {
-    ...counts,
-    proven: counts.legacyRows === 0
-      && counts.blockingJobs === 0
-      && counts.incompleteActiveSets === 0
-      && counts.uploadsWithoutActiveSet === 0,
+    inspectedJobs: 0,
+    resolvedJobs: 0,
+    closedVerifiedRuns,
+    closedFailedRuns,
+    expiredRunsStamped: closedVerifiedRuns + closedFailedRuns,
+    remainder: results.length === COVER_CLEANUP_ROWS_PER_CLASS || unchanged > 0,
   };
 }
 

@@ -14,6 +14,7 @@ import {
   cleanupRsvpScratch,
   deleteEventData,
   reconcileEventCoverPurge,
+  resumeDeletedEventPurges,
   scheduledCleanup,
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
@@ -1082,8 +1083,13 @@ describe('lifecycle cleanup', () => {
     it('removes an emptied backfill run only once it is also past its own expiry', async () => {
       const access = await eventAccess();
       const ids = await seedEventCoverGraph(testEnv.DB, access.event.id);
-      await testEnv.DB.prepare('UPDATE event_cover_backfill_runs SET expires_at = ? WHERE id = ?')
-        .bind('2026-08-01T00:00:00.000Z', ids.runId).run();
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_backfill_runs
+        SET status = 'verified', verified_at = ?, expires_at = ?
+        WHERE id = ?
+      `).bind(
+        '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', ids.runId,
+      ).run();
 
       await purgeSettled(access.event.id, new Date('2026-08-04T12:00:00.000Z'));
 
@@ -1449,6 +1455,11 @@ describe('bounded cover storage sweep', () => {
       status: 'applied', masterId: 'master-job', setId: 'set-job',
       referenceReleaseAt: PAST, expiresAt: PAST, runExpiresAt: PAST,
     });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_backfill_runs
+      SET status = 'verified', verified_at = ?
+      WHERE id = 'run-a'
+    `).bind(PAST).run();
 
     const first = await cleanupEventCovers(testEnv, NOW);
     expect(first.backfillJobsReleased).toBe(1);
@@ -1950,6 +1961,63 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_rate_events', access.event.id)).toBe(0);
   });
 
+  it('deletes only expired closed empty runs and keeps an active run even with a bad deadline', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at, expires_at)
+        VALUES ('active-expired-run', 'execute', 'executing', ?, ?, ?)
+      `).bind(PAST, PAST, PAST),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at, expires_at)
+        VALUES ('verified-expired-run', 'verify', 'verified', ?, ?, ?)
+      `).bind(PAST, PAST, PAST),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at, expires_at)
+        VALUES ('failed-expired-run', 'execute', 'failed', ?, ?, ?)
+      `).bind(PAST, PAST, PAST),
+    ]);
+
+    await cleanupEventCovers(testEnv, NOW);
+
+    expect((await testEnv.DB.prepare(`
+      SELECT id, status FROM event_cover_backfill_runs ORDER BY id
+    `).all()).results).toEqual([{ id: 'active-expired-run', status: 'executing' }]);
+  });
+
+  it('deletes an expired terminal job but retains an equivalently expired nonterminal job', async () => {
+    await insertBackfillJob('expired-terminal-job', 'expired-terminal-run', {
+      status: 'applied', expiresAt: PAST,
+    });
+    await insertBackfillJob('expired-live-job', 'expired-live-run', {
+      status: 'queued', expiresAt: PAST,
+    });
+
+    await cleanupEventCovers(testEnv, NOW);
+
+    expect((await testEnv.DB.prepare(`
+      SELECT id, status FROM event_cover_backfill_jobs
+      WHERE id LIKE 'expired-%-job' ORDER BY id
+    `).all()).results).toEqual([{ id: 'expired-live-job', status: 'queued' }]);
+  });
+
+  it('bounds expired closed-run cleanup by expiry and ID and reports saturation', async () => {
+    const statements = Array.from({ length: COVER_CLEANUP_ROWS_PER_CLASS + 1 }, (_unused, index) => (
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at, expires_at)
+        VALUES (?, 'verify', 'verified', ?, ?, ?)
+      `).bind(`expired-run-${index.toString().padStart(3, '0')}`, PAST, PAST, PAST)
+    ));
+    for (let offset = 0; offset < statements.length; offset += 100) {
+      await testEnv.DB.batch(statements.slice(offset, offset + 100));
+    }
+
+    expect((await cleanupEventCovers(testEnv, NOW)).remainder).toBe(true);
+    expect((await testEnv.DB.prepare(`
+      SELECT id FROM event_cover_backfill_runs WHERE id LIKE 'expired-run-%' ORDER BY id
+    `).all()).results).toEqual([{ id: 'expired-run-100' }]);
+    expect((await cleanupEventCovers(testEnv, NOW)).remainder).toBe(false);
+  });
+
   it('runs resolver, stale-create recovery, reconciliation, cover cleanup, then purge', async () => {
     const phases: string[] = [];
     const note = (phase: string) => {
@@ -1965,6 +2033,8 @@ describe('bounded cover storage sweep', () => {
               && sql.includes('fence_state')) note('stale-create recovery');
             if (sql.includes("j.dispatch_state = 'confirmed'")
               && sql.includes('event_deleted_at')) note('reconciliation');
+            if (sql.includes('SELECT r.id FROM event_cover_backfill_runs r')
+              && sql.includes('inventory_sha256')) note('run closure');
             if (sql.includes('WITH terminal_owners AS')) note('cover cleanup');
             if (sql.includes('LEFT JOIN event_cover_purge_progress p')
               && sql.includes('SELECT e.id FROM events e')) note('purge');
@@ -1979,7 +2049,7 @@ describe('bounded cover storage sweep', () => {
     await scheduledCleanup({ ...testEnv, DB: db }, NOW);
 
     expect(phases).toEqual([
-      'resolver', 'stale-create recovery', 'reconciliation', 'cover cleanup', 'purge',
+      'resolver', 'stale-create recovery', 'reconciliation', 'run closure', 'cover cleanup', 'purge',
     ]);
   });
 
@@ -2007,6 +2077,10 @@ describe('bounded cover storage sweep', () => {
         id, event_id, action, replay_key, request_sha256, window_start, created_at, expires_at
       ) VALUES ('schedule-rate', ?, 'reservation', 'schedule-replay', ?, 1785196800, ?, ?)
     `).bind(access.event.id, HEX, PAST, PAST).run();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+      VALUES ('schedule-close', 'verify', 'executing', ?, ?)
+    `).bind(PAST, PAST).run();
     const due = await eventAccess('Due after saturated resolver');
     await testEnv.DB.prepare('UPDATE events SET purge_after = ? WHERE id = ?')
       .bind(PAST, due.event.id).run();
@@ -2033,6 +2107,20 @@ describe('bounded cover storage sweep', () => {
       ],
     });
     expect(await countRows('event_cover_rate_events', access.event.id)).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, verified_at, expires_at FROM event_cover_backfill_runs
+      WHERE id = 'schedule-close'
+    `).first()).toMatchObject({ status: 'verified', verified_at: NOW.toISOString() });
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(due.event.id).first()).toBeNull();
+  });
+
+  it('exposes the bounded deleted-event purge phase independently', async () => {
+    const due = await eventAccess('Explicit purge phase');
+    await testEnv.DB.prepare('UPDATE events SET purge_after = ? WHERE id = ?')
+      .bind(PAST, due.event.id).run();
+
+    expect(await resumeDeletedEventPurges(testEnv, NOW)).toBe(1);
     expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
       .bind(due.event.id).first()).toBeNull();
   });
