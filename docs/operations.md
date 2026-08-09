@@ -330,10 +330,13 @@ Document only signals this candidate actually produces:
 - The launcher prints or writes ordered private artifacts and evaluates saved Wrangler `--json`
   payloads. Its display proof is diagnostic only. The Worker is the only writer of a verified run.
 
-The candidate does **not** log the cleanup/reconciliation summary objects or lookup telemetry values,
-expose a cleanup endpoint, store an `unknown` platform marker, or publish a fence-backlog metric. An
-unchanged job/fence is therefore not evidence that an instance is missing. Observe the aggregate D1
-JSON queries in [cover-backfill-runbook.md](cover-backfill-runbook.md), compare snapshots across scheduled passes,
+The candidate emits a structured `cover_platform_observation` for every non-null platform diagnostic.
+It contains only a fixed `source` (`publication`, `backfill`, or `purge`) and a bounded,
+low-cardinality `code`; it never contains raw status/error text, Workflow IDs, or object keys. The
+candidate does **not** log the cleanup/reconciliation summary objects, expose a cleanup endpoint,
+store an `unknown` platform marker, or publish a fence-backlog metric. A diagnostic event or unchanged
+job/fence is therefore not evidence that an instance is missing. Observe the aggregate D1 JSON queries
+in [cover-backfill-runbook.md](cover-backfill-runbook.md), compare snapshots across scheduled passes,
 and stop for engineering investigation when platform status is unknown or purge/fence state remains
 unexplained. Do not fill those observability gaps with raw D1 edits or operator resume/restart calls.
 

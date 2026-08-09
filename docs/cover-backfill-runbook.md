@@ -46,6 +46,19 @@ $approvedAccountId = '<approved production account ID>'
 if ($approvedAccountId -notmatch '^[0-9a-f]{32}$') {
   throw 'Approved account ID must be one 32-character lowercase ID.'
 }
+$wranglerConfig = Get-Content -Raw -LiteralPath 'wrangler.jsonc'
+$configuredAccountIds = @([regex]::Matches(
+  $wranglerConfig,
+  '(?m)^[\t ]*"account_id"[\t ]*:[\t ]*"([^"]+)"'
+) | ForEach-Object { $_.Groups[1].Value })
+if ($configuredAccountIds.Count -gt 1 -or
+    ($configuredAccountIds.Count -eq 1 -and $configuredAccountIds[0] -cne $approvedAccountId)) {
+  throw 'wrangler.jsonc selects a different or ambiguous account.'
+}
+$env:CLOUDFLARE_ACCOUNT_ID = $approvedAccountId
+if ($env:CLOUDFLARE_ACCOUNT_ID -cne $approvedAccountId) {
+  throw 'The Wrangler shell is not pinned to the approved account.'
+}
 $candidateSha = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $candidateSha -notmatch '^[0-9a-f]{40}$') {
   throw 'Candidate SHA is not one full lowercase commit ID.'
@@ -132,7 +145,15 @@ foreach ($required in $requiredBindings.GetEnumerator()) {
     throw "Deployed binding $($required.Key) is absent or has the wrong type."
   }
 }
-if ($bindingMap.DB.id -ne '60bec5de-c8c7-41b5-a26b-2d3f7d184c71' -or
+$deployedD1Ids = @(
+  @(
+    [string]$bindingMap.DB.database_id
+    [string]$bindingMap.DB.id
+  ) | Where-Object { $_ -ne '' }
+)
+if ($deployedD1Ids.Count -lt 1 -or $deployedD1Ids.Count -gt 2 -or
+    ($deployedD1Ids.Count -eq 2 -and $deployedD1Ids[0] -cne $deployedD1Ids[1]) -or
+    $deployedD1Ids[0] -cne '60bec5de-c8c7-41b5-a26b-2d3f7d184c71' -or
     $bindingMap.MEDIA_BUCKET.bucket_name -ne 'candidary-media' -or
     $bindingMap.COVER_RENDER_WORKFLOW.workflow_name -ne 'candidary-cover-render' -or
     $bindingMap.COVER_BACKFILL_WORKFLOW.workflow_name -ne 'candidary-cover-backfill') {
@@ -165,7 +186,13 @@ $expectedMigrations = @(
 )
 $localMigrations = @(Get-ChildItem migrations -Filter '*.sql' -File |
   Sort-Object Name | Select-Object -ExpandProperty Name)
-if (@(Compare-Object $expectedMigrations $localMigrations).Count -ne 0) {
+$localMigrationMismatch = $localMigrations.Count -ne $expectedMigrations.Count
+for ($index = 0; -not $localMigrationMismatch -and $index -lt $expectedMigrations.Count; $index++) {
+  if ($localMigrations[$index] -cne $expectedMigrations[$index]) {
+    $localMigrationMismatch = $true
+  }
+}
+if ($localMigrationMismatch) {
   throw 'The checked-in migration set is not exactly 0001 through 0012.'
 }
 
@@ -177,7 +204,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Remote migration-ledger read failed.' }
 $migrationEnvelope = ($remoteMigrationJson -join "`n") | ConvertFrom-Json
 $remoteMigrations = @($migrationEnvelope | ForEach-Object { $_.results } |
   ForEach-Object { $_.name })
-if (@(Compare-Object $expectedMigrations $remoteMigrations).Count -ne 0) {
+$remoteMigrationMismatch = $remoteMigrations.Count -ne $expectedMigrations.Count
+for ($index = 0; -not $remoteMigrationMismatch -and $index -lt $expectedMigrations.Count; $index++) {
+  if ([string]$remoteMigrations[$index] -cne $expectedMigrations[$index]) {
+    $remoteMigrationMismatch = $true
+  }
+}
+if ($remoteMigrationMismatch) {
   throw 'Remote migration names do not exactly match the candidate set.'
 }
 ```
@@ -415,8 +448,11 @@ eligible row:
 7. Inspect the confirmation artifact. It contains two identity checks, an optional generated
    `terminate` only when deletion owns the fence, one D1 `apply`, and one `receipt-read`. Execute in
    that order, rerunning every section-2 machine guard immediately before the terminate (if present)
-   and again before the D1 file. Require the receipt to show the expected job/event/instance/
-   generation and either the confirmed claim or the guarded `EVENT_DELETED` settlement. Reapplying
+   and again before the D1 file. For deletion ownership, require artifact `outcome = blocked`, exactly
+   one generated terminate, and reviewed SQL containing the generation/fence-guarded
+   `failure_code = 'EVENT_DELETED'` settlement. Its receipt cannot display `failure_code`; require the
+   expected job/event/instance/generation plus `dispatch_state = blocked`, `status = failed`, and
+   `fence_state = deletion-blocked`. Otherwise require the expected confirmed claim. Reapplying
    confirmation SQL is a no-op.
 8. Start no second batch inside the rolling minute or while 25 jobs are in flight. Wait for durable
    progress, then perform a completely fresh dispatch read. The launcher creates zero rows when
@@ -441,8 +477,11 @@ guarded D1 generation/fence claims. A certified-missing recreation edge exists, 
 `CERTIFIED_NOT_FOUND_MATCHERS` is deliberately empty, so the default adapter cannot reach it: every
 lookup exception is `unknown` and changes nothing. Exact-candidate staging must prove a stable
 missing-instance discriminator; adding it creates a new candidate that must repeat candidate and
-staging gates. The returned telemetry label is not logged. Operators may run a generated trigger or
-generated deletion-owned terminate unit; they may not improvise platform lifecycle commands.
+staging gates. Every non-null platform observation emits only a structured
+`cover_platform_observation` with fixed `source` and low-cardinality `code` fields; raw status/error
+text, Workflow IDs, and object keys are never logged. This diagnostic event does not authorize a
+mutation. Operators may run a generated trigger or generated deletion-owned terminate unit; they may
+not improvise platform lifecycle commands.
 
 ## 8. Observe bounded cleanup from D1 JSON
 
