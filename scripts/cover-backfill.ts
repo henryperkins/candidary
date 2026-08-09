@@ -7,7 +7,8 @@ import type * as ConstantsModule from '../shared/constants';
 import type * as CoverDispatchModule from '../shared/cover-dispatch';
 
 /**
- * The legacy-cover backfill launcher: inventory, execute, dispatch, confirm, verify.
+ * The legacy-cover backfill launcher: inventory, execute, dispatch, launch,
+ * confirm, verify.
  *
  * A planner, not a driver — the same shape as `scripts/event-start-backfill.ts`.
  * It reads `wrangler d1 execute --json` output and emits the exact SQL and
@@ -16,14 +17,16 @@ import type * as CoverDispatchModule from '../shared/cover-dispatch';
  * makes every bound below testable without a network and what keeps a mistyped
  * flag from being a production event.
  *
- * D1 is the durable source of truth, and the five modes exist to keep it that
+ * D1 is the durable source of truth, and the six modes exist to keep it that
  * way. `inventory` and `execute` only ever write the ledger; they never propose
  * a Workflow command, because a job ID that lost its `NOT EXISTS` guard must
- * never be triggerable. `dispatch` reads the committed rows back and can emit a
- * command only for a row D1 returned. `confirm` consumes the post-trigger read
- * for one generation and emits a guarded confirmation, a terminate/failure
- * unit, or nothing at all. `verify` prints the proof and, under its own gate,
- * opens a verification run — it can never record one as verified.
+ * never be triggerable. `dispatch` reads committed pending rows, writes their
+ * guarded claim, and emits only an exact post-claim read. `launch` compares that
+ * saved read with the claim artifact's candidate manifest before it can emit a
+ * Workflow command. `confirm` consumes the post-trigger read for one generation
+ * and emits a guarded confirmation, a terminate/failure unit, or nothing at
+ * all. `verify` prints the proof and, under its own gate, opens a verification
+ * run — it can never record one as verified.
  *
  * Mutating output is emitted only when `CANDIDARY_COVER_BACKFILL_CONFIRM` is
  * set, mirroring the load harnesses; without it a mode prints the plan it
@@ -58,6 +61,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const INSTANCE_ID_PATTERN = /^cb1-[0-9a-f]{48}$/u;
 const ROLLING_MINUTE_MS = 60 * 1000;
 const DISPATCH_ARTIFACT_KIND = 'candidary-cover-backfill-dispatch' as const;
+const LAUNCH_ARTIFACT_KIND = 'candidary-cover-backfill-launch' as const;
 const EXECUTE_ARTIFACT_KIND = 'candidary-cover-backfill-execute' as const;
 const CONFIRM_ARTIFACT_KIND = 'candidary-cover-backfill-confirm' as const;
 const ARTIFACT_VERSION = 2 as const;
@@ -130,12 +134,14 @@ export type CoverBackfillRunStatus = typeof COVER_BACKFILL_RUN_STATUSES[number];
 export type CoverBackfillRunMode = typeof COVER_BACKFILL_RUN_MODES[number];
 
 /**
- * The launcher's five planning phases. Only three of them are run *modes* —
+ * The launcher's six planning phases. Only three of them are run *modes* —
  * `event_cover_backfill_runs.mode` is constrained by `0012` to
  * `inventory | execute | verify`, and phase 2 adds no migration, so `dispatch`
- * and `confirm` are planner phases over an existing run and never appear in D1.
+ * `launch`, and `confirm` are planner phases over an existing run and never
+ * appear in D1.
  */
-export type CoverBackfillMode = 'inventory' | 'execute' | 'dispatch' | 'confirm' | 'verify';
+export type CoverBackfillMode =
+  | 'inventory' | 'execute' | 'dispatch' | 'launch' | 'confirm' | 'verify';
 
 export interface InventoryRow {
   id: string;
@@ -173,6 +179,23 @@ export interface DurableDispatchRow {
   fenceGeneration: number | null;
 }
 
+/** The exact generation a dispatch artifact proposed and a launch must prove. */
+export interface DispatchClaimCandidate {
+  runId: string;
+  jobId: string;
+  eventId: string;
+  workflowInstanceId: string;
+  dispatchGeneration: number;
+}
+
+export interface ClaimedDispatchResult {
+  candidate: DispatchClaimCandidate;
+  accepted: boolean;
+  runMode: CoverBackfillRunMode | null;
+  runStatus: CoverBackfillRunStatus | null;
+  row: DurableDispatchRow | null;
+}
+
 export interface BackfillRunPlan {
   runId: string;
   cursor: string | null;
@@ -202,16 +225,19 @@ export interface DispatchBatch {
    * one, and carry that same generation and timestamp onto the fence.
    */
   claimStatements: string[];
-  /** POSIX-quoted `wrangler workflows trigger` invocations. */
-  commands: string[];
-  /** The same invocations quoted for PowerShell, which this repository uses. */
-  powershellCommands: string[];
   fenceStatements: string[];
   withheld: DispatchWithheld;
   limitingBound: DispatchBound;
   blockedByActiveRun: boolean;
   /** The earliest instant this batch may be triggered: one minute after the last claim. */
   notBefore: string;
+}
+
+export interface LaunchPlan {
+  acceptedCandidates: DispatchClaimCandidate[];
+  refusedCandidates: DispatchClaimCandidate[];
+  commands: string[];
+  powershellCommands: string[];
 }
 
 export interface DispatchObservation {
@@ -340,6 +366,7 @@ export function dispatchSql(runId: string): string {
     ' j.dispatch_state AS dispatch_state, j.dispatch_generation AS dispatch_generation,',
     ' j.status AS status, f.state AS fence_state, f.dispatch_generation AS fence_generation',
     ' FROM event_cover_backfill_jobs j',
+    " JOIN event_cover_backfill_runs r ON r.id = j.run_id AND r.mode = 'execute' AND r.status = 'executing'",
     ' JOIN events e ON e.id = j.event_id',
     ' LEFT JOIN event_cover_workflow_fences f',
     `   ON f.workflow_binding = ${binding}`,
@@ -365,6 +392,115 @@ export function dispatchSql(runId: string): string {
     ` WHERE run_id = ${run} AND status = 'failed' AND retryable = 1`,
     " UNION ALL SELECT 'latestClaimAt', 0, max(f.updated_at) FROM event_cover_workflow_fences f",
     ` WHERE ${claimedFence};`,
+  ].join('');
+}
+
+function dispatchClaimCandidate(source: DurableDispatchRow): DispatchClaimCandidate {
+  return {
+    runId: source.runId,
+    jobId: source.jobId,
+    eventId: source.eventId,
+    workflowInstanceId: source.workflowInstanceId,
+    dispatchGeneration: source.dispatchGeneration + 1,
+  };
+}
+
+function candidateKey(candidate: DispatchClaimCandidate): string {
+  return [
+    candidate.runId,
+    candidate.jobId,
+    candidate.eventId,
+    candidate.workflowInstanceId,
+    candidate.dispatchGeneration,
+  ].join('|');
+}
+
+function validateClaimCandidates(
+  runId: string,
+  candidates: readonly DispatchClaimCandidate[],
+): DispatchClaimCandidate[] {
+  assertUuid(runId, 'run ID');
+  if (candidates.length === 0) throw new Error('The claim manifest has no candidates.');
+  if (candidates.length > constants.MAX_COVER_BACKFILL_CREATE_BATCH) {
+    throw new Error('The claim manifest exceeds the dispatch batch size.');
+  }
+  const seen = new Set<string>();
+  const seenJobs = new Set<string>();
+  const seenInstances = new Set<string>();
+  return candidates.map((candidate) => {
+    assertUuid(candidate.runId, 'candidate run ID');
+    assertUuid(candidate.jobId, 'candidate job ID');
+    assertUuid(candidate.eventId, 'candidate event ID');
+    if (!INSTANCE_ID_PATTERN.test(candidate.workflowInstanceId)) {
+      throw new Error('A claim candidate has no cover backfill workflow instance ID.');
+    }
+    assertGeneration(candidate.dispatchGeneration);
+    if (candidate.dispatchGeneration === 0) {
+      throw new Error('A claim candidate must name the post-claim generation.');
+    }
+    if (candidate.runId !== runId) {
+      throw new Error('A claim candidate belongs to a different run.');
+    }
+    const key = candidateKey(candidate);
+    if (seen.has(key) || seenJobs.has(candidate.jobId)
+      || seenInstances.has(candidate.workflowInstanceId)) {
+      throw new Error('The claim manifest contains a duplicate candidate.');
+    }
+    seen.add(key);
+    seenJobs.add(candidate.jobId);
+    seenInstances.add(candidate.workflowInstanceId);
+    return { ...candidate };
+  });
+}
+
+/**
+ * One explicit result row per proposed claim, including refusals.
+ *
+ * The candidate CTE is the durable manifest rendered into the read itself. A
+ * left join keeps a refused or now-missing candidate visible as
+ * `claim_accepted = 0`; absence can therefore never be mistaken for a partial
+ * saved payload. `launch` independently compares every one of these tuples with
+ * the dispatch artifact before considering any platform command.
+ */
+export function claimedDispatchSql(
+  runId: string,
+  candidates: readonly DurableDispatchRow[],
+): string {
+  const manifest = validateClaimCandidates(runId, candidates.map(dispatchClaimCandidate));
+  const values = manifest.map((candidate) => `(${[
+    sqlString(candidate.runId),
+    sqlString(candidate.jobId),
+    sqlString(candidate.eventId),
+    sqlString(candidate.workflowInstanceId),
+    candidate.dispatchGeneration,
+  ].join(', ')})`).join(', ');
+  const binding = sqlString(COVER_BACKFILL_BINDING);
+  return [
+    'WITH candidates(run_id, job_id, event_id, workflow_instance_id, dispatch_generation) AS (VALUES ',
+    values,
+    ") SELECT 'claim-result' AS kind,",
+    ' c.run_id AS candidate_run_id, c.job_id AS candidate_job_id,',
+    ' c.event_id AS candidate_event_id, c.workflow_instance_id AS candidate_workflow_instance_id,',
+    ' c.dispatch_generation AS candidate_dispatch_generation,',
+    " CASE WHEN r.mode = 'execute' AND r.status = 'executing'",
+    "   AND j.dispatch_state = 'creating' AND j.status = 'queued'",
+    '   AND j.dispatch_generation = c.dispatch_generation',
+    "   AND f.state = 'open' AND f.dispatch_generation = c.dispatch_generation",
+    ' THEN 1 ELSE 0 END AS claim_accepted,',
+    ' r.mode AS run_mode, r.status AS run_status,',
+    ' j.run_id AS run_id, j.id AS job_id, j.event_id AS event_id,',
+    ' j.workflow_instance_id AS workflow_instance_id, j.dispatch_state AS dispatch_state,',
+    ' j.dispatch_generation AS dispatch_generation, j.status AS status,',
+    ' f.state AS fence_state, f.dispatch_generation AS fence_generation',
+    ' FROM candidates c',
+    ' LEFT JOIN event_cover_backfill_runs r ON r.id = c.run_id',
+    ' LEFT JOIN event_cover_backfill_jobs j',
+    '   ON j.id = c.job_id AND j.run_id = c.run_id AND j.event_id = c.event_id',
+    '  AND j.workflow_instance_id = c.workflow_instance_id',
+    ' LEFT JOIN event_cover_workflow_fences f',
+    `   ON f.workflow_binding = ${binding}`,
+    '  AND f.workflow_instance_id = c.workflow_instance_id AND f.event_id = c.event_id',
+    ' ORDER BY c.job_id;',
   ].join('');
 }
 
@@ -670,6 +806,77 @@ export function parseDispatchPayload(payload: unknown): DispatchObservation {
   };
 }
 
+function nullableMember<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  label: string,
+): T | null {
+  return value === null || value === undefined ? null : requireMember(value, allowed, label);
+}
+
+/** Parses the explicit accepted/refused result emitted for every claim candidate. */
+export function parseClaimedDispatchPayload(payload: unknown): ClaimedDispatchResult[] {
+  const results: ClaimedDispatchResult[] = [];
+  for (const set of resultSets(payload)) {
+    for (const value of set) {
+      const entry = record(value, 'A claim-result row');
+      if (entry['kind'] !== 'claim-result') {
+        throw new Error('The claimed-dispatch payload carries a row that is not a claim result.');
+      }
+      const instanceId = entry['candidate_workflow_instance_id'];
+      if (typeof instanceId !== 'string' || !INSTANCE_ID_PATTERN.test(instanceId)) {
+        throw new Error('A claim-result row has no candidate Workflow instance ID.');
+      }
+      const acceptedValue = entry['claim_accepted'];
+      if (acceptedValue !== 0 && acceptedValue !== 1) {
+        throw new Error('A claim-result row has no exact accepted/refused value.');
+      }
+      const candidate: DispatchClaimCandidate = {
+        runId: requireUuid(entry, 'candidate_run_id', 'A claim-result row'),
+        jobId: requireUuid(entry, 'candidate_job_id', 'A claim-result row'),
+        eventId: requireUuid(entry, 'candidate_event_id', 'A claim-result row'),
+        workflowInstanceId: instanceId,
+        dispatchGeneration: requireCount(
+          entry,
+          'candidate_dispatch_generation',
+          'A claim-result row',
+        ),
+      };
+      const jobId = entry['job_id'];
+      const jobFields = [
+        'run_id', 'job_id', 'event_id', 'workflow_instance_id',
+        'dispatch_state', 'dispatch_generation', 'status',
+      ] as const;
+      if ((jobId === null || jobId === undefined)
+        && jobFields.some((key) => entry[key] !== null && entry[key] !== undefined)) {
+        throw new Error('A refused claim-result row carries a partial durable job.');
+      }
+      const hasRunMode = entry['run_mode'] !== null && entry['run_mode'] !== undefined;
+      const hasRunStatus = entry['run_status'] !== null && entry['run_status'] !== undefined;
+      if (hasRunMode !== hasRunStatus) {
+        throw new Error('A claim-result row carries a partial run state.');
+      }
+      const hasFenceState = entry['fence_state'] !== null && entry['fence_state'] !== undefined;
+      const hasFenceGeneration = entry['fence_generation'] !== null
+        && entry['fence_generation'] !== undefined;
+      if (hasFenceState !== hasFenceGeneration) {
+        throw new Error('A claim-result row carries a partial fence state.');
+      }
+      const row = jobId === null || jobId === undefined
+        ? null
+        : parseJobFenceRow(entry, 'claim-result');
+      results.push({
+        candidate,
+        accepted: acceptedValue === 1,
+        runMode: nullableMember(entry['run_mode'], COVER_BACKFILL_RUN_MODES, 'run mode'),
+        runStatus: nullableMember(entry['run_status'], COVER_BACKFILL_RUN_STATUSES, 'run status'),
+        row,
+      });
+    }
+  }
+  return results;
+}
+
 /** Zero, one, or several rows — `evaluateConfirmation` decides what that means. */
 export function parseConfirmPayload(payload: unknown): DurableDispatchRow[] {
   const rows: DurableDispatchRow[] = [];
@@ -918,8 +1125,6 @@ export function buildDispatchBatch(input: {
     return {
       create: [],
       claimStatements: [],
-      commands: [],
-      powershellCommands: [],
       fenceStatements: [],
       withheld,
       limitingBound: eligible.length > 0 ? bound : 'none',
@@ -943,13 +1148,23 @@ export function buildDispatchBatch(input: {
   const create = eligible.slice(0, capacity);
   withheld[limiter[2]] = eligible.length - create.length;
 
-  const fenceStatements = create.map((row) => (
+  // A marker exists only for candidates whose durable read proved the fence
+  // absent. It is written into the proposed generation-zero fence and replaced
+  // by the database clock on a successful claim. A refused claim can therefore
+  // remove only the fence inserted by this exact artifact; a pre-existing fence
+  // and a concurrently advanced fence can match neither the saved absence nor
+  // the unguessable marker.
+  const claimOwnershipMarkers = create.map((row) => (
+    row.fenceState === null ? `claim-${randomUUID()}` : null
+  ));
+  const fenceStatements = create.map((row, index) => (
     'INSERT INTO event_cover_workflow_fences ('
     + 'workflow_binding, workflow_instance_id, event_id, dispatch_generation, state,'
     + ' created_at, updated_at, expires_at)'
     + ` SELECT ${sqlString(COVER_BACKFILL_BINDING)}, ${sqlString(row.workflowInstanceId)},`
     + ` ${sqlString(row.eventId)}, ${row.dispatchGeneration}, 'open', ${sqlString(input.now)},`
-    + ` ${sqlString(input.now)}, ${sqlString(constants.COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT)}`
+    + ` ${sqlString(claimOwnershipMarkers[index] ?? input.now)},`
+    + ` ${sqlString(constants.COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT)}`
     // Guarded the way the job inserts are, and for a sharper reason. A fence
     // carries no foreign key to `events` — it has to outlive the row it
     // protected — so nothing in the schema stops an operator from applying a
@@ -991,44 +1206,118 @@ export function buildDispatchBatch(input: {
       ', updated_at =',
       `, expires_at = ${sqlString(constants.COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT)}, updated_at =`,
     );
-    return [fenceStatements[index]!, `${claim.job};`, `${fenceClaim};`];
+    // If the guarded job update refused, remove only the absent-at-read fence
+    // proposed with this artifact's unique marker. The pending/old-generation
+    // guard also keeps a concurrent successful claim's advanced fence intact.
+    const ownershipMarker = claimOwnershipMarkers[index];
+    const cleanup = typeof ownershipMarker !== 'string'
+      ? null
+      : 'DELETE FROM event_cover_workflow_fences'
+      + ` WHERE workflow_binding = ${sqlString(COVER_BACKFILL_BINDING)}`
+      + ` AND workflow_instance_id = ${sqlString(row.workflowInstanceId)}`
+      + ` AND event_id = ${sqlString(row.eventId)}`
+      + ` AND dispatch_generation = ${row.dispatchGeneration} AND state = 'open'`
+      + ` AND created_at = ${sqlString(input.now)} AND updated_at = ${sqlString(ownershipMarker)}`
+      + ' AND EXISTS (SELECT 1 FROM event_cover_backfill_jobs j'
+      + ` WHERE j.id = ${sqlString(row.jobId)} AND j.run_id = ${sqlString(input.runId)}`
+      + ` AND j.event_id = ${sqlString(row.eventId)}`
+      + ` AND j.workflow_instance_id = ${sqlString(row.workflowInstanceId)}`
+      + ` AND j.dispatch_state = 'pending'`
+      + ` AND j.dispatch_generation = ${row.dispatchGeneration})`;
+    return [
+      fenceStatements[index]!,
+      `${claim.job};`,
+      `${fenceClaim};`,
+      ...(cleanup === null ? [] : [`${cleanup};`]),
+    ];
   });
-
-  // Read off `wrangler workflows --help` at 4.113.0 rather than assumed: there is
-  // no `workflows instances create`. The instance subcommands are list, describe,
-  // send-event, terminate, restart, pause, and resume; creation is `trigger`,
-  // whose params are a positional JSON string and whose `--id` is the only way to
-  // give an instance the deterministic ID the fence is keyed by. `--remote` does
-  // not exist here; `--config` plus the absence of `--local` is what targets the
-  // deployed Workflow.
-  const paramsFor = (row: DurableDispatchRow) => JSON.stringify({
-    runId: input.runId,
-    jobId: row.jobId,
-    eventId: row.eventId,
-  });
-  const commands = create.map((row) => (
-    `npx wrangler workflows trigger ${COVER_BACKFILL_WORKFLOW_NAME} '${paramsFor(row)}'`
-    + ` --id ${row.workflowInstanceId} --config ${WRANGLER_CONFIG_PATH}`
-  ));
-  // A single-quoted JSON payload survives POSIX and is eaten by PowerShell, so
-  // the operator gets the doubled-quote form rather than an instance created
-  // with no parameters at all.
-  const powershellCommands = create.map((row) => (
-    `npx wrangler workflows trigger ${COVER_BACKFILL_WORKFLOW_NAME}`
-    + ` "${paramsFor(row).replace(/"/gu, '""')}"`
-    + ` --id ${row.workflowInstanceId} --config ${WRANGLER_CONFIG_PATH}`
-  ));
 
   return {
     create,
     claimStatements,
-    commands,
-    powershellCommands,
     fenceStatements,
     withheld,
     limitingBound: create.length === eligible.length ? 'none' : limiter[0],
     blockedByActiveRun: false,
     notBefore,
+  };
+}
+
+function triggerCommands(candidate: DispatchClaimCandidate): {
+  posix: string;
+  powershell: string;
+} {
+  const params = JSON.stringify({
+    runId: candidate.runId,
+    jobId: candidate.jobId,
+    eventId: candidate.eventId,
+  });
+  return {
+    posix: `npx wrangler workflows trigger ${COVER_BACKFILL_WORKFLOW_NAME} '${params}'`
+      + ` --id ${candidate.workflowInstanceId} --config ${WRANGLER_CONFIG_PATH}`,
+    // A single-quoted JSON payload survives POSIX and is eaten by PowerShell,
+    // so the operator gets the doubled-quote form there.
+    powershell: `npx wrangler workflows trigger ${COVER_BACKFILL_WORKFLOW_NAME}`
+      + ` "${params.replace(/"/gu, '""')}"`
+      + ` --id ${candidate.workflowInstanceId} --config ${WRANGLER_CONFIG_PATH}`,
+  };
+}
+
+/**
+ * Validates the saved post-claim read all-or-nothing before rendering a single
+ * platform command. Refused candidates remain explicit; missing, duplicate,
+ * unknown, or internally inconsistent evidence voids the whole launch.
+ */
+export function buildLaunchPlan(input: {
+  runId: string;
+  candidates: readonly DispatchClaimCandidate[];
+  results: readonly ClaimedDispatchResult[];
+}): LaunchPlan {
+  const candidates = validateClaimCandidates(input.runId, input.candidates);
+  const expected = new Map(candidates.map((candidate) => [candidateKey(candidate), candidate]));
+  const observed = new Set<string>();
+  const acceptedCandidates: DispatchClaimCandidate[] = [];
+  const refusedCandidates: DispatchClaimCandidate[] = [];
+
+  for (const result of input.results) {
+    const key = candidateKey(result.candidate);
+    const candidate = expected.get(key);
+    if (!candidate) throw new Error('The saved claim payload contains an unknown candidate.');
+    if (observed.has(key)) throw new Error('The saved claim payload contains a duplicate candidate.');
+    observed.add(key);
+
+    const row = result.row;
+    if (row !== null && (
+      row.runId !== candidate.runId
+      || row.jobId !== candidate.jobId
+      || row.eventId !== candidate.eventId
+      || row.workflowInstanceId !== candidate.workflowInstanceId
+    )) {
+      throw new Error('A saved claim result describes a different durable job.');
+    }
+    const durablyAccepted = row !== null
+      && result.runMode === 'execute'
+      && result.runStatus === 'executing'
+      && row.dispatchState === 'creating'
+      && row.dispatchGeneration === candidate.dispatchGeneration
+      && row.status === 'queued'
+      && row.fenceState === 'open'
+      && row.fenceGeneration === candidate.dispatchGeneration;
+    if (result.accepted !== durablyAccepted) {
+      throw new Error('A saved claim result is inconsistent with its job, run, or fence state.');
+    }
+    (durablyAccepted ? acceptedCandidates : refusedCandidates).push(candidate);
+  }
+
+  if (observed.size !== candidates.length) {
+    throw new Error('The saved claim payload is missing a candidate result.');
+  }
+  const rendered = acceptedCandidates.map(triggerCommands);
+  return {
+    acceptedCandidates,
+    refusedCandidates,
+    commands: rendered.map((command) => command.posix),
+    powershellCommands: rendered.map((command) => command.powershell),
   };
 }
 
@@ -1164,6 +1453,7 @@ export interface CoverBackfillRequest {
   mode: CoverBackfillMode;
   payloadFile: string | null;
   planFile: string | null;
+  claimFile: string | null;
   runStateFile: string | null;
   runId: string | null;
   jobId: string | null;
@@ -1176,10 +1466,10 @@ export interface CoverBackfillRequest {
 }
 
 const MODES: readonly CoverBackfillMode[] = [
-  'inventory', 'execute', 'dispatch', 'confirm', 'verify',
+  'inventory', 'execute', 'dispatch', 'launch', 'confirm', 'verify',
 ];
 const VALUE_FLAGS = [
-  '--payload-file', '--plan-file', '--run-state-file', '--run-id', '--job-id',
+  '--payload-file', '--plan-file', '--claim-file', '--run-state-file', '--run-id', '--job-id',
   '--event-id', '--generation', '--account-id', '--cursor', '--now',
 ] as const;
 
@@ -1200,6 +1490,7 @@ export function parseCoverBackfillArgs(
     mode,
     payloadFile: null,
     planFile: null,
+    claimFile: null,
     runStateFile: null,
     runId: null,
     jobId: null,
@@ -1220,6 +1511,7 @@ export function parseCoverBackfillArgs(
     index += 1;
     if (flag === '--payload-file') request.payloadFile = value;
     if (flag === '--plan-file') request.planFile = value;
+    if (flag === '--claim-file') request.claimFile = value;
     if (flag === '--run-state-file') request.runStateFile = value;
     if (flag === '--run-id') request.runId = value;
     if (flag === '--job-id') request.jobId = value;
@@ -1270,6 +1562,75 @@ function writeArtifact(file: string, contents: string): void {
   writeFileSync(absolute, contents, 'utf8');
 }
 
+interface DispatchClaimArtifact {
+  runId: string;
+  generatedAt: string;
+  notBefore: string;
+  candidates: DispatchClaimCandidate[];
+}
+
+function parseDispatchClaimArtifact(
+  payload: unknown,
+  expected: { runId: string; accountId: string },
+): DispatchClaimArtifact {
+  const artifact = record(payload, 'The dispatch claim artifact');
+  if (artifact['kind'] !== DISPATCH_ARTIFACT_KIND || artifact['version'] !== ARTIFACT_VERSION) {
+    throw new Error('The claim file is not the expected dispatch artifact version.');
+  }
+  const runId = requireUuid(artifact, 'runId', 'The dispatch claim artifact');
+  if (runId !== expected.runId) throw new Error('The claim file belongs to a different run.');
+  const generatedAt = artifact['generatedAt'];
+  const notBefore = artifact['notBefore'];
+  if (typeof generatedAt !== 'string' || !ISO_INSTANT_PATTERN.test(generatedAt)
+    || typeof notBefore !== 'string' || !ISO_INSTANT_PATTERN.test(notBefore)) {
+    throw new Error('The claim file has no valid generation or launch timestamp.');
+  }
+
+  const identity = record(artifact['identity'], 'The claim artifact identity');
+  const database = record(identity['database'], 'The claim artifact database identity');
+  if (identity['accountId'] !== expected.accountId
+    || identity['worker'] !== COVER_BACKFILL_WORKER_NAME
+    || identity['workflow'] !== COVER_BACKFILL_WORKFLOW_NAME
+    || identity['wranglerConfig'] !== WRANGLER_CONFIG_PATH
+    || database['name'] !== COVER_BACKFILL_DATABASE_NAME
+    || database['id'] !== COVER_BACKFILL_DATABASE_ID) {
+    throw new Error('The claim artifact resource identity does not match this launch.');
+  }
+
+  const rawCandidates = artifact['candidates'];
+  if (!Array.isArray(rawCandidates)) throw new Error('The claim artifact has no candidate manifest.');
+  const candidates = rawCandidates.map((value) => {
+    const candidate = record(value, 'A claim artifact candidate');
+    const workflowInstanceId = candidate['workflowInstanceId'];
+    if (typeof workflowInstanceId !== 'string' || !INSTANCE_ID_PATTERN.test(workflowInstanceId)) {
+      throw new Error('A claim artifact candidate has no Workflow instance ID.');
+    }
+    return {
+      runId: requireUuid(candidate, 'runId', 'A claim artifact candidate'),
+      jobId: requireUuid(candidate, 'jobId', 'A claim artifact candidate'),
+      eventId: requireUuid(candidate, 'eventId', 'A claim artifact candidate'),
+      workflowInstanceId,
+      dispatchGeneration: requireCount(
+        candidate,
+        'dispatchGeneration',
+        'A claim artifact candidate',
+      ),
+    };
+  });
+  const validated = validateClaimCandidates(runId, candidates);
+
+  const steps = artifact['steps'];
+  const stepKinds = Array.isArray(steps)
+    ? steps.map((step) => record(step, 'A claim artifact step')['kind'])
+    : [];
+  if (JSON.stringify(stepKinds) !== JSON.stringify([
+    'identity-check', 'identity-check', 'claim', 'claimed-read',
+  ]) || JSON.stringify(artifact).includes('wrangler workflows trigger')) {
+    throw new Error('The claim artifact does not contain the exact claim/read protocol.');
+  }
+  return { runId, generatedAt, notBefore, candidates: validated };
+}
+
 function sqlPathFor(planFile: string): string {
   return planFile.replace(/\.json$/u, '') + '.sql';
 }
@@ -1293,7 +1654,9 @@ export function runCli(
 
   // Path safety is checked before anything is read, so a mistyped artifact
   // destination can never be discovered after a payload has been loaded.
-  for (const candidate of [request.payloadFile, request.planFile, request.runStateFile]) {
+  for (const candidate of [
+    request.payloadFile, request.planFile, request.claimFile, request.runStateFile,
+  ]) {
     if (candidate === null) continue;
     const problem = artifactPathProblem(candidate);
     if (problem) {
@@ -1340,11 +1703,107 @@ export function runCli(
     return 0;
   }
 
-  if (request.mode === 'dispatch' || request.mode === 'confirm') {
+  if (request.mode === 'dispatch' || request.mode === 'launch' || request.mode === 'confirm') {
     if (!request.runId) {
       log(`--run-id is required in ${request.mode} mode.`);
       return 1;
     }
+  }
+
+  if (request.mode === 'launch') {
+    if (!request.claimFile) {
+      log('--claim-file is required in launch mode.');
+      return 1;
+    }
+    if (!request.payloadFile) {
+      log('--payload-file is required in launch mode. Save the claimed-read result first.');
+      return 1;
+    }
+    if (!requireAccount()) return 1;
+    const claimArtifact = parseDispatchClaimArtifact(readPayload(request.claimFile), {
+      runId: request.runId!,
+      accountId: request.accountId!,
+    });
+    if (!ISO_INSTANT_PATTERN.test(request.now)) {
+      throw new Error('The timestamp must be a UTC instant.');
+    }
+    if (Date.parse(request.now) < Date.parse(claimArtifact.notBefore)) {
+      log(`This claim cannot launch before ${claimArtifact.notBefore}.`);
+      return 1;
+    }
+    // All payload/manifest validation happens before any command is logged or
+    // written. A single hostile or missing row voids the whole launch.
+    const launch = buildLaunchPlan({
+      runId: request.runId!,
+      candidates: claimArtifact.candidates,
+      results: parseClaimedDispatchPayload(readPayload(request.payloadFile)),
+    });
+    log(`${launch.acceptedCandidates.length} committed claims accepted;`
+      + ` ${launch.refusedCandidates.length} explicitly refused.`);
+    if (!request.confirmed) {
+      log('Set CANDIDARY_COVER_BACKFILL_CONFIRM to write the launch artifact.');
+      return 0;
+    }
+    if (!request.planFile) {
+      log('--plan-file is required in launch mode.');
+      return 1;
+    }
+    if (launch.acceptedCandidates.length === 0) {
+      log('No committed claim is launchable; no artifact was written.');
+      return 0;
+    }
+    const unitSteps = launch.acceptedCandidates.flatMap((candidate, index) => {
+      const read = d1ReadCommands(confirmSql({
+        runId: candidate.runId,
+        jobId: candidate.jobId,
+        eventId: candidate.eventId,
+      }));
+      return [
+        {
+          kind: 'trigger',
+          jobId: candidate.jobId,
+          eventId: candidate.eventId,
+          workflowInstanceId: candidate.workflowInstanceId,
+          dispatchGeneration: candidate.dispatchGeneration,
+          command: launch.commands[index]!,
+          powershellCommand: launch.powershellCommands[index]!,
+        },
+        {
+          kind: 'confirm-read',
+          jobId: candidate.jobId,
+          confirmWith: `npm run cover-backfill:confirm -- --run-id ${candidate.runId}`
+            + ` --job-id ${candidate.jobId} --event-id ${candidate.eventId}`
+            + ` --generation ${candidate.dispatchGeneration}`,
+          command: read.posix,
+          powershellCommand: read.powershell,
+        },
+        {
+          kind: 'receipt-read',
+          jobId: candidate.jobId,
+          command: read.posix,
+          powershellCommand: read.powershell,
+        },
+      ];
+    });
+    const steps = [
+      ...identityCheckCommands().map((command) => ({ kind: 'identity-check', command })),
+      ...unitSteps,
+    ].map((step, index) => ({ order: index + 1, ...step }));
+    writeArtifact(request.planFile, `${JSON.stringify({
+      kind: LAUNCH_ARTIFACT_KIND,
+      version: ARTIFACT_VERSION,
+      runId: request.runId,
+      identity,
+      claimFile: request.claimFile,
+      generatedAt: request.now,
+      notBefore: claimArtifact.notBefore,
+      acceptedCandidates: launch.acceptedCandidates,
+      refusedCandidates: launch.refusedCandidates,
+      steps,
+    }, null, 2)}\n`);
+    log(`Wrote a launch artifact for ${launch.acceptedCandidates.length} committed claims`
+      + ` to ${request.planFile}. Running it is a separately authorized activity.`);
+    return 0;
   }
 
   if (request.mode === 'dispatch') {
@@ -1365,7 +1824,7 @@ export function runCli(
     log(`${observed.rows.length} committed pending rows; ${observed.nonterminal} nonterminal,`
       + ` ${observed.retryable} retryable, ${observed.activeRuns} other active runs,`
       + ` ${observed.minuteClaims} claims this minute.`);
-    log(`${batch.create.length} would be triggered, not before ${batch.notBefore}`
+    log(`${batch.create.length} would be claimed, not before ${batch.notBefore}`
       + ` (limited by ${batch.limitingBound}).`);
     if (observed.retryable > 0) {
       log('Retryable failures are restarted by Worker reconciliation, never from here.');
@@ -1385,41 +1844,17 @@ export function runCli(
     }
     const sqlFile = sqlPathFor(request.planFile);
     writeArtifact(sqlFile, `${batch.claimStatements.join('\n')}\n`);
-    // The four ordered parts, in the order they must be run: claim, trigger,
-    // post-trigger read and confirm, then a receipt read that proves the
-    // generation and dispatch state the unit actually left behind.
-    const readFor = (row: DurableDispatchRow) => d1ReadCommands(
-      confirmSql({ runId: request.runId!, jobId: row.jobId, eventId: row.eventId }),
-    );
+    const candidates = batch.create.map(dispatchClaimCandidate);
+    const claimedRead = d1ReadCommands(claimedDispatchSql(request.runId!, batch.create));
     const steps = [
       ...identityCheckCommands().map((command) => ({ kind: 'identity-check', command })),
       { kind: 'claim', command: d1FileCommand(sqlFile) },
-      ...batch.create.map((row, index) => ({
-        kind: 'trigger',
-        jobId: row.jobId,
-        eventId: row.eventId,
-        workflowInstanceId: row.workflowInstanceId,
-        // The generation the claim moves this job to, which is the one the
-        // confirm step must be run with.
-        dispatchGeneration: row.dispatchGeneration + 1,
-        command: batch.commands[index]!,
-        powershellCommand: batch.powershellCommands[index]!,
-      })),
-      ...batch.create.map((row) => ({
-        kind: 'confirm-read',
-        jobId: row.jobId,
-        confirmWith: `npm run cover-backfill:confirm -- --run-id ${request.runId}`
-          + ` --job-id ${row.jobId} --event-id ${row.eventId}`
-          + ` --generation ${row.dispatchGeneration + 1}`,
-        command: readFor(row).posix,
-        powershellCommand: readFor(row).powershell,
-      })),
-      ...batch.create.map((row) => ({
-        kind: 'receipt-read',
-        jobId: row.jobId,
-        command: readFor(row).posix,
-        powershellCommand: readFor(row).powershell,
-      })),
+      {
+        kind: 'claimed-read',
+        command: claimedRead.posix,
+        powershellCommand: claimedRead.powershell,
+        savePayloadAs: request.planFile.replace(/\.json$/u, '') + '.claimed.json',
+      },
     ].map((step, index) => ({ order: index + 1, ...step }));
     writeArtifact(request.planFile, `${JSON.stringify({
       kind: DISPATCH_ARTIFACT_KIND,
@@ -1430,10 +1865,11 @@ export function runCli(
       notBefore: batch.notBefore,
       withheld: batch.withheld,
       limitingBound: batch.limitingBound,
+      candidates,
       steps,
     }, null, 2)}\n`);
-    log(`Wrote a dispatch artifact for ${batch.create.length} committed rows to ${request.planFile}`);
-    log(`and its fence claim to ${sqlFile}. Applying either is a separately authorized activity.`);
+    log(`Wrote a claim artifact for ${batch.create.length} committed rows to ${request.planFile}`);
+    log(`and its fence claim to ${sqlFile}. Applying the claim is a separately authorized activity.`);
     return 0;
   }
 

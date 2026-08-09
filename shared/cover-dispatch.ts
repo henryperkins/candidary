@@ -146,6 +146,13 @@ export function coverBackfillNoPurgeGuardSql(): string {
     + '   WHERE p.event_id = event_cover_backfill_jobs.event_id)';
 }
 
+/** The owning release run is still authorized to make initial dispatch claims. */
+export function coverBackfillExecutingRunGuardSql(runId: string): string {
+  return 'EXISTS (SELECT 1 FROM event_cover_backfill_runs r'
+    + ' WHERE r.id = event_cover_backfill_jobs.run_id'
+    + ` AND r.id = ${runId} AND r.mode = 'execute' AND r.status = 'executing')`;
+}
+
 /**
  * The exact row this job was created against is still the current one.
  *
@@ -214,6 +221,7 @@ export function claimCoverBackfillDispatchSql(
       + ` WHERE id = ${values.jobId} AND run_id = ${values.runId} AND event_id = ${values.eventId}`
       + ` AND dispatch_state = 'pending' AND status = 'queued'`
       + ` AND dispatch_generation = ${values.generation}`
+      + ` AND ${coverBackfillExecutingRunGuardSql(values.runId)}`
       + ` AND ${liveEventGuard()}`
       + ` AND ${coverBackfillNoPurgeGuardSql()}`
       + ` AND ${coverBackfillFenceGuardSql(values.binding, 'open', values.generation)}`

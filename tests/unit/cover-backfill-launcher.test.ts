@@ -1,5 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -20,6 +28,7 @@ import {
   COVER_BACKFILL_DATABASE_NAME,
   COVER_BACKFILL_DEPENDENCY_VERSIONS,
   COVER_BACKFILL_JOB_STATUSES,
+  COVER_BACKFILL_RUN_MODES,
   COVER_BACKFILL_WORKER_NAME,
   COVER_BACKFILL_WORKFLOW_NAME,
   COVER_DISPATCH_STATES,
@@ -29,6 +38,8 @@ import {
   backfillInstanceId,
   buildBackfillRunPlan,
   buildDispatchBatch,
+  buildLaunchPlan,
+  claimedDispatchSql,
   confirmSql,
   d1FileCommand,
   d1ReadCommands,
@@ -40,6 +51,7 @@ import {
   inventoryDigest,
   inventorySql,
   parseConfirmPayload,
+  parseClaimedDispatchPayload,
   parseCountPayload,
   parseCoverBackfillArgs,
   parseDispatchPayload,
@@ -61,6 +73,93 @@ const JOB = '22222222-2222-4222-8222-222222222222';
 const EVENT = '33333333-3333-4333-8333-333333333333';
 const OTHER_EVENT = '44444444-4444-4444-8444-444444444444';
 const NOW = '2026-08-05T10:00:00.000Z';
+
+function migratedDatabase(): DatabaseSync {
+  const database = new DatabaseSync(':memory:');
+  const migrationRoot = resolve(process.cwd(), 'migrations');
+  for (const name of readdirSync(migrationRoot).filter((entry) => entry.endsWith('.sql')).sort()) {
+    database.exec(readFileSync(resolve(migrationRoot, name), 'utf8'));
+  }
+  return database;
+}
+
+function seedDispatchCandidate(
+  database: DatabaseSync,
+  input: {
+    runMode?: 'inventory' | 'execute' | 'verify';
+    runStatus?: 'inventorying' | 'executing' | 'verified' | 'failed';
+  } = {},
+): DurableDispatchRow {
+  database.prepare(`
+    INSERT INTO events (
+      id, slug, name, event_date, welcome_message, cover_object_key,
+      guest_access_expires_at, management_access_expires_at, purge_after, created_at
+    ) VALUES (?, 'task-3-event', 'Task 3', '2026-08-08', 'Welcome',
+      'events/task-3/cover/legacy.jpg', ?, ?, ?, ?)
+  `).run(EVENT, NOW, NOW, NOW, NOW);
+  database.prepare(`
+    INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(RUN, input.runMode ?? 'execute', input.runStatus ?? 'executing', NOW, NOW);
+  const candidate = dispatchRow(1, {
+    jobId: JOB,
+    eventId: EVENT,
+    workflowInstanceId: `cb1-${'1'.repeat(48)}`,
+  });
+  database.prepare(`
+    INSERT INTO event_cover_backfill_jobs (
+      id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+      workflow_instance_id, dispatch_state, dispatch_generation, status,
+      dependency_versions_json, created_at, updated_at
+    ) VALUES (?, ?, ?, 0, ?, ?, 'pending', 0, 'queued', '{}', ?, ?)
+  `).run(
+    candidate.jobId,
+    candidate.runId,
+    candidate.eventId,
+    'a'.repeat(64),
+    candidate.workflowInstanceId,
+    NOW,
+    NOW,
+  );
+  return candidate;
+}
+
+function dispatchRows(database: DatabaseSync, runId = RUN): unknown[] {
+  const sql = dispatchSql(runId);
+  return database.prepare(sql.slice(0, sql.indexOf(';') + 1)).all();
+}
+
+function fillInFlightCapacity(database: DatabaseSync): void {
+  const insertEvent = database.prepare(`
+    INSERT INTO events (
+      id, slug, name, event_date, welcome_message, cover_object_key,
+      guest_access_expires_at, management_access_expires_at, purge_after, created_at
+    ) VALUES (?, ?, 'Capacity', '2026-08-08', 'Welcome', ?, ?, ?, ?, ?)
+  `);
+  const insertJob = database.prepare(`
+    INSERT INTO event_cover_backfill_jobs (
+      id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+      workflow_instance_id, dispatch_state, dispatch_generation, status,
+      dependency_versions_json, created_at, updated_at
+    ) VALUES (?, ?, ?, 0, ?, ?, 'creating', 1, 'queued', '{}', ?, ?)
+  `);
+  for (let index = 0; index < MAX_COVER_BACKFILL_IN_FLIGHT; index += 1) {
+    const suffix = `${index + 100}`.padStart(12, '0');
+    const eventId = `aaaaaaaa-aaaa-4aaa-8aaa-${suffix}`;
+    const jobId = `bbbbbbbb-bbbb-4bbb-8bbb-${suffix}`;
+    const instanceId = `cb1-${`${index + 500}`.padStart(48, '0')}`;
+    insertEvent.run(
+      eventId,
+      `capacity-${index}`,
+      `events/${eventId}/cover/legacy.jpg`,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+    );
+    insertJob.run(jobId, RUN, eventId, 'b'.repeat(64), instanceId, NOW, NOW);
+  }
+}
 
 it('promises immediate access revocation and scheduled physical cleanup in Manager', () => {
   const source = readFileSync(resolve(process.cwd(), 'src/pages/ManagerPage.tsx'), 'utf8');
@@ -122,6 +221,40 @@ const dispatchPayload = (
   rows: readonly DurableDispatchRow[],
   values: Parameters<typeof counterRows>[0] = {},
 ) => envelopes(rows.map(dispatchWireRow), counterRows(values));
+
+const claimCandidate = (source: DurableDispatchRow) => ({
+  runId: source.runId,
+  jobId: source.jobId,
+  eventId: source.eventId,
+  workflowInstanceId: source.workflowInstanceId,
+  dispatchGeneration: source.dispatchGeneration + 1,
+});
+
+const claimedWireRow = (
+  source: DurableDispatchRow,
+  accepted: boolean,
+  overrides: Record<string, unknown> = {},
+) => ({
+  kind: 'claim-result',
+  candidate_run_id: source.runId,
+  candidate_job_id: source.jobId,
+  candidate_event_id: source.eventId,
+  candidate_workflow_instance_id: source.workflowInstanceId,
+  candidate_dispatch_generation: source.dispatchGeneration + 1,
+  claim_accepted: accepted ? 1 : 0,
+  run_mode: 'execute',
+  run_status: 'executing',
+  run_id: source.runId,
+  job_id: source.jobId,
+  event_id: source.eventId,
+  workflow_instance_id: source.workflowInstanceId,
+  dispatch_state: accepted ? 'creating' : 'pending',
+  dispatch_generation: accepted ? source.dispatchGeneration + 1 : source.dispatchGeneration,
+  status: 'queued',
+  fence_state: accepted ? 'open' : null,
+  fence_generation: accepted ? source.dispatchGeneration + 1 : null,
+  ...overrides,
+});
 
 const confirmWireRow = (overrides: Record<string, unknown> = {}) => ({
   kind: 'confirm',
@@ -224,6 +357,9 @@ describe('the launcher is pinned to the same contract the Workflow renders under
     expect([...COVER_BACKFILL_JOB_STATUSES]).toEqual(checkList(jobs, 'status'));
     expect([...COVER_FENCE_STATES])
       .toEqual(checkList(tableBlock('event_cover_workflow_fences'), 'state'));
+    expect([...COVER_BACKFILL_RUN_MODES])
+      .toEqual(checkList(tableBlock('event_cover_backfill_runs'), 'mode'));
+    expect(COVER_BACKFILL_RUN_MODES).not.toContain('launch');
   });
 
   it('names the exact resources wrangler.jsonc binds', () => {
@@ -477,6 +613,33 @@ describe('the durable dispatch read', () => {
     expect(parsed.latestClaimAt).toBeNull();
   });
 
+  it('exposes jobs only while their run is execute/executing in migrated D1', () => {
+    const cases = [
+      { runMode: 'inventory', runStatus: 'inventorying' },
+      { runMode: 'execute', runStatus: 'verified' },
+      { runMode: 'execute', runStatus: 'failed' },
+      { runMode: 'verify', runStatus: 'executing' },
+    ] as const;
+
+    for (const input of cases) {
+      const database = migratedDatabase();
+      try {
+        seedDispatchCandidate(database, input);
+        expect(dispatchRows(database), `${input.runMode}/${input.runStatus}`).toEqual([]);
+      } finally {
+        database.close();
+      }
+    }
+
+    const database = migratedDatabase();
+    try {
+      seedDispatchCandidate(database);
+      expect(dispatchRows(database)).toHaveLength(1);
+    } finally {
+      database.close();
+    }
+  });
+
   it('refuses a payload missing a counter, carrying an unknown kind, or a bad row', () => {
     expect(() => parseDispatchPayload(envelopes([], [{ kind: 'nonterminal', value: 0, at: null }])))
       .toThrow(/activeRuns/u);
@@ -509,7 +672,7 @@ describe('the dispatch batch', () => {
   it('creates nothing at all once the in-flight ceiling is reached', () => {
     const full = batch({ nonterminal: MAX_COVER_BACKFILL_IN_FLIGHT });
     expect(full.create).toEqual([]);
-    expect(full.commands).toEqual([]);
+    expect(full).not.toHaveProperty('commands');
     expect(full.fenceStatements).toEqual([]);
     expect(full.withheld.inFlight).toBe(40);
     expect(full.limitingBound).toBe('in-flight');
@@ -543,7 +706,7 @@ describe('the dispatch batch', () => {
   it('never runs beside another active run', () => {
     const contended = batch({ activeRuns: 1 });
     expect(contended.create).toEqual([]);
-    expect(contended.commands).toEqual([]);
+    expect(contended).not.toHaveProperty('commands');
     expect(contended.blockedByActiveRun).toBe(true);
     expect(contended.withheld.activeRun).toBe(40);
   });
@@ -582,10 +745,7 @@ describe('the dispatch batch', () => {
     // fences phase — and no later phase would ever settle it.
     expect(one.fenceStatements[0]).toContain('deleted_at IS NULL');
     expect(one.fenceStatements[0]).toContain('event_cover_purge_progress');
-    expect(one.commands[0]).toContain(COVER_BACKFILL_WORKFLOW_NAME);
-    expect(one.commands[0]).toContain(dispatchRow(7).workflowInstanceId);
-    expect(one.commands[0]).toContain('"runId"');
-    expect(one.commands[0]).not.toContain('cover_object_key');
+    expect(one.claimStatements.join('\n')).not.toContain('cover_object_key');
     expect(one.notBefore).toBe(NOW);
   });
 
@@ -610,9 +770,10 @@ describe('the dispatch batch', () => {
    */
   it('emits the creation command wrangler actually has', () => {
     const source = dispatchRow(3);
-    const one = buildDispatchBatch({
-      runId: RUN, rows: [source], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
-      latestClaimAt: null, now: NOW,
+    const one = buildLaunchPlan({
+      runId: RUN,
+      candidates: [claimCandidate(source)],
+      results: parseClaimedDispatchPayload(envelope([claimedWireRow(source, true)])),
     });
 
     expect(one.commands[0]).toBe(
@@ -626,9 +787,10 @@ describe('the dispatch batch', () => {
 
   it('emits a PowerShell-quoted form beside it, because that is the shell here', () => {
     const source = dispatchRow(4);
-    const one = buildDispatchBatch({
-      runId: RUN, rows: [source], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
-      latestClaimAt: null, now: NOW,
+    const one = buildLaunchPlan({
+      runId: RUN,
+      candidates: [claimCandidate(source)],
+      results: parseClaimedDispatchPayload(envelope([claimedWireRow(source, true)])),
     });
 
     // A single-quoted JSON payload survives POSIX and is eaten by PowerShell, so
@@ -674,9 +836,11 @@ describe('remote targeting', () => {
   });
 
   it('never marks a Workflow command remote and never marks one local', () => {
-    const one = buildDispatchBatch({
-      runId: RUN, rows: [dispatchRow(1)], nonterminal: 0, activeRuns: 0, minuteClaims: 0,
-      latestClaimAt: null, now: NOW,
+    const source = dispatchRow(1);
+    const one = buildLaunchPlan({
+      runId: RUN,
+      candidates: [claimCandidate(source)],
+      results: parseClaimedDispatchPayload(envelope([claimedWireRow(source, true)])),
     });
     for (const command of [...one.commands, ...one.powershellCommands]) {
       expect(command).toContain(`--config ${WRANGLER_CONFIG_PATH}`);
@@ -698,7 +862,7 @@ describe('the transactional claim', () => {
   });
 
   it('opens the fence, then moves the job and the fence to the next generation', () => {
-    const [fence, job, fenceClaim, ...rest] = one().claimStatements;
+    const [fence, job, fenceClaim, cleanup, ...rest] = one().claimStatements;
     expect(rest).toEqual([]);
     expect(fence).toContain('INSERT INTO event_cover_workflow_fences');
     expect(job).toContain("dispatch_state = 'creating'");
@@ -711,10 +875,16 @@ describe('the transactional claim', () => {
     expect(fenceClaim).toContain('changes() = 1');
     expect(fenceClaim).toContain('SELECT j.dispatch_generation');
     expect(fenceClaim).toContain("expires_at = '9999-12-31T23:59:59.999Z'");
+    expect(cleanup).toContain('DELETE FROM event_cover_workflow_fences');
+    expect(cleanup).toContain("j.dispatch_state = 'pending'");
+    expect(cleanup).toContain('j.dispatch_generation = 0');
+    expect(cleanup).toContain(`created_at = '${NOW}'`);
   });
 
-  it('carries all four refusals into the statement itself', () => {
+  it('carries the run authorization and all capacity refusals into the statement itself', () => {
     const job = one().claimStatements[1]!;
+    expect(job).toContain("r.mode = 'execute'");
+    expect(job).toContain("r.status = 'executing'");
     // Another run is active.
     expect(job).toContain("r.status IN ('inventorying', 'executing')");
     // In-flight headroom is zero — counted over live dispatch states, never over
@@ -729,6 +899,232 @@ describe('the transactional claim', () => {
     // And the two the event owns: not deleted, not being purged.
     expect(job).toContain('deleted_at IS NULL');
     expect(job).toContain('event_cover_purge_progress');
+  });
+
+  it('refuses a claim after its run stops executing and removes its proposed fence', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      expect(dispatchRows(database)).toHaveLength(1);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [candidate],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+
+      database.prepare("UPDATE event_cover_backfill_runs SET status = 'verified' WHERE id = ?")
+        .run(RUN);
+      database.exec(batch.claimStatements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT dispatch_state, dispatch_generation
+        FROM event_cover_backfill_jobs WHERE id = ?
+      `).get(JOB)).toEqual({ dispatch_state: 'pending', dispatch_generation: 0 });
+      expect(database.prepare(`
+        SELECT count(*) AS value FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId)).toEqual({ value: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('refuses a stale claim after rolling capacity fills and leaves no generation-zero fence', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      expect(dispatchRows(database)).toHaveLength(1);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [candidate],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+
+      for (let index = 0; index < MAX_COVER_BACKFILL_CREATIONS_PER_MINUTE; index += 1) {
+        database.prepare(`
+          INSERT INTO event_cover_workflow_fences (
+            workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+            state, created_at, updated_at, expires_at
+          ) VALUES (?, ?, ?, 1, 'open', ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+        `).run(
+          COVER_BACKFILL_BINDING,
+          `cb1-${`${index + 100}`.padStart(48, '0')}`,
+          EVENT,
+          NOW,
+          '9999-12-31T23:59:59.999Z',
+        );
+      }
+      database.exec(batch.claimStatements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT dispatch_state, dispatch_generation
+        FROM event_cover_backfill_jobs WHERE id = ?
+      `).get(JOB)).toEqual({ dispatch_state: 'pending', dispatch_generation: 0 });
+      expect(database.prepare(`
+        SELECT count(*) AS value FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId)).toEqual({ value: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('refuses a stale claim after in-flight capacity fills and leaves no proposed fence', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      expect(dispatchRows(database)).toHaveLength(1);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [candidate],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+
+      fillInFlightCapacity(database);
+      database.exec(batch.claimStatements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT dispatch_state, dispatch_generation
+        FROM event_cover_backfill_jobs WHERE id = ?
+      `).get(JOB)).toEqual({ dispatch_state: 'pending', dispatch_generation: 0 });
+      expect(database.prepare(`
+        SELECT count(*) AS value FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId)).toEqual({ value: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('never cleans up a pre-existing generation-zero fence after a refused claim', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      database.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, 0, 'open', ?, ?, ?)
+      `).run(
+        COVER_BACKFILL_BINDING,
+        candidate.workflowInstanceId,
+        EVENT,
+        NOW,
+        NOW,
+        '9999-12-31T23:59:59.999Z',
+      );
+      const observed = { ...candidate, fenceState: 'open' as const, fenceGeneration: 0 };
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [observed],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+      database.prepare("UPDATE event_cover_backfill_runs SET status = 'verified' WHERE id = ?")
+        .run(RUN);
+
+      database.exec(batch.claimStatements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT state, dispatch_generation, created_at, updated_at
+        FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId)).toEqual({
+        state: 'open',
+        dispatch_generation: 0,
+        created_at: NOW,
+        updated_at: NOW,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not mistake a concurrently inserted fence for its absent-at-read proposal', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [candidate],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+      database.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, 0, 'open', ?, ?, ?)
+      `).run(
+        COVER_BACKFILL_BINDING,
+        candidate.workflowInstanceId,
+        EVENT,
+        NOW,
+        NOW,
+        '9999-12-31T23:59:59.999Z',
+      );
+      database.prepare("UPDATE event_cover_backfill_runs SET status = 'verified' WHERE id = ?")
+        .run(RUN);
+
+      database.exec(batch.claimStatements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT state, dispatch_generation, created_at, updated_at
+        FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId)).toEqual({
+        state: 'open',
+        dispatch_generation: 0,
+        created_at: NOW,
+        updated_at: NOW,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('cleans its proposed fence when the old pending job changes status before claim', () => {
+    const database = migratedDatabase();
+    try {
+      const candidate = seedDispatchCandidate(database);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [candidate],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+      database.prepare(`
+        UPDATE event_cover_backfill_jobs SET status = 'failed', retryable = 1 WHERE id = ?
+      `).run(JOB);
+
+      database.exec(batch.claimStatements.join('\n'));
+
+      expect(database.prepare(`
+        SELECT count(*) AS value FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = ?
+      `).get(candidate.workflowInstanceId)).toEqual({ value: 0 });
+    } finally {
+      database.close();
+    }
   });
 
   /**
@@ -779,6 +1175,233 @@ describe('the transactional claim', () => {
     expect(sql).toContain(`j.dispatch_state IN (${LIVE_DISPATCH_STATES.map((s) => `'${s}'`).join(', ')})`
       .replace('j.dispatch_state', 'dispatch_state'));
     expect(LIVE_DISPATCH_STATES).not.toContain('pending');
+  });
+});
+
+describe('the two-stage dispatch and launch protocol', () => {
+  const outputRoot = resolve(process.cwd(), 'output');
+  const dispatchPayloadFile = 'output/task-3-dispatch-payload.json';
+  const claimFile = 'output/task-3-claim.json';
+  const claimSqlFile = 'output/task-3-claim.sql';
+  const claimedPayloadFile = 'output/task-3-claimed-payload.json';
+  const launchFile = 'output/task-3-launch.json';
+  const first = dispatchRow(21);
+  const second = dispatchRow(22);
+
+  const writeJson = (path: string, value: unknown) => {
+    writeFileSync(resolve(process.cwd(), path), `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  };
+
+  const createClaimArtifact = (): Record<string, unknown> => {
+    writeJson(dispatchPayloadFile, dispatchPayload([first, second]));
+    const code = runCli([
+      'dispatch',
+      '--run-id', RUN,
+      '--payload-file', dispatchPayloadFile,
+      '--plan-file', claimFile,
+      '--account-id', 'task-3-account',
+      '--now', NOW,
+    ], { CANDIDARY_COVER_BACKFILL_CONFIRM: '1' }, () => undefined);
+    expect(code).toBe(0);
+    return JSON.parse(readFileSync(resolve(process.cwd(), claimFile), 'utf8')) as Record<string, unknown>;
+  };
+
+  beforeAll(() => {
+    mkdirSync(outputRoot, { recursive: true });
+  });
+  afterAll(() => {
+    for (const path of [
+      dispatchPayloadFile, claimFile, claimSqlFile, claimedPayloadFile, launchFile,
+    ]) rmSync(resolve(process.cwd(), path), { force: true });
+  });
+
+  it('exports an exact post-claim read that represents accepted and refused candidates', () => {
+    const database = migratedDatabase();
+    try {
+      const accepted = seedDispatchCandidate(database);
+      const batch = buildDispatchBatch({
+        runId: RUN,
+        rows: [accepted],
+        nonterminal: 0,
+        activeRuns: 0,
+        minuteClaims: 0,
+        latestClaimAt: null,
+        now: NOW,
+      });
+      database.exec(batch.claimStatements.join('\n'));
+      const results = database.prepare(claimedDispatchSql(RUN, [accepted])).all() as Array<
+        Record<string, unknown>
+      >;
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        kind: 'claim-result',
+        candidate_job_id: accepted.jobId,
+        candidate_dispatch_generation: 1,
+        claim_accepted: 1,
+        dispatch_state: 'creating',
+        dispatch_generation: 1,
+        fence_state: 'open',
+        fence_generation: 1,
+        run_mode: 'execute',
+        run_status: 'executing',
+      });
+
+      database.prepare("UPDATE event_cover_backfill_runs SET status = 'verified' WHERE id = ?")
+        .run(RUN);
+      const refused = database.prepare(claimedDispatchSql(RUN, [accepted])).all() as Array<
+        Record<string, unknown>
+      >;
+      expect(refused).toHaveLength(1);
+      expect(refused[0]).toMatchObject({
+        kind: 'claim-result',
+        candidate_job_id: accepted.jobId,
+        claim_accepted: 0,
+        run_mode: 'execute',
+        run_status: 'verified',
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('writes claim and post-claim-read steps with an exact manifest and zero triggers', () => {
+    const artifact = createClaimArtifact();
+    expect(artifact['candidates']).toEqual([claimCandidate(first), claimCandidate(second)]);
+    const steps = artifact['steps'] as Array<Record<string, unknown>>;
+    expect(steps.map((step) => step['kind'])).toEqual([
+      'identity-check', 'identity-check', 'claim', 'claimed-read',
+    ]);
+    expect(JSON.stringify(artifact)).not.toContain('wrangler workflows trigger');
+    expect(String(steps.at(-1)?.['command'])).toContain('claim-result');
+    expect(String(steps.at(-1)?.['command'])).toContain(first.jobId);
+    expect(String(steps.at(-1)?.['command'])).toContain(second.jobId);
+  });
+
+  it('launches exactly the accepted candidate and carries its confirm and receipt reads', () => {
+    createClaimArtifact();
+    writeJson(claimedPayloadFile, envelope([
+      claimedWireRow(first, true),
+      claimedWireRow(second, false),
+    ]));
+    const lines: string[] = [];
+    const code = runCli([
+      'launch',
+      '--run-id', RUN,
+      '--claim-file', claimFile,
+      '--payload-file', claimedPayloadFile,
+      '--plan-file', launchFile,
+      '--account-id', 'task-3-account',
+      '--now', NOW,
+    ], { CANDIDARY_COVER_BACKFILL_CONFIRM: '1' }, (message) => lines.push(message));
+    expect(code).toBe(0);
+
+    const artifact = JSON.parse(readFileSync(resolve(process.cwd(), launchFile), 'utf8')) as {
+      acceptedCandidates: unknown[];
+      refusedCandidates: unknown[];
+      steps: Array<Record<string, unknown>>;
+    };
+    expect(artifact.acceptedCandidates).toEqual([claimCandidate(first)]);
+    expect(artifact.refusedCandidates).toEqual([claimCandidate(second)]);
+    expect(artifact.steps.filter((step) => step['kind'] === 'trigger')).toHaveLength(1);
+    expect(artifact.steps.filter((step) => step['kind'] === 'confirm-read')).toHaveLength(1);
+    expect(artifact.steps.filter((step) => step['kind'] === 'receipt-read')).toHaveLength(1);
+    const trigger = String(artifact.steps.find((step) => step['kind'] === 'trigger')?.['command']);
+    expect(trigger).toContain(first.workflowInstanceId);
+    expect(trigger).not.toContain(second.workflowInstanceId);
+    expect(trigger).toContain(`--config ${WRANGLER_CONFIG_PATH}`);
+    expect(trigger).not.toContain('--local');
+    expect(trigger).not.toContain('--remote');
+    expect(lines.join('\n')).not.toContain(second.workflowInstanceId);
+  });
+
+  it('rejects the whole launch before emitting a trigger for incomplete or hostile claim evidence', () => {
+    createClaimArtifact();
+    const unknown = dispatchRow(23);
+    const cases: Array<[string, unknown[]]> = [
+      ['missing candidate', [claimedWireRow(first, true)]],
+      ['duplicate candidate', [claimedWireRow(first, true), claimedWireRow(first, true), claimedWireRow(second, false)]],
+      ['unknown candidate', [claimedWireRow(first, true), claimedWireRow(second, false), claimedWireRow(unknown, true)]],
+      ['wrong run', [claimedWireRow(first, true, { run_id: OTHER_RUN }), claimedWireRow(second, false)]],
+      ['wrong generation', [claimedWireRow(first, true, { dispatch_generation: 2 }), claimedWireRow(second, false)]],
+      ['wrong fence', [claimedWireRow(first, true, { fence_state: 'deletion-blocked' }), claimedWireRow(second, false)]],
+      ['wrong status', [claimedWireRow(first, true, { status: 'rendering' }), claimedWireRow(second, false)]],
+      ['wrong instance', [
+        claimedWireRow(first, true, { workflow_instance_id: second.workflowInstanceId }),
+        claimedWireRow(second, false),
+      ]],
+      ['partial missing job', [
+        claimedWireRow(first, false, { job_id: null }),
+        claimedWireRow(second, false),
+      ]],
+    ];
+
+    for (const [label, rows] of cases) {
+      rmSync(resolve(process.cwd(), launchFile), { force: true });
+      writeJson(claimedPayloadFile, envelope(rows));
+      const lines: string[] = [];
+      let code: number | null = null;
+      let failed = false;
+      try {
+        code = runCli([
+          'launch',
+          '--run-id', RUN,
+          '--claim-file', claimFile,
+          '--payload-file', claimedPayloadFile,
+          '--plan-file', launchFile,
+          '--account-id', 'task-3-account',
+          '--now', NOW,
+        ], { CANDIDARY_COVER_BACKFILL_CONFIRM: '1' }, (message) => lines.push(message));
+      } catch {
+        failed = true;
+      }
+      expect(failed || code === 1, label).toBe(true);
+      expect(existsSync(resolve(process.cwd(), launchFile)), label).toBe(false);
+      expect(lines.join('\n'), label).not.toContain('wrangler workflows trigger');
+    }
+  });
+
+  it('rejects a claim artifact with the wrong run, resource identity, or protocol', () => {
+    const original = createClaimArtifact();
+    writeJson(claimedPayloadFile, envelope([
+      claimedWireRow(first, true),
+      claimedWireRow(second, false),
+    ]));
+    const identity = original['identity'] as Record<string, unknown>;
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['wrong run', { ...original, runId: OTHER_RUN }],
+      ['wrong account', { ...original, identity: { ...identity, accountId: 'another-account' } }],
+      ['trigger-bearing claim', {
+        ...original,
+        steps: [
+          ...(original['steps'] as unknown[]),
+          { kind: 'trigger', command: 'npx wrangler workflows trigger hostile' },
+        ],
+      }],
+    ];
+
+    for (const [label, artifact] of cases) {
+      rmSync(resolve(process.cwd(), launchFile), { force: true });
+      writeJson(claimFile, artifact);
+      const lines: string[] = [];
+      let code: number | null = null;
+      let failed = false;
+      try {
+        code = runCli([
+          'launch',
+          '--run-id', RUN,
+          '--claim-file', claimFile,
+          '--payload-file', claimedPayloadFile,
+          '--plan-file', launchFile,
+          '--account-id', 'task-3-account',
+          '--now', NOW,
+        ], { CANDIDARY_COVER_BACKFILL_CONFIRM: '1' }, (message) => lines.push(message));
+      } catch {
+        failed = true;
+      }
+      expect(failed || code === 1, label).toBe(true);
+      expect(existsSync(resolve(process.cwd(), launchFile)), label).toBe(false);
+      expect(lines.join('\n'), label).not.toContain('wrangler workflows trigger');
+    }
   });
 });
 
@@ -954,9 +1577,9 @@ describe('the zero-legacy proof', () => {
 });
 
 describe('the command line', () => {
-  it('accepts the five planner modes and nothing else', () => {
+  it('accepts the six planner modes and nothing else', () => {
     expect(parseCoverBackfillArgs([]).mode).toBe('inventory');
-    for (const mode of ['inventory', 'execute', 'dispatch', 'confirm', 'verify'] as const) {
+    for (const mode of ['inventory', 'execute', 'dispatch', 'launch', 'confirm', 'verify'] as const) {
       expect(parseCoverBackfillArgs([mode]).mode).toBe(mode);
     }
     expect(() => parseCoverBackfillArgs(['apply'])).toThrow(/Unknown mode/u);
@@ -1031,11 +1654,11 @@ describe('artifacts stay inside the ignored output directory', () => {
 });
 
 describe('the operator commands are checked in', () => {
-  it('exposes the five modes as npm scripts', () => {
+  it('exposes the six modes as npm scripts', () => {
     const packageJson = JSON.parse(
       readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'),
     ) as { scripts?: Record<string, string> };
-    for (const mode of ['inventory', 'execute', 'dispatch', 'confirm', 'verify']) {
+    for (const mode of ['inventory', 'execute', 'dispatch', 'launch', 'confirm', 'verify']) {
       expect(packageJson.scripts?.[`cover-backfill:${mode}`])
         .toBe(`node --experimental-strip-types scripts/cover-backfill.ts ${mode}`);
     }
