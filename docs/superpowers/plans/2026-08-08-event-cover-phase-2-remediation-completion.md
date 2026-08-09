@@ -366,11 +366,11 @@ export async function resolveSupersededBackfillJobsBounded(
 ): Promise<CoverBackfillLedgerSweepSummary>;
 ```
 
-- [ ] **Step 1: Write RED global-bound and expiry-eligibility tests**
+- [ ] **Step 1: Write RED global-bound, fairness, remainder, and expiry-eligibility tests**
 
-Seed more than 100 blocking jobs across multiple runs. Assert only the globally oldest 100 `(updated_at, id)` rows are inspected, only no-longer-current fingerprints resolve, at most 100 affected run IDs recount, and `remainder` is true. Assert current `needs_replacement` and retryable-inside-window rows remain blocking and receive neither reference release nor expiry.
+Seed 101 blocking jobs ordered so the oldest 100 are still-current blockers and the newer final row is superseded. Assert pass one inspects exactly 100, resolves none, CAS-touches only `updated_at` on those 100, preserves every other job field byte-for-byte, and reports `remainder: true`; assert pass two reaches and resolves the previously starved row. Add boundary cases proving: exactly 100 all-resolved rows report `remainder: true` and a confirming empty pass reports `false`; 99 still-current blockers report `true`; and equal `updated_at` values break ties by `id`. Keep current `needs_replacement` and retryable-inside-window `failed` fixtures blocking with neither reference release nor expiry. Assert no pass inspects more than 100 rows and only distinct runs containing a job actually resolved in that pass are recounted.
 
-- [ ] **Step 2: Replace the per-run resolver with one global selection**
+- [ ] **Step 2: Replace the per-run resolver with one global fair selection**
 
 Select globally before grouping by run:
 
@@ -381,7 +381,9 @@ ORDER BY updated_at, id
 LIMIT 100
 ```
 
-Resolve only rows whose stored legacy fingerprint is no longer current, then recompute only the distinct affected run IDs. Keep reference release at seven days and settled job expiry at thirty days; do not stamp unresolved/current rows.
+Resolve only rows whose stored legacy fingerprint is no longer current. For every inspected row that remains current, issue a compare-and-swap guarded by the selected job identity, blocking status, original `updated_at`, stored fingerprint, and the exact observed current event source/lifecycle state; set only `updated_at` to a rotation clock strictly later than both the sweep clock and the selected value, for example `new Date(Math.max(now.getTime(), Date.parse(selected.updated_at)) + 1).toISOString()`. A failed CAS remains unresolved. This scheduling-only touch rotates still-current blockers behind previously uninspected rows and must preserve every other job column, including `status`, `dispatch_state`, `retryable`, `failure_code`, `terminal_at`, `reference_release_at`, `expires_at`, run/event/Workflow identity, source revision/fingerprint, dependency pins, and derived-state fields. `terminal_at`, not the fairness touch, remains the restart and retention clock, and existing release/expiry timestamps are never recomputed.
+
+Recompute only distinct runs containing a job actually resolved in this pass; rotating a current blocker alone never triggers a run recount. Keep reference release at seven days and settled job expiry at thirty days. Define `remainder` conservatively as `inspectedJobs === 100 || unresolvedInspectedJobs > 0`, where unresolved includes every inspected row not proven resolved after guarded writes. Thus saturation requires a confirming pass, any current or lost-CAS row keeps `remainder` true, and a sub-limit pass whose inspected rows all resolve returns false.
 
 - [ ] **Step 3: Wire superseded resolution before recovery**
 

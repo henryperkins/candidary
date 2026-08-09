@@ -422,7 +422,9 @@ export async function closeCoverBackfillRuns(
 ): Promise<CoverBackfillLedgerSweepSummary>;
 ```
 
-Do not iterate every run and then apply a per-run limit. Select at most `COVER_CLEANUP_ROWS_PER_CLASS` blocking jobs globally, ordered by `(updated_at, id)`, resolve only fingerprints that are no longer current, and recompute the at-most-100 affected run IDs.
+Do not iterate every run and then apply a per-run limit. Select at most `COVER_CLEANUP_ROWS_PER_CLASS` blocking jobs globally, ordered by `(updated_at, id)`. Resolve only rows whose stored legacy fingerprint is no longer current. For every inspected row that remains current, issue a compare-and-swap guarded by the selected job identity, blocking status, original `updated_at`, stored fingerprint, and the exact observed current event source/lifecycle state; set only `updated_at` to a rotation clock strictly later than both the sweep clock and the selected value, for example `new Date(Math.max(now.getTime(), Date.parse(selected.updated_at)) + 1).toISOString()`. A failed CAS remains unresolved. This scheduling-only touch rotates still-current blockers behind previously uninspected rows and preserves every other job column. In particular, it must not change status, retryability, failure data, `terminal_at`, reference-release/expiry timestamps, identities, dependencies, or derived state. `terminal_at`, not the fairness touch, remains the restart and retention clock.
+
+Recompute only distinct runs containing a job actually resolved in the pass; rotating a blocker never recounts its run. Report `remainder` conservatively when `inspectedJobs === COVER_CLEANUP_ROWS_PER_CLASS || unresolvedInspectedJobs > 0`. Saturation therefore requires a confirming pass, while any inspected row not proven resolved keeps the result true.
 
 After Task 5's recovery/reconciliation pass, select a bounded set of closable runs. A run is not closable while inventory is incomplete, any job is nonterminal, any current `needs_replacement` exists, or a retryable failure remains inside its restart window. For a closable run, invoke Task 7's atomic proof transition: green becomes `verified`; red becomes `failed`. Stamp `expires_at` only on `verified` or `failed` runs, thirty days after the later of verification/failure closure and the last job terminal timestamp. Never stamp an `inventorying` or `executing` run.
 
@@ -430,7 +432,9 @@ Jobs retain existing rules: current `needs_replacement` and retryable-inside-win
 
 The final `scheduledCleanup` order is explicit: bounded superseded resolution → stale initial-create recovery → platform reconciliation/restart → bounded run closure/atomic proof → existing cover expiry phases → event purge coordination. An earlier phase may leave `remainder`; later safety phases still run within their own bounds, but no phase treats that remainder as proof of quiescence.
 
-- [ ] **Step 1: Write RED tests for the global bound, truthful remainder, run closure, and expiry eligibility**
+- [ ] **Step 1: Write RED tests for global fairness, truthful remainder, run closure, and expiry eligibility**
+
+Prove that 100 oldest still-current blockers rotate so a newer 101st superseded row resolves on the second pass; exactly 100 all-resolved rows report `remainder: true` followed by an empty `false` pass; 99 current blockers report `true`; and equal timestamps use `id` as the deterministic tie-breaker. Assert rotated rows change only `updated_at`, current `needs_replacement` and retryable-inside-window failures receive no release or expiry, no pass inspects more than the global bound, and only runs with actually resolved jobs are recounted.
 - [ ] **Step 2: Implement the bounded ledger sweep and wire it before existing cover expiry phases**
 - [ ] **Step 3: Run focused gates and commit**
 
