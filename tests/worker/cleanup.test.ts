@@ -6,6 +6,8 @@ import { MediaRepository } from '../../worker/db/media';
 import {
   COVER_CLEANUP_ROWS_PER_CLASS,
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+  MAX_COVER_PURGE_FENCES_PER_PASS,
+  MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
 } from '../../shared/constants';
 import {
   cleanupAuthScratch,
@@ -519,20 +521,55 @@ describe('event cover purge coordinator', () => {
     ).first()).toEqual({ queued_count: 1 });
   });
 
-  it('never deletes R2 objects while a fence is unresolved', async () => {
+  it.each([
+    [
+      'an unknown lookup',
+      { kind: 'unknown', telemetry: 'events/private/cover/cr1-secret' } as const,
+      'cover_platform_unknown',
+    ],
+    [
+      'an unmapped status',
+      { kind: 'status', status: 'events/private/cover/cr1-secret' } as const,
+      'cover_platform_unmapped',
+    ],
+    [
+      'a thrown lookup',
+      'throw' as const,
+      'cover_platform_lookup_failed',
+    ],
+  ])('never deletes R2 objects for %s and emits only sanitized telemetry', async (
+    _label,
+    lookup,
+    expectedCode,
+  ) => {
     const { access, ids } = await seeded();
     const { accessors, calls } = purgeAccessors({
-      [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 't' },
+      [ids.workflowInstanceId]: lookup,
     });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
+    try {
+      const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, accessors);
 
-    expect(summary.remainder).toBe(true);
-    expect(await prefixKeys(access.event.id)).not.toEqual([]);
-    // An unknown lookup performs no platform mutation at all.
-    expect(calls.filter((call) => !call.startsWith('lookup:'))).toEqual([]);
-    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
-      .bind(access.event.id).first()).not.toBeNull();
+      expect(summary.remainder).toBe(true);
+      expect(await prefixKeys(access.event.id)).not.toEqual([]);
+      // Neither absent information nor a future status performs a platform
+      // mutation. The only observable output is one bounded operations event.
+      expect(calls.filter((call) => !call.startsWith('lookup:'))).toEqual([]);
+      expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+        .bind(access.event.id).first()).not.toBeNull();
+      expect(reported).toHaveBeenCalledTimes(1);
+      const observation = JSON.parse(String(reported.mock.calls[0]![0])) as Record<string, unknown>;
+      expect(observation).toEqual({
+        event: 'cover_platform_observation',
+        source: 'purge',
+        code: expectedCode,
+      });
+      expect(JSON.stringify(observation)).not.toContain('private');
+      expect(JSON.stringify(observation)).not.toContain(ids.workflowInstanceId);
+    } finally {
+      reported.mockRestore();
+    }
   });
 
   it('keeps an already-terminal purge fence irreversibly blocked through relational completion', async () => {
@@ -558,7 +595,7 @@ describe('event cover purge coordinator', () => {
     expect(await fenceRow(ids.workflowInstanceId)).toBeNull();
   });
 
-  it('keeps a late restart blocked after relational cleanup removes its receipt', async () => {
+  it('soft-delete permanently blocks an already retryable-failed publication without releasing its graph', async () => {
     const { access, ids } = await seeded();
     await testEnv.DB.prepare(`
       UPDATE event_cover_publish_receipts
@@ -567,6 +604,66 @@ describe('event cover purge coordinator', () => {
       WHERE event_id = ? AND operation_id = ?
     `).bind(
       now.toISOString(), '2026-08-05T12:00:00.000Z', access.event.id, ids.operationId,
+    ).run();
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_drafts SET state = 'publishing' WHERE id = ?
+      `).bind(ids.draftId),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_render_sets SET state = 'staging' WHERE id = ?
+      `).bind(ids.renderSetId),
+    ]);
+    const { accessors, calls } = purgeAccessors({
+      [ids.workflowInstanceId]: { kind: 'unknown', telemetry: 'cover_platform_unknown' },
+    });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const summary = await reconcileEventCoverPurge(
+        testEnv, access.event.id, now, accessors,
+      );
+
+      expect(summary).toMatchObject({ phase: 'fences', remainder: true });
+      expect(calls).toEqual([`lookup:${ids.workflowInstanceId}`]);
+      expect(await testEnv.DB.prepare(`
+        SELECT status, retryable, failure_code, dispatch_state, dispatch_generation,
+          draft_id, render_set_id
+        FROM event_cover_publish_receipts
+        WHERE event_id = ? AND operation_id = ?
+      `).bind(access.event.id, ids.operationId).first()).toEqual({
+        status: 'failed', retryable: 0, failure_code: 'EVENT_DELETED',
+        dispatch_state: 'blocked', dispatch_generation: 1,
+        draft_id: ids.draftId, render_set_id: ids.renderSetId,
+      });
+      expect(await testEnv.DB.prepare(`
+        SELECT state, draft_revision FROM event_cover_drafts WHERE id = ?
+      `).bind(ids.draftId).first()).toEqual({ state: 'publishing', draft_revision: 3 });
+      expect(await testEnv.DB.prepare(`
+        SELECT state, abandoned_at, cleanup_after FROM event_cover_render_sets WHERE id = ?
+      `).bind(ids.renderSetId).first()).toEqual({
+        state: 'staging', abandoned_at: null, cleanup_after: null,
+      });
+      expect(await fenceRow(ids.workflowInstanceId)).toEqual({
+        state: 'deletion-blocked', expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+        dispatch_generation: 1,
+      });
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('keeps a late restart blocked after relational cleanup removes its receipt', async () => {
+    const { access, ids } = await seeded();
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          dispatch_state = 'confirmed', updated_at = ?, expires_at = ?
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(
+      // The public call below uses a fixed logical instant, while its guarded
+      // claim deliberately uses D1's real application clock. Keep this race
+      // fixture inside both clocks' restart window.
+      now.toISOString(), '2099-08-05T12:00:00.000Z', access.event.id, ids.operationId,
     ).run();
 
     let signalRestartStarted!: () => void;
@@ -594,6 +691,15 @@ describe('event cover purge coordinator', () => {
       },
     });
     await restartStarted;
+
+    // Claims now use D1's application clock. Align the durable receipt clock
+    // with this test's fixed logical instant before advancing it by 121 seconds;
+    // otherwise the real wall clock would correctly keep the claim young.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET last_dispatch_at = ?, updated_at = ?
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(now.toISOString(), now.toISOString(), access.event.id, ids.operationId).run();
 
     const purgeAt = new Date(now.getTime() + 121_000);
     const purged = await reconcileEventCoverPurge(
@@ -1249,15 +1355,17 @@ describe('bounded cover storage sweep', () => {
   async function insertSet(id: string, options: {
     state: string;
     masterId: string;
+    draftId?: string | null;
     cleanupAfter?: string | null;
   }) {
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_render_sets (
-        id, event_id, master_id, recipe_json, recipe_sha256, state, required_slots,
-        created_at, cleanup_after
-      ) VALUES (?, ?, ?, '{"effect":"natural"}', ?, ?, 12, ?, ?)
+        id, event_id, master_id, draft_id, recipe_json, recipe_sha256, state,
+        required_slots, created_at, cleanup_after
+      ) VALUES (?, ?, ?, ?, '{"effect":"natural"}', ?, ?, 12, ?, ?)
     `).bind(
-      id, access.event.id, options.masterId, HEX, options.state, PAST,
+      id, access.event.id, options.masterId, options.draftId ?? null,
+      HEX, options.state, PAST,
       options.cleanupAfter ?? null,
     ).run();
   }
@@ -1280,18 +1388,22 @@ describe('bounded cover storage sweep', () => {
     draftId?: string | null;
     setId?: string | null;
     retryable?: number;
+    failureCode?: string | null;
+    updatedAt?: string;
+    expectedRevision?: number;
   }) {
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_publish_receipts (
         event_id, operation_id, draft_id, render_set_id, request_sha256, action,
         expected_revision, status, workflow_instance_id, dependency_versions_json,
-        completed_profiles, required_profiles, retryable, dispatch_state,
+        completed_profiles, required_profiles, failure_code, retryable, dispatch_state,
         dispatch_generation, created_at, updated_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, 'publish', 0, ?, ?, '{"tonalEffect":1}', 0, 6, ?, 'confirmed', 1, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 'publish', ?, ?, ?, '{"tonalEffect":1}', 0, 6, ?, ?, 'confirmed', 1, ?, ?, ?)
     `).bind(
       access.event.id, operationId, options.draftId ?? null, options.setId ?? null, HEX,
-      options.status, `instance-${operationId}`, options.retryable ?? 0, PAST, PAST,
-      options.expiresAt,
+      options.expectedRevision ?? 0, options.status, `instance-${operationId}`,
+      options.failureCode ?? null,
+      options.retryable ?? 0, PAST, options.updatedAt ?? PAST, options.expiresAt,
     ).run();
   }
 
@@ -1391,6 +1503,1013 @@ describe('bounded cover storage sweep', () => {
     // Publication ownership is what returns it to `ready` — never a sweep.
     expect((await draftState('draft-publishing'))?.state).toBe('publishing');
     expect(await countRows('event_cover_publish_receipts', access.event.id)).toBe(1);
+  });
+
+  it('settles a retryable publication exactly at expiry before admitting a competitor', async () => {
+    const terminalAt = '2026-08-09T12:00:00.000Z';
+    const expiresAt = NOW.toISOString();
+    const terminalReceiptExpiry = '2026-08-11T12:00:00.000Z';
+    const fenceExpiry = '2026-09-10T12:00:00.000Z';
+    const setCleanupAfter = '2026-08-17T12:00:00.000Z';
+    const draftExpiry = '2026-10-20T00:00:00.000Z';
+    const raw = await put(`${prefix()}/raw/draft-retry-expiry`);
+    await insertMaster('master-retry-expiry');
+    await insertDraft('draft-retry-expiry', {
+      state: 'publishing', expiresAt: draftExpiry, rawKey: raw,
+      masterId: 'master-retry-expiry',
+    });
+    await insertSet('set-retry-expiry', {
+      state: 'staging', masterId: 'master-retry-expiry', draftId: 'draft-retry-expiry',
+    });
+    const rendered = await insertRenderObject(
+      'object-retry-expiry', 'set-retry-expiry', 'wide-expanded',
+    );
+    await insertReceipt('op-retry-expiry', {
+      status: 'failed', retryable: 1, expiresAt,
+      draftId: 'draft-retry-expiry', setId: 'set-retry-expiry',
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: terminalAt,
+    });
+    // A coincidentally correct legacy deadline is not proof by itself: cleanup
+    // must also move the fence's owner-relative terminal clock.
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-expiry', {
+      expiresAt: fenceExpiry,
+    });
+
+    const insertCompetitor = () => insertReceipt('op-competitor', {
+      status: 'queued', expiresAt: draftExpiry,
+    });
+    const calls: string[] = [];
+    let platformStatus: 'paused' | 'terminated' = 'paused';
+    let signalTerminateStarted!: () => void;
+    let releaseTerminate!: () => void;
+    const terminateStarted = new Promise<void>((resolve) => { signalTerminateStarted = resolve; });
+    const terminateGate = new Promise<void>((resolve) => { releaseTerminate = resolve; });
+    const workflow = {
+      async lookup(id: string): Promise<CoverWorkflowLookup> {
+        calls.push(`lookup:${id}`);
+        return { kind: 'status', status: platformStatus };
+      },
+      async create(id: string) { calls.push(`create:${id}`); },
+      async resume(id: string) { calls.push(`resume:${id}`); },
+      async restart(id: string) { calls.push(`restart:${id}`); },
+      async terminate(id: string) {
+        calls.push(`terminate:${id}`);
+        signalTerminateStarted();
+        await terminateGate;
+        platformStatus = 'terminated';
+      },
+    };
+
+    await cleanupEventCovers(testEnv, new Date(NOW.getTime() - 1), workflow);
+    expect(calls).toEqual([]);
+    await expect(insertCompetitor()).rejects.toThrow(/UNIQUE constraint failed/);
+    expect(await testEnv.DB.prepare(`
+      SELECT retryable, updated_at, expires_at FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = 'op-retry-expiry'
+    `).bind(access.event.id).first()).toEqual({
+      retryable: 1, updated_at: terminalAt, expires_at: expiresAt,
+    });
+    expect(await draftState('draft-retry-expiry')).toMatchObject({
+      state: 'publishing', draft_revision: 1,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_at, cleanup_after FROM event_cover_render_sets
+      WHERE id = 'set-retry-expiry'
+    `).first()).toEqual({ state: 'staging', abandoned_at: null, cleanup_after: null });
+
+    const transition = cleanupEventCovers(testEnv, NOW, workflow);
+    expect(await Promise.race([
+      terminateStarted.then(() => 'started' as const),
+      transition.then(() => 'completed' as const),
+    ])).toBe('started');
+
+    // Expiry claimed this exact generation and held its fence, but has not
+    // released one-preparation ownership while the paused instance can resume.
+    expect(calls).toEqual([
+      'lookup:instance-op-retry-expiry',
+      'lookup:instance-op-retry-expiry',
+      'terminate:instance-op-retry-expiry',
+    ]);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, failure_code, dispatch_state, dispatch_generation,
+        last_dispatch_at, updated_at, expires_at, draft_id, render_set_id
+      FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = 'op-retry-expiry'
+    `).bind(access.event.id).first()).toEqual({
+      status: 'failed', retryable: 1, failure_code: 'COVER_RENDER_UNAVAILABLE',
+      dispatch_state: 'resuming', dispatch_generation: 2,
+      last_dispatch_at: expiresAt, updated_at: expiresAt, expires_at: expiresAt,
+      draft_id: 'draft-retry-expiry', render_set_id: 'set-retry-expiry',
+    });
+    expect(await draftState('draft-retry-expiry')).toMatchObject({
+      state: 'publishing', raw_object_key: raw, draft_revision: 1,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_reason, abandoned_at, cleanup_after
+      FROM event_cover_render_sets WHERE id = 'set-retry-expiry'
+    `).first()).toEqual({
+      state: 'staging', abandoned_reason: null, abandoned_at: null, cleanup_after: null,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation, updated_at, expires_at
+      FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = 'instance-op-retry-expiry'
+    `).first()).toEqual({
+      state: 'open', dispatch_generation: 2,
+      updated_at: expiresAt, expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+    await expect(insertCompetitor()).rejects.toThrow(/UNIQUE constraint failed/);
+    expect(await exists(rendered)).toBe(true);
+
+    releaseTerminate();
+    await transition;
+
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, failure_code, dispatch_state, dispatch_generation,
+        updated_at, expires_at, draft_id, render_set_id
+      FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = 'op-retry-expiry'
+    `).bind(access.event.id).first()).toEqual({
+      status: 'failed', retryable: 0, failure_code: 'COVER_RENDER_UNAVAILABLE',
+      dispatch_state: 'failed', dispatch_generation: 2,
+      updated_at: expiresAt, expires_at: terminalReceiptExpiry,
+      draft_id: 'draft-retry-expiry', render_set_id: 'set-retry-expiry',
+    });
+    expect(await draftState('draft-retry-expiry')).toMatchObject({
+      state: 'ready', raw_object_key: raw, draft_revision: 2,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_reason, abandoned_at, cleanup_after
+      FROM event_cover_render_sets WHERE id = 'set-retry-expiry'
+    `).first()).toEqual({
+      state: 'abandoned', abandoned_reason: 'COVER_RENDER_UNAVAILABLE',
+      abandoned_at: expiresAt, cleanup_after: setCleanupAfter,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, updated_at, expires_at, dispatch_generation
+      FROM event_cover_workflow_fences WHERE workflow_instance_id = 'instance-op-retry-expiry'
+    `).first()).toEqual({
+      state: 'open', updated_at: expiresAt, expires_at: fenceExpiry, dispatch_generation: 2,
+    });
+    expect(calls).toEqual([
+      'lookup:instance-op-retry-expiry',
+      'lookup:instance-op-retry-expiry',
+      'terminate:instance-op-retry-expiry',
+      'lookup:instance-op-retry-expiry',
+    ]);
+    expect(await exists(raw)).toBe(true);
+    expect(await exists(rendered)).toBe(true);
+    expect(await countRows('event_cover_render_objects', access.event.id)).toBe(1);
+
+    // The partial unique index remains the authority: the same insertion that
+    // failed one millisecond earlier succeeds only after the atomic settlement.
+    await insertCompetitor();
+    const settledGraph = (await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        SELECT retryable, updated_at, expires_at FROM event_cover_publish_receipts
+        WHERE event_id = ? AND operation_id = 'op-retry-expiry'
+      `).bind(access.event.id),
+      testEnv.DB.prepare(`
+        SELECT state, draft_revision, updated_at FROM event_cover_drafts
+        WHERE id = 'draft-retry-expiry'
+      `),
+      testEnv.DB.prepare(`
+        SELECT state, abandoned_reason, abandoned_at, cleanup_after
+        FROM event_cover_render_sets WHERE id = 'set-retry-expiry'
+      `),
+      testEnv.DB.prepare(`
+        SELECT state, updated_at, expires_at FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = 'instance-op-retry-expiry'
+      `),
+    ])).map((result) => result.results);
+
+    const replay = await cleanupEventCovers(testEnv, NOW, workflow);
+    expect(replay).toMatchObject({
+      draftsExpired: 0, receiptsExpired: 0, setsAbandoned: 0,
+      renderObjectsDeleted: 0, setsDeleted: 0, remainder: false,
+    });
+    expect((await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        SELECT retryable, updated_at, expires_at FROM event_cover_publish_receipts
+        WHERE event_id = ? AND operation_id = 'op-retry-expiry'
+      `).bind(access.event.id),
+      testEnv.DB.prepare(`
+        SELECT state, draft_revision, updated_at FROM event_cover_drafts
+        WHERE id = 'draft-retry-expiry'
+      `),
+      testEnv.DB.prepare(`
+        SELECT state, abandoned_reason, abandoned_at, cleanup_after
+        FROM event_cover_render_sets WHERE id = 'set-retry-expiry'
+      `),
+      testEnv.DB.prepare(`
+        SELECT state, updated_at, expires_at FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = 'instance-op-retry-expiry'
+      `),
+    ])).map((result) => result.results)).toEqual(settledGraph);
+
+    await cleanupEventCovers(
+      testEnv, new Date('2026-09-10T11:59:59.999Z'), workflow,
+    );
+    expect(await fenceRow('instance-op-retry-expiry')).not.toBeNull();
+    expect(await exists(rendered)).toBe(true);
+
+    await cleanupEventCovers(testEnv, new Date(fenceExpiry), workflow);
+    expect(await fenceRow('instance-op-retry-expiry')).toBeNull();
+    expect(await testEnv.DB.prepare(`
+      SELECT operation_id FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = 'op-retry-expiry'
+    `).bind(access.event.id).first()).toBeNull();
+    expect(await exists(rendered)).toBe(false);
+    expect(await exists(raw)).toBe(true);
+  });
+
+  it('re-proves terminal state after claiming an initially terminal retryable publication', async () => {
+    const expiresAt = NOW.toISOString();
+    await insertMaster('master-retry-expiry-race');
+    await insertDraft('draft-retry-expiry-race', {
+      state: 'publishing', expiresAt: FUTURE, masterId: 'master-retry-expiry-race',
+    });
+    await insertSet('set-retry-expiry-race', {
+      state: 'staging', masterId: 'master-retry-expiry-race',
+      draftId: 'draft-retry-expiry-race',
+    });
+    await insertReceipt('op-retry-expiry-race', {
+      status: 'failed', retryable: 1, expiresAt,
+      draftId: 'draft-retry-expiry-race', setId: 'set-retry-expiry-race',
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: '2026-08-09T12:00:00.000Z',
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-expiry-race', {
+      expiresAt: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+
+    const calls: string[] = [];
+    const observations = ['complete', 'running', 'terminated'] as const;
+    let lookupIndex = 0;
+    const workflow = {
+      async lookup(id: string): Promise<CoverWorkflowLookup> {
+        calls.push(`lookup:${id}`);
+        return { kind: 'status', status: observations[lookupIndex++] ?? 'unknown' };
+      },
+      async create(id: string) { calls.push(`create:${id}`); },
+      async resume(id: string) { calls.push(`resume:${id}`); },
+      async restart(id: string) { calls.push(`restart:${id}`); },
+      async terminate(id: string) { calls.push(`terminate:${id}`); },
+    };
+
+    await cleanupEventCovers(testEnv, NOW, workflow);
+
+    expect(calls).toEqual([
+      'lookup:instance-op-retry-expiry-race',
+      'lookup:instance-op-retry-expiry-race',
+      'terminate:instance-op-retry-expiry-race',
+      'lookup:instance-op-retry-expiry-race',
+    ]);
+    expect(await testEnv.DB.prepare(`
+      SELECT retryable, dispatch_state, dispatch_generation, expires_at
+      FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = 'op-retry-expiry-race'
+    `).bind(access.event.id).first()).toEqual({
+      retryable: 0, dispatch_state: 'failed', dispatch_generation: 2,
+      expires_at: '2026-08-11T12:00:00.000Z',
+    });
+    expect(await draftState('draft-retry-expiry-race')).toMatchObject({
+      state: 'ready', draft_revision: 2,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, cleanup_after FROM event_cover_render_sets
+      WHERE id = 'set-retry-expiry-race'
+    `).first()).toEqual({
+      state: 'abandoned', cleanup_after: '2026-08-17T12:00:00.000Z',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation, expires_at
+      FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = 'instance-op-retry-expiry-race'
+    `).first()).toEqual({
+      state: 'open', dispatch_generation: 2,
+      expires_at: '2026-09-10T12:00:00.000Z',
+    });
+  });
+
+  it('settles an expired paused revision loser as conflict after terminal proof', async () => {
+    const expiresAt = NOW.toISOString();
+    await insertMaster('master-retry-expiry-conflict');
+    await insertDraft('draft-retry-expiry-conflict', {
+      state: 'publishing', expiresAt: FUTURE, masterId: 'master-retry-expiry-conflict',
+    });
+    await insertSet('set-retry-expiry-conflict', {
+      state: 'staging', masterId: 'master-retry-expiry-conflict',
+      draftId: 'draft-retry-expiry-conflict',
+    });
+    await insertReceipt('op-retry-expiry-conflict', {
+      status: 'failed', retryable: 1, expiresAt, expectedRevision: 0,
+      draftId: 'draft-retry-expiry-conflict', setId: 'set-retry-expiry-conflict',
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: '2026-08-09T12:00:00.000Z',
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-expiry-conflict', {
+      expiresAt: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    let platformStatus: 'paused' | 'terminated' = 'paused';
+    const calls: string[] = [];
+    const workflow = {
+      async lookup(id: string): Promise<CoverWorkflowLookup> {
+        calls.push(`lookup:${id}`);
+        return { kind: 'status', status: platformStatus };
+      },
+      async create(id: string) { calls.push(`create:${id}`); },
+      async resume(id: string) { calls.push(`resume:${id}`); },
+      async restart(id: string) { calls.push(`restart:${id}`); },
+      async terminate(id: string) {
+        calls.push(`terminate:${id}`);
+        platformStatus = 'terminated';
+      },
+    };
+
+    await cleanupEventCovers(testEnv, NOW, workflow);
+
+    expect(calls).toEqual([
+      'lookup:instance-op-retry-expiry-conflict',
+      'lookup:instance-op-retry-expiry-conflict',
+      'terminate:instance-op-retry-expiry-conflict',
+      'lookup:instance-op-retry-expiry-conflict',
+    ]);
+    expect(await testEnv.DB.prepare(`
+      SELECT expected_revision, status, retryable, failure_code, dispatch_state,
+        dispatch_generation, render_set_id, expires_at
+      FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = 'op-retry-expiry-conflict'
+    `).bind(access.event.id).first()).toEqual({
+      expected_revision: 0, status: 'conflict', retryable: 0, failure_code: null,
+      dispatch_state: 'resuming', dispatch_generation: 2, render_set_id: null,
+      expires_at: '2026-08-11T12:00:00.000Z',
+    });
+    expect(await draftState('draft-retry-expiry-conflict')).toMatchObject({
+      state: 'ready', draft_revision: 2,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_reason, cleanup_after FROM event_cover_render_sets
+      WHERE id = 'set-retry-expiry-conflict'
+    `).first()).toEqual({
+      state: 'abandoned', abandoned_reason: 'revision-conflict',
+      cleanup_after: '2026-08-17T12:00:00.000Z',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation, expires_at FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = 'instance-op-retry-expiry-conflict'
+    `).first()).toEqual({
+      state: 'open', dispatch_generation: 2, expires_at: '2026-09-10T12:00:00.000Z',
+    });
+  });
+
+  it('preserves an expired retryable publication byte-for-byte on unknown platform evidence', async () => {
+    await insertMaster('master-retry-unknown');
+    await insertDraft('draft-retry-unknown', {
+      state: 'publishing', expiresAt: FUTURE, masterId: 'master-retry-unknown',
+    });
+    await insertSet('set-retry-unknown', {
+      state: 'staging', masterId: 'master-retry-unknown', draftId: 'draft-retry-unknown',
+    });
+    await insertReceipt('op-retry-unknown', {
+      status: 'failed', retryable: 1, expiresAt: NOW.toISOString(),
+      draftId: 'draft-retry-unknown', setId: 'set-retry-unknown',
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: PAST,
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-unknown');
+    const before = (await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        SELECT * FROM event_cover_publish_receipts WHERE operation_id = 'op-retry-unknown'
+      `),
+      testEnv.DB.prepare(`SELECT * FROM event_cover_drafts WHERE id = 'draft-retry-unknown'`),
+      testEnv.DB.prepare(`SELECT * FROM event_cover_render_sets WHERE id = 'set-retry-unknown'`),
+      testEnv.DB.prepare(`
+        SELECT * FROM event_cover_workflow_fences
+        WHERE workflow_instance_id = 'instance-op-retry-unknown'
+      `),
+    ])).map((result) => result.results);
+    const { accessors, calls } = purgeAccessors({
+      'instance-op-retry-unknown': {
+        kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
+      },
+    });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const summary = await cleanupEventCovers(testEnv, NOW, accessors.render);
+
+      expect(summary.remainder).toBe(true);
+      expect(calls).toEqual(['lookup:instance-op-retry-unknown']);
+      expect((await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          SELECT * FROM event_cover_publish_receipts WHERE operation_id = 'op-retry-unknown'
+        `),
+        testEnv.DB.prepare(`SELECT * FROM event_cover_drafts WHERE id = 'draft-retry-unknown'`),
+        testEnv.DB.prepare(`SELECT * FROM event_cover_render_sets WHERE id = 'set-retry-unknown'`),
+        testEnv.DB.prepare(`
+          SELECT * FROM event_cover_workflow_fences
+          WHERE workflow_instance_id = 'instance-op-retry-unknown'
+        `),
+      ])).map((result) => result.results)).toEqual(before);
+      await expect(insertReceipt('op-unknown-competitor', {
+        status: 'queued', expiresAt: FUTURE,
+      })).rejects.toThrow(/UNIQUE constraint failed/);
+      expect(reported).toHaveBeenCalledTimes(1);
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('does not release another terminal winner graph after losing its settlement CAS', async () => {
+    await insertMaster('master-retry-race');
+    await insertDraft('draft-retry-race', {
+      state: 'publishing', expiresAt: FUTURE, masterId: 'master-retry-race',
+    });
+    await insertSet('set-retry-race', {
+      state: 'staging', masterId: 'master-retry-race', draftId: 'draft-retry-race',
+    });
+    await insertReceipt('op-retry-race', {
+      status: 'failed', retryable: 1, expiresAt: NOW.toISOString(),
+      draftId: 'draft-retry-race', setId: 'set-retry-race',
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: PAST,
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-race', {
+      expiresAt: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences SET created_at = ?
+      WHERE workflow_instance_id = 'instance-op-retry-race'
+    `).bind('2026-08-10T12:00:00.001Z').run();
+    let lookups = 0;
+    const workflow = {
+      async lookup(): Promise<CoverWorkflowLookup> {
+        lookups += 1;
+        if (lookups === 2) {
+          // A different terminal writer wins after this cleanup's claim and
+          // before its settlement. It owns its own graph/fence follow-through.
+          await testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET retryable = 0, dispatch_state = 'failed',
+                updated_at = ?, expires_at = ?
+            WHERE operation_id = 'op-retry-race'
+          `).bind(NOW.toISOString(), '2026-08-11T12:00:00.000Z').run();
+          return { kind: 'status', status: 'terminated' };
+        }
+        return { kind: 'status', status: 'paused' };
+      },
+      async create() {},
+      async resume() {},
+      async restart() {},
+      async terminate() {},
+    };
+
+    const summary = await cleanupEventCovers(testEnv, NOW, workflow);
+
+    expect(summary.remainder).toBe(true);
+    expect(lookups).toBe(2);
+    expect(await testEnv.DB.prepare(`
+      SELECT retryable, dispatch_state, dispatch_generation, draft_id, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = 'op-retry-race'
+    `).first()).toEqual({
+      retryable: 0, dispatch_state: 'failed', dispatch_generation: 2,
+      draft_id: 'draft-retry-race', render_set_id: 'set-retry-race',
+    });
+    expect(await draftState('draft-retry-race')).toMatchObject({
+      state: 'publishing', draft_revision: 1,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_at, cleanup_after FROM event_cover_render_sets
+      WHERE id = 'set-retry-race'
+    `).first()).toEqual({ state: 'staging', abandoned_at: null, cleanup_after: null });
+    expect(await fenceRow('instance-op-retry-race')).toEqual({
+      state: 'open', expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      dispatch_generation: 2,
+    });
+  });
+
+  it('parks a young expiry reconciliation claim without a platform call', async () => {
+    const claimAt = new Date(NOW.getTime() - 119_000).toISOString();
+    await insertReceipt('op-retry-young', {
+      status: 'failed', retryable: 1, expiresAt: NOW.toISOString(),
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: claimAt,
+    });
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET dispatch_state = 'resuming', last_dispatch_at = ?
+      WHERE operation_id = 'op-retry-young'
+    `).bind(claimAt).run();
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-young', {
+      expiresAt: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+    const { accessors, calls } = purgeAccessors({
+      'instance-op-retry-young': { kind: 'status', status: 'paused' },
+    });
+
+    const summary = await cleanupEventCovers(testEnv, NOW, accessors.render);
+
+    expect(summary.remainder).toBe(true);
+    expect(calls).toEqual([]);
+    expect(await testEnv.DB.prepare(`
+      SELECT retryable, dispatch_state, dispatch_generation, last_dispatch_at
+      FROM event_cover_publish_receipts WHERE operation_id = 'op-retry-young'
+    `).first()).toEqual({
+      retryable: 1, dispatch_state: 'resuming', dispatch_generation: 1,
+      last_dispatch_at: claimAt,
+    });
+    expect(await fenceRow('instance-op-retry-young')).toEqual({
+      state: 'open', expires_at: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      dispatch_generation: 1,
+    });
+  });
+
+  it('bounds retryable publication expiry globally and is idempotent after draining', async () => {
+    const count = MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS + 1;
+    const terminalAt = '2026-08-09T12:00:00.000Z';
+    const expiresAt = NOW.toISOString();
+    const statements = Array.from({ length: count }, (_unused, index) => {
+      const id = `retry-expiry-event-${index.toString().padStart(2, '0')}`;
+      return testEnv.DB.prepare(`
+        INSERT INTO events (
+          id, slug, name, event_date, welcome_message,
+          guest_access_expires_at, management_access_expires_at,
+          purge_after, created_at
+        ) VALUES (?, ?, 'Retry expiry', '2026-12-31', 'Welcome', ?, ?, ?, ?)
+      `).bind(id, id, '2027-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z',
+        '2027-02-01T00:00:00.000Z', PAST);
+    });
+    const masters = Array.from({ length: count }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_masters (
+          id, event_id, object_key, mime_type, byte_size, width, height, sha256,
+          normalization_version, normalization_rung, created_at
+        ) VALUES (?, ?, ?, 'image/webp', 900000, 2400, 1600, ?, 1, 1, ?)
+      `).bind(
+        `retry-expiry-master-${suffix}`, `retry-expiry-event-${suffix}`,
+        `events/retry-expiry-event-${suffix}/cover/masters/master.webp`, HEX, PAST,
+      );
+    });
+    const drafts = Array.from({ length: count }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_drafts (
+          id, event_id, source, state, draft_intent_id, request_sha256,
+          draft_revision, master_id, created_at, updated_at, expires_at
+        ) VALUES (?, ?, 'new_upload', 'publishing', ?, ?, 1, ?, ?, ?, ?)
+      `).bind(
+        `retry-expiry-draft-${suffix}`, `retry-expiry-event-${suffix}`,
+        `retry-expiry-intent-${suffix}`, HEX, `retry-expiry-master-${suffix}`,
+        PAST, PAST, FUTURE,
+      );
+    });
+    const sets = Array.from({ length: count }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_render_sets (
+          id, event_id, master_id, draft_id, recipe_json, recipe_sha256,
+          state, required_slots, created_at
+        ) VALUES (?, ?, ?, ?, '{"effect":"natural"}', ?, 'staging', 12, ?)
+      `).bind(
+        `retry-expiry-set-${suffix}`, `retry-expiry-event-${suffix}`,
+        `retry-expiry-master-${suffix}`, `retry-expiry-draft-${suffix}`, HEX, PAST,
+      );
+    });
+    const receipts = Array.from({ length: count }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_publish_receipts (
+          event_id, operation_id, draft_id, render_set_id, request_sha256,
+          action, expected_revision, status, workflow_instance_id,
+          dependency_versions_json, failure_code, retryable, dispatch_state,
+          dispatch_generation, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, 'publish', 0, 'failed', ?, '{}',
+          'COVER_RENDER_UNAVAILABLE', 1, 'confirmed', 1, ?, ?, ?)
+      `).bind(
+        `retry-expiry-event-${suffix}`, `retry-expiry-operation-${suffix}`,
+        `retry-expiry-draft-${suffix}`, `retry-expiry-set-${suffix}`, HEX,
+        `retry-expiry-instance-${suffix}`, terminalAt, terminalAt, expiresAt,
+      );
+    });
+    const fences = Array.from({ length: count }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES ('COVER_RENDER_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
+      `).bind(
+        `retry-expiry-instance-${suffix}`, `retry-expiry-event-${suffix}`,
+        terminalAt, terminalAt, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      );
+    });
+    await testEnv.DB.batch([...statements, ...masters, ...drafts, ...sets]);
+    await testEnv.DB.batch([...receipts, ...fences]);
+    const platform = new Map(Array.from({ length: count }, (_unused, index) => [
+      `retry-expiry-instance-${index.toString().padStart(2, '0')}`,
+      'paused' as string,
+    ]));
+    const calls: string[] = [];
+    const workflow = {
+      async lookup(id: string): Promise<CoverWorkflowLookup> {
+        calls.push(`lookup:${id}`);
+        return { kind: 'status', status: platform.get(id) ?? 'unknown' };
+      },
+      async create(id: string) { calls.push(`create:${id}`); },
+      async resume(id: string) { calls.push(`resume:${id}`); },
+      async restart(id: string) { calls.push(`restart:${id}`); },
+      async terminate(id: string) {
+        calls.push(`terminate:${id}`);
+        platform.set(id, 'terminated');
+      },
+    };
+
+    const first = await cleanupEventCovers(testEnv, NOW, workflow);
+
+    expect(first.remainder).toBe(true);
+    expect(calls.filter((call) => call.startsWith('lookup:'))).toHaveLength(10);
+    const settledPerPass = Math.floor(MAX_COVER_PURGE_FENCES_PER_PASS / 3);
+    expect(calls.filter((call) => call.startsWith('terminate:'))).toHaveLength(settledPerPass);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_publish_receipts
+      WHERE operation_id LIKE 'retry-expiry-operation-%' AND retryable = 0
+    `).first()).toEqual({ count: settledPerPass });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count, MIN(dispatch_state) AS dispatch_state,
+        MIN(dispatch_generation) AS dispatch_generation
+      FROM event_cover_publish_receipts
+      WHERE operation_id LIKE 'retry-expiry-operation-%' AND retryable = 1
+    `).first()).toEqual({
+      count: count - settledPerPass, dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+
+    const second = await cleanupEventCovers(testEnv, NOW, workflow);
+    expect(second.remainder).toBe(false);
+    expect(calls.filter((call) => call.startsWith('terminate:'))).toHaveLength(count);
+    const drained = await testEnv.DB.prepare(`
+      SELECT operation_id, retryable, dispatch_state, dispatch_generation,
+        updated_at, expires_at
+      FROM event_cover_publish_receipts
+      WHERE operation_id LIKE 'retry-expiry-operation-%' ORDER BY operation_id
+    `).all();
+    expect(drained.results).toHaveLength(count);
+    expect(drained.results.every((row) => (
+      row.retryable === 0
+      && row.dispatch_state === 'failed'
+      && row.dispatch_generation === 2
+      && row.updated_at === expiresAt
+      && row.expires_at === '2026-08-11T12:00:00.000Z'
+    ))).toBe(true);
+    expect((await testEnv.DB.prepare(`
+      SELECT dispatch_generation, updated_at, expires_at
+      FROM event_cover_workflow_fences
+      WHERE workflow_instance_id LIKE 'retry-expiry-instance-%'
+    `).all()).results.every((row) => (
+      row.dispatch_generation === 2
+      && row.updated_at === expiresAt
+      && row.expires_at === '2026-09-10T12:00:00.000Z'
+    ))).toBe(true);
+
+    const callCount = calls.length;
+    const replay = await cleanupEventCovers(testEnv, NOW, workflow);
+    expect(replay).toMatchObject({ receiptsExpired: 0, remainder: false });
+    expect(calls).toHaveLength(callCount);
+    expect((await testEnv.DB.prepare(`
+      SELECT operation_id, retryable, dispatch_state, dispatch_generation,
+        updated_at, expires_at
+      FROM event_cover_publish_receipts
+      WHERE operation_id LIKE 'retry-expiry-operation-%' ORDER BY operation_id
+    `).all()).results).toEqual(drained.results);
+  });
+
+  it('drifts bounded windows past nonsettling two-read prefixes', async () => {
+    const rowCount = 20;
+    const dayMs = 24 * 60 * 60 * 1000;
+    let firstDay = Math.ceil(NOW.getTime() / dayMs);
+    while (firstDay % (rowCount * 2) !== 0) firstDay += 1;
+    const passAt = (offset: number) => new Date((firstDay + offset) * dayMs);
+    const expiresAt = passAt(0).toISOString();
+
+    for (let index = 0; index < rowCount; index += 1) {
+      const suffix = index.toString().padStart(2, '0');
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          INSERT INTO events (
+            id, slug, name, event_date, welcome_message,
+            guest_access_expires_at, management_access_expires_at,
+            purge_after, created_at
+          ) VALUES (?, ?, 'Retry drift', '2026-12-31', 'Welcome', ?, ?, ?, ?)
+        `).bind(
+          `retry-drift-event-${suffix}`, `retry-drift-event-${suffix}`,
+          '2027-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z',
+          '2027-02-01T00:00:00.000Z', PAST,
+        ),
+        testEnv.DB.prepare(`
+          INSERT INTO event_cover_masters (
+            id, event_id, object_key, mime_type, byte_size, width, height, sha256,
+            normalization_version, normalization_rung, created_at
+          ) VALUES (?, ?, ?, 'image/webp', 900000, 2400, 1600, ?, 1, 1, ?)
+        `).bind(
+          `retry-drift-master-${suffix}`, `retry-drift-event-${suffix}`,
+          `events/retry-drift-event-${suffix}/cover/masters/master.webp`, HEX, PAST,
+        ),
+        testEnv.DB.prepare(`
+          INSERT INTO event_cover_drafts (
+            id, event_id, source, state, draft_intent_id, request_sha256,
+            draft_revision, master_id, created_at, updated_at, expires_at
+          ) VALUES (?, ?, 'new_upload', 'publishing', ?, ?, 1, ?, ?, ?, ?)
+        `).bind(
+          `retry-drift-draft-${suffix}`, `retry-drift-event-${suffix}`,
+          `retry-drift-intent-${suffix}`, HEX, `retry-drift-master-${suffix}`,
+          PAST, PAST, '2099-01-01T00:00:00.000Z',
+        ),
+        testEnv.DB.prepare(`
+          INSERT INTO event_cover_render_sets (
+            id, event_id, master_id, draft_id, recipe_json, recipe_sha256,
+            state, required_slots, created_at
+          ) VALUES (?, ?, ?, ?, '{"effect":"natural"}', ?, 'staging', 12, ?)
+        `).bind(
+          `retry-drift-set-${suffix}`, `retry-drift-event-${suffix}`,
+          `retry-drift-master-${suffix}`, `retry-drift-draft-${suffix}`, HEX, PAST,
+        ),
+        testEnv.DB.prepare(`
+          INSERT INTO event_cover_publish_receipts (
+            event_id, operation_id, draft_id, render_set_id, request_sha256,
+            action, expected_revision, status, workflow_instance_id,
+            dependency_versions_json, failure_code, retryable, dispatch_state,
+            dispatch_generation, created_at, updated_at, expires_at
+          ) VALUES (?, ?, ?, ?, ?, 'publish', 0, 'failed', ?, '{}',
+            'COVER_RENDER_UNAVAILABLE', 1, 'confirmed', 1, ?, ?, ?)
+        `).bind(
+          `retry-drift-event-${suffix}`, `retry-drift-operation-${suffix}`,
+          `retry-drift-draft-${suffix}`, `retry-drift-set-${suffix}`, HEX,
+          `retry-drift-instance-${suffix}`, PAST, PAST, expiresAt,
+        ),
+        testEnv.DB.prepare(`
+          INSERT INTO event_cover_workflow_fences (
+            workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+            state, created_at, updated_at, expires_at
+          ) VALUES ('COVER_RENDER_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
+        `).bind(
+          `retry-drift-instance-${suffix}`, `retry-drift-event-${suffix}`,
+          PAST, PAST, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+        ),
+      ]);
+    }
+
+    const prefixIndexes = new Set([0, 1, 2, 3, 4, 10, 11, 12, 13, 14]);
+    const lookupCounts = new Map<string, number>();
+    const calls: string[] = [];
+    const workflow = {
+      async lookup(id: string): Promise<CoverWorkflowLookup> {
+        calls.push(id);
+        const index = Number(id.slice(-2));
+        if (prefixIndexes.has(index)) {
+          const count = (lookupCounts.get(id) ?? 0) + 1;
+          lookupCounts.set(id, count);
+          return count % 2 === 1
+            ? { kind: 'status', status: 'complete' }
+            : { kind: 'unknown', telemetry: 'cover_platform_unknown' };
+        }
+        return index === 5
+          ? { kind: 'status', status: 'complete' }
+          : { kind: 'unknown', telemetry: 'cover_platform_unknown' };
+      },
+      async create() {},
+      async resume() {},
+      async restart() {},
+      async terminate() {},
+    };
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await cleanupEventCovers(testEnv, passAt(0), workflow);
+      expect(new Set(calls)).toEqual(new Set(Array.from({ length: 5 }, (_unused, index) => (
+        `retry-drift-instance-${index.toString().padStart(2, '0')}`
+      ))));
+      calls.length = 0;
+
+      await cleanupEventCovers(testEnv, passAt(1), workflow);
+      expect(new Set(calls)).toEqual(new Set(Array.from({ length: 5 }, (_unused, index) => (
+        `retry-drift-instance-${(index + 10).toString().padStart(2, '0')}`
+      ))));
+      calls.length = 0;
+
+      await cleanupEventCovers(testEnv, passAt(2), workflow);
+      expect(calls).toContain('retry-drift-instance-05');
+      expect(await testEnv.DB.prepare(`
+        SELECT retryable, dispatch_state, dispatch_generation
+        FROM event_cover_publish_receipts
+        WHERE operation_id = 'retry-drift-operation-05'
+      `).first()).toEqual({
+        retryable: 0, dispatch_state: 'failed', dispatch_generation: 2,
+      });
+      expect(await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM event_cover_publish_receipts
+        WHERE operation_id IN (
+          'retry-drift-operation-00', 'retry-drift-operation-01',
+          'retry-drift-operation-02', 'retry-drift-operation-03',
+          'retry-drift-operation-04', 'retry-drift-operation-10',
+          'retry-drift-operation-11', 'retry-drift-operation-12',
+          'retry-drift-operation-13', 'retry-drift-operation-14'
+        ) AND retryable = 1
+      `).first()).toEqual({ count: 10 });
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('rotates the full bounded window past unchanged unknown expiry rows', async () => {
+    const unknownCount = 20;
+    const total = unknownCount + 1;
+    const dayMs = 24 * 60 * 60 * 1000;
+    let firstDay = Math.ceil(NOW.getTime() / dayMs);
+    const windows = Math.ceil(total / MAX_COVER_PURGE_FENCES_PER_PASS);
+    while (firstDay % (total * windows) !== 0) firstDay += 1;
+    const passAt = (offset: number) => new Date((firstDay + offset) * dayMs);
+    const expiresAt = passAt(0).toISOString();
+    const events = Array.from({ length: total }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO events (
+          id, slug, name, event_date, welcome_message,
+          guest_access_expires_at, management_access_expires_at,
+          purge_after, created_at
+        ) VALUES (?, ?, 'Retry rotation', '2026-12-31', 'Welcome', ?, ?, ?, ?)
+      `).bind(
+        `retry-rotation-event-${suffix}`, `retry-rotation-event-${suffix}`,
+        '2027-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z',
+        '2027-02-01T00:00:00.000Z', PAST,
+      );
+    });
+    const receipts = Array.from({ length: total }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      const terminal = index === unknownCount;
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_publish_receipts (
+          event_id, operation_id, draft_id, render_set_id, request_sha256,
+          action, expected_revision, status, workflow_instance_id,
+          dependency_versions_json, failure_code, retryable, dispatch_state,
+          dispatch_generation, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, 'publish', 0, 'failed', ?, '{}',
+          'COVER_RENDER_UNAVAILABLE', 1, 'confirmed', 1, ?, ?, ?)
+      `).bind(
+        `retry-rotation-event-${suffix}`, `retry-rotation-operation-${suffix}`,
+        terminal ? 'retry-rotation-draft-20' : null,
+        terminal ? 'retry-rotation-set-20' : null,
+        HEX, `retry-rotation-instance-${suffix}`, PAST, PAST, expiresAt,
+      );
+    });
+    const fences = Array.from({ length: total }, (_unused, index) => {
+      const suffix = index.toString().padStart(2, '0');
+      return testEnv.DB.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES ('COVER_RENDER_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
+      `).bind(
+        `retry-rotation-instance-${suffix}`, `retry-rotation-event-${suffix}`,
+        PAST, PAST, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      );
+    });
+    await testEnv.DB.batch(events);
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_masters (
+          id, event_id, object_key, mime_type, byte_size, width, height, sha256,
+          normalization_version, normalization_rung, created_at
+        ) VALUES ('retry-rotation-master-20', 'retry-rotation-event-20',
+          'events/retry-rotation-event-20/cover/masters/master.webp',
+          'image/webp', 900000, 2400, 1600, ?, 1, 1, ?)
+      `).bind(HEX, PAST),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_drafts (
+          id, event_id, source, state, draft_intent_id, request_sha256,
+          draft_revision, master_id, created_at, updated_at, expires_at
+        ) VALUES ('retry-rotation-draft-20', 'retry-rotation-event-20',
+          'new_upload', 'publishing', 'retry-rotation-intent-20', ?, 1,
+          'retry-rotation-master-20', ?, ?, '2099-01-01T00:00:00.000Z')
+      `).bind(HEX, PAST, PAST),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_render_sets (
+          id, event_id, master_id, draft_id, recipe_json, recipe_sha256,
+          state, required_slots, created_at
+        ) VALUES ('retry-rotation-set-20', 'retry-rotation-event-20',
+          'retry-rotation-master-20', 'retry-rotation-draft-20',
+          '{"effect":"natural"}', ?, 'staging', 12, ?)
+      `).bind(HEX, PAST),
+    ]);
+    await testEnv.DB.batch([...receipts, ...fences]);
+    const unknownBefore = (await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        SELECT * FROM event_cover_publish_receipts
+        WHERE operation_id < 'retry-rotation-operation-20' ORDER BY operation_id
+      `),
+      testEnv.DB.prepare(`
+        SELECT * FROM event_cover_workflow_fences
+        WHERE workflow_instance_id < 'retry-rotation-instance-20'
+        ORDER BY workflow_instance_id
+      `),
+    ])).map((result) => result.results);
+    const calls: string[] = [];
+    const workflow = {
+      async lookup(id: string): Promise<CoverWorkflowLookup> {
+        calls.push(id);
+        return id === 'retry-rotation-instance-20'
+          ? { kind: 'status', status: 'complete' }
+          : { kind: 'unknown', telemetry: 'cover_platform_unknown' };
+      },
+      async create() {},
+      async resume() {},
+      async restart() {},
+      async terminate() {},
+    };
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await cleanupEventCovers(testEnv, passAt(0), workflow);
+      expect(calls).toEqual(Array.from({ length: 10 }, (_unused, index) => (
+        `retry-rotation-instance-${index.toString().padStart(2, '0')}`
+      )));
+      expect(await testEnv.DB.prepare(`
+        SELECT retryable FROM event_cover_publish_receipts
+        WHERE operation_id = 'retry-rotation-operation-20'
+      `).first()).toEqual({ retryable: 1 });
+
+      calls.length = 0;
+      await cleanupEventCovers(testEnv, passAt(1), workflow);
+      expect(calls).toEqual(Array.from({ length: 10 }, (_unused, index) => (
+        `retry-rotation-instance-${(index + 10).toString().padStart(2, '0')}`
+      )));
+
+      calls.length = 0;
+      await cleanupEventCovers(testEnv, passAt(2), workflow);
+      expect(calls).toContain('retry-rotation-instance-20');
+      expect(await testEnv.DB.prepare(`
+        SELECT retryable, dispatch_state, dispatch_generation
+        FROM event_cover_publish_receipts
+        WHERE operation_id = 'retry-rotation-operation-20'
+      `).first()).toEqual({
+        retryable: 0, dispatch_state: 'failed', dispatch_generation: 2,
+      });
+      expect((await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          SELECT * FROM event_cover_publish_receipts
+          WHERE operation_id < 'retry-rotation-operation-20' ORDER BY operation_id
+        `),
+        testEnv.DB.prepare(`
+          SELECT * FROM event_cover_workflow_fences
+          WHERE workflow_instance_id < 'retry-rotation-instance-20'
+          ORDER BY workflow_instance_id
+        `),
+      ])).map((result) => result.results)).toEqual(unknownBefore);
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('expires an owned draft whose own deadline passed before the retry window', async () => {
+    const raw = await put(`${prefix()}/raw/draft-retry-expired`);
+    await insertMaster('master-retry-expired');
+    await insertDraft('draft-retry-expired', {
+      state: 'publishing', expiresAt: PAST, rawKey: raw,
+      masterId: 'master-retry-expired',
+    });
+    await insertSet('set-retry-expired', {
+      state: 'staging', masterId: 'master-retry-expired', draftId: 'draft-retry-expired',
+    });
+    await insertReceipt('op-retry-expired', {
+      status: 'failed', retryable: 1, expiresAt: NOW.toISOString(),
+      draftId: 'draft-retry-expired', setId: 'set-retry-expired',
+      failureCode: 'COVER_RENDER_UNAVAILABLE', updatedAt: '2026-08-09T12:00:00.000Z',
+    });
+    await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-expired', {
+      expiresAt: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    });
+    const workflow = purgeAccessors({
+      'instance-op-retry-expired': { kind: 'status', status: 'complete' },
+    }).accessors.render;
+
+    await cleanupEventCovers(testEnv, NOW, workflow);
+
+    expect(await draftState('draft-retry-expired')).toEqual({
+      state: 'expired', raw_object_key: null, draft_revision: 2,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_reason FROM event_cover_render_sets
+      WHERE id = 'set-retry-expired'
+    `).first()).toEqual({
+      state: 'abandoned', abandoned_reason: 'COVER_RENDER_UNAVAILABLE',
+    });
+    expect(await exists(raw)).toBe(false);
+
+    // Deletion follows the terminal draft transition in the same ordered pass,
+    // and a replay cannot decrement the draft or delete the object twice.
+    await cleanupEventCovers(testEnv, NOW, workflow);
+    expect(await exists(raw)).toBe(false);
+    expect(await draftState('draft-retry-expired')).toEqual({
+      state: 'expired', raw_object_key: null, draft_revision: 2,
+    });
   });
 
   /**

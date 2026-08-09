@@ -3,6 +3,7 @@ import {
   MAX_COVER_PUBLICATIONS_PER_HOUR,
   MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
   MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+  coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import {
   CANONICAL_NONE_COVER_CONFIG,
@@ -15,12 +16,18 @@ import {
 import { ApiError } from '../../shared/errors';
 import { chargeCoverRateEvent } from '../db/event-covers';
 import { coverPointerStatements } from '../db/events';
-import type { CoverDraftRow, CoverPublishReceiptRow, EventRecord } from '../db/types';
+import type {
+  CoverDispatchState,
+  CoverDraftRow,
+  CoverPublishReceiptRow,
+  EventRecord,
+} from '../db/types';
 import type { AppEnv } from '../env';
 import { coverKeyFingerprint } from '../storage/event-cover-keys';
 import {
   defaultCoverWorkflowAccessor,
   dispositionForLookup,
+  emitCoverPlatformTelemetry,
   type CoverPlatformDisposition,
   type CoverWorkflowAccessor,
   type CoverWorkflowLookup,
@@ -41,6 +48,7 @@ const RESTART_WINDOW_MS = 24 * 60 * 60 * 1000;
 const RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
 /** How long a `creating`/`resuming`/`restarting` claim may sit before purge reconciles it. */
 export const STALE_DISPATCH_CLAIM_MS = 2 * 60 * 1000;
+const DISPATCH_CLAIM_APPLIED_AT_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 /**
  * The wrangler binding name, and an immutable release constant from 0012 onward.
@@ -65,9 +73,11 @@ async function lookupDisposition(
   instanceId: string,
 ): Promise<CoverPlatformDisposition> {
   const lookup = await accessor.lookup(instanceId).catch(
-    (): CoverWorkflowLookup => ({ kind: 'unknown', telemetry: 'cover_platform_accessor_rejected' }),
+    (): CoverWorkflowLookup => ({ kind: 'unknown', telemetry: 'cover_platform_lookup_failed' }),
   );
-  return dispositionForLookup(lookup);
+  const disposition = dispositionForLookup(lookup);
+  emitCoverPlatformTelemetry('publication', disposition.telemetry);
+  return disposition;
 }
 
 /* ------------------------------------------------------------------ *
@@ -89,10 +99,31 @@ export interface CoverPublicationOutcome {
 }
 
 export interface CoverPublicationRestartResult {
-  status: 'restarted' | 'terminal' | 'ineligible' | 'unavailable';
+  status: 'active' | 'restarted' | 'terminal' | 'ineligible' | 'unavailable';
   view: EventCoverPreparationView | null;
   retryAfterSeconds: number | null;
 }
+
+export interface CoverPublicationTerminalResult {
+  status: 'applied' | 'conflict' | 'failed';
+  appliedRevision: number | null;
+  view: EventCoverPreparationView;
+}
+
+type CoverDispatchClaimState = 'creating' | 'resuming' | 'restarting';
+
+interface CoverDispatchScope {
+  workflowInstanceId: string;
+  dispatchState: CoverDispatchState;
+  dispatchGeneration: number;
+}
+
+export type InitialCoverDispatchClaim =
+  | { kind: 'claimed'; dispatchGeneration: number }
+  | { kind: 'in-flight'; dispatchGeneration: number }
+  | { kind: 'stale'; dispatchGeneration: number }
+  | { kind: 'confirmed' }
+  | { kind: 'unavailable' };
 
 /**
  * The digest a receipt is pinned to, over the canonical request string.
@@ -140,6 +171,26 @@ function preparationView(receipt: CoverPublishReceiptRow): EventCoverPreparation
   };
 }
 
+function activePreparationView(receipt: CoverPublishReceiptRow): EventCoverPreparationView {
+  return {
+    ...preparationView(receipt),
+    status: 'preparing',
+    retryable: false,
+    safeFailureCode: null,
+  };
+}
+
+function terminalReceiptStatus(
+  receipt: CoverPublishReceiptRow,
+): CoverPublicationTerminalResult['status'] | null {
+  if (receipt.status === 'applied' || receipt.status === 'conflict') return receipt.status;
+  return receipt.status === 'failed' && receipt.retryable === 0 ? 'failed' : null;
+}
+
+function terminalRestartResult(receipt: CoverPublishReceiptRow): CoverPublicationRestartResult {
+  return { status: 'terminal', view: preparationView(receipt), retryAfterSeconds: null };
+}
+
 async function loadReceipt(
   env: AppEnv,
   eventId: string,
@@ -148,6 +199,167 @@ async function loadReceipt(
   return env.DB.prepare(
     'SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?',
   ).bind(eventId, operationId).first<CoverPublishReceiptRow>();
+}
+
+/** Reads the exact durable terminal result after a platform dispatch attempt. */
+export async function readCoverPublicationTerminalResult(
+  env: AppEnv,
+  eventId: string,
+  operationId: string,
+): Promise<CoverPublicationTerminalResult | null> {
+  const receipt = await loadReceipt(env, eventId, operationId);
+  if (!receipt) return null;
+  const status = terminalReceiptStatus(receipt);
+  if (!status) return null;
+  return {
+    status,
+    appliedRevision: receipt.applied_revision,
+    view: preparationView(receipt),
+  };
+}
+
+async function hasYoungExactDispatchClaim(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+): Promise<boolean> {
+  const row = await env.DB.prepare(`
+    SELECT 1 AS present
+    FROM event_cover_publish_receipts r
+    WHERE r.event_id = ? AND r.operation_id = ? AND r.workflow_instance_id = ?
+      AND r.dispatch_state IN ('creating', 'resuming', 'restarting')
+      AND (
+        r.status IN ('queued', 'rendering', 'finalizing')
+        OR (r.status = 'failed' AND r.retryable = 1)
+      )
+      AND r.last_dispatch_at IS NOT NULL
+      AND r.last_dispatch_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 minutes')
+      AND EXISTS (
+        SELECT 1 FROM event_cover_workflow_fences f
+        WHERE f.workflow_binding = ? AND f.workflow_instance_id = r.workflow_instance_id
+          AND f.event_id = r.event_id AND f.state = 'open'
+          AND f.dispatch_generation = r.dispatch_generation
+      )
+  `).bind(
+    input.eventId, input.operationId, input.workflowInstanceId, COVER_RENDER_BINDING,
+  ).first<{ present: number }>();
+  return row !== null;
+}
+
+function isRecoverableReceipt(receipt: CoverPublishReceiptRow): boolean {
+  return receipt.status === 'queued'
+    || receipt.status === 'rendering'
+    || receipt.status === 'finalizing'
+    || (receipt.status === 'failed' && receipt.retryable === 1);
+}
+
+async function loadReceiptWithExactOpenDispatchFence(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+): Promise<(CoverPublishReceiptRow & { exact_open_fence: number }) | null> {
+  return env.DB.prepare(`
+    SELECT r.*, EXISTS (
+      SELECT 1 FROM event_cover_workflow_fences f
+      WHERE f.workflow_binding = ? AND f.workflow_instance_id = r.workflow_instance_id
+        AND f.event_id = r.event_id AND f.state = 'open'
+        AND f.dispatch_generation = r.dispatch_generation
+    ) AS exact_open_fence
+    FROM event_cover_publish_receipts r
+    WHERE r.event_id = ? AND r.operation_id = ? AND r.workflow_instance_id = ?
+  `).bind(
+    COVER_RENDER_BINDING,
+    input.eventId,
+    input.operationId,
+    input.workflowInstanceId,
+  ).first<CoverPublishReceiptRow & { exact_open_fence: number }>();
+}
+
+function platformDispositionIsKnown(disposition: CoverPlatformDisposition): boolean {
+  return disposition.kind !== 'unknown'
+    && disposition.telemetry !== 'cover_platform_unmapped';
+}
+
+/**
+ * Classifies the fresh durable owner after an awaited lookup or platform edge
+ * loses its original receipt CAS. A newer exact claim/confirmation is progress,
+ * never a transient platform outage; unknown evidence remains fail-closed.
+ */
+async function recoveryResultAfterLostOwnership(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+  disposition: CoverPlatformDisposition,
+): Promise<CoverPublicationRestartResult | null> {
+  const current = await loadReceipt(env, input.eventId, input.operationId);
+  if (!current) return { status: 'ineligible', view: null, retryAfterSeconds: null };
+  if (terminalReceiptStatus(current)) return terminalRestartResult(current);
+  if (disposition.kind === 'complete' && current.status === 'failed') {
+    return terminalRestartResult(current);
+  }
+  if (current.workflow_instance_id !== input.workflowInstanceId) return null;
+
+  const platformKnown = platformDispositionIsKnown(disposition);
+  const youngClaim = await hasYoungExactDispatchClaim(env, input);
+  const exactOwner = await loadReceiptWithExactOpenDispatchFence(env, input);
+  const ownsOpenFence = exactOwner?.exact_open_fence === 1
+    && isRecoverableReceipt(exactOwner);
+  const platformActive = disposition.kind === 'active' && disposition.telemetry === null;
+  if (ownsOpenFence && platformKnown && (youngClaim || platformActive)) {
+    return {
+      status: 'active',
+      view: activePreparationView(current),
+      retryAfterSeconds: 2,
+    };
+  }
+  if (!platformKnown && youngClaim) {
+    return {
+      status: 'unavailable',
+      view: preparationView(current),
+      retryAfterSeconds: 5,
+    };
+  }
+  return null;
+}
+
+async function recoveryGuardIsKnownIneligible(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+): Promise<boolean> {
+  const row = await env.DB.prepare(`
+    SELECT
+      (
+        r.status = 'failed'
+        AND r.expires_at <= ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      ) AS restart_expired,
+      (
+        SELECT count(*) FROM event_cover_publish_receipts retained
+        WHERE retained.event_id = r.event_id
+      ) > ? AS receipts_over_cap,
+      (
+        SELECT count(*) FROM event_cover_render_sets retained_set
+        WHERE retained_set.event_id = r.event_id
+          AND retained_set.state <> 'active'
+      ) > ? AS sets_over_cap
+    FROM event_cover_publish_receipts r
+    WHERE r.event_id = ? AND r.operation_id = ? AND r.workflow_instance_id = ?
+  `).bind(
+    MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+    MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
+    input.eventId,
+    input.operationId,
+    input.workflowInstanceId,
+  ).first<{ restart_expired: number; receipts_over_cap: number; sets_over_cap: number }>();
+  return row !== null
+    && (row.restart_expired === 1 || row.receipts_over_cap === 1 || row.sets_over_cap === 1);
+}
+
+function sameRecoverySnapshot(
+  before: CoverPublishReceiptRow,
+  after: CoverPublishReceiptRow,
+): boolean {
+  return before.workflow_instance_id === after.workflow_instance_id
+    && before.status === after.status
+    && before.retryable === after.retryable
+    && before.dispatch_state === after.dispatch_state
+    && before.dispatch_generation === after.dispatch_generation;
 }
 
 /**
@@ -192,7 +404,8 @@ export async function readCoverPublication(
   const receipt = await loadReceipt(env, input.eventId, input.operationId);
   if (!receipt) return null;
   const view = preparationView(receipt);
-  if (view.status !== 'preparing' || !receipt.workflow_instance_id) return view;
+  if ((view.status !== 'preparing' && view.status !== 'retryable-failed')
+    || !receipt.workflow_instance_id) return view;
 
   // D1 is nonterminal, so the recorded instance is consulted and §9.4's map
   // applied in memory. This may synthesize an immediate retryable view; it may
@@ -202,8 +415,23 @@ export async function readCoverPublication(
   // A failed lookup is `unknown`, not absence: it must not satisfy any
   // mutation predicate, and it must not be reported as a failure either.
   const disposition = await lookupDisposition(accessor, receipt.workflow_instance_id);
-  if (disposition.productStatus === 'preparing') return view;
-  return { ...view, status: 'retryable-failed', retryable: true };
+  const current = await loadReceipt(env, input.eventId, input.operationId);
+  if (!current) return null;
+  const currentView = preparationView(current);
+  if (terminalReceiptStatus(current)) return currentView;
+  // A lookup about an older recovery generation cannot classify the generation
+  // that won while it was pending. Progress-only changes are safe to surface
+  // from the fresh row because they do not change this ownership snapshot.
+  if (!sameRecoverySnapshot(receipt, current)) return currentView;
+  if (disposition.kind === 'active' && disposition.telemetry === null) {
+    return activePreparationView(current);
+  }
+  if (disposition.productStatus === 'preparing') return currentView;
+  return {
+    ...currentView,
+    status: 'retryable-failed', retryable: true,
+    safeFailureCode: 'COVER_RENDER_UNAVAILABLE',
+  };
 }
 
 interface AcceptContext {
@@ -275,11 +503,6 @@ export async function acceptCoverPublication(
     : null;
   const renderSetId = isUpload ? crypto.randomUUID() : null;
 
-  // The cheap revision check, before any Images work and before a Workflow
-  // exists. A first attempt that is already stale becomes `conflict` here.
-  const stale = event.coverRevision !== request.expectedRevision;
-  const status = stale ? 'conflict' : 'queued';
-
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(`
       INSERT INTO event_cover_publish_receipts (
@@ -288,19 +511,56 @@ export async function acceptCoverPublication(
         completed_profiles, required_profiles, failure_code, retryable,
         dispatch_state, dispatch_generation, created_at, updated_at, expires_at
       )
-      SELECT ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, NULL, 0, 'pending', 0, ?, ?, ?
-      WHERE (SELECT cover_revision FROM events WHERE id = ? AND deleted_at IS NULL) IS NOT NULL
+      SELECT ?, ?, ?, NULL, ?, ?, ?,
+        CASE WHEN e.cover_revision = ? THEN 'queued' ELSE 'conflict' END,
+        CASE WHEN e.cover_revision = ? THEN ? ELSE NULL END,
+        ?, 0, ?, NULL, 0, 'pending', 0, ?, ?,
+        CASE WHEN e.cover_revision = ? THEN ? ELSE ? END
+      FROM events e WHERE e.id = ? AND e.deleted_at IS NULL
+        AND (
+          e.cover_revision <> ? OR ? = 0 OR EXISTS (
+            SELECT 1 FROM event_cover_drafts d
+            WHERE d.id = ? AND d.event_id = e.id AND d.state = 'ready'
+              AND d.master_id = ?
+          )
+        )
+        AND (
+          ? = 1 OR e.cover_revision <> ? OR (
+            e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+          )
+        )
+        AND (
+          SELECT count(*) FROM event_cover_publish_receipts retained
+          WHERE retained.event_id = e.id
+        ) < ?
+        AND (
+          SELECT count(*) FROM event_cover_render_sets retained_set
+          WHERE retained_set.event_id = e.id AND retained_set.state <> 'active'
+        ) < ?
     `).bind(
       event.id, request.operationId, draft?.id ?? null,
       requestDigest,
       request.source.kind === 'none' ? 'remove' : 'publish',
-      request.expectedRevision, status,
-      stale ? null : workflowInstanceId,
+      request.expectedRevision,
+      request.expectedRevision,
+      request.expectedRevision, workflowInstanceId,
       JSON.stringify(COVER_PIPELINE_VERSIONS),
       isUpload ? EVENT_COVER_PROFILES.length : 0,
       timestamp, timestamp,
-      new Date(now.getTime() + (stale ? RECEIPT_TERMINAL_TTL_MS : RECEIPT_APPLIED_TTL_MS)).toISOString(),
+      request.expectedRevision,
+      new Date(now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
+      new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
       event.id,
+      request.expectedRevision,
+      isUpload ? 1 : 0,
+      draft?.id ?? null,
+      draft?.master_id ?? null,
+      isUpload ? 1 : 0,
+      request.expectedRevision,
+      event.coverObjectKey,
+      event.coverRenderSetId,
+      MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+      MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
     ),
   ];
 
@@ -309,7 +569,7 @@ export async function acceptCoverPublication(
   // so a receipt that named a set created further down the same batch would fail
   // outright — and moving the set first would break the guard-first convention
   // and leave an orphan staging set behind whenever the guard was lost.
-  if (!stale && isUpload && draft && renderSetId && workflowInstanceId) {
+  if (isUpload && draft && renderSetId && workflowInstanceId) {
     statements.push(
       // Freeze the draft. `publishing` is what makes it non-discardable until
       // the receipt is terminal.
@@ -317,7 +577,16 @@ export async function acceptCoverPublication(
         UPDATE event_cover_drafts
         SET state = 'publishing', draft_revision = draft_revision + 1, updated_at = ?
         WHERE id = ? AND event_id = ? AND state = 'ready' AND changes() = 1
-      `).bind(timestamp, draft.id, event.id),
+          AND EXISTS (
+            SELECT 1 FROM event_cover_publish_receipts r
+            WHERE r.event_id = ? AND r.operation_id = ? AND r.status = 'queued'
+              AND r.workflow_instance_id = ? AND r.expected_revision = ?
+              AND r.render_set_id IS NULL
+          )
+      `).bind(
+        timestamp, draft.id, event.id,
+        event.id, request.operationId, workflowInstanceId, request.expectedRevision,
+      ),
       env.DB.prepare(`
         INSERT INTO event_cover_render_sets (
           id, event_id, master_id, draft_id, recipe_json, recipe_sha256, state,
@@ -333,8 +602,9 @@ export async function acceptCoverPublication(
       ),
       env.DB.prepare(`
         UPDATE event_cover_publish_receipts SET render_set_id = ?
-        WHERE event_id = ? AND operation_id = ? AND changes() = 1
-      `).bind(renderSetId, event.id, request.operationId),
+        WHERE event_id = ? AND operation_id = ? AND status = 'queued'
+          AND workflow_instance_id = ? AND render_set_id IS NULL AND changes() = 1
+      `).bind(renderSetId, event.id, request.operationId, workflowInstanceId),
       // The fence closes the gap between this commit and the platform call.
       env.DB.prepare(`
         INSERT INTO event_cover_workflow_fences (
@@ -347,6 +617,14 @@ export async function acceptCoverPublication(
         COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
       ),
     );
+  } else {
+    statements.push(...await removalPublicationStatements(env.DB, {
+      event,
+      operationId: request.operationId,
+      requestDigest,
+      expectedRevision: request.expectedRevision,
+      now,
+    }));
   }
 
   let results: D1Result[];
@@ -373,6 +651,11 @@ export async function acceptCoverPublication(
     if (raced && raced.request_sha256 === requestDigest) {
       return { receipt: raced, accepted: false, view: preparationView(raced) };
     }
+    // The optimistic read above gives the ordinary fast refusal, while the
+    // INSERT predicate is the serialized authority. Re-read here so a cap that
+    // filled between those points reports the same safe reason without ever
+    // committing receipt 1,025 or render set 33.
+    await assertStorageCaps(env, event.id);
     throw new ApiError(
       'COVER_PUBLICATION_CONFLICT',
       'Another cover change is already being prepared for this event. Wait for it to finish.',
@@ -423,6 +706,80 @@ async function requireReadyDraft(
   return draft;
 }
 
+async function removalPublicationStatements(
+  db: D1Database,
+  input: {
+    event: EventRecord;
+    operationId: string;
+    requestDigest: string;
+    expectedRevision: number;
+    now: Date;
+  },
+): Promise<D1PreparedStatement[]> {
+  const timestamp = input.now.toISOString();
+  const cleanupAfter = new Date(input.now.getTime() + RETIRED_RECOVERY_MS).toISOString();
+  const pointerStatements = coverPointerStatements(db, {
+    eventId: input.event.id,
+    expectedRevision: input.expectedRevision,
+    expectedCurrentKey: input.event.coverObjectKey,
+    expectedCurrentRenderSetId: input.event.coverRenderSetId,
+    nextConfig: canonicalCoverConfig(CANONICAL_NONE_COVER_CONFIG),
+    nextObjectKey: null,
+    nextRenderSetId: null,
+    retiredAt: timestamp,
+    cleanupAfter,
+    retiredKeyFingerprint: input.event.coverObjectKey
+      ? await coverKeyFingerprint(input.event.coverObjectKey)
+      : '0'.repeat(64),
+    publicationGuard: {
+      operationId: input.operationId,
+      requestSha256: input.requestDigest,
+    },
+  });
+  const movePointer = pointerStatements[0]!;
+  const retireLegacyObject = pointerStatements[1]!;
+  return [
+    movePointer,
+    // The receipt can claim the resulting revision only when this batch's
+    // immediately preceding pointer move changed one exact row.
+    db.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'applied', applied_revision = ?, result_cover_json = ?, updated_at = ?,
+          dispatch_state = 'confirmed', expires_at = ?
+      WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
+        AND action = 'remove' AND status = 'queued' AND retryable = 0
+        AND workflow_instance_id IS NULL AND render_set_id IS NULL
+        AND dispatch_state = 'pending' AND dispatch_generation = 0
+        AND changes() = 1
+    `).bind(
+      input.expectedRevision + 1,
+      canonicalCoverConfig(CANONICAL_NONE_COVER_CONFIG),
+      timestamp,
+      new Date(input.now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
+      input.event.id, input.operationId, input.requestDigest,
+    ),
+    // `coverPointerStatements` already supplies the guarded retirement insert;
+    // following the exact receipt transition keeps its `changes() = 1` chain.
+    retireLegacyObject,
+    db.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'retired', retired_at = ?, cleanup_after = ?
+      WHERE id = ? AND state = 'active'
+        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+        AND EXISTS (
+          SELECT 1 FROM event_cover_publish_receipts r
+          WHERE r.event_id = ? AND r.operation_id = ? AND r.request_sha256 = ?
+            AND r.status = 'applied' AND r.applied_revision = ?
+        )
+    `).bind(
+      timestamp, cleanupAfter,
+      input.event.coverRenderSetId, input.event.id, input.expectedRevision + 1,
+      input.event.id, input.operationId, input.requestDigest,
+      input.expectedRevision + 1,
+    ),
+  ];
+}
+
 /**
  * The synchronous `none` publication.
  *
@@ -442,7 +799,7 @@ export async function applyRemovalPublication(
 ): Promise<CoverPublicationOutcome> {
   const receipt = await loadReceipt(env, input.event.id, input.operationId);
   if (!receipt) throw new Error('Removal publication requires an accepted receipt.');
-  if (receipt.status === 'applied' || receipt.status === 'conflict') {
+  if (terminalReceiptStatus(receipt)) {
     return {
       applied: receipt.status === 'applied',
       appliedRevision: receipt.applied_revision,
@@ -451,54 +808,25 @@ export async function applyRemovalPublication(
     };
   }
 
-  const timestamp = input.now.toISOString();
-  const results = await env.DB.batch([
-    ...coverPointerStatements(env.DB, {
-      eventId: input.event.id,
-      expectedRevision: input.expectedRevision,
-      expectedCurrentKey: input.event.coverObjectKey,
-      expectedCurrentRenderSetId: input.event.coverRenderSetId,
-      nextConfig: canonicalCoverConfig(CANONICAL_NONE_COVER_CONFIG),
-      nextObjectKey: null,
-      nextRenderSetId: null,
-      retiredAt: timestamp,
-      cleanupAfter: new Date(input.now.getTime() + RETIRED_RECOVERY_MS).toISOString(),
-      retiredKeyFingerprint: input.event.coverObjectKey
-        ? await coverKeyFingerprint(input.event.coverObjectKey)
-        : '0'.repeat(64),
-    }),
-    // Retire the previous active set in the same transaction, so nothing is
-    // ever pointed at by an event that has moved on.
-    env.DB.prepare(`
-      UPDATE event_cover_render_sets
-      SET state = 'retired', retired_at = ?, cleanup_after = ?
-      WHERE id = ? AND state = 'active'
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
-    `).bind(
-      timestamp, new Date(input.now.getTime() + RETIRED_RECOVERY_MS).toISOString(),
-      input.event.coverRenderSetId, input.event.id, input.expectedRevision + 1,
-    ),
-    env.DB.prepare(`
-      UPDATE event_cover_publish_receipts
-      SET status = 'applied', applied_revision = ?, result_cover_json = ?, updated_at = ?,
-          dispatch_state = 'confirmed', expires_at = ?
-      WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
-        AND status NOT IN ('applied', 'conflict')
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
-    `).bind(
-      input.expectedRevision + 1,
-      canonicalCoverConfig(CANONICAL_NONE_COVER_CONFIG),
-      timestamp,
-      new Date(input.now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
-      input.event.id, input.operationId, input.requestDigest,
-      input.event.id, input.expectedRevision + 1,
-    ),
-  ]);
+  const results = await env.DB.batch(await removalPublicationStatements(env.DB, input));
 
   if ((results[0]?.meta.changes ?? 0) !== 1) {
     // The house shape for a lost optimistic guard. A new code would say the
     // cover pipeline failed; it did not — the manager's page is simply stale.
-    await recordConflict(env, input.event.id, input.operationId, input.now);
+    const recordedConflict = await recordConflict(
+      env, input.event.id, input.operationId, input.now,
+    );
+    if (!recordedConflict) {
+      const current = await loadReceipt(env, input.event.id, input.operationId);
+      if (current && terminalReceiptStatus(current)) {
+        return {
+          applied: current.status === 'applied',
+          appliedRevision: current.applied_revision,
+          receipt: current,
+          view: preparationView(current),
+        };
+      }
+    }
     throw new ApiError(
       'VALIDATION_FAILED',
       'This cover has moved on since this page loaded. Reload and try again.',
@@ -520,16 +848,337 @@ async function recordConflict(
   eventId: string,
   operationId: string,
   now: Date,
-): Promise<void> {
-  await env.DB.prepare(`
+): Promise<boolean> {
+  const result = await env.DB.prepare(`
     UPDATE event_cover_publish_receipts
     SET status = 'conflict', retryable = 0, updated_at = ?, expires_at = ?
     WHERE event_id = ? AND operation_id = ? AND status NOT IN ('applied', 'conflict')
+      AND (status <> 'failed' OR retryable = 1)
   `).bind(
     now.toISOString(),
     new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
     eventId, operationId,
   ).run();
+  return (result.meta.changes ?? 0) === 1;
+}
+
+/**
+ * Resolves a revision lost before an initial or recovery platform call.
+ *
+ * Callers invoke this only when the exact initial generation never earned
+ * `create()`, or a fresh lookup proved the retained instance terminal/absent.
+ * The receipt, staging set, draft, and terminal fence proof move as one guarded
+ * unit; a later replay observes conflict instead of reviving stale work.
+ */
+async function settleCoverDispatchRevisionConflict(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+  receipt: CoverPublishReceiptRow,
+): Promise<boolean> {
+  if (!receipt.draft_id || !receipt.render_set_id) return false;
+  const settled = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'conflict', retryable = 0, failure_code = NULL,
+          render_set_id = NULL,
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL},
+          expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 day')
+      WHERE event_id = ? AND operation_id = ? AND workflow_instance_id = ?
+        AND draft_id = ? AND render_set_id = ?
+        AND status = ? AND retryable = ?
+        AND dispatch_state = ? AND dispatch_generation = ?
+        AND status NOT IN ('applied', 'conflict')
+        AND (status <> 'failed' OR retryable = 1)
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id AND e.deleted_at IS NULL
+            AND e.cover_revision <> event_cover_publish_receipts.expected_revision
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_drafts d
+          WHERE d.id = event_cover_publish_receipts.draft_id
+            AND d.event_id = event_cover_publish_receipts.event_id
+            AND d.state = 'publishing'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = event_cover_publish_receipts.render_set_id
+            AND s.event_id = event_cover_publish_receipts.event_id
+            AND s.draft_id = event_cover_publish_receipts.draft_id
+            AND s.state IN ('staging', 'ready')
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+            AND f.event_id = ? AND f.state = 'open' AND f.dispatch_generation = ?
+        )
+    `).bind(
+      input.eventId, input.operationId, input.workflowInstanceId,
+      receipt.draft_id, receipt.render_set_id,
+      receipt.status, receipt.retryable, receipt.dispatch_state, receipt.dispatch_generation,
+      COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId,
+      receipt.dispatch_generation,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'abandoned', abandoned_reason = 'revision-conflict',
+          abandoned_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL},
+          cleanup_after = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+7 days')
+      WHERE id = ? AND event_id = ? AND draft_id = ? AND state IN ('staging', 'ready')
+        AND changes() = 1
+    `).bind(receipt.render_set_id, input.eventId, receipt.draft_id),
+    env.DB.prepare(`
+      UPDATE event_cover_drafts
+      SET state = 'ready', draft_revision = draft_revision + 1,
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      WHERE id = ? AND event_id = ? AND state = 'publishing' AND changes() = 1
+    `).bind(receipt.draft_id, input.eventId),
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET updated_at = (
+            SELECT r.updated_at FROM event_cover_publish_receipts r
+            WHERE r.event_id = ? AND r.operation_id = ?
+          ),
+          expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', (
+            SELECT r.updated_at FROM event_cover_publish_receipts r
+            WHERE r.event_id = ? AND r.operation_id = ?
+          ), '+31 days')
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+        AND state = 'open' AND dispatch_generation = ? AND changes() = 1
+    `).bind(
+      input.eventId, input.operationId,
+      input.eventId, input.operationId,
+      COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId,
+      receipt.dispatch_generation,
+    ),
+  ]);
+  return settled.every((result) => (result.meta.changes ?? 0) === 1);
+}
+
+/**
+ * Claims the one instance whose source revision has already lost and whose
+ * platform lifecycle must be stopped before D1 can settle it.
+ *
+ * A paused Workflow cannot reach its own conflict finalizer, and a stale
+ * creating/resuming/restarting host may still issue its already-authorized
+ * lifecycle call. Settling D1 first would let that late call outlive terminal
+ * proof. Move the exact receipt and fence generation together first; only that
+ * caller may then terminate, freshly observe terminal state, and record the
+ * conflict.
+ */
+async function claimRevisionConflictTermination(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+  receipt: CoverPublishReceiptRow,
+  claimState: 'resuming' | 'restarting',
+): Promise<CoverPublishReceiptRow | null> {
+  if (!receipt.draft_id || !receipt.render_set_id) return null;
+  const dispatchGeneration = receipt.dispatch_generation + 1;
+  const claimed = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET dispatch_state = ?, dispatch_generation = ?,
+          last_dispatch_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL},
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      WHERE event_id = ? AND operation_id = ? AND workflow_instance_id = ?
+        AND draft_id = ? AND render_set_id = ?
+        AND status = ? AND retryable = ?
+        AND dispatch_state = ? AND dispatch_generation = ?
+        AND (
+          status IN ('queued', 'rendering', 'finalizing')
+          OR (status = 'failed' AND retryable = 1)
+        )
+        AND (
+          dispatch_state NOT IN ('creating', 'resuming', 'restarting')
+          OR (last_dispatch_at IS NOT NULL AND last_dispatch_at <=
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 minutes'))
+        )
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id AND e.deleted_at IS NULL
+            AND e.cover_revision <> event_cover_publish_receipts.expected_revision
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_drafts d
+          WHERE d.id = event_cover_publish_receipts.draft_id
+            AND d.event_id = event_cover_publish_receipts.event_id
+            AND d.state = 'publishing'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = event_cover_publish_receipts.render_set_id
+            AND s.event_id = event_cover_publish_receipts.event_id
+            AND s.draft_id = event_cover_publish_receipts.draft_id
+            AND s.state IN ('staging', 'ready')
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+            AND f.event_id = ? AND f.state = 'open'
+            AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+        )
+    `).bind(
+      claimState, dispatchGeneration,
+      input.eventId, input.operationId, input.workflowInstanceId,
+      receipt.draft_id, receipt.render_set_id,
+      receipt.status, receipt.retryable,
+      receipt.dispatch_state, receipt.dispatch_generation,
+      COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET dispatch_generation = ?, expires_at = ?,
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+        AND state = 'open' AND dispatch_generation = ? AND changes() = 1
+    `).bind(
+      dispatchGeneration, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+      COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId,
+      receipt.dispatch_generation,
+    ),
+  ]);
+  if ((claimed[0]?.meta.changes ?? 0) !== 1 || (claimed[1]?.meta.changes ?? 0) !== 1) {
+    return null;
+  }
+  const current = await loadReceipt(env, input.eventId, input.operationId);
+  return current?.workflow_instance_id === input.workflowInstanceId
+    && current.dispatch_state === claimState
+    && current.dispatch_generation === dispatchGeneration
+    ? current
+    : null;
+}
+
+async function terminateRevisionConflict(
+  env: AppEnv,
+  input: { eventId: string; operationId: string; workflowInstanceId: string },
+  receipt: CoverPublishReceiptRow,
+  accessor: CoverWorkflowAccessor,
+): Promise<CoverPublicationRestartResult> {
+  try {
+    await accessor.terminate(input.workflowInstanceId);
+  } catch {
+    // A rejected call may still have reached the platform. The fresh lookup
+    // below, never the thrown result, decides whether terminal proof exists.
+  }
+  const observed = await lookupDisposition(accessor, input.workflowInstanceId);
+  const terminal = observed.kind === 'complete'
+    || observed.kind === 'missing'
+    || observed.recovery === 'restart';
+  if (terminal && await settleCoverDispatchRevisionConflict(env, input, receipt)) {
+    const current = await loadReceipt(env, input.eventId, input.operationId);
+    if (current) return terminalRestartResult(current);
+  }
+  const current = await loadReceipt(env, input.eventId, input.operationId);
+  if (current && terminalReceiptStatus(current)) return terminalRestartResult(current);
+  if (observed.kind === 'complete' && current?.status === 'failed') {
+    return terminalRestartResult(current);
+  }
+  const platformKnown = observed.kind !== 'unknown'
+    && observed.telemetry !== 'cover_platform_unmapped';
+  const youngClaim = current?.workflow_instance_id === input.workflowInstanceId
+    && await hasYoungExactDispatchClaim(env, input);
+  if (youngClaim && platformKnown) {
+    return {
+      status: 'active',
+      view: activePreparationView(current),
+      retryAfterSeconds: 2,
+    };
+  }
+  return {
+    status: 'unavailable',
+    view: current ? preparationView(current) : null,
+    retryAfterSeconds: 5,
+  };
+}
+
+/**
+ * Claims the one permitted initial create before touching the Workflow binding.
+ *
+ * The receipt and fence move from generation zero together. A replay that sees
+ * a live claim, a failure, or a confirmed dispatch cannot call `create()` again;
+ * only the exact `pending` receipt and its exact open fence earn that mutation.
+ */
+export async function claimInitialCoverDispatch(
+  env: AppEnv,
+  input: {
+    eventId: string;
+    operationId: string;
+    workflowInstanceId: string;
+  },
+): Promise<InitialCoverDispatchClaim> {
+  const dispatchGeneration = 1;
+  const claimed = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET dispatch_state = 'creating', dispatch_generation = ?,
+          last_dispatch_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL},
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      WHERE event_id = ? AND operation_id = ? AND workflow_instance_id = ?
+        AND status = 'queued' AND dispatch_state = 'pending' AND dispatch_generation = 0
+        AND EXISTS (
+          SELECT 1 FROM events
+          WHERE id = ? AND deleted_at IS NULL AND cover_revision = expected_revision
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+            AND f.event_id = ? AND f.state = 'open' AND f.dispatch_generation = 0
+        )
+    `).bind(
+      dispatchGeneration,
+      input.eventId, input.operationId, input.workflowInstanceId,
+      input.eventId,
+      COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET dispatch_generation = ?, updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+        AND state = 'open' AND dispatch_generation = 0 AND changes() = 1
+    `).bind(
+      dispatchGeneration,
+      COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId,
+    ),
+  ]);
+
+  if ((claimed[0]?.meta.changes ?? 0) === 1 && (claimed[1]?.meta.changes ?? 0) === 1) {
+    return { kind: 'claimed', dispatchGeneration };
+  }
+
+  const [current, fence] = await Promise.all([
+    loadReceipt(env, input.eventId, input.operationId),
+    env.DB.prepare(`
+      SELECT state, dispatch_generation FROM event_cover_workflow_fences
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+    `).bind(COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId)
+      .first<{ state: string; dispatch_generation: number }>(),
+  ]);
+  if (current?.workflow_instance_id === input.workflowInstanceId
+    && current.status === 'queued'
+    && current.dispatch_state === 'pending'
+    && current.dispatch_generation === 0
+    && await settleCoverDispatchRevisionConflict(env, input, current)) {
+    return { kind: 'unavailable' };
+  }
+  if (current?.workflow_instance_id === input.workflowInstanceId
+    && current.dispatch_state === 'confirmed'
+    && ['queued', 'rendering', 'finalizing', 'applied'].includes(current.status)
+    && fence?.state === 'open'
+    && fence.dispatch_generation === current.dispatch_generation) {
+    return { kind: 'confirmed' };
+  }
+  if (current?.workflow_instance_id === input.workflowInstanceId
+    && ['queued', 'rendering', 'finalizing'].includes(current.status)
+    && ['creating', 'resuming', 'restarting'].includes(current.dispatch_state)
+    && fence?.state === 'open'
+    && fence.dispatch_generation === current.dispatch_generation) {
+    const young = await hasYoungExactDispatchClaim(env, input);
+    return {
+      kind: young ? 'in-flight' : 'stale',
+      dispatchGeneration: current.dispatch_generation,
+    };
+  }
+  return { kind: 'unavailable' };
 }
 
 /**
@@ -551,10 +1200,16 @@ export async function restartCoverPublication(
 ): Promise<CoverPublicationRestartResult> {
   const receipt = await loadReceipt(env, input.eventId, input.operationId);
   if (!receipt) return { status: 'ineligible', view: null, retryAfterSeconds: null };
-  if (receipt.status === 'applied' || receipt.status === 'conflict') {
-    return { status: 'terminal', view: preparationView(receipt), retryAfterSeconds: null };
-  }
+  if (terminalReceiptStatus(receipt)) return terminalRestartResult(receipt);
   if (!receipt.workflow_instance_id) {
+    return { status: 'ineligible', view: preparationView(receipt), retryAfterSeconds: null };
+  }
+
+  // Outside its restart window a retryable failure is no longer recoverable;
+  // the host needs a corrected draft and a new operation.
+  const restartExpiresAt = Date.parse(receipt.expires_at);
+  if (receipt.status === 'failed'
+    && (!Number.isFinite(restartExpiresAt) || input.now.getTime() >= restartExpiresAt)) {
     return { status: 'ineligible', view: preparationView(receipt), retryAfterSeconds: null };
   }
 
@@ -562,29 +1217,102 @@ export async function restartCoverPublication(
   // A failed lookup is `unknown`, not absence: it must not satisfy any
   // mutation predicate, and it must not be reported as a failure either.
   const disposition = await lookupDisposition(accessor, receipt.workflow_instance_id);
-
-  // A permanently failed receipt is not restartable however the platform reads.
-  if (receipt.status === 'failed' && receipt.retryable === 0) {
-    return { status: 'ineligible', view: preparationView(receipt), retryAfterSeconds: null };
+  // The lookup can overlap a Workflow or another recovery writer. Re-read once
+  // before interpreting its platform evidence so every terminal D1 winner is
+  // returned exactly and stale evidence never mutates a newer generation.
+  const afterLookup = await loadReceipt(env, input.eventId, input.operationId);
+  if (!afterLookup) return { status: 'ineligible', view: null, retryAfterSeconds: null };
+  if (terminalReceiptStatus(afterLookup)) return terminalRestartResult(afterLookup);
+  // A completed platform instance cannot supersede either kind of already
+  // recorded D1 failure. The retained failed result wins without reopening it.
+  if (disposition.kind === 'complete' && afterLookup.status === 'failed') {
+    return terminalRestartResult(afterLookup);
+  }
+  const platformActive = disposition.kind === 'active' && disposition.telemetry === null;
+  const platformKnown = platformDispositionIsKnown(disposition);
+  const observedClaimState = ['creating', 'resuming', 'restarting']
+    .includes(afterLookup.dispatch_state)
+    ? afterLookup.dispatch_state as CoverDispatchClaimState
+    : null;
+  const youngExactClaim = observedClaimState !== null
+    && await hasYoungExactDispatchClaim(env, {
+      eventId: input.eventId,
+      operationId: input.operationId,
+      workflowInstanceId: afterLookup.workflow_instance_id!,
+    });
+  if (!sameRecoverySnapshot(receipt, afterLookup)) {
+    const freshOwner = await recoveryResultAfterLostOwnership(env, {
+      eventId: input.eventId,
+      operationId: input.operationId,
+      workflowInstanceId: receipt.workflow_instance_id,
+    }, disposition);
+    if (freshOwner) return freshOwner;
+    return {
+      status: 'unavailable',
+      view: preparationView(afterLookup),
+      retryAfterSeconds: 5,
+    };
+  }
+  if (youngExactClaim) {
+    if (platformKnown) {
+      return {
+        status: 'active',
+        view: activePreparationView(afterLookup),
+        retryAfterSeconds: 2,
+      };
+    }
+    return {
+      status: 'unavailable',
+      view: preparationView(afterLookup),
+      retryAfterSeconds: 5,
+    };
   }
   if (!disposition.mutates) {
-    // `unknown` never satisfies a mutation predicate. The caller returns 503
-    // with polling guidance rather than acting on absent information.
+    // Active, unknown, and unrecognized states all preserve D1 and ask the
+    // caller to poll. None is evidence that this operation has become
+    // permanently ineligible.
+    if (platformActive
+      && observedClaimState
+      && afterLookup.status !== 'failed') {
+      const confirmed = await confirmCoverDispatch(env, {
+        eventId: input.eventId,
+        operationId: input.operationId,
+        workflowInstanceId: receipt.workflow_instance_id,
+        dispatchGeneration: afterLookup.dispatch_generation,
+        from: observedClaimState,
+        now: input.now,
+        workflow: accessor,
+      });
+      const current = await loadReceipt(env, input.eventId, input.operationId);
+      if (!current) {
+        return { status: 'ineligible', view: null, retryAfterSeconds: null };
+      }
+      if (terminalReceiptStatus(current)) return terminalRestartResult(current);
+      if (!confirmed) {
+        return {
+          status: 'unavailable',
+          view: preparationView(current),
+          retryAfterSeconds: 5,
+        };
+      }
+      return {
+        status: 'active',
+        view: activePreparationView(current),
+        retryAfterSeconds: 2,
+      };
+    }
     return {
-      status: disposition.kind === 'unknown' ? 'unavailable' : 'ineligible',
-      view: preparationView(receipt),
-      retryAfterSeconds: disposition.kind === 'unknown' ? 5 : null,
+      status: platformActive ? 'active' : 'unavailable',
+      view: platformActive ? activePreparationView(afterLookup) : preparationView(afterLookup),
+      retryAfterSeconds: platformActive ? 2 : 5,
     };
   }
 
-  // Outside its restart window a retryable failure is no longer recoverable;
-  // the host needs a corrected draft and a new operation.
-  const failedAt = Date.parse(receipt.updated_at);
-  if (receipt.status === 'failed' && input.now.getTime() - failedAt > RESTART_WINDOW_MS) {
-    return { status: 'ineligible', view: preparationView(receipt), retryAfterSeconds: null };
-  }
-
-  const timestamp = input.now.toISOString();
+  const claimState: CoverDispatchClaimState = disposition.recovery === 'resume'
+    ? 'resuming'
+    : disposition.recovery === 'create' ? 'creating' : 'restarting';
+  const previousGeneration = receipt.dispatch_generation;
+  const dispatchGeneration = previousGeneration + 1;
   const claimed = await env.DB.batch([
     // One guarded transaction: persist the mapped failure if D1 was still
     // nonterminal, and claim the recovery edge, so recovery never waits for the
@@ -592,41 +1320,158 @@ export async function restartCoverPublication(
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'queued', retryable = 1, failure_code = NULL,
-          dispatch_state = ?, dispatch_generation = dispatch_generation + 1,
-          last_dispatch_at = ?, updated_at = ?
+          dispatch_state = ?, dispatch_generation = ?,
+          last_dispatch_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL},
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
       WHERE event_id = ? AND operation_id = ? AND workflow_instance_id = ?
+        AND dispatch_state = ? AND dispatch_generation = ?
+        AND status = ? AND retryable = ?
+        AND (
+          dispatch_state NOT IN ('creating', 'resuming', 'restarting')
+          OR (last_dispatch_at IS NOT NULL AND last_dispatch_at <=
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 minutes'))
+        )
         AND status IN ('queued', 'rendering', 'finalizing', 'failed')
         AND (status <> 'failed' OR retryable = 1)
+        AND (status <> 'failed' OR expires_at > ${DISPATCH_CLAIM_APPLIED_AT_SQL})
         AND EXISTS (
           SELECT 1 FROM events
           WHERE id = ? AND deleted_at IS NULL AND cover_revision = expected_revision
         )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+            AND f.event_id = ? AND f.state = 'open'
+            AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+        )
+        AND (
+          SELECT count(*) FROM event_cover_publish_receipts retained
+          WHERE retained.event_id = event_cover_publish_receipts.event_id
+        ) <= ?
+        AND (
+          SELECT count(*) FROM event_cover_render_sets retained_set
+          WHERE retained_set.event_id = event_cover_publish_receipts.event_id
+            AND retained_set.state <> 'active'
+        ) <= ?
     `).bind(
-      disposition.recovery === 'resume' ? 'resuming'
-        : disposition.recovery === 'create' ? 'creating' : 'restarting',
-      timestamp, timestamp,
-      input.eventId, input.operationId, receipt.workflow_instance_id, input.eventId,
+      claimState, dispatchGeneration,
+      input.eventId, input.operationId, receipt.workflow_instance_id,
+      receipt.dispatch_state, previousGeneration,
+      receipt.status, receipt.retryable,
+      input.eventId,
+      COVER_RENDER_BINDING, receipt.workflow_instance_id, input.eventId,
+      MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+      MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
     ),
     // The fence must still be open. If deletion won the race it is
     // `deletion-blocked`, and this claim changes nothing.
     env.DB.prepare(`
       UPDATE event_cover_workflow_fences
-      SET dispatch_generation = dispatch_generation + 1, expires_at = ?, updated_at = ?
-      WHERE workflow_binding = ? AND workflow_instance_id = ? AND state = 'open'
-        AND changes() = 1
+      SET dispatch_generation = ?, expires_at = ?,
+          updated_at = ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+        AND state = 'open' AND dispatch_generation = ? AND changes() = 1
     `).bind(
+      dispatchGeneration,
       COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
-      timestamp,
       COVER_RENDER_BINDING,
       receipt.workflow_instance_id,
+      input.eventId,
+      previousGeneration,
     ),
   ]);
 
-  if ((claimed[0]?.meta.changes ?? 0) !== 1) {
-    const current = (await loadReceipt(env, input.eventId, input.operationId))!;
-    return { status: 'ineligible', view: preparationView(current), retryAfterSeconds: null };
+  if ((claimed[0]?.meta.changes ?? 0) !== 1 || (claimed[1]?.meta.changes ?? 0) !== 1) {
+    const current = await loadReceipt(env, input.eventId, input.operationId);
+    if (current && terminalReceiptStatus(current)) return terminalRestartResult(current);
+    if (disposition.kind === 'complete' && current?.status === 'failed') {
+      return terminalRestartResult(current);
+    }
+    // A retained exact claim is stronger evidence than a revision mismatch:
+    // another caller may already be between its D1 claim and platform call.
+    // Do not use this caller's older lookup to settle that newer generation.
+    const youngClaim = current?.workflow_instance_id === receipt.workflow_instance_id
+      && await hasYoungExactDispatchClaim(env, {
+        eventId: input.eventId,
+        operationId: input.operationId,
+        workflowInstanceId: receipt.workflow_instance_id,
+      });
+    if (youngClaim) {
+      if (platformKnown) {
+        return {
+          status: 'active',
+          view: activePreparationView(current),
+          retryAfterSeconds: 2,
+        };
+      }
+      return {
+        status: 'unavailable',
+        view: preparationView(current),
+        retryAfterSeconds: 5,
+      };
+    }
+    const observedActiveClaim = ['creating', 'resuming', 'restarting']
+      .includes(receipt.dispatch_state);
+    if (disposition.recovery === 'resume' || observedActiveClaim) {
+      const conflictClaim = await claimRevisionConflictTermination(env, {
+        eventId: input.eventId,
+        operationId: input.operationId,
+        workflowInstanceId: receipt.workflow_instance_id,
+      }, receipt, disposition.recovery === 'resume' ? 'resuming' : 'restarting');
+      if (conflictClaim) {
+        return terminateRevisionConflict(env, {
+          eventId: input.eventId,
+          operationId: input.operationId,
+          workflowInstanceId: receipt.workflow_instance_id,
+        }, conflictClaim, accessor);
+      }
+    }
+    const terminalOrAbsent = disposition.kind === 'complete'
+      || disposition.kind === 'missing'
+      || disposition.recovery === 'restart';
+    if (!observedActiveClaim
+      && current?.workflow_instance_id === receipt.workflow_instance_id
+      && terminalOrAbsent
+      && await settleCoverDispatchRevisionConflict(env, {
+        eventId: input.eventId,
+        operationId: input.operationId,
+        workflowInstanceId: receipt.workflow_instance_id,
+      }, receipt)) {
+      const conflicted = await loadReceipt(env, input.eventId, input.operationId);
+      if (conflicted) return terminalRestartResult(conflicted);
+    }
+    const latest = await loadReceiptWithExactOpenDispatchFence(env, {
+      eventId: input.eventId,
+      operationId: input.operationId,
+      workflowInstanceId: receipt.workflow_instance_id,
+    });
+    if (latest && terminalReceiptStatus(latest)) return terminalRestartResult(latest);
+    if (latest && await recoveryGuardIsKnownIneligible(env, {
+      eventId: input.eventId,
+      operationId: input.operationId,
+      workflowInstanceId: receipt.workflow_instance_id,
+    })) {
+      return {
+        status: 'ineligible',
+        view: preparationView(latest),
+        retryAfterSeconds: null,
+      };
+    }
+    const latestRecoverable = latest !== null
+      && isRecoverableReceipt(latest)
+      && latest.exact_open_fence === 1;
+    return {
+      status: latestRecoverable ? 'unavailable' : 'ineligible',
+      view: latest ? preparationView(latest) : null,
+      retryAfterSeconds: latestRecoverable ? 5 : null,
+    };
   }
 
+  const scope: CoverDispatchScope = {
+    workflowInstanceId: receipt.workflow_instance_id,
+    dispatchState: claimState,
+    dispatchGeneration,
+  };
   try {
     if (disposition.recovery === 'resume') await accessor.resume(receipt.workflow_instance_id);
     else if (disposition.recovery === 'create') {
@@ -635,28 +1480,86 @@ export async function restartCoverPublication(
       });
     } else await accessor.restart(receipt.workflow_instance_id);
   } catch {
-    await markDispatchFailed(env, input.eventId, input.operationId, input.now);
-    return { status: 'unavailable', view: null, retryAfterSeconds: 5 };
+    const followUp = await lookupDisposition(accessor, receipt.workflow_instance_id);
+    if (followUp.kind === 'unknown' || followUp.telemetry === 'cover_platform_unmapped') {
+      await guardCoverDispatchAfterPlatformCall(env, {
+        eventId: input.eventId,
+        operationId: input.operationId,
+        workflowInstanceId: receipt.workflow_instance_id,
+        dispatchGeneration,
+        workflow: accessor,
+      });
+      const current = await loadReceipt(env, input.eventId, input.operationId);
+      if (!current) {
+        return { status: 'ineligible', view: null, retryAfterSeconds: null };
+      }
+      if (terminalReceiptStatus(current)) return terminalRestartResult(current);
+      return {
+        status: 'unavailable', view: preparationView(current), retryAfterSeconds: 5,
+      };
+    }
+    if (followUp.kind !== 'active') {
+      const failed = await markDispatchFailed(
+        env, input.eventId, input.operationId, input.now, scope,
+      );
+      // A lost failure CAS can mean purge/deletion won after the platform call.
+      // Reuse the exact post-call guard so only this generation is terminated;
+      // a newer claim is neither written nor terminated by this caller.
+      if (!failed) {
+        await confirmCoverDispatch(env, {
+          eventId: input.eventId,
+          operationId: input.operationId,
+          workflowInstanceId: receipt.workflow_instance_id,
+          dispatchGeneration,
+          from: claimState,
+          now: input.now,
+          workflow: accessor,
+        });
+      }
+      const freshOwner = await recoveryResultAfterLostOwnership(env, {
+        eventId: input.eventId,
+        operationId: input.operationId,
+        workflowInstanceId: receipt.workflow_instance_id,
+      }, followUp);
+      if (freshOwner) return freshOwner;
+      const current = await loadReceipt(env, input.eventId, input.operationId);
+      if (!current) {
+        return { status: 'ineligible', view: null, retryAfterSeconds: null };
+      }
+      if (terminalReceiptStatus(current)) return terminalRestartResult(current);
+      return {
+        status: 'unavailable', view: preparationView(current), retryAfterSeconds: 5,
+      };
+    }
   }
 
-  // Mandatory post-call check. If deletion won the commit/dispatch gap, the
-  // instance is terminated and no successful dispatch is recorded.
-  const fence = await env.DB.prepare(`
-    SELECT state FROM event_cover_workflow_fences
-    WHERE workflow_binding = ? AND workflow_instance_id = ?
-  `).bind(COVER_RENDER_BINDING, receipt.workflow_instance_id).first<{ state: string }>();
-  if (fence?.state !== 'open') {
-    try { await accessor.terminate(receipt.workflow_instance_id); } catch { /* purge retries */ }
-    await markDispatchFailed(env, input.eventId, input.operationId, input.now);
-    return { status: 'ineligible', view: null, retryAfterSeconds: null };
+  const confirmed = await confirmCoverDispatch(env, {
+    eventId: input.eventId,
+    operationId: input.operationId,
+    workflowInstanceId: receipt.workflow_instance_id,
+    dispatchGeneration,
+    from: claimState,
+    now: input.now,
+    workflow: accessor,
+  });
+  if (!confirmed) {
+    const freshOwner = await recoveryResultAfterLostOwnership(env, {
+      eventId: input.eventId,
+      operationId: input.operationId,
+      workflowInstanceId: receipt.workflow_instance_id,
+    }, disposition);
+    if (freshOwner) return freshOwner;
+    const current = await loadReceipt(env, input.eventId, input.operationId);
+    if (!current) return { status: 'ineligible', view: null, retryAfterSeconds: null };
+    if (terminalReceiptStatus(current)) return terminalRestartResult(current);
+    return {
+      status: 'unavailable', view: preparationView(current), retryAfterSeconds: 5,
+    };
   }
 
-  await env.DB.prepare(`
-    UPDATE event_cover_publish_receipts SET dispatch_state = 'confirmed', updated_at = ?
-    WHERE event_id = ? AND operation_id = ?
-  `).bind(timestamp, input.eventId, input.operationId).run();
-
-  const updated = (await loadReceipt(env, input.eventId, input.operationId))!;
+  const updated = await loadReceipt(env, input.eventId, input.operationId);
+  if (!updated) return { status: 'ineligible', view: null, retryAfterSeconds: null };
+  if (terminalReceiptStatus(updated)) return terminalRestartResult(updated);
   return { status: 'restarted', view: preparationView(updated), retryAfterSeconds: 2 };
 }
 
@@ -665,17 +1568,135 @@ export async function markDispatchFailed(
   eventId: string,
   operationId: string,
   now: Date,
-): Promise<void> {
-  await env.DB.prepare(`
+  expected?: CoverDispatchScope,
+): Promise<boolean> {
+  const scope = expected ?? await loadReceipt(env, eventId, operationId).then((receipt) => (
+    receipt?.workflow_instance_id
+      ? {
+          workflowInstanceId: receipt.workflow_instance_id,
+          dispatchState: receipt.dispatch_state,
+          dispatchGeneration: receipt.dispatch_generation,
+        }
+      : null
+  ));
+  if (!scope) return false;
+  const failed = await env.DB.prepare(`
     UPDATE event_cover_publish_receipts
     SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
         dispatch_state = 'failed', updated_at = ?, expires_at = ?
-    WHERE event_id = ? AND operation_id = ? AND status NOT IN ('applied', 'conflict')
+    WHERE event_id = ? AND operation_id = ? AND workflow_instance_id = ?
+      AND dispatch_state = ? AND dispatch_generation = ?
+      AND status IN ('queued', 'rendering', 'finalizing')
+      AND EXISTS (
+        SELECT 1 FROM events e
+        WHERE e.id = event_cover_publish_receipts.event_id
+          AND e.deleted_at IS NULL
+          AND e.cover_revision = event_cover_publish_receipts.expected_revision
+      )
+      AND EXISTS (
+        SELECT 1 FROM event_cover_workflow_fences f
+        WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+          AND f.event_id = ? AND f.state = 'open'
+          AND f.dispatch_generation = event_cover_publish_receipts.dispatch_generation
+      )
   `).bind(
     now.toISOString(),
     new Date(now.getTime() + RESTART_WINDOW_MS).toISOString(),
-    eventId, operationId,
+    eventId, operationId, scope.workflowInstanceId,
+    scope.dispatchState, scope.dispatchGeneration,
+    COVER_RENDER_BINDING, scope.workflowInstanceId, eventId,
   ).run();
+  return failed.meta.changes === 1;
+}
+
+interface CoverDispatchPostCallInput {
+  eventId: string;
+  operationId: string;
+  workflowInstanceId: string;
+  dispatchGeneration: number;
+  workflow: CoverWorkflowAccessor;
+}
+
+interface CoverDispatchPostCallSnapshot {
+  receipt: CoverPublishReceiptRow | null;
+  fence: {
+    state: string;
+    dispatch_generation: number;
+    updated_at: string;
+    expires_at: string;
+  } | null;
+  eventIsCurrent: boolean;
+  exactGeneration: boolean;
+}
+
+/**
+ * Checks only whether this exact platform call lost admission after it began.
+ *
+ * This helper deliberately performs no D1 write. Unknown/unmapped follow-up
+ * states use it before returning, so deletion can still terminate the exact
+ * instance without turning uncertain platform evidence into confirmation.
+ */
+async function inspectAndGuardCoverDispatch(
+  env: AppEnv,
+  input: CoverDispatchPostCallInput,
+): Promise<CoverDispatchPostCallSnapshot> {
+  const [receipt, fence, event] = await Promise.all([
+    loadReceipt(env, input.eventId, input.operationId),
+    env.DB.prepare(`
+      SELECT state, dispatch_generation, updated_at, expires_at
+      FROM event_cover_workflow_fences
+      WHERE workflow_binding = ? AND workflow_instance_id = ? AND event_id = ?
+    `).bind(COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId)
+      .first<{
+        state: string;
+        dispatch_generation: number;
+        updated_at: string;
+        expires_at: string;
+      }>(),
+    env.DB.prepare(`
+      SELECT deleted_at, cover_revision FROM events WHERE id = ?
+    `).bind(input.eventId).first<{ deleted_at: string | null; cover_revision: number }>(),
+  ]);
+  const exactGeneration = receipt?.workflow_instance_id === input.workflowInstanceId
+    && receipt.dispatch_generation === input.dispatchGeneration;
+  const terminalResult = receipt !== null && terminalReceiptStatus(receipt) !== null;
+  const eventIsCurrent = event !== null && receipt !== null
+    && event.deleted_at === null
+    && (terminalResult || event.cover_revision === receipt.expected_revision);
+  // Deletion owns this event/instance across generations. Once its exact
+  // fence is blocked, no delayed caller may leave the retained instance live,
+  // including while purge proof is still on HOLD or after relational cleanup.
+  const deletionWon = fence?.state === 'deletion-blocked';
+  const fenceDisappearedWithoutSupersession = exactGeneration && !fence;
+  const eventMovedOn = exactGeneration && !terminalResult && !eventIsCurrent;
+  const receiptUpdatedAt = receipt ? new Date(receipt.updated_at) : null;
+  const supersedingTerminalExpiry = receiptUpdatedAt !== null
+    && Number.isFinite(receiptUpdatedAt.getTime())
+    ? coverWorkflowFenceTerminalExpiry(receiptUpdatedAt)
+    : null;
+  const supersedingTerminalProof = receipt !== null
+    && receipt.workflow_instance_id === input.workflowInstanceId
+    && terminalResult
+    && receipt.dispatch_generation > input.dispatchGeneration
+    && fence !== null
+    && fence.dispatch_generation === receipt.dispatch_generation
+    && supersedingTerminalExpiry !== null
+    && fence.state === 'open'
+    && fence.expires_at === supersedingTerminalExpiry;
+  if (deletionWon
+    || fenceDisappearedWithoutSupersession
+    || eventMovedOn
+    || supersedingTerminalProof) {
+    try { await input.workflow.terminate(input.workflowInstanceId); } catch { /* purge retries */ }
+  }
+  return { receipt, fence, eventIsCurrent, exactGeneration };
+}
+
+export async function guardCoverDispatchAfterPlatformCall(
+  env: AppEnv,
+  input: CoverDispatchPostCallInput,
+): Promise<void> {
+  await inspectAndGuardCoverDispatch(env, input);
 }
 
 /** Records a successful first dispatch, after the mandatory fence recheck. */
@@ -685,23 +1706,60 @@ export async function confirmCoverDispatch(
     eventId: string;
     operationId: string;
     workflowInstanceId: string;
+    dispatchGeneration: number;
+    from?: CoverDispatchClaimState;
     now: Date;
     workflow: CoverWorkflowAccessor;
   },
 ): Promise<boolean> {
-  const fence = await env.DB.prepare(`
-    SELECT state FROM event_cover_workflow_fences
-    WHERE workflow_binding = ? AND workflow_instance_id = ?
-  `).bind(COVER_RENDER_BINDING, input.workflowInstanceId).first<{ state: string }>();
-  if (fence?.state !== 'open') {
-    try { await input.workflow.terminate(input.workflowInstanceId); } catch { /* purge retries */ }
-    await markDispatchFailed(env, input.eventId, input.operationId, input.now);
-    return false;
-  }
-  await env.DB.prepare(`
+  const from = input.from ?? 'creating';
+  const confirmed = await env.DB.prepare(`
     UPDATE event_cover_publish_receipts
-    SET dispatch_state = 'confirmed', last_dispatch_at = ?, updated_at = ?
-    WHERE event_id = ? AND operation_id = ? AND status = 'queued'
-  `).bind(input.now.toISOString(), input.now.toISOString(), input.eventId, input.operationId).run();
-  return true;
+    SET dispatch_state = 'confirmed',
+        updated_at = CASE
+          WHEN status IN ('applied', 'conflict') OR (status = 'failed' AND retryable = 0)
+            THEN updated_at
+          ELSE ${DISPATCH_CLAIM_APPLIED_AT_SQL}
+        END
+    WHERE event_id = ? AND operation_id = ? AND workflow_instance_id = ?
+      AND dispatch_state = ? AND dispatch_generation = ?
+      AND EXISTS (
+        SELECT 1 FROM events e
+        WHERE e.id = event_cover_publish_receipts.event_id
+          AND e.deleted_at IS NULL
+          AND (
+            event_cover_publish_receipts.status IN ('applied', 'conflict')
+            OR (
+              event_cover_publish_receipts.status = 'failed'
+              AND event_cover_publish_receipts.retryable = 0
+            )
+            OR e.cover_revision = event_cover_publish_receipts.expected_revision
+          )
+      )
+      AND EXISTS (
+        SELECT 1 FROM event_cover_workflow_fences f
+        WHERE f.workflow_binding = ? AND f.workflow_instance_id = ?
+          AND f.event_id = ? AND f.state = 'open' AND f.dispatch_generation = ?
+      )
+  `).bind(
+    input.eventId, input.operationId, input.workflowInstanceId,
+    from, input.dispatchGeneration,
+    COVER_RENDER_BINDING, input.workflowInstanceId, input.eventId, input.dispatchGeneration,
+  ).run();
+  if (confirmed.meta.changes === 1) return true;
+
+  const { receipt, fence, eventIsCurrent, exactGeneration } = await inspectAndGuardCoverDispatch(
+    env,
+    input,
+  );
+  if (exactGeneration
+    && receipt !== null
+    && receipt.dispatch_state === 'confirmed'
+    && fence?.state === 'open'
+    && fence.dispatch_generation === input.dispatchGeneration
+    && eventIsCurrent) {
+    return true;
+  }
+
+  return false;
 }

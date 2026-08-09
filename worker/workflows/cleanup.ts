@@ -1,5 +1,6 @@
 import {
   COVER_CLEANUP_ROWS_PER_CLASS,
+  COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX,
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_PURGE_FENCES_PER_PASS,
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
@@ -23,6 +24,8 @@ import {
 import {
   defaultCoverBackfillWorkflowAccessor,
   defaultCoverWorkflowAccessor,
+  dispositionForLookup,
+  emitCoverPlatformTelemetry,
   type CoverBackfillWorkflowAccessor,
   type CoverWorkflowAccessor,
   type CoverWorkflowLookup,
@@ -222,6 +225,8 @@ export interface CoverCleanupSummary {
 
 /** The same window publication gives a set it abandons or retires. */
 const COVER_RETIRED_RECOVERY_MS = 7 * 24 * 60 * 60 * 1000;
+/** A newly permanent publication failure remains queryable for one day. */
+const COVER_RECEIPT_TERMINAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 const LIVE_COVER_DRAFT_STATES = "('reserved', 'transferred', 'inspected', 'ready', 'publishing')";
 const EXPIRABLE_COVER_DRAFT_STATES = "('reserved', 'transferred', 'inspected', 'ready', 'failed')";
@@ -233,8 +238,6 @@ const TERMINAL_COVER_DRAFT_STATES = "('failed', 'expired', 'published')";
  * that the terminal-only coordinator, rather than an old escape hatch, released
  * a deletion-blocked fence.
  */
-const COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX = '|cf2';
-
 function coverPurgeFenceTerminalExpiry(now: Date): string {
   return `${coverWorkflowFenceTerminalExpiry(now)}${COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX}`;
 }
@@ -273,6 +276,7 @@ async function deleteObjectFirst(bucket: R2Bucket, key: string): Promise<boolean
 export async function cleanupEventCovers(
   env: AppEnv,
   now = new Date(),
+  workflow?: CoverWorkflowAccessor,
 ): Promise<CoverCleanupSummary> {
   const timestamp = now.toISOString();
   const backfillRestartFloor = new Date(
@@ -299,6 +303,118 @@ export async function cleanupEventCovers(
     return count;
   };
 
+  // An expired retryable publication still blocks a competitor until the
+  // recorded Workflow is observed terminal. The expiry pass first rejects
+  // unknown evidence, then claims the exact receipt/fence generation and holds
+  // it. A post-claim terminal reading (fresh again after any termination) is
+  // required before releasing the draft/set and clearing `retryable`.
+  const cleanupDay = Math.floor(now.getTime() / (24 * 60 * 60 * 1000));
+  const expiringRetryableReceipts = await env.DB.prepare(`
+    WITH candidates AS (
+      SELECT r.event_id, r.operation_id, r.expected_revision, r.draft_id, r.render_set_id,
+        r.workflow_instance_id, r.dispatch_state, r.dispatch_generation,
+        r.failure_code, r.last_dispatch_at, r.updated_at, r.expires_at,
+        COALESCE(r.last_dispatch_at, r.updated_at) AS claim_at,
+        ROW_NUMBER() OVER (
+          ORDER BY r.expires_at, r.event_id, r.operation_id
+        ) - 1 AS ordinal,
+        COUNT(*) OVER () AS candidate_count
+      FROM event_cover_publish_receipts r
+      WHERE r.action = 'publish' AND r.status = 'failed' AND r.retryable = 1
+        AND r.expires_at <= ?1
+        AND EXISTS (SELECT 1 FROM events e WHERE e.id = r.event_id AND e.deleted_at IS NULL)
+    ), rotated AS (
+      SELECT *, CAST((candidate_count + ?2 - 1) / ?2 AS INTEGER) AS window_count
+      FROM candidates
+    )
+    SELECT event_id, operation_id, expected_revision, draft_id, render_set_id, workflow_instance_id,
+      dispatch_state, dispatch_generation, failure_code, last_dispatch_at,
+      updated_at, expires_at, claim_at
+    FROM rotated
+    ORDER BY (
+      ordinal - (
+        (CAST(?3 / window_count AS INTEGER) + (?3 % window_count) * ?2)
+        % candidate_count
+      ) + candidate_count
+    ) % candidate_count
+    LIMIT ?2
+  `).bind(
+    timestamp, MAX_COVER_PURGE_FENCES_PER_PASS, cleanupDay,
+  ).all<ExpiringRetryableReceipt>();
+  if (expiringRetryableReceipts.results.length >= MAX_COVER_PURGE_FENCES_PER_PASS) {
+    summary.remainder = true;
+  }
+  const platform = workflow ?? defaultCoverWorkflowAccessor(env);
+  let platformInspections = 0;
+  let platformMutations = 0;
+  for (const receipt of expiringRetryableReceipts.results) {
+    if (platformInspections >= MAX_COVER_PURGE_FENCES_PER_PASS) {
+      summary.remainder = true;
+      break;
+    }
+    if (isYoungRetryableReceiptClaim(receipt, now) || !receipt.workflow_instance_id) {
+      summary.remainder = true;
+      continue;
+    }
+
+    platformInspections += 1;
+    const initialLookup = await retryableReceiptExpiryLookup(
+      platform, receipt.workflow_instance_id,
+    );
+    const initialAction = retryableReceiptExpiryActionFor(initialLookup);
+    if (initialAction === 'wait') {
+      summary.remainder = true;
+      continue;
+    }
+    if (platformInspections >= MAX_COVER_PURGE_FENCES_PER_PASS) {
+      summary.remainder = true;
+      continue;
+    }
+
+    const claimState: RetryableReceiptExpiryClaimState = initialLookup.kind === 'status'
+      && initialLookup.status === 'paused'
+      ? 'resuming'
+      : 'restarting';
+    const generation = await claimRetryableReceiptExpiry(env, receipt, claimState, now);
+    if (generation === null) {
+      summary.remainder = true;
+      continue;
+    }
+
+    platformInspections += 1;
+    let action = retryableReceiptExpiryActionFor(await retryableReceiptExpiryLookup(
+      platform, receipt.workflow_instance_id,
+    ));
+    if (action === 'terminate') {
+      if (platformMutations >= MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS
+        || platformInspections >= MAX_COVER_PURGE_FENCES_PER_PASS) {
+        summary.remainder = true;
+        continue;
+      }
+      platformMutations += 1;
+      try {
+        await platform.terminate(receipt.workflow_instance_id);
+      } catch {
+        // The call may have reached the platform. Only the fresh lookup below
+        // decides whether this generation now has terminal proof.
+      }
+      platformInspections += 1;
+      const observed = await retryableReceiptExpiryLookup(
+        platform, receipt.workflow_instance_id,
+      );
+      action = retryableReceiptExpiryActionFor(observed);
+    }
+    if (action !== 'settle') {
+      summary.remainder = true;
+      continue;
+    }
+    if (!await settleRetryableReceiptExpiry(
+      env, receipt, claimState, generation, now,
+    )) {
+      summary.remainder = true;
+    }
+  }
+
   // Legacy releases created open fences with a creation-relative expiry. An
   // exact generation-matching terminal owner first upgrades that old value to
   // its full terminal-relative deadline. Deletion happens only on a later pass,
@@ -318,7 +434,7 @@ export async function cleanupEventCovers(
        AND r.dispatch_generation = f.dispatch_generation
       WHERE f.state = 'open' AND r.updated_at >= f.created_at AND (
         r.status IN ('applied', 'conflict')
-        OR (r.status = 'failed' AND (r.retryable = 0 OR r.expires_at < ?1))
+        OR (r.status = 'failed' AND r.retryable = 0)
       )
       UNION ALL
       SELECT f.rowid AS fence_rowid, f.expires_at AS fence_expires_at,
@@ -387,7 +503,7 @@ export async function cleanupEventCovers(
                 AND r.updated_at >= f.created_at
                 AND (
                   r.status IN ('applied', 'conflict')
-                  OR (r.status = 'failed' AND (r.retryable = 0 OR r.expires_at < ?1))
+                  OR (r.status = 'failed' AND r.retryable = 0)
                 )
                 AND f.expires_at = strftime(
                   '%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days'
@@ -480,7 +596,7 @@ export async function cleanupEventCovers(
     WHERE rowid IN (
       SELECT rowid FROM event_cover_publish_receipts
       WHERE expires_at IS NOT NULL AND expires_at <= ?1
-        AND status IN ('applied', 'conflict', 'failed')
+        AND (status IN ('applied', 'conflict') OR (status = 'failed' AND retryable = 0))
         AND NOT EXISTS (
           SELECT 1 FROM event_cover_workflow_fences f
           WHERE f.workflow_binding = 'COVER_RENDER_WORKFLOW'
@@ -780,6 +896,7 @@ function isYoungClaim(fence: HeldFenceRow, now: Date): boolean {
 
 /** What a purge does about one lookup. Total, with an explicit wait default. */
 function purgeActionFor(lookup: CoverWorkflowLookup): 'terminate' | 'settle' | 'materialize' | 'wait' {
+  emitCoverPlatformTelemetry('purge', dispositionForLookup(lookup).telemetry);
   if (lookup.kind === 'unknown') return 'wait';
   if (lookup.kind === 'missing') return 'materialize';
   switch (lookup.status) {
@@ -808,7 +925,9 @@ async function purgeLookup(
   instanceId: string,
 ): Promise<CoverWorkflowLookup> {
   return accessor.lookup(instanceId)
-    .catch((): CoverWorkflowLookup => ({ kind: 'unknown', telemetry: 'cover_purge_lookup_failed' }));
+    .catch((): CoverWorkflowLookup => ({
+      kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
+    }));
 }
 
 /**
@@ -858,6 +977,278 @@ async function materializeForPurge(
   } catch {
     return { attempted: false, created: false };
   }
+}
+
+interface ExpiringRetryableReceipt {
+  event_id: string;
+  operation_id: string;
+  expected_revision: number;
+  draft_id: string | null;
+  render_set_id: string | null;
+  workflow_instance_id: string | null;
+  dispatch_state: string;
+  dispatch_generation: number;
+  failure_code: string | null;
+  last_dispatch_at: string | null;
+  updated_at: string;
+  expires_at: string;
+  claim_at: string | null;
+}
+
+type RetryableReceiptExpiryAction = 'terminate' | 'settle' | 'wait';
+type RetryableReceiptExpiryClaimState = 'resuming' | 'restarting';
+
+function isYoungRetryableReceiptClaim(receipt: ExpiringRetryableReceipt, now: Date): boolean {
+  if (!['creating', 'resuming', 'restarting'].includes(receipt.dispatch_state)
+    || !receipt.claim_at) {
+    return false;
+  }
+  const claimedAt = Date.parse(receipt.claim_at);
+  return Number.isFinite(claimedAt)
+    && now.getTime() - claimedAt < STALE_DISPATCH_CLAIM_MS;
+}
+
+/** Never throws: absent evidence is never permission to unblock a publication. */
+async function retryableReceiptExpiryLookup(
+  accessor: CoverWorkflowAccessor,
+  instanceId: string,
+): Promise<CoverWorkflowLookup> {
+  return accessor.lookup(instanceId).catch((): CoverWorkflowLookup => ({
+    kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
+  }));
+}
+
+/** Expiry stops live work; it does not inherit the ordinary restart map's mutations. */
+function retryableReceiptExpiryActionFor(
+  lookup: CoverWorkflowLookup,
+): RetryableReceiptExpiryAction {
+  emitCoverPlatformTelemetry('purge', dispositionForLookup(lookup).telemetry);
+  if (lookup.kind === 'unknown') return 'wait';
+  if (lookup.kind === 'missing') return 'settle';
+  switch (lookup.status) {
+    case 'queued':
+    case 'running':
+    case 'waiting':
+    case 'waitingForPause':
+    case 'paused':
+      return 'terminate';
+    case 'errored':
+    case 'terminated':
+    case 'complete':
+      return 'settle';
+    case 'unknown':
+    default:
+      return 'wait';
+  }
+}
+
+async function claimRetryableReceiptExpiry(
+  env: AppEnv,
+  receipt: ExpiringRetryableReceipt,
+  claimState: RetryableReceiptExpiryClaimState,
+  now: Date,
+): Promise<number | null> {
+  if (!receipt.workflow_instance_id || !receipt.draft_id || !receipt.render_set_id) return null;
+  const timestamp = now.toISOString();
+  const staleClaimFloor = new Date(now.getTime() - STALE_DISPATCH_CLAIM_MS).toISOString();
+  const nextGeneration = receipt.dispatch_generation + 1;
+  const claimed = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET dispatch_state = ?1, dispatch_generation = ?2,
+          last_dispatch_at = ?3, updated_at = ?3
+      WHERE event_id = ?4 AND operation_id = ?5
+        AND action = 'publish' AND status = 'failed' AND retryable = 1
+        AND expires_at = ?6 AND expires_at <= ?3
+        AND workflow_instance_id = ?7
+        AND dispatch_state = ?8 AND dispatch_generation = ?9
+        AND failure_code IS ?10 AND last_dispatch_at IS ?11 AND updated_at = ?12
+        AND draft_id = ?13 AND render_set_id = ?14
+        AND expected_revision = ?16
+        AND (
+          dispatch_state NOT IN ('creating', 'resuming', 'restarting')
+          OR COALESCE(last_dispatch_at, updated_at) <= ?15
+        )
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id AND e.deleted_at IS NULL
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_drafts d
+          WHERE d.id = ?13 AND d.event_id = ?4 AND d.state = 'publishing'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = ?14 AND s.event_id = ?4 AND s.draft_id = ?13
+            AND s.state IN ('staging', 'ready')
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+            AND f.workflow_instance_id = ?7 AND f.event_id = ?4
+            AND f.state = 'open' AND f.dispatch_generation = ?9
+        )
+    `).bind(
+      claimState, nextGeneration, timestamp,
+      receipt.event_id, receipt.operation_id, receipt.expires_at,
+      receipt.workflow_instance_id, receipt.dispatch_state, receipt.dispatch_generation,
+      receipt.failure_code, receipt.last_dispatch_at, receipt.updated_at,
+      receipt.draft_id, receipt.render_set_id, staleClaimFloor, receipt.expected_revision,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET dispatch_generation = ?1, expires_at = ?2, updated_at = ?3
+      WHERE workflow_binding = 'COVER_RENDER_WORKFLOW'
+        AND workflow_instance_id = ?4 AND event_id = ?5
+        AND state = 'open' AND dispatch_generation = ?6 AND changes() = 1
+    `).bind(
+      nextGeneration, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, timestamp,
+      receipt.workflow_instance_id, receipt.event_id, receipt.dispatch_generation,
+    ),
+  ]);
+  return (claimed[0]?.meta.changes ?? 0) === 1 && (claimed[1]?.meta.changes ?? 0) === 1
+    ? nextGeneration
+    : null;
+}
+
+async function settleRetryableReceiptExpiry(
+  env: AppEnv,
+  receipt: ExpiringRetryableReceipt,
+  claimState: RetryableReceiptExpiryClaimState,
+  generation: number,
+  now: Date,
+): Promise<boolean> {
+  if (!receipt.workflow_instance_id || !receipt.draft_id || !receipt.render_set_id) return false;
+  const event = await env.DB.prepare(`
+    SELECT cover_revision FROM events WHERE id = ? AND deleted_at IS NULL
+  `).bind(receipt.event_id).first<{ cover_revision: number }>();
+  if (!event) return false;
+  const timestamp = now.toISOString();
+  const terminalReceiptExpiry = new Date(
+    now.getTime() + COVER_RECEIPT_TERMINAL_RETENTION_MS,
+  ).toISOString();
+  const abandonedSetCleanupAfter = new Date(
+    now.getTime() + COVER_RETIRED_RECOVERY_MS,
+  ).toISOString();
+  const revisionConflict = event.cover_revision !== receipt.expected_revision;
+  const receiptStatus = revisionConflict ? 'conflict' : 'failed';
+  const receiptFailureCode = revisionConflict ? null : receipt.failure_code;
+  const receiptRenderSetId = revisionConflict ? null : receipt.render_set_id;
+  const receiptDispatchState = revisionConflict ? claimState : 'failed';
+  const abandonedReason = revisionConflict
+    ? 'revision-conflict'
+    : (receipt.failure_code ?? 'restart-window-expired');
+  const settled = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = ?1, retryable = 0, failure_code = ?2, render_set_id = ?3,
+          dispatch_state = ?4, updated_at = ?5, expires_at = ?6
+      WHERE event_id = ?7 AND operation_id = ?8
+        AND action = 'publish' AND status = 'failed' AND retryable = 1
+        AND expires_at = ?9 AND expires_at <= ?5
+        AND workflow_instance_id = ?10
+        AND dispatch_state = ?11 AND dispatch_generation = ?12
+        AND failure_code IS ?13 AND last_dispatch_at = ?5 AND updated_at = ?5
+        AND draft_id = ?14 AND render_set_id = ?15 AND expected_revision = ?16
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id AND e.deleted_at IS NULL
+            AND e.cover_revision = ?17
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_drafts d
+          WHERE d.id = ?14 AND d.event_id = ?7 AND d.state = 'publishing'
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = ?15 AND s.event_id = ?7 AND s.draft_id = ?14
+            AND s.state IN ('staging', 'ready')
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_workflow_fences f
+          WHERE f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+            AND f.workflow_instance_id = ?10 AND f.event_id = ?7
+            AND f.state = 'open' AND f.dispatch_generation = ?12
+            AND f.expires_at = ?18
+        )
+    `).bind(
+      receiptStatus, receiptFailureCode, receiptRenderSetId, receiptDispatchState,
+      timestamp, terminalReceiptExpiry,
+      receipt.event_id, receipt.operation_id, receipt.expires_at,
+      receipt.workflow_instance_id, claimState, generation,
+      receipt.failure_code, receipt.draft_id, receipt.render_set_id,
+      receipt.expected_revision, event.cover_revision,
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET updated_at = ?1, expires_at = ?2
+      WHERE workflow_binding = 'COVER_RENDER_WORKFLOW'
+        AND workflow_instance_id = ?3 AND event_id = ?4
+        AND state = 'open' AND dispatch_generation = ?5
+        AND expires_at = ?6 AND changes() = 1
+        AND EXISTS (
+          SELECT 1 FROM event_cover_publish_receipts r
+          WHERE r.event_id = ?4 AND r.operation_id = ?7
+            AND r.workflow_instance_id = ?3 AND r.dispatch_generation = ?5
+            AND r.draft_id = ?8 AND r.expected_revision = ?9
+            AND r.status = ?10 AND r.retryable = 0 AND r.failure_code IS ?11
+            AND r.dispatch_state = ?12 AND r.render_set_id IS ?13
+            AND r.updated_at = ?1 AND r.expires_at = ?14
+        )
+    `).bind(
+      timestamp, coverWorkflowFenceTerminalExpiry(now),
+      receipt.workflow_instance_id, receipt.event_id, generation,
+      COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT, receipt.operation_id,
+      receipt.draft_id, receipt.expected_revision, receiptStatus, receiptFailureCode,
+      receiptDispatchState, receiptRenderSetId, terminalReceiptExpiry,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'abandoned', abandoned_reason = ?1,
+          abandoned_at = ?2, cleanup_after = ?3
+      WHERE id = ?4 AND event_id = ?5 AND draft_id = ?6
+        AND state IN ('staging', 'ready')
+        AND changes() = 1
+        AND EXISTS (
+          SELECT 1 FROM event_cover_publish_receipts r
+          WHERE r.event_id = ?5 AND r.operation_id = ?7
+            AND r.workflow_instance_id = ?8 AND r.dispatch_generation = ?9
+            AND r.draft_id = ?6 AND r.expected_revision = ?10
+            AND r.status = ?11 AND r.retryable = 0 AND r.failure_code IS ?12
+            AND r.dispatch_state = ?13 AND r.render_set_id IS ?14
+            AND r.updated_at = ?2 AND r.expires_at = ?15
+        )
+    `).bind(
+      abandonedReason, timestamp, abandonedSetCleanupAfter,
+      receipt.render_set_id, receipt.event_id, receipt.draft_id,
+      receipt.operation_id, receipt.workflow_instance_id, generation,
+      receipt.expected_revision, receiptStatus, receiptFailureCode,
+      receiptDispatchState, receiptRenderSetId, terminalReceiptExpiry,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_drafts
+      SET state = CASE WHEN expires_at <= ?1 THEN 'expired' ELSE 'ready' END,
+          draft_revision = draft_revision + 1, updated_at = ?1
+      WHERE id = ?2 AND event_id = ?3 AND state = 'publishing'
+        AND changes() = 1
+        AND EXISTS (
+          SELECT 1 FROM event_cover_publish_receipts r
+          WHERE r.event_id = ?3 AND r.operation_id = ?4
+            AND r.workflow_instance_id = ?5 AND r.dispatch_generation = ?6
+            AND r.draft_id = ?2 AND r.expected_revision = ?7
+            AND r.status = ?8 AND r.retryable = 0 AND r.failure_code IS ?9
+            AND r.dispatch_state = ?10 AND r.render_set_id IS ?11
+            AND r.updated_at = ?1 AND r.expires_at = ?12
+        )
+    `).bind(
+      timestamp, receipt.draft_id, receipt.event_id, receipt.operation_id,
+      receipt.workflow_instance_id, generation, receipt.expected_revision,
+      receiptStatus, receiptFailureCode, receiptDispatchState,
+      receiptRenderSetId, terminalReceiptExpiry,
+    ),
+  ]);
+  return settled.every((result) => (result.meta.changes ?? 0) === 1);
 }
 
 /**
@@ -1146,7 +1537,10 @@ export async function reconcileEventCoverPurge(
             WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN updated_at
             ELSE ?
           END
-      WHERE event_id = ? AND status IN ('queued', 'rendering', 'finalizing')
+      WHERE event_id = ? AND (
+        status IN ('queued', 'rendering', 'finalizing')
+        OR (status = 'failed' AND retryable = 1)
+      )
     `).bind(timestamp, eventId),
     env.DB.prepare(`
       UPDATE event_cover_backfill_jobs

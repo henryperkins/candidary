@@ -1,9 +1,17 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MAX_COVER_UPLOAD_BYTES } from '../../shared/constants';
-import { COVER_PIPELINE_VERSIONS } from '../../shared/event-cover';
+import {
+  COVER_WORKFLOW_FENCE_TERMINAL_TTL_MS,
+  MAX_COVER_UPLOAD_BYTES,
+} from '../../shared/constants';
+import { COVER_PIPELINE_VERSIONS, canonicalCoverRequest } from '../../shared/event-cover';
 import { createApp } from '../../worker/app';
+import { EventsRepository } from '../../worker/db/events';
 import type { AppEnv } from '../../worker/env';
+import {
+  acceptCoverPublication,
+  coverRequestDigest,
+} from '../../worker/services/event-cover-publication';
 import {
   eventAccess,
   hostAccess,
@@ -126,6 +134,52 @@ async function readyDraft(access: Access) {
     recording.env,
   );
   return { draft: (await composed.json<any>()).data.draft, env: recording.env };
+}
+
+function withCoverRenderWorkflow(
+  base: AppEnv,
+  options: {
+    status?: string;
+    lookupRejects?: boolean;
+    rejectDuplicate?: boolean;
+    onCreate?(id: string): Promise<void>;
+    onStatus?(): Promise<void>;
+  } = {},
+) {
+  const calls: string[] = [];
+  let created = false;
+  const instance = {
+    id: '',
+    async pause() { calls.push('pause'); },
+    async resume() { calls.push('resume'); },
+    async terminate() { calls.push('terminate'); },
+    async restart() { calls.push('restart'); },
+    async status() {
+      await options.onStatus?.();
+      return { status: options.status ?? 'running' };
+    },
+    async sendEvent() { calls.push('sendEvent'); },
+  };
+  const workflow = {
+    async get(id: string) {
+      calls.push(`get:${id}`);
+      if (options.lookupRejects) throw new Error('lookup unavailable');
+      return { ...instance, id };
+    },
+    async create(input?: { id?: string }) {
+      const id = input?.id ?? '';
+      calls.push(`create:${id}`);
+      if (options.rejectDuplicate && created) throw new Error('duplicate instance');
+      await options.onCreate?.(id);
+      created = true;
+      return { ...instance, id };
+    },
+    async createBatch(batch: Array<{ id?: string }>) {
+      calls.push('createBatch');
+      return batch.map(({ id = '' }) => ({ ...instance, id }));
+    },
+  } as unknown as AppEnv['COVER_RENDER_WORKFLOW'];
+  return { env: { ...base, COVER_RENDER_WORKFLOW: workflow }, calls };
 }
 
 describe('cover draft reservation', () => {
@@ -561,6 +615,73 @@ describe('cover publication', () => {
     expect(event?.cover_revision).toBe(1);
   });
 
+  it('returns 409 when a pending removal becomes conflict before application', async () => {
+    const access = await eventAccess();
+    const operationId = crypto.randomUUID();
+    const request = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'none' as const },
+    };
+    await acceptCoverPublication(testEnv, {
+      event: (await new EventsRepository(testEnv.DB).getById(access.event.id))!,
+      request,
+      requestDigest: await coverRequestDigest(canonicalCoverRequest(request)),
+      now: new Date(),
+    });
+
+    let receiptReads = 0;
+    const wrapStatement = (
+      statement: D1PreparedStatement,
+      isReceiptRead: boolean,
+    ): D1PreparedStatement => new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrapStatement(target.bind(...values), isReceiptRead);
+        }
+        if (property === 'first') {
+          return async <T>(columnName?: string) => {
+            if (isReceiptRead) {
+              receiptReads += 1;
+              if (receiptReads === 2) {
+                await testEnv.DB.prepare(`
+                  UPDATE event_cover_publish_receipts
+                  SET status = 'conflict', retryable = 0
+                  WHERE event_id = ? AND operation_id = ?
+                `).bind(access.event.id, operationId).run();
+              }
+            }
+            return columnName === undefined
+              ? target.first<T>()
+              : target.first<T>(columnName);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => wrapStatement(
+            target.prepare(sql),
+            sql.includes('SELECT * FROM event_cover_publish_receipts')
+              && sql.includes('event_id = ? AND operation_id = ?'),
+          );
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await publish(access, request, { ...testEnv, DB: db });
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({
+      data: { applied: false, operation: { status: 'conflict' } },
+    });
+  });
+
   it('refuses reuse of an operation ID with different bytes', async () => {
     const access = await eventAccess();
     const operationId = crypto.randomUUID();
@@ -571,7 +692,13 @@ describe('cover publication', () => {
       source: { kind: 'none' },
     });
     expect(collision.status).toBe(409);
-    expect((await collision.json<any>()).code).toBe('COVER_PUBLICATION_CONFLICT');
+    expect(await collision.json<any>()).toMatchObject({
+      code: 'COVER_PUBLICATION_CONFLICT',
+      data: {
+        operation: { operationId, status: 'applied' },
+        event: { coverRevision: 1 },
+      },
+    });
   });
 
   it('refuses a stale expected revision with a recovery view', async () => {
@@ -613,6 +740,740 @@ describe('cover publication', () => {
       .prepare('SELECT state FROM event_cover_drafts WHERE id = ?')
       .bind(draft.id).first<{ state: string }>();
     expect(row?.state).toBe('publishing');
+  });
+
+  it('keeps a rejected create with an unknown lookup preparing and recoverable', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, {
+      lookupRejects: true,
+      async onCreate() { throw new Error('create unavailable'); },
+    });
+    const operationId = crypto.randomUUID();
+
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let response: Response;
+    try {
+      response = await publish(access, {
+        operationId,
+        expectedRevision: 0,
+        source: { kind: 'upload', draftId: draft.id },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, workflow.env);
+
+      // The rejected create is observed once by dispatch and once by the
+      // side-effect-free response read. Each observation is independently
+      // bounded and contains no operation/event identity.
+      expect(reported).toHaveBeenCalledTimes(2);
+      for (const call of reported.mock.calls) {
+        const observation = JSON.parse(String(call[0])) as Record<string, unknown>;
+        expect(observation).toEqual({
+          event: 'cover_platform_observation',
+          source: 'publication',
+          code: 'cover_platform_lookup_failed',
+        });
+        expect(JSON.stringify(observation)).not.toContain(operationId);
+        expect(JSON.stringify(observation)).not.toContain(access.event.id);
+      }
+    } finally {
+      reported.mockRestore();
+    }
+
+    expect(response.status).toBe(503);
+    expect((await response.json<any>()).data.operation).toMatchObject({
+      operationId,
+      status: 'preparing',
+      retryable: false,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code, retryable
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'queued', dispatch_state: 'creating', dispatch_generation: 1,
+      failure_code: null, retryable: 0,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = (
+        SELECT workflow_instance_id FROM event_cover_publish_receipts WHERE operation_id = ?
+      )
+    `).bind(operationId).first()).toEqual({ state: 'open', dispatch_generation: 1 });
+    expect(workflow.calls.filter((call) => /^(?:create|resume|restart|terminate):?/u.test(call)))
+      .toHaveLength(1);
+  });
+
+  it('keeps a rejected create with an unmapped status unconfirmed and sanitized', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, {
+      status: 'events/private/cover/cr1-secret',
+      async onCreate() { throw new Error('create unavailable'); },
+    });
+    const operationId = crypto.randomUUID();
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const response = await publish(access, {
+        operationId,
+        expectedRevision: 0,
+        source: { kind: 'upload', draftId: draft.id },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, workflow.env);
+
+      expect(response.status).toBe(503);
+      expect((await response.json<any>()).data.operation.status).toBe('preparing');
+      expect(await testEnv.DB.prepare(`
+        SELECT status, dispatch_state, dispatch_generation, failure_code
+        FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(operationId).first()).toEqual({
+        status: 'queued', dispatch_state: 'creating', dispatch_generation: 1,
+        failure_code: null,
+      });
+      expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+      expect(reported).toHaveBeenCalledTimes(2);
+      for (const call of reported.mock.calls) {
+        expect(JSON.parse(String(call[0]))).toEqual({
+          event: 'cover_platform_observation',
+          source: 'publication',
+          code: 'cover_platform_unmapped',
+        });
+        expect(String(call[0])).not.toContain('private');
+      }
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('does not issue another create for a young initial-dispatch claim', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, {
+      lookupRejects: true,
+      async onCreate() { throw new Error('create unavailable'); },
+    });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+
+    await publish(access, body, workflow.env);
+    const replay = await publish(access, body, workflow.env);
+
+    expect(replay.status).toBe(503);
+    expect((await replay.json<any>()).data.operation.status).toBe('preparing');
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+  });
+
+  it('recovers a stale initial-dispatch claim with the retained instance ID', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const unavailable = withCoverRenderWorkflow(env, {
+      lookupRejects: true,
+      async onCreate() { throw new Error('create unavailable'); },
+    });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, unavailable.env)).status).toBe(503);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET last_dispatch_at = '2000-01-01T00:00:00.000Z'
+      WHERE operation_id = ?
+    `).bind(operationId).run();
+    const recoverable = withCoverRenderWorkflow(env, { status: 'errored' });
+
+    const replay = await publish(access, body, recoverable.env);
+
+    expect(replay.status).toBe(202);
+    expect(recoverable.calls.filter((call) => call === 'restart')).toHaveLength(1);
+    expect(recoverable.calls.some((call) => call.startsWith('create:'))).toBe(false);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
+  });
+
+  it('keeps a stale initial claim retryable when its retained lookup is unknown', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const unavailable = withCoverRenderWorkflow(env, {
+      lookupRejects: true,
+      async onCreate() { throw new Error('create unavailable'); },
+    });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, unavailable.env)).status).toBe(503);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET last_dispatch_at = '2000-01-01T00:00:00.000Z'
+      WHERE operation_id = ?
+    `).bind(operationId).run();
+    const stillUnknown = withCoverRenderWorkflow(env, { lookupRejects: true });
+
+    const replay = await publish(access, body, stillUnknown.env);
+
+    expect(replay.status).toBe(503);
+    expect(replay.headers.get('retry-after')).toBe('5');
+    expect(stillUnknown.calls.some((call) => call.startsWith('create:'))).toBe(false);
+    expect(stillUnknown.calls.filter((call) => call === 'restart')).toHaveLength(0);
+  });
+
+  it('returns accepted progress for a young initial claim whose retained instance is active', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const unavailable = withCoverRenderWorkflow(env, {
+      lookupRejects: true,
+      async onCreate() { throw new Error('create unavailable'); },
+    });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, unavailable.env)).status).toBe(503);
+    const active = withCoverRenderWorkflow(env, { status: 'running' });
+
+    const replay = await publish(access, body, active.env);
+
+    expect(replay.status).toBe(202);
+    expect(replay.headers.get('location')).toBe(
+      coverPath(access.event.id, `/publications/${operationId}`),
+    );
+    expect((await replay.json<any>()).data.operation).toMatchObject({
+      status: 'preparing', retryable: false,
+    });
+    expect(active.calls.some((call) => call.startsWith('create:'))).toBe(false);
+  });
+
+  it('does not issue another create for a failed publication replay', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, { rejectDuplicate: true });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          dispatch_state = 'failed'
+      WHERE operation_id = ?
+    `).bind(operationId).run();
+
+    const replay = await publish(access, body, workflow.env);
+
+    expect(replay.status).toBe(202);
+    expect(replay.headers.get('location')).toBe(
+      coverPath(access.event.id, `/publications/${operationId}`),
+    );
+    expect((await replay.json<any>()).data.operation).toMatchObject({
+      status: 'preparing', retryable: false, safeFailureCode: null,
+    });
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'failed', dispatch_state: 'failed', dispatch_generation: 1,
+      failure_code: 'COVER_RENDER_UNAVAILABLE',
+    });
+  });
+
+  it('uses guarded recovery for a same-digest retryable failed replay', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, { status: 'errored' });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          dispatch_state = 'failed'
+      WHERE operation_id = ?
+    `).bind(operationId).run();
+
+    const replay = await publish(access, body, workflow.env);
+
+    expect(replay.status).toBe(202);
+    expect((await replay.json<any>()).data.operation.status).toBe('preparing');
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+    expect(workflow.calls.filter((call) => call === 'restart')).toHaveLength(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      failure_code: null,
+    });
+  });
+
+  it('returns the retained failed result when same-digest recovery observes completion', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, { status: 'complete' });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          dispatch_state = 'failed'
+      WHERE operation_id = ?
+    `).bind(operationId).run();
+
+    const replay = await publish(access, body, workflow.env);
+
+    expect(replay.status).toBe(200);
+    expect((await replay.json<any>()).data).toMatchObject({
+      applied: false,
+      operation: {
+        status: 'retryable-failed',
+        safeFailureCode: 'COVER_RENDER_UNAVAILABLE',
+      },
+    });
+    expect(workflow.calls.filter((call) => call === 'restart')).toHaveLength(0);
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+  });
+
+  it('returns a permanent conflict for an expired same-digest recovery', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, { status: 'errored' });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+          dispatch_state = 'failed', expires_at = '2000-01-01T00:00:00.000Z'
+      WHERE operation_id = ?
+    `).bind(operationId).run();
+
+    const replay = await publish(access, body, workflow.env);
+
+    expect(replay.status).toBe(409);
+    expect(await replay.json<any>()).toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT' });
+    expect(workflow.calls.filter((call) => call === 'restart')).toHaveLength(0);
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+  });
+
+  it('does not issue another create for a confirmed replay', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, { rejectDuplicate: true });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+  });
+
+  it.each([
+    ['applied', 200, 'applied', true],
+    ['conflict', 409, 'conflict', false],
+    ['failed', 200, 'permanent-failed', false],
+  ] as const)(
+    'returns the exact %s envelope when it wins during the post-dispatch status lookup',
+    async (storedStatus, expectedHttp, expectedProductStatus, expectedApplied) => {
+      const access = await eventAccess();
+      const { draft, env } = await readyDraft(access);
+      const operationId = crypto.randomUUID();
+      let settled = false;
+      const workflow = withCoverRenderWorkflow(env, {
+        async onStatus() {
+          if (settled) return;
+          settled = true;
+          await testEnv.DB.batch([
+            testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+              .bind(access.event.id),
+            testEnv.DB.prepare(`
+              UPDATE event_cover_publish_receipts
+              SET status = ?, retryable = 0,
+                  failure_code = CASE WHEN ? = 'failed' THEN 'EVENT_DELETED' ELSE NULL END,
+                  applied_revision = CASE WHEN ? = 'applied' THEN 1 ELSE NULL END
+              WHERE operation_id = ?
+            `).bind(storedStatus, storedStatus, storedStatus, operationId),
+          ]);
+        },
+      });
+
+      const response = await publish(access, {
+        operationId,
+        expectedRevision: 0,
+        source: { kind: 'upload', draftId: draft.id },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, workflow.env);
+      const body = await response.json<any>();
+
+      expect(response.status).toBe(expectedHttp);
+      expect(body.data).toMatchObject({
+        applied: expectedApplied,
+        operation: { operationId, status: expectedProductStatus },
+      });
+      if (storedStatus === 'applied') {
+        expect(body.data).toMatchObject({ appliedRevision: 1, event: { coverRevision: 1 } });
+      } else if (storedStatus === 'conflict') {
+        expect(body.data.event).toMatchObject({ coverRevision: 1 });
+      }
+    },
+  );
+
+  it('does not report a confirmed replay after deletion blocks its exact fence', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const workflow = withCoverRenderWorkflow(env, { rejectDuplicate: true });
+    const operationId = crypto.randomUUID();
+    const body = {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    };
+
+    expect((await publish(access, body, workflow.env)).status).toBe(202);
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+      WHERE workflow_instance_id = (
+        SELECT workflow_instance_id FROM event_cover_publish_receipts WHERE operation_id = ?
+      )
+    `).bind(operationId).run();
+
+    expect((await publish(access, body, workflow.env)).status).toBe(503);
+    expect(workflow.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+  });
+
+  it('confirms the exact claim when the Workflow advances D1 before create returns', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const workflow = withCoverRenderWorkflow(env, {
+      async onCreate() {
+        await testEnv.DB.prepare(`
+          UPDATE event_cover_publish_receipts SET status = 'rendering'
+          WHERE operation_id = ?
+        `).bind(operationId).run();
+      },
+    });
+
+    const response = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env);
+
+    expect(response.status).toBe(202);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'rendering', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  it('confirms an exact claim that the Workflow already applied before create returns', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const terminalAt = '2026-08-09T12:34:56.000Z';
+    const terminalExpiresAt = new Date(
+      Date.parse(terminalAt) + COVER_WORKFLOW_FENCE_TERMINAL_TTL_MS,
+    ).toISOString();
+    const workflow = withCoverRenderWorkflow(env, {
+      async onCreate() {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'applied', applied_revision = 1, retryable = 0, updated_at = ?
+            WHERE operation_id = ?
+          `).bind(terminalAt, operationId),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences
+            SET updated_at = ?, expires_at = ?
+            WHERE event_id = ? AND workflow_binding = 'COVER_RENDER_WORKFLOW'
+          `).bind(terminalAt, terminalExpiresAt, access.event.id),
+        ]);
+      },
+    });
+
+    const response = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env);
+
+    expect(response.status).toBe(200);
+    expect(await response.json<any>()).toMatchObject({
+      data: { applied: true, appliedRevision: 1, operation: { status: 'applied' } },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT status, applied_revision, dispatch_state, dispatch_generation, updated_at
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'applied', applied_revision: 1,
+      dispatch_state: 'confirmed', dispatch_generation: 1, updated_at: terminalAt,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT updated_at, expires_at FROM event_cover_workflow_fences WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({
+      updated_at: terminalAt, expires_at: terminalExpiresAt,
+    });
+    expect(workflow.calls.filter((call) => call === 'terminate')).toHaveLength(0);
+  });
+
+  it('returns the exact applied receipt after a later publication advances the event again', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const workflow = withCoverRenderWorkflow(env, {
+      async onCreate() {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare('UPDATE events SET cover_revision = 2 WHERE id = ?')
+            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'applied', applied_revision = 1, retryable = 0
+            WHERE operation_id = ?
+          `).bind(operationId),
+        ]);
+      },
+    });
+
+    const response = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env);
+
+    expect(response.status).toBe(200);
+    expect(await response.json<any>()).toMatchObject({
+      data: { applied: true, appliedRevision: 1, operation: { status: 'applied' } },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation FROM event_cover_publish_receipts
+      WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+    expect(workflow.calls.filter((call) => call === 'terminate')).toHaveLength(0);
+  });
+
+  it('returns the exact conflict when the Workflow records revision movement before create returns', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const workflow = withCoverRenderWorkflow(env, {
+      async onCreate() {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'conflict', retryable = 0
+            WHERE operation_id = ?
+          `).bind(operationId),
+        ]);
+      },
+    });
+
+    const response = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env);
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({
+      data: { applied: false, operation: { status: 'conflict' } },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation FROM event_cover_publish_receipts
+      WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+    expect(workflow.calls.filter((call) => call === 'terminate')).toHaveLength(0);
+  });
+
+  it('does not overwrite deletion settlement that wins after create starts', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const workflow = withCoverRenderWorkflow(env, {
+      async onCreate(id) {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+            WHERE workflow_instance_id = ?
+          `).bind(id),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+                dispatch_state = CASE
+                  WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN dispatch_state
+                  ELSE 'blocked'
+                END
+            WHERE operation_id = ?
+          `).bind(operationId),
+        ]);
+      },
+    });
+
+    const response = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env);
+
+    expect(response.status).toBe(200);
+    expect(await response.clone().json<any>()).toMatchObject({
+      data: { applied: false, operation: { status: 'permanent-failed' } },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code, retryable
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'failed', dispatch_state: 'creating', dispatch_generation: 1,
+      failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+    expect(workflow.calls.filter((call) => call === 'terminate')).toHaveLength(1);
+  });
+
+  it('does not confirm an exact claim after the event is deleted but before its fence is blocked', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const workflow = withCoverRenderWorkflow(env, {
+      async onCreate() {
+        await testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+          .bind(new Date().toISOString(), access.event.id).run();
+      },
+    });
+
+    const response = await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env);
+
+    expect(response.status).toBe(503);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'queued', dispatch_state: 'creating', dispatch_generation: 1,
+    });
+    expect(workflow.calls.filter((call) => call === 'terminate')).toHaveLength(1);
+  });
+
+  it('runs the deletion guard after an uncertain rejected create', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    const workflow = withCoverRenderWorkflow(env, {
+      status: 'events/private/cover/cr1-secret',
+      async onCreate() {
+        await testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+          .bind(new Date().toISOString(), access.event.id).run();
+        throw new Error('create result unavailable');
+      },
+    });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const response = await publish(access, {
+        operationId,
+        expectedRevision: 0,
+        source: { kind: 'upload', draftId: draft.id },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, workflow.env);
+
+      expect(response.status).toBe(503);
+      expect(workflow.calls.filter((call) => call === 'terminate')).toHaveLength(1);
+      expect(await testEnv.DB.prepare(`
+        SELECT status, dispatch_state, dispatch_generation
+        FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(operationId).first()).toEqual({
+        status: 'queued', dispatch_state: 'creating', dispatch_generation: 1,
+      });
+      expect(reported.mock.calls.every((call) => !String(call[0]).includes('private'))).toBe(true);
+    } finally {
+      reported.mockRestore();
+    }
   });
 
   it('refuses a second preparing publication for the same event', async () => {
@@ -782,6 +1643,75 @@ describe('cover publication status and restart', () => {
     expect(after).toEqual(before);
   });
 
+  it('returns the applied revision and fresh event from the status endpoint', async () => {
+    const access = await eventAccess();
+    const operationId = crypto.randomUUID();
+    expect((await publish(access, {
+      operationId, expectedRevision: 0, source: { kind: 'none' },
+    })).status).toBe(200);
+
+    const response = await createApp().request(
+      coverPath(access.event.id, `/publications/${operationId}`),
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json<any>()).toMatchObject({
+      data: {
+        operation: { operationId, status: 'applied' },
+        appliedRevision: 1,
+        event: { coverRevision: 1 },
+      },
+    });
+  });
+
+  it('upgrades to the applied envelope when apply wins during the status lookup', async () => {
+    const access = await eventAccess();
+    const { draft, env } = await readyDraft(access);
+    const operationId = crypto.randomUUID();
+    let applied = false;
+    let allowApply = false;
+    const workflow = withCoverRenderWorkflow(env, {
+      async onStatus() {
+        if (!allowApply || applied) return;
+        applied = true;
+        await testEnv.DB.batch([
+          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'applied', applied_revision = 1, retryable = 0
+            WHERE operation_id = ?
+          `).bind(operationId),
+        ]);
+      },
+    });
+    expect((await publish(access, {
+      operationId,
+      expectedRevision: 0,
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, workflow.env)).status).toBe(202);
+    allowApply = true;
+
+    const response = await createApp().request(
+      coverPath(access.event.id, `/publications/${operationId}`),
+      { headers: { cookie: access.manager.cookie } },
+      workflow.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json<any>()).toMatchObject({
+      data: {
+        operation: { operationId, status: 'applied' },
+        appliedRevision: 1,
+        event: { coverRevision: 1 },
+      },
+    });
+  });
+
   it('reports an unknown operation as not found', async () => {
     const access = await eventAccess();
     const response = await createApp().request(
@@ -821,6 +1751,21 @@ describe('cover publication status and restart', () => {
     expect(unknown.status).toBe(409);
   });
 
+  it.each([
+    ['an empty body', undefined],
+    ['malformed JSON', '{'],
+    ['JSON null', 'null'],
+  ])('rejects %s on the restart endpoint', async (_label, body) => {
+    const access = await eventAccess();
+    const response = await createApp().request(
+      coverPath(access.event.id, `/publications/${crypto.randomUUID()}/restart`),
+      { method: 'POST', headers: jsonHeaders(access), ...(body === undefined ? {} : { body }) },
+      testEnv,
+    );
+    expect(response.status).toBe(422);
+    expect(await response.json<any>()).toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
   it('refuses restarting an applied receipt', async () => {
     const access = await eventAccess();
     const operationId = crypto.randomUUID();
@@ -832,6 +1777,25 @@ describe('cover publication status and restart', () => {
     );
     expect(response.status).toBe(200);
     expect((await response.json<any>()).data.operation.status).toBe('applied');
+  });
+
+  it('returns 409 when restart replays a stored conflict', async () => {
+    const access = await eventAccess();
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+    const operationId = crypto.randomUUID();
+    expect((await publish(access, {
+      operationId, expectedRevision: 0, source: { kind: 'none' },
+    })).status).toBe(409);
+
+    const response = await createApp().request(
+      coverPath(access.event.id, `/publications/${operationId}/restart`),
+      { method: 'POST', headers: jsonHeaders(access), body: JSON.stringify({}) },
+      testEnv,
+    );
+
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).data.operation.status).toBe('conflict');
   });
 
   it('refuses every cover route to a guest session', async () => {
@@ -1088,7 +2052,7 @@ describe('cover publication replay and restart eligibility', () => {
     expect((await collision.json<any>()).code).toBe('COVER_PUBLICATION_CONFLICT');
   });
 
-  it('refuses to restart a permanently failed receipt', async () => {
+  it('returns the exact terminal result for a permanently failed receipt', async () => {
     const access = await eventAccess();
     const { draft, env } = await readyDraft(access);
     const operationId = crypto.randomUUID();
@@ -1110,9 +2074,10 @@ describe('cover publication replay and restart eligibility', () => {
       { method: 'POST', headers: jsonHeaders(access), body: JSON.stringify({}) },
       env,
     );
-    // A permanent failure needs a corrected draft and a new operation, whatever
-    // the platform says about the instance.
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(200);
+    expect(await response.json<any>()).toMatchObject({
+      data: { operation: { status: 'permanent-failed', retryable: false } },
+    });
   });
 
   it('refuses a restart from a manager of another event', async () => {

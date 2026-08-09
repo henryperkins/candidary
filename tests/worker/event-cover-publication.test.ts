@@ -1,6 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MAX_COVER_PUBLICATIONS_PER_HOUR } from '../../shared/constants';
+import {
+  MAX_COVER_PUBLICATIONS_PER_HOUR,
+  MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
+  MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+} from '../../shared/constants';
 import type { EventCoverPublishRequestV1 } from '../../shared/event-cover';
 import { createCoverDraft, insertCoverMaster } from '../../worker/db/event-covers';
 import { EventsRepository } from '../../worker/db/events';
@@ -9,6 +13,7 @@ import type { AppEnv } from '../../worker/env';
 import {
   acceptCoverPublication,
   applyRemovalPublication,
+  claimInitialCoverDispatch,
   confirmCoverDispatch,
   coverWorkflowInstanceId,
   markDispatchFailed,
@@ -64,6 +69,30 @@ function fakeWorkflow(
   return { accessor, calls };
 }
 
+function rejectingRestartWorkflow(
+  afterFailure: CoverWorkflowLookup,
+  onRestart: () => Promise<void> = async () => {},
+) {
+  let lookups = 0;
+  const calls: string[] = [];
+  const accessor: CoverWorkflowAccessor = {
+    async create(id) { calls.push(`create:${id}`); },
+    async lookup() {
+      calls.push('lookup');
+      lookups += 1;
+      return lookups === 1 ? { kind: 'status', status: 'errored' } : afterFailure;
+    },
+    async resume(id) { calls.push(`resume:${id}`); },
+    async restart(id) {
+      calls.push(`restart:${id}`);
+      await onRestart();
+      throw new Error('restart unavailable');
+    },
+    async terminate(id) { calls.push(`terminate:${id}`); },
+  };
+  return { accessor, calls };
+}
+
 async function reload(eventId: string): Promise<EventRecord> {
   return (await new EventsRepository(testEnv.DB).getById(eventId))!;
 }
@@ -101,6 +130,49 @@ async function draftState(id: string): Promise<string> {
   return row!.state;
 }
 
+async function seedRetainedReceipts(eventId: string, count: number, prefix: string): Promise<void> {
+  await testEnv.DB.prepare(`
+    WITH digits(d) AS (
+      VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+    ), sequence(n) AS (
+      SELECT ones.d + (10 * tens.d) + (100 * hundreds.d) + (1000 * thousands.d) + 1
+      FROM digits ones CROSS JOIN digits tens CROSS JOIN digits hundreds CROSS JOIN digits thousands
+    )
+    INSERT INTO event_cover_publish_receipts (
+      event_id, operation_id, request_sha256, action, expected_revision, status,
+      dependency_versions_json, completed_profiles, required_profiles, retryable,
+      dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+    )
+    SELECT ?, printf('%s-%04d', ?, n), ?, 'remove', 0, 'conflict', '{}', 0, 0, 0,
+      'pending', 0, ?, ?, ?
+    FROM sequence WHERE n <= ?
+  `).bind(
+    eventId, prefix, HEX_64,
+    now.toISOString(), now.toISOString(), new Date(now.getTime() + 86_400_000).toISOString(),
+    count,
+  ).run();
+}
+
+async function seedNonactiveRenderSets(eventId: string, count: number): Promise<void> {
+  await testEnv.DB.prepare(`
+    WITH RECURSIVE sequence(n) AS (
+      SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < ?
+    )
+    INSERT INTO event_cover_render_sets (
+      id, event_id, master_id, draft_id, recipe_json, recipe_sha256,
+      state, required_slots, created_at, abandoned_reason, abandoned_at
+    )
+    SELECT printf('cap-set-%04d', sequence.n), owned.event_id, owned.master_id, owned.draft_id,
+      owned.recipe_json, owned.recipe_sha256, 'abandoned', owned.required_slots,
+      owned.created_at, 'test-cap', owned.created_at
+    FROM sequence
+    JOIN event_cover_render_sets owned ON owned.id = (
+      SELECT render_set_id FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = ?
+    )
+  `).bind(count, eventId, OPERATION).run();
+}
+
 describe('platform status map', () => {
   it('names exactly the documented binding union, which has no absence member', () => {
     expect([...COVER_PLATFORM_STATUSES]).toEqual([
@@ -132,7 +204,7 @@ describe('platform status map', () => {
     // reports itself rather than being guessed at.
     const unmapped = mapPlatformStatus('someFutureState');
     expect(unmapped).toMatchObject({ kind: 'active', mutates: false, productStatus: 'preparing' });
-    expect(unmapped.telemetry).toContain('someFutureState');
+    expect(unmapped.telemetry).toBe('cover_platform_unmapped');
   });
 
   it('refuses to derive absence from any status string', () => {
@@ -330,6 +402,108 @@ describe('publication acceptance', () => {
     expect(await draftState(draft.id)).toBe('ready');
   });
 
+  it('rechecks revision inside acceptance before freezing or allocating', async () => {
+    const draft = await readyDraft(access);
+    const staleSnapshot = await reload(access.event.id);
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const accepted = await acceptCoverPublication(testEnv, {
+      event: staleSnapshot,
+      request: uploadRequest(draft.id, { expectedRevision: 0 }),
+      requestDigest: HEX_64,
+      now,
+    });
+
+    expect(accepted.view.status).toBe('conflict');
+    expect(accepted.receipt.render_set_id).toBeNull();
+    expect(accepted.receipt.workflow_instance_id).toBeNull();
+    expect(await draftState(draft.id)).toBe('ready');
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_render_sets WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_workflow_fences WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
+  it('does not retain a receipt when the ready draft expires before the acceptance batch', async () => {
+    const draft = await readyDraft(access);
+    const event = await reload(access.event.id);
+    let raced = false;
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!raced) {
+              raced = true;
+              await target.prepare(`
+                UPDATE event_cover_drafts SET state = 'expired' WHERE id = ? AND state = 'ready'
+              `).bind(draft.id).run();
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(acceptCoverPublication({ ...testEnv, DB: db }, {
+      event, request: uploadRequest(draft.id), requestDigest: HEX_64, now,
+    })).rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
+
+    expect(await draftState(draft.id)).toBe('expired');
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_publish_receipts WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_render_sets WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_workflow_fences WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
+  it('rechecks the retained-receipt cap in the winning acceptance statement', async () => {
+    await seedRetainedReceipts(
+      access.event.id,
+      MAX_RETAINED_COVER_RECEIPTS_PER_EVENT - 1,
+      'retained',
+    );
+    let raced = false;
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!raced) {
+              raced = true;
+              await seedRetainedReceipts(access.event.id, 1, 'concurrent');
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(acceptCoverPublication({ ...testEnv, DB: db }, {
+      event: await reload(access.event.id),
+      request: { operationId: OPERATION, expectedRevision: 0, source: { kind: 'none' } },
+      requestDigest: OTHER_HEX,
+      now,
+    })).rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_publish_receipts WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: MAX_RETAINED_COVER_RECEIPTS_PER_EVENT });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first()).toEqual({ count: 0 });
+  });
+
   it('charges a first-seen operation but never a replay', async () => {
     const event = await reload(access.event.id);
     for (let index = 0; index < MAX_COVER_PUBLICATIONS_PER_HOUR; index += 1) {
@@ -401,11 +575,18 @@ describe('dispatch and the deletion fence', () => {
 
   it('confirms a dispatch only while the fence is still open', async () => {
     const { accepted: publication } = await accepted();
+    const claim = await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+    expect(claim).toEqual({ kind: 'claimed', dispatchGeneration: 1 });
     const workflow = fakeWorkflow();
     const confirmed = await confirmCoverDispatch(testEnv, {
       eventId: access.event.id,
       operationId: OPERATION,
       workflowInstanceId: publication.receipt.workflow_instance_id!,
+      dispatchGeneration: 1,
       now,
       workflow: workflow.accessor,
     });
@@ -418,16 +599,31 @@ describe('dispatch and the deletion fence', () => {
 
   it('terminates the instance when deletion wins the commit/dispatch gap', async () => {
     const { accepted: publication } = await accepted();
+    const claim = await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+    expect(claim).toEqual({ kind: 'claimed', dispatchGeneration: 1 });
     // Deletion blocked the fence between the D1 commit and the platform call.
-    await testEnv.DB.prepare(`
-      UPDATE event_cover_workflow_fences SET state = 'deletion-blocked' WHERE workflow_instance_id = ?
-    `).bind(publication.receipt.workflow_instance_id).run();
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+        WHERE workflow_instance_id = ?
+      `).bind(publication.receipt.workflow_instance_id),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED'
+        WHERE operation_id = ?
+      `).bind(OPERATION),
+    ]);
 
     const workflow = fakeWorkflow();
     const confirmed = await confirmCoverDispatch(testEnv, {
       eventId: access.event.id,
       operationId: OPERATION,
       workflowInstanceId: publication.receipt.workflow_instance_id!,
+      dispatchGeneration: 1,
       now,
       workflow: workflow.accessor,
     });
@@ -436,9 +632,119 @@ describe('dispatch and the deletion fence', () => {
     // The mandatory post-call check, and no successful dispatch recorded.
     expect(workflow.calls).toContain(`terminate:${publication.receipt.workflow_instance_id}`);
     const receipt = await testEnv.DB.prepare(
-      'SELECT status, dispatch_state, retryable FROM event_cover_publish_receipts WHERE operation_id = ?',
+      `SELECT status, dispatch_state, retryable, failure_code
+       FROM event_cover_publish_receipts WHERE operation_id = ?`,
     ).bind(OPERATION).first();
-    expect(receipt).toEqual({ status: 'failed', dispatch_state: 'failed', retryable: 1 });
+    expect(receipt).toEqual({
+      status: 'failed', dispatch_state: 'creating', retryable: 0, failure_code: 'EVENT_DELETED',
+    });
+  });
+
+  it('settles revision movement in the acceptance-to-claim gap without dispatch', async () => {
+    const { draft, accepted: publication } = await accepted();
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const claim = await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+
+    expect(claim).toEqual({ kind: 'unavailable' });
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, dispatch_state, dispatch_generation, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'conflict', retryable: 0, dispatch_state: 'pending',
+      dispatch_generation: 0, render_set_id: null,
+    });
+    expect(await draftState(draft.id)).toBe('ready');
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_reason FROM event_cover_render_sets WHERE id = ?
+    `).bind(publication.receipt.render_set_id).first()).toEqual({
+      state: 'abandoned', abandoned_reason: 'revision-conflict',
+    });
+    const proof = await testEnv.DB.prepare(`
+      SELECT f.state, f.dispatch_generation,
+        f.expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days') AS exact_proof
+      FROM event_cover_workflow_fences f
+      JOIN event_cover_publish_receipts r
+        ON r.event_id = f.event_id AND r.workflow_instance_id = f.workflow_instance_id
+      WHERE f.workflow_instance_id = ?
+    `).bind(publication.receipt.workflow_instance_id).first();
+    expect(proof).toEqual({ state: 'open', dispatch_generation: 0, exact_proof: 1 });
+  });
+
+  it('does not settle a newer initial claim after revision movement', async () => {
+    const { accepted: publication } = await accepted();
+    const first = await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+    expect(first).toEqual({ kind: 'claimed', dispatchGeneration: 1 });
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first();
+    const beforeFence = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(publication.receipt.workflow_instance_id).first();
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const second = await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+
+    expect(second).toEqual({ kind: 'in-flight', dispatchGeneration: 1 });
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(publication.receipt.workflow_instance_id).first()).toEqual(beforeFence);
+  });
+
+  it('does not settle a confirmed initial dispatch on raw replay', async () => {
+    const { accepted: publication } = await accepted();
+    await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+    await confirmCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+      dispatchGeneration: 1,
+      now,
+      workflow: fakeWorkflow().accessor,
+    });
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first();
+    const beforeFence = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(publication.receipt.workflow_instance_id).first();
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const replay = await claimInitialCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: publication.receipt.workflow_instance_id!,
+    });
+
+    expect(replay).toEqual({ kind: 'confirmed' });
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(publication.receipt.workflow_instance_id).first()).toEqual(beforeFence);
   });
 
   it('records a dispatch failure as retryable and keeps the draft frozen', async () => {
@@ -488,7 +794,10 @@ describe('side-effect-free status read', () => {
         eventId: access.event.id, operationId: OPERATION, now,
         workflow: fakeWorkflow(lookup).accessor,
       });
-      expect(view, label).toMatchObject({ status: 'retryable-failed', retryable: true });
+      expect(view, label).toMatchObject({
+        status: 'retryable-failed', retryable: true,
+        safeFailureCode: 'COVER_RENDER_UNAVAILABLE',
+      });
       // Read-only: the Workflow handler, the restart POST, and bounded cleanup
       // are the authoritative writers.
       expect(await storedStatus(), label).toEqual({ status: 'queued', retryable: 0 });
@@ -502,6 +811,115 @@ describe('side-effect-free status read', () => {
     });
     expect(view).toMatchObject({ status: 'preparing' });
     expect(await storedStatus()).toEqual({ status: 'queued', retryable: 0 });
+  });
+
+  it('returns a terminal receipt that wins while the platform lookup is pending', async () => {
+    const workflow = fakeWorkflow('running');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.batch([
+        testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+          .bind(access.event.id),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_publish_receipts
+          SET status = 'applied', applied_revision = 1, retryable = 0,
+              completed_profiles = 6, updated_at = ?
+          WHERE operation_id = ?
+        `).bind('2026-08-09T13:00:00.000Z', OPERATION),
+      ]);
+      return { kind: 'status', status: 'running' };
+    };
+
+    const view = await readCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(view).toMatchObject({
+      status: 'applied', retryable: false, completedSteps: 6,
+      updatedAt: '2026-08-09T13:00:00.000Z',
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it('synthesizes preparing when a retained failure is actually active', async () => {
+    await markDispatchFailed(testEnv, access.event.id, OPERATION, now);
+    const workflow = fakeWorkflow('running');
+
+    const view = await readCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(view).toMatchObject({
+      status: 'preparing', retryable: false, safeFailureCode: null,
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await storedStatus()).toEqual({ status: 'failed', retryable: 1 });
+  });
+
+  it('preserves a retained failure when its platform lookup is unknown', async () => {
+    await markDispatchFailed(testEnv, access.event.id, OPERATION, now);
+    const workflow = fakeWorkflow('unknown');
+
+    const view = await readCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(view).toMatchObject({ status: 'retryable-failed', retryable: true });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await storedStatus()).toEqual({ status: 'failed', retryable: 1 });
+  });
+
+  it.each([
+    [
+      'an unknown lookup',
+      { kind: 'unknown', telemetry: 'events/private/cover/cr1-secret' } as const,
+      'cover_platform_unknown',
+    ],
+    [
+      'an unmapped status',
+      { kind: 'status', status: 'events/private/cover/cr1-secret' } as const,
+      'cover_platform_unmapped',
+    ],
+    [
+      'a thrown lookup',
+      'throw' as const,
+      'cover_platform_lookup_failed',
+    ],
+  ])('emits only sanitized telemetry for %s without changing D1', async (
+    _label,
+    lookup,
+    expectedCode,
+  ) => {
+    const before = await storedStatus();
+    const workflow = fakeWorkflow().accessor;
+    if (lookup === 'throw') {
+      workflow.lookup = async () => {
+        throw new Error(`lookup failed for ${instanceId}: events/private/cover/secret`);
+      };
+    } else {
+      workflow.lookup = async () => lookup;
+    }
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const view = await readCoverPublication(testEnv, {
+        eventId: access.event.id, operationId: OPERATION, now, workflow,
+      });
+
+      expect(view).toMatchObject({ status: 'preparing' });
+      expect(await storedStatus()).toEqual(before);
+      expect(reported).toHaveBeenCalledTimes(1);
+      const observation = JSON.parse(String(reported.mock.calls[0]![0])) as Record<string, unknown>;
+      expect(observation).toEqual({
+        event: 'cover_platform_observation',
+        source: 'publication',
+        code: expectedCode,
+      });
+      expect(JSON.stringify(observation)).not.toContain('private');
+      expect(JSON.stringify(observation)).not.toContain(instanceId);
+    } finally {
+      reported.mockRestore();
+    }
   });
 
   it('never consults the platform once D1 is terminal', async () => {
@@ -545,6 +963,13 @@ describe('operation restart', () => {
     });
     instanceId = publication.receipt.workflow_instance_id!;
     await markDispatchFailed(testEnv, access.event.id, OPERATION, now);
+    // Recovery claims use D1's application clock. Keep the shared fixture
+    // inside its restart window regardless of the wall clock running the test.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+24 hours')
+      WHERE operation_id = ?
+    `).bind(OPERATION).run();
   });
 
   it('resumes a paused instance and never restarts it', async () => {
@@ -575,6 +1000,118 @@ describe('operation restart', () => {
     expect(receipt).toEqual({ status: 'queued', workflow_instance_id: instanceId, dispatch_generation: 1 });
   });
 
+  it('allows recovery at the exact retained-receipt cap because it allocates no row', async () => {
+    await seedRetainedReceipts(
+      access.event.id,
+      MAX_RETAINED_COVER_RECEIPTS_PER_EVENT - 1,
+      'restart-cap',
+    );
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({ status: 'restarted', retryAfterSeconds: 2 });
+    expect(workflow.calls).toEqual(['lookup', `restart:${instanceId}`]);
+  });
+
+  it('refuses recovery only when retained receipts already exceed their cap', async () => {
+    await seedRetainedReceipts(
+      access.event.id,
+      MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+      'restart-over-cap',
+    );
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first();
+    const beforeFence = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first();
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({ status: 'ineligible', retryAfterSeconds: null });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual(beforeFence);
+  });
+
+  it('allows recovery at the exact nonactive render-set cap because it reuses the set', async () => {
+    await seedNonactiveRenderSets(
+      access.event.id,
+      MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT - 1,
+    );
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({ status: 'restarted', retryAfterSeconds: 2 });
+    expect(workflow.calls).toEqual(['lookup', `restart:${instanceId}`]);
+  });
+
+  it('refuses recovery only when nonactive render sets already exceed their cap', async () => {
+    await seedNonactiveRenderSets(
+      access.event.id,
+      MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
+    );
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first();
+    const beforeFence = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first();
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({ status: 'ineligible', retryAfterSeconds: null });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual(beforeFence);
+  });
+
+  it('refuses a failed recovery whose restart window closes during lookup', async () => {
+    const workflow = fakeWorkflow('errored');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE operation_id = ?
+      `).bind(OPERATION).run();
+      return { kind: 'status', status: 'errored' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({ status: 'ineligible', retryAfterSeconds: null });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', retryable: 1, dispatch_state: 'failed', dispatch_generation: 0,
+    });
+  });
+
   it('recreates a confirmed-missing instance under the same fenced ID', async () => {
     const workflow = fakeWorkflow({ kind: 'missing' });
     const result = await restartCoverPublication(testEnv, {
@@ -597,12 +1134,173 @@ describe('operation restart', () => {
     expect(receipt).toEqual({ status: 'failed' });
   });
 
+  it('keeps the recorded failed result when the platform reports complete', async () => {
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first();
+    const beforeFence = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first();
+    const workflow = fakeWorkflow('complete');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null, view: { status: 'retryable-failed' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual(beforeFence);
+  });
+
+  it('keeps a retryable failure that wins while a complete lookup is in flight', async () => {
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'queued', retryable = 0, failure_code = NULL, dispatch_state = 'confirmed'
+      WHERE operation_id = ?
+    `).bind(OPERATION).run();
+    const workflow = fakeWorkflow('complete');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'failed', retryable = 1, failure_code = 'COVER_RENDER_UNAVAILABLE',
+            dispatch_state = 'failed'
+        WHERE operation_id = ?
+      `).bind(OPERATION).run();
+      return { kind: 'status', status: 'complete' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null,
+      view: { status: 'retryable-failed', safeFailureCode: 'COVER_RENDER_UNAVAILABLE' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, failure_code, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', retryable: 1, failure_code: 'COVER_RENDER_UNAVAILABLE',
+      dispatch_state: 'failed', dispatch_generation: 0,
+    });
+  });
+
+  it('returns the applied result that wins while a complete lookup is in flight', async () => {
+    const workflow = fakeWorkflow('complete');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'applied', retryable = 0, applied_revision = 1,
+            dispatch_state = 'confirmed'
+        WHERE operation_id = ?
+      `).bind(OPERATION).run();
+      return { kind: 'status', status: 'complete' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null,
+      view: { status: 'applied', retryable: false },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it('returns a terminal result that wins during a nonmutating platform lookup', async () => {
+    const workflow = fakeWorkflow('running');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'conflict', retryable = 0, failure_code = NULL
+        WHERE operation_id = ?
+      `).bind(OPERATION).run();
+      return { kind: 'status', status: 'running' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null, view: { status: 'conflict' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it('returns fresh progress written during a nonmutating platform lookup', async () => {
+    const progressedAt = '2026-08-04T12:00:01.000Z';
+    const workflow = fakeWorkflow('running');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts SET completed_profiles = 3, updated_at = ?
+        WHERE operation_id = ?
+      `).bind(progressedAt, OPERATION).run();
+      return { kind: 'status', status: 'running' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2,
+      view: { status: 'preparing', completedSteps: 3, updatedAt: progressedAt },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it.each(['queued', 'running', 'waiting', 'waitingForPause'] as const)(
+    'polls without mutating a failed receipt while the platform is %s',
+    async (status) => {
+      const beforeReceipt = await testEnv.DB.prepare(`
+        SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION).first();
+      const beforeFence = await testEnv.DB.prepare(`
+        SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+      `).bind(instanceId).first();
+      const workflow = fakeWorkflow(status);
+
+      const result = await restartCoverPublication(testEnv, {
+        eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+      });
+
+      expect(result).toMatchObject({
+        status: 'active', retryAfterSeconds: 2,
+        view: { status: 'preparing', retryable: false, safeFailureCode: null },
+      });
+      expect(workflow.calls).toEqual(['lookup']);
+      expect(await testEnv.DB.prepare(`
+        SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION).first()).toEqual(beforeReceipt);
+      expect(await testEnv.DB.prepare(`
+        SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+      `).bind(instanceId).first()).toEqual(beforeFence);
+    },
+  );
+
   it('refuses a permanent failure, a terminal receipt, and a lapsed restart window', async () => {
     await testEnv.DB.prepare('UPDATE event_cover_publish_receipts SET retryable = 0 WHERE operation_id = ?')
       .bind(OPERATION).run();
+    const permanentWorkflow = fakeWorkflow('errored');
     expect((await restartCoverPublication(testEnv, {
-      eventId: access.event.id, operationId: OPERATION, now, workflow: fakeWorkflow('errored').accessor,
-    })).status).toBe('ineligible');
+      eventId: access.event.id, operationId: OPERATION, now, workflow: permanentWorkflow.accessor,
+    })).status).toBe('terminal');
+    expect(permanentWorkflow.calls).toEqual([]);
 
     await testEnv.DB.prepare(`UPDATE event_cover_publish_receipts SET status = 'applied' WHERE operation_id = ?`)
       .bind(OPERATION).run();
@@ -611,8 +1309,9 @@ describe('operation restart', () => {
     })).status).toBe('terminal');
 
     await testEnv.DB.prepare(`
-      UPDATE event_cover_publish_receipts SET status = 'failed', retryable = 1 WHERE operation_id = ?
-    `).bind(OPERATION).run();
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 1, expires_at = ? WHERE operation_id = ?
+    `).bind(new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(), OPERATION).run();
     const late = new Date(now.getTime() + 25 * 60 * 60 * 1000);
     expect((await restartCoverPublication(testEnv, {
       eventId: access.event.id, operationId: OPERATION, now: late,
@@ -620,7 +1319,7 @@ describe('operation restart', () => {
     })).status).toBe('ineligible');
   });
 
-  it('terminates and records nothing when deletion blocked the fence', async () => {
+  it('does not mutate the platform when deletion blocked the fence before the claim', async () => {
     await testEnv.DB.prepare(`
       UPDATE event_cover_workflow_fences SET state = 'deletion-blocked' WHERE workflow_instance_id = ?
     `).bind(instanceId).run();
@@ -629,16 +1328,1046 @@ describe('operation restart', () => {
       eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
     });
     expect(result.status).toBe('ineligible');
-    expect(workflow.calls).toContain(`terminate:${instanceId}`);
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', dispatch_state: 'failed', dispatch_generation: 0,
+      failure_code: 'COVER_RENDER_UNAVAILABLE',
+    });
   });
 
-  it('refuses to revive stale work after a newer publication moved the revision', async () => {
+  it('does not mutate the platform when the exact fence is missing before the claim', async () => {
+    await testEnv.DB.prepare(`
+      DELETE FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).run();
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result.status).toBe('ineligible');
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({ dispatch_state: 'failed', dispatch_generation: 0 });
+  });
+
+  it('does not mutate the platform when the fence generation mismatches before the claim', async () => {
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences SET dispatch_generation = 4
+      WHERE workflow_instance_id = ?
+    `).bind(instanceId).run();
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result.status).toBe('ineligible');
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({ dispatch_state: 'failed', dispatch_generation: 0 });
+  });
+
+  it('keeps a rejected restart claim recoverable when its follow-up lookup is unknown', async () => {
+    const workflow = rejectingRestartWorkflow({ kind: 'unknown', telemetry: 'test-unknown' });
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({ status: 'unavailable', retryAfterSeconds: 5 });
+    expect(workflow.calls).toEqual(['lookup', `restart:${instanceId}`, 'lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code, retryable
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', dispatch_state: 'restarting', dispatch_generation: 1,
+      failure_code: null, retryable: 1,
+    });
+  });
+
+  it('runs the deletion guard after a rejected restart has an unknown follow-up', async () => {
+    const workflow = rejectingRestartWorkflow(
+      { kind: 'unknown', telemetry: 'test-unknown' },
+      async () => {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+            WHERE workflow_instance_id = ?
+          `).bind(instanceId),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED'
+            WHERE operation_id = ?
+          `).bind(OPERATION),
+        ]);
+      },
+    );
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result.status).toBe('terminal');
+    expect(workflow.calls).toEqual([
+      'lookup', `restart:${instanceId}`, 'lookup', `terminate:${instanceId}`,
+    ]);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code, retryable
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', dispatch_state: 'restarting', dispatch_generation: 1,
+      failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+  });
+
+  it('keeps a rejected restart claim recoverable when its follow-up status is unmapped', async () => {
+    const workflow = rejectingRestartWorkflow({
+      kind: 'status', status: 'events/private/cover/cr1-secret',
+    });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const result = await restartCoverPublication(testEnv, {
+        eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+      });
+
+      expect(result).toMatchObject({ status: 'unavailable', retryAfterSeconds: 5 });
+      expect(workflow.calls).toEqual(['lookup', `restart:${instanceId}`, 'lookup']);
+      expect(await testEnv.DB.prepare(`
+        SELECT status, dispatch_state, dispatch_generation, failure_code, retryable
+        FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION).first()).toEqual({
+        status: 'queued', dispatch_state: 'restarting', dispatch_generation: 1,
+        failure_code: null, retryable: 1,
+      });
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(reported.mock.calls[0]![0]))).toEqual({
+        event: 'cover_platform_observation',
+        source: 'publication',
+        code: 'cover_platform_unmapped',
+      });
+      expect(String(reported.mock.calls[0]![0])).not.toContain('private');
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('confirms a rejected restart when its follow-up lookup proves the instance active', async () => {
+    const workflow = rejectingRestartWorkflow({ kind: 'status', status: 'running' });
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result.status).toBe('restarted');
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 1, failure_code: null,
+    });
+  });
+
+  it('does not reclaim a young recovery while its first platform call is still pending', async () => {
+    let releaseFirst!: () => void;
+    let reportEntered!: () => void;
+    const release = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const entered = new Promise<void>((resolve) => { reportEntered = resolve; });
+    let restartCalls = 0;
+    const workflow = fakeWorkflow('errored');
+    workflow.accessor.restart = async (id) => {
+      workflow.calls.push(`restart:${id}`);
+      restartCalls += 1;
+      if (restartCalls === 1) {
+        reportEntered();
+        await release;
+      }
+    };
+
+    const first = restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+    await entered;
+
+    const second = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(second).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(restartCalls).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', dispatch_state: 'restarting', dispatch_generation: 1,
+    });
+
+    releaseFirst();
+    expect((await first).status).toBe('restarted');
+    expect(restartCalls).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({ dispatch_state: 'confirmed', dispatch_generation: 1 });
+  });
+
+  it.each(['errored', 'running'] as const)(
+    'keeps a young exact recovery temporary after retryable failure while platform is %s',
+    async (platformStatus) => {
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'failed', retryable = 1, dispatch_state = 'restarting',
+            last_dispatch_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE operation_id = ?
+      `).bind(OPERATION).run();
+      const workflow = fakeWorkflow(platformStatus);
+
+      const result = await restartCoverPublication(testEnv, {
+        eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+      });
+
+      expect(result).toMatchObject({
+        status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+      });
+      expect(workflow.calls).toEqual(['lookup']);
+      expect(await testEnv.DB.prepare(`
+        SELECT status, retryable, dispatch_state, dispatch_generation
+        FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION).first()).toEqual({
+        status: 'failed', retryable: 1, dispatch_state: 'restarting', dispatch_generation: 0,
+      });
+    },
+  );
+
+  it('returns active when the same dispatch generation progresses during lookup', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'queued', retryable = 1, dispatch_state = 'creating',
+            dispatch_generation = 1, last_dispatch_at = '2000-01-01T00:00:00.000Z'
+        WHERE operation_id = ?
+      `).bind(OPERATION),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+        WHERE workflow_instance_id = ?
+      `).bind(instanceId),
+    ]);
+    const workflow = fakeWorkflow('running');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'rendering', dispatch_state = 'confirmed', completed_profiles = 2
+        WHERE operation_id = ? AND dispatch_generation = 1
+      `).bind(OPERATION).run();
+      return { kind: 'status', status: 'running' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2,
+      view: { status: 'preparing', completedSteps: 2 },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it('returns active when lookup overlaps a newer confirmed generation', async () => {
+    const workflow = fakeWorkflow('running');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_publish_receipts
+          SET status = 'queued', retryable = 1, dispatch_state = 'confirmed',
+              dispatch_generation = 1, failure_code = NULL
+          WHERE operation_id = ?
+        `).bind(OPERATION),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+          WHERE workflow_instance_id = ?
+        `).bind(instanceId),
+      ]);
+      return { kind: 'status', status: 'running' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it('confirms a stale exact recovery claim when the retained instance is active', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'queued', retryable = 1, dispatch_state = 'restarting',
+            dispatch_generation = 1, last_dispatch_at = '2000-01-01T00:00:00.000Z'
+        WHERE operation_id = ?
+      `).bind(OPERATION),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+        WHERE workflow_instance_id = ?
+      `).bind(instanceId),
+    ]);
+    const workflow = fakeWorkflow('running');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  it('does not settle a young in-flight recovery after revision movement', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'queued', dispatch_state = 'restarting', dispatch_generation = 1,
+            last_dispatch_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE operation_id = ?
+      `).bind(OPERATION),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+        WHERE workflow_instance_id = ?
+      `).bind(instanceId),
+      testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+        .bind(access.event.id),
+    ]);
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first();
+    const beforeFence = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first();
+    const workflow = fakeWorkflow('errored');
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual(beforeFence);
+  });
+
+  it('returns a terminal result when a rejected restart already applied in D1', async () => {
+    const workflow = rejectingRestartWorkflow(
+      { kind: 'status', status: 'complete' },
+      async () => {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'applied', applied_revision = 1, retryable = 0
+            WHERE operation_id = ?
+          `).bind(OPERATION),
+        ]);
+      },
+    );
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null, view: { status: 'applied' },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT status, applied_revision, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'applied', applied_revision: 1,
+      dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+    expect(workflow.calls).not.toContain(`terminate:${instanceId}`);
+  });
+
+  it('does not overwrite deletion settlement after a rejected restart', async () => {
+    const workflow = rejectingRestartWorkflow(
+      { kind: 'status', status: 'errored' },
+      async () => {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+            WHERE workflow_instance_id = ?
+          `).bind(instanceId),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED'
+            WHERE operation_id = ?
+          `).bind(OPERATION),
+        ]);
+      },
+    );
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result.status).toBe('terminal');
+    expect(workflow.calls).toEqual([
+      'lookup', `restart:${instanceId}`, 'lookup', `terminate:${instanceId}`,
+    ]);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code, retryable
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', dispatch_state: 'restarting', dispatch_generation: 1,
+      failure_code: 'EVENT_DELETED', retryable: 0,
+    });
+  });
+
+  it('does not overwrite a newer generation after a rejected restart', async () => {
+    const workflow = rejectingRestartWorkflow(
+      { kind: 'status', status: 'errored' },
+      async () => {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET dispatch_generation = 2, dispatch_state = 'restarting'
+            WHERE operation_id = ?
+          `).bind(OPERATION),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences SET dispatch_generation = 2
+            WHERE workflow_instance_id = ?
+          `).bind(instanceId),
+        ]);
+      },
+    );
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(workflow.calls).not.toContain(`terminate:${instanceId}`);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, failure_code
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', dispatch_state: 'restarting', dispatch_generation: 2, failure_code: null,
+    });
+  });
+
+  it('does not settle a recovery generation claimed after its lookup', async () => {
+    const workflow = fakeWorkflow('errored');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_publish_receipts
+          SET status = 'queued', dispatch_state = 'restarting', dispatch_generation = 1,
+              last_dispatch_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE operation_id = ?
+        `).bind(OPERATION),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+          WHERE workflow_instance_id = ?
+        `).bind(instanceId),
+        testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
+          .bind(access.event.id),
+      ]);
+      return { kind: 'status', status: 'errored' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toMatchObject({
+      status: 'queued', dispatch_state: 'restarting', dispatch_generation: 1,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual({ state: 'open', dispatch_generation: 1 });
+  });
+
+  it('polls when a newer generation finishes back in a retryable failed state', async () => {
+    const workflow = fakeWorkflow('errored');
+    workflow.accessor.lookup = async () => {
+      workflow.calls.push('lookup');
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_publish_receipts
+          SET status = 'failed', retryable = 1, dispatch_state = 'failed',
+              dispatch_generation = 1, failure_code = 'COVER_RENDER_UNAVAILABLE'
+          WHERE operation_id = ?
+        `).bind(OPERATION),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+          WHERE workflow_instance_id = ?
+        `).bind(instanceId),
+      ]);
+      return { kind: 'status', status: 'errored' };
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'unavailable', retryAfterSeconds: 5,
+      view: { status: 'retryable-failed' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', retryable: 1, dispatch_state: 'failed', dispatch_generation: 1,
+    });
+  });
+
+  it('returns a terminal result that wins between the final receipt and fence reads', async () => {
+    const workflow = fakeWorkflow('errored');
+    let claimRaced = false;
+    let fenceReads = 0;
+    const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrapStatement(target.bind(...values));
+        }
+        if (property === 'first') {
+          return async <T = unknown>(columnName?: string) => {
+            fenceReads += 1;
+            if (fenceReads === 2) {
+              await testEnv.DB.prepare(`
+                UPDATE event_cover_publish_receipts
+                SET status = 'applied', retryable = 0, dispatch_state = 'confirmed',
+                    applied_revision = 1, failure_code = NULL
+                WHERE operation_id = ?
+              `).bind(OPERATION).run();
+            }
+            return columnName === undefined
+              ? target.first<T>()
+              : target.first<T>(columnName);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!claimRaced) {
+              claimRaced = true;
+              await testEnv.DB.batch([
+                testEnv.DB.prepare(`
+                  UPDATE event_cover_publish_receipts
+                  SET status = 'failed', retryable = 1, dispatch_state = 'failed',
+                      dispatch_generation = 1, failure_code = 'COVER_RENDER_UNAVAILABLE'
+                  WHERE operation_id = ?
+                `).bind(OPERATION),
+                testEnv.DB.prepare(`
+                  UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+                  WHERE workflow_instance_id = ?
+                `).bind(instanceId),
+              ]);
+            }
+            return target.batch(statements);
+          };
+        }
+        if (property === 'prepare') {
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            return sql.includes('event_cover_workflow_fences') ? wrapStatement(statement) : statement;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const result = await restartCoverPublication({ ...testEnv, DB: db }, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(fenceReads).toBe(2);
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null, view: { status: 'applied' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+  });
+
+  it('uses the D1 application clock for a recovery claim', async () => {
+    const requested = new Date('2020-01-01T00:00:00.000Z');
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now: requested,
+      workflow: fakeWorkflow('paused').accessor,
+    });
+
+    expect(result.status).toBe('restarted');
+    const receipt = await testEnv.DB.prepare(`
+      SELECT last_dispatch_at FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first<{ last_dispatch_at: string }>();
+    const fence = await testEnv.DB.prepare(`
+      SELECT updated_at FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first<{ updated_at: string }>();
+    expect(receipt?.last_dispatch_at).not.toBe(requested.toISOString());
+    expect(fence?.updated_at).not.toBe(requested.toISOString());
+  });
+
+  it('settles stale recovery after a newer publication moved the revision', async () => {
+    const before = await testEnv.DB.prepare(`
+      SELECT draft_id, render_set_id FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first<{ draft_id: string; render_set_id: string }>();
     await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
       .bind(access.event.id).run();
+    const workflow = fakeWorkflow('errored');
     const result = await restartCoverPublication(testEnv, {
-      eventId: access.event.id, operationId: OPERATION, now, workflow: fakeWorkflow('errored').accessor,
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
     });
-    expect(result.status).toBe('ineligible');
+    expect(result).toMatchObject({ status: 'terminal', view: { status: 'conflict' } });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, dispatch_state, dispatch_generation, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'conflict', retryable: 0, dispatch_state: 'failed',
+      dispatch_generation: 0, render_set_id: null,
+    });
+    expect(await draftState(before!.draft_id)).toBe('ready');
+    expect(await testEnv.DB.prepare(`
+      SELECT state, abandoned_reason FROM event_cover_render_sets WHERE id = ?
+    `).bind(before!.render_set_id).first()).toEqual({
+      state: 'abandoned', abandoned_reason: 'revision-conflict',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT f.expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', r.updated_at, '+31 days') AS exact_proof
+      FROM event_cover_workflow_fences f
+      JOIN event_cover_publish_receipts r
+        ON r.event_id = f.event_id AND r.workflow_instance_id = f.workflow_instance_id
+      WHERE f.workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual({ exact_proof: 1 });
+  });
+
+  it('takes over and terminates a stale active generation before revision settlement', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'queued', retryable = 1, dispatch_state = 'restarting',
+            dispatch_generation = 1, last_dispatch_at = '2000-01-01T00:00:00.000Z'
+        WHERE operation_id = ?
+      `).bind(OPERATION),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences SET dispatch_generation = 1
+        WHERE workflow_instance_id = ?
+      `).bind(instanceId),
+      testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
+        .bind(access.event.id),
+    ]);
+    let platformStatus: CoverPlatformStatus = 'errored';
+    const calls: string[] = [];
+    const workflow: CoverWorkflowAccessor = {
+      async create() {},
+      async lookup() {
+        calls.push('lookup');
+        return { kind: 'status', status: platformStatus };
+      },
+      async resume() {},
+      async restart(id) {
+        calls.push(`restart:${id}`);
+        platformStatus = 'running';
+      },
+      async terminate(id) {
+        calls.push(`terminate:${id}`);
+        platformStatus = 'terminated';
+      },
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow,
+    });
+
+    expect(result).toMatchObject({ status: 'terminal', view: { status: 'conflict' } });
+    expect(calls).toEqual(['lookup', `terminate:${instanceId}`, 'lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'conflict', dispatch_state: 'restarting', dispatch_generation: 2,
+      render_set_id: null,
+    });
+
+    // A delayed generation-one host can still return from its platform call,
+    // but it no longer owns D1 confirmation or the generation-two fence.
+    await workflow.restart(instanceId);
+    expect(await confirmCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: instanceId,
+      dispatchGeneration: 1,
+      from: 'restarting',
+      now,
+      workflow,
+    })).toBe(false);
+    expect(calls.slice(-2)).toEqual([`restart:${instanceId}`, `terminate:${instanceId}`]);
+    expect(platformStatus).toBe('terminated');
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'conflict', dispatch_state: 'restarting', dispatch_generation: 2,
+    });
+
+    // Purge can later preserve that exact terminal proof while tagging the
+    // superseding generation deletion-blocked. A still-later generation-one
+    // platform call must be terminated just as it was for the open proof.
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_workflow_fences
+      SET state = 'deletion-blocked', expires_at = expires_at || '|cf2'
+      WHERE workflow_instance_id = ?
+    `).bind(instanceId).run();
+    await workflow.restart(instanceId);
+    expect(await confirmCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: instanceId,
+      dispatchGeneration: 1,
+      from: 'restarting',
+      now,
+      workflow,
+    })).toBe(false);
+    expect(calls.slice(-2)).toEqual([`restart:${instanceId}`, `terminate:${instanceId}`]);
+    expect(platformStatus).toBe('terminated');
+  });
+
+  it('terminates a delayed older call after relational purge retains only newer terminal proof', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'conflict', retryable = 0, dispatch_state = 'restarting',
+            dispatch_generation = 3, updated_at = ?
+        WHERE operation_id = ?
+      `).bind(now.toISOString(), OPERATION),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences
+        SET state = 'deletion-blocked', dispatch_generation = 3,
+            updated_at = ?, expires_at = '2026-09-04T12:00:00.000Z|cf2'
+        WHERE workflow_instance_id = ?
+      `).bind(now.toISOString(), instanceId),
+      testEnv.DB.prepare(`
+        DELETE FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION),
+      testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+        .bind(now.toISOString(), access.event.id),
+    ]);
+    const workflow = fakeWorkflow('running');
+
+    expect(await confirmCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: instanceId,
+      dispatchGeneration: 2,
+      from: 'restarting',
+      now,
+      workflow: workflow.accessor,
+    })).toBe(false);
+
+    expect(workflow.calls).toEqual([`terminate:${instanceId}`]);
+  });
+
+  it('terminates a delayed older call while a newer deletion-blocked purge is unresolved', async () => {
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+            dispatch_state = 'blocked', dispatch_generation = 3
+        WHERE operation_id = ?
+      `).bind(OPERATION),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_workflow_fences
+        SET state = 'deletion-blocked', dispatch_generation = 3
+        WHERE workflow_instance_id = ?
+      `).bind(instanceId),
+      testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+        .bind(now.toISOString(), access.event.id),
+    ]);
+    const workflow = fakeWorkflow('running');
+
+    expect(await confirmCoverDispatch(testEnv, {
+      eventId: access.event.id,
+      operationId: OPERATION,
+      workflowInstanceId: instanceId,
+      dispatchGeneration: 2,
+      from: 'restarting',
+      now,
+      workflow: workflow.accessor,
+    })).toBe(false);
+
+    expect(workflow.calls).toEqual([`terminate:${instanceId}`]);
+  });
+
+  it('terminates a paused stale publication before settling its revision conflict', async () => {
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
+      .bind(access.event.id).run();
+    let platformStatus: CoverPlatformStatus = 'paused';
+    const calls: string[] = [];
+    const workflow: CoverWorkflowAccessor = {
+      async create(id) { calls.push(`create:${id}`); },
+      async lookup() {
+        calls.push('lookup');
+        return { kind: 'status', status: platformStatus };
+      },
+      async resume(id) { calls.push(`resume:${id}`); },
+      async restart(id) { calls.push(`restart:${id}`); },
+      async terminate(id) {
+        calls.push(`terminate:${id}`);
+        platformStatus = 'terminated';
+      },
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow,
+    });
+
+    expect(result).toMatchObject({ status: 'terminal', view: { status: 'conflict' } });
+    expect(calls).toEqual(['lookup', `terminate:${instanceId}`, 'lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, dispatch_state, dispatch_generation, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'conflict', retryable: 0, dispatch_state: 'resuming',
+      dispatch_generation: 1, render_set_id: null,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation,
+        expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+31 days') AS exact_proof
+      FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual({
+      state: 'open', dispatch_generation: 1, exact_proof: 1,
+    });
+  });
+
+  it.each(['queued', 'rendering', 'finalizing'] as const)(
+    'terminates paused %s state after revision movement, including a ready set',
+    async (status) => {
+      const before = await testEnv.DB.prepare(`
+        SELECT render_set_id FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION).first<{ render_set_id: string }>();
+      await testEnv.DB.batch([
+        testEnv.DB.prepare(`
+          UPDATE event_cover_publish_receipts
+          SET status = ?, retryable = 0, dispatch_state = 'confirmed'
+          WHERE operation_id = ?
+        `).bind(status, OPERATION),
+        testEnv.DB.prepare(`
+          UPDATE event_cover_render_sets SET state = ? WHERE id = ?
+        `).bind(status === 'finalizing' ? 'ready' : 'staging', before!.render_set_id),
+        testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
+          .bind(access.event.id),
+      ]);
+      let platformStatus: CoverPlatformStatus = 'paused';
+      const calls: string[] = [];
+      const workflow: CoverWorkflowAccessor = {
+        async create() {},
+        async lookup() {
+          calls.push('lookup');
+          return { kind: 'status', status: platformStatus };
+        },
+        async resume() {},
+        async restart() {},
+        async terminate(id) {
+          calls.push(`terminate:${id}`);
+          platformStatus = 'terminated';
+        },
+      };
+
+      const result = await restartCoverPublication(testEnv, {
+        eventId: access.event.id, operationId: OPERATION, now, workflow,
+      });
+
+      expect(result).toMatchObject({ status: 'terminal', view: { status: 'conflict' } });
+      expect(calls).toEqual(['lookup', `terminate:${instanceId}`, 'lookup']);
+      expect(await testEnv.DB.prepare(`
+        SELECT status, render_set_id FROM event_cover_publish_receipts WHERE operation_id = ?
+      `).bind(OPERATION).first()).toEqual({ status: 'conflict', render_set_id: null });
+      expect(await testEnv.DB.prepare(`
+        SELECT state, abandoned_reason FROM event_cover_render_sets WHERE id = ?
+      `).bind(before!.render_set_id).first()).toEqual({
+        state: 'abandoned', abandoned_reason: 'revision-conflict',
+      });
+    },
+  );
+
+  it('preserves deletion when it wins during paused conflict termination', async () => {
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
+      .bind(access.event.id).run();
+    let platformStatus: CoverPlatformStatus = 'paused';
+    const calls: string[] = [];
+    const workflow: CoverWorkflowAccessor = {
+      async create() {},
+      async lookup() {
+        calls.push('lookup');
+        return { kind: 'status', status: platformStatus };
+      },
+      async resume() {},
+      async restart() {},
+      async terminate(id) {
+        calls.push(`terminate:${id}`);
+        await testEnv.DB.batch([
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+                dispatch_state = 'blocked'
+            WHERE event_id = ? AND operation_id = ? AND dispatch_generation = 1
+          `).bind(access.event.id, OPERATION),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences SET state = 'deletion-blocked'
+            WHERE workflow_instance_id = ? AND dispatch_generation = 1
+          `).bind(instanceId),
+        ]);
+        platformStatus = 'terminated';
+      },
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', view: { status: 'permanent-failed', safeFailureCode: 'EVENT_DELETED' },
+    });
+    expect(calls).toEqual(['lookup', `terminate:${instanceId}`, 'lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, failure_code, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'failed', retryable: 0, failure_code: 'EVENT_DELETED',
+      dispatch_state: 'blocked', dispatch_generation: 1,
+    });
+  });
+
+  it('does not settle a newer generation that wins during paused conflict termination', async () => {
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
+      .bind(access.event.id).run();
+    let platformStatus: CoverPlatformStatus = 'paused';
+    const workflow: CoverWorkflowAccessor = {
+      async create() {},
+      async lookup() { return { kind: 'status', status: platformStatus }; },
+      async resume() {},
+      async restart() {},
+      async terminate() {
+        await testEnv.DB.batch([
+          testEnv.DB.prepare(`
+            UPDATE event_cover_publish_receipts
+            SET status = 'queued', dispatch_state = 'restarting', dispatch_generation = 2,
+                last_dispatch_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE event_id = ? AND operation_id = ? AND dispatch_generation = 1
+          `).bind(access.event.id, OPERATION),
+          testEnv.DB.prepare(`
+            UPDATE event_cover_workflow_fences SET dispatch_generation = 2
+            WHERE workflow_instance_id = ? AND dispatch_generation = 1
+          `).bind(instanceId),
+        ]);
+        platformStatus = 'terminated';
+      },
+    };
+
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow,
+    });
+
+    expect(result).toMatchObject({
+      status: 'active', retryAfterSeconds: 2, view: { status: 'preparing' },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation, render_set_id
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toMatchObject({
+      status: 'queued', dispatch_state: 'restarting', dispatch_generation: 2,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, dispatch_generation FROM event_cover_workflow_fences
+      WHERE workflow_instance_id = ?
+    `).bind(instanceId).first()).toEqual({ state: 'open', dispatch_generation: 2 });
+  });
+
+  it('returns a terminal result that wins immediately before a paused conflict claim', async () => {
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
+      .bind(access.event.id).run();
+    let batches = 0;
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            batches += 1;
+            if (batches === 2) {
+              await target.prepare(`
+                UPDATE event_cover_publish_receipts
+                SET status = 'conflict', retryable = 0, failure_code = NULL
+                WHERE event_id = ? AND operation_id = ?
+              `).bind(access.event.id, OPERATION).run();
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const workflow = fakeWorkflow('paused');
+
+    const result = await restartCoverPublication({ ...testEnv, DB: db }, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+
+    expect(result).toMatchObject({
+      status: 'terminal', retryAfterSeconds: null, view: { status: 'conflict' },
+    });
+    expect(workflow.calls).toEqual(['lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'conflict', dispatch_state: 'failed', dispatch_generation: 0,
+    });
   });
 });
 
@@ -663,6 +2392,44 @@ describe('synchronous removal publication', () => {
       now,
     });
   }
+
+  /** Reconstructs the pre-atomic-acceptance row shape for upgrade/race tests. */
+  async function seedPendingRemoval() {
+    await acceptRemoval();
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE events SET cover_object_key = ?, cover_render_set_id = NULL, cover_revision = 0
+        WHERE id = ?
+      `).bind(legacyKey(access.event.id), access.event.id),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_publish_receipts
+        SET status = 'queued', applied_revision = NULL, result_cover_json = NULL,
+            retryable = 0, failure_code = NULL, dispatch_state = 'pending'
+        WHERE event_id = ? AND operation_id = ?
+      `).bind(access.event.id, OPERATION),
+      testEnv.DB.prepare(`
+        DELETE FROM event_cover_retired_legacy_objects WHERE event_id = ?
+      `).bind(access.event.id),
+    ]);
+    return reload(access.event.id);
+  }
+
+  it('applies the removal in the same durable transaction as first acceptance', async () => {
+    const accepted = await acceptRemoval();
+
+    expect(accepted).toMatchObject({
+      accepted: true,
+      receipt: { status: 'applied', applied_revision: 1 },
+      view: { status: 'applied' },
+    });
+    expect((await reload(access.event.id)).coverObjectKey).toBeNull();
+    expect((await reload(access.event.id)).coverRevision).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT object_key, reason FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({
+      object_key: legacyKey(access.event.id), reason: 'removed',
+    });
+  });
 
   it('applies in one transaction, retires the original into inventory, and does not delete it', async () => {
     await acceptRemoval();
@@ -704,8 +2471,86 @@ describe('synchronous removal publication', () => {
     expect(retired).toEqual({ count: 1 });
   });
 
+  it('replays a permanent deletion result without reviving the removal', async () => {
+    await seedPendingRemoval();
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+          dispatch_state = 'blocked'
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).run();
+    const beforeEvent = await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(access.event.id).first();
+    const beforeReceipt = await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first();
+
+    const outcome = await applyRemovalPublication(testEnv, {
+      event: await reload(access.event.id),
+      operationId: OPERATION, requestDigest: HEX_64, expectedRevision: 0, now,
+    });
+
+    expect(outcome).toMatchObject({ applied: false, appliedRevision: null });
+    expect(outcome.view).toMatchObject({
+      status: 'permanent-failed', retryable: false, safeFailureCode: 'EVENT_DELETED',
+    });
+    expect(await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual(beforeEvent);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first()).toEqual(beforeReceipt);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
+  it('preserves a deletion result that wins immediately before the removal batch', async () => {
+    const event = await seedPendingRemoval();
+    let raced = false;
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!raced) {
+              raced = true;
+              await target.prepare(`
+                UPDATE event_cover_publish_receipts
+                SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
+                    dispatch_state = 'blocked'
+                WHERE event_id = ? AND operation_id = ?
+              `).bind(access.event.id, OPERATION).run();
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const outcome = await applyRemovalPublication({ ...testEnv, DB: db }, {
+      event, operationId: OPERATION, requestDigest: HEX_64, expectedRevision: 0, now,
+    });
+
+    expect(outcome).toMatchObject({ applied: false, appliedRevision: null });
+    expect(outcome.view).toMatchObject({
+      status: 'permanent-failed', retryable: false, safeFailureCode: 'EVENT_DELETED',
+    });
+    expect((await reload(access.event.id)).coverRevision).toBe(0);
+    expect((await reload(access.event.id)).coverObjectKey).toBe(legacyKey(access.event.id));
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, failure_code, dispatch_state
+      FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first()).toEqual({
+      status: 'failed', retryable: 0, failure_code: 'EVENT_DELETED', dispatch_state: 'blocked',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
   it('writes no retirement row when it loses its revision guard', async () => {
-    await acceptRemoval();
+    await seedPendingRemoval();
     await testEnv.DB.prepare('UPDATE events SET cover_revision = 4 WHERE id = ?')
       .bind(access.event.id).run();
 
@@ -724,5 +2569,29 @@ describe('synchronous removal publication', () => {
       'SELECT status FROM event_cover_publish_receipts WHERE operation_id = ?',
     ).bind(OPERATION).first();
     expect(receipt).toEqual({ status: 'conflict' });
+  });
+
+  it('does not claim another publication that reached the same next revision', async () => {
+    const staleEvent = await seedPendingRemoval();
+    const winningKey = `events/${access.event.id}/cover/winner.jpg`;
+    await testEnv.DB.prepare(`
+      UPDATE events SET cover_revision = 1, cover_object_key = ? WHERE id = ?
+    `).bind(winningKey, access.event.id).run();
+
+    await expect(applyRemovalPublication(testEnv, {
+      event: staleEvent,
+      operationId: OPERATION, requestDigest: HEX_64, expectedRevision: 0, now,
+    })).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 409 });
+
+    expect((await reload(access.event.id)).coverObjectKey).toBe(winningKey);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, applied_revision FROM event_cover_publish_receipts
+      WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first()).toEqual({
+      status: 'conflict', applied_revision: null,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
   });
 });

@@ -107,7 +107,7 @@ export function mapPlatformStatus(status: string): CoverPlatformDisposition {
     default:
       return {
         kind: 'active', recovery: 'none', productStatus: 'preparing',
-        mutates: false, retryable: true, telemetry: `cover_platform_unmapped:${status.slice(0, 32)}`,
+        mutates: false, retryable: true, telemetry: 'cover_platform_unmapped',
       };
   }
 }
@@ -168,14 +168,6 @@ export function isCertifiedWorkflowNotFound(error: unknown): boolean {
   return CERTIFIED_NOT_FOUND_MATCHERS.some((matches) => matches(error));
 }
 
-/** Bounded, low-cardinality, and never derived from an error message. */
-function errorLabel(error: unknown): string {
-  if (error instanceof Error && error.name) {
-    return error.name.replace(/[^A-Za-z0-9_]/gu, '').slice(0, 32) || 'Error';
-  }
-  return typeof error;
-}
-
 /**
  * Classify a thrown lookup.
  *
@@ -184,7 +176,35 @@ function errorLabel(error: unknown): string {
  */
 export function classifyWorkflowLookupError(error: unknown): CoverWorkflowLookup {
   if (isCertifiedWorkflowNotFound(error)) return { kind: 'missing' };
-  return { kind: 'unknown', telemetry: `cover_platform_lookup_failed:${errorLabel(error)}` };
+  return { kind: 'unknown', telemetry: 'cover_platform_lookup_failed' };
+}
+
+export type CoverPlatformTelemetrySource = 'publication' | 'backfill' | 'purge';
+
+const COVER_PLATFORM_TELEMETRY_CODES = new Set([
+  'cover_platform_complete',
+  'cover_platform_unknown',
+  'cover_platform_unmapped',
+  'cover_platform_missing',
+  'cover_platform_lookup_failed',
+]);
+
+/**
+ * Emits one bounded, structured operations observation without identifiers.
+ *
+ * Accessors are injectable in tests and a future adapter may carry a label this
+ * release does not know. Never trust that string as log data: unknown labels
+ * collapse to the same fixed code as an unclassifiable platform reading.
+ */
+export function emitCoverPlatformTelemetry(
+  source: CoverPlatformTelemetrySource,
+  telemetry: string | null,
+): void {
+  if (telemetry === null) return;
+  const code = COVER_PLATFORM_TELEMETRY_CODES.has(telemetry)
+    ? telemetry
+    : 'cover_platform_unknown';
+  console.warn(JSON.stringify({ event: 'cover_platform_observation', source, code }));
 }
 
 /**

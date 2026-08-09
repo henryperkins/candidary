@@ -32,17 +32,22 @@ import {
 import {
   acceptCoverPublication,
   applyRemovalPublication,
+  claimInitialCoverDispatch,
   confirmCoverDispatch,
   coverRequestDigest,
   coverWorkflowInstanceId,
   markDispatchFailed,
+  guardCoverDispatchAfterPlatformCall,
   readCoverPublication,
+  readCoverPublicationTerminalResult,
   restartCoverPublication,
   selectEventCoverPreparation,
+  type CoverPublicationRestartResult,
 } from '../services/event-cover-publication';
 import {
   defaultCoverWorkflowAccessor,
   dispositionForLookup,
+  emitCoverPlatformTelemetry,
 } from '../workflows/cover-platform';
 
 /**
@@ -90,6 +95,41 @@ async function withRateRetryAfter<T>(
 
 function coverBase(eventId: string): string {
   return `/api/manage/events/${eventId}/cover`;
+}
+
+async function coverPublicationTerminalResponse(
+  context: Context<AppBindings>,
+  eventId: string,
+  operationId: string,
+  now: Date,
+): Promise<Response | null> {
+  const terminal = await readCoverPublicationTerminalResult(context.env, eventId, operationId);
+  if (!terminal) return null;
+  if (terminal.status === 'applied') {
+    return context.json({
+      data: {
+        applied: true,
+        appliedRevision: terminal.appliedRevision,
+        operation: terminal.view,
+        event: await currentEventView(context, eventId, now),
+      },
+      requestId: context.get('requestId'),
+    });
+  }
+  if (terminal.status === 'conflict') {
+    return context.json({
+      data: {
+        applied: false,
+        operation: terminal.view,
+        event: await currentEventView(context, eventId, now),
+      },
+      requestId: context.get('requestId'),
+    }, 409);
+  }
+  return context.json({
+    data: { applied: false, operation: terminal.view },
+    requestId: context.get('requestId'),
+  });
 }
 
 /**
@@ -341,12 +381,30 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
 
   const now = new Date();
   const requestDigest = await coverRequestDigest(canonicalCoverRequest(request));
-  const acceptance = await withRateRetryAfter(context, now, () => acceptCoverPublication(context.env, {
-    event: auth.event,
-    request,
-    requestDigest,
-    now,
-  }));
+  let acceptance: Awaited<ReturnType<typeof acceptCoverPublication>>;
+  try {
+    acceptance = await withRateRetryAfter(context, now, () => acceptCoverPublication(context.env, {
+      event: auth.event,
+      request,
+      requestDigest,
+      now,
+    }));
+  } catch (error) {
+    if (error instanceof ApiError
+      && error.code === 'COVER_PUBLICATION_CONFLICT'
+      && error.status === 409) {
+      return context.json({
+        code: error.code,
+        message: error.message,
+        data: {
+          operation: await selectEventCoverPreparation(context.env, auth.event.id, now),
+          event: await currentEventView(context, auth.event.id, now),
+        },
+        requestId: context.get('requestId'),
+      }, 409);
+    }
+    throw error;
+  }
 
   if (acceptance.receipt.status === 'conflict') {
     return context.json({
@@ -367,6 +425,16 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
       expectedRevision: request.expectedRevision,
       now,
     });
+    if (outcome.receipt.status === 'conflict') {
+      return context.json({
+        data: {
+          applied: false,
+          operation: outcome.view,
+          event: await currentEventView(context, auth.event.id, now),
+        },
+        requestId: context.get('requestId'),
+      }, 409);
+    }
     return context.json({
       data: {
         applied: outcome.applied,
@@ -390,26 +458,82 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
     });
   }
 
-  const dispatched = await dispatchCoverRender(context, auth.event.id, request.operationId, now);
+  // A same-digest replay of a retryable failure is an authorized recovery
+  // request under §9.4. It must use the retained instance/generation guards,
+  // never fall back to the initial raw `create()` edge.
+  let recovery = acceptance.receipt.status === 'failed' && acceptance.receipt.retryable === 1
+    ? await restartCoverPublication(context.env, {
+      eventId: auth.event.id,
+      operationId: request.operationId,
+      now,
+    })
+    : null;
+  let dispatched: boolean;
+  if (recovery) {
+    dispatched = recovery.status === 'restarted' || recovery.status === 'active';
+  } else {
+    const dispatch = await dispatchCoverRender(context, auth.event.id, request.operationId, now);
+    recovery = dispatch.recovery;
+    dispatched = dispatch.dispatched;
+  }
+  const terminalResponse = await coverPublicationTerminalResponse(
+    context, auth.event.id, request.operationId, now,
+  );
+  if (terminalResponse) return terminalResponse;
+  // `complete + failed` deliberately returns the retained failed D1 result:
+  // platform completion is not permission to reopen a recorded failure. A
+  // retryable failure is not part of the ordinary terminal-read set, so honor
+  // the recovery service's explicit terminal result here as the restart route
+  // does instead of misreporting it as a transient dispatch outage.
+  if (recovery?.status === 'terminal') {
+    return context.json({
+      data: { applied: false, operation: recovery.view },
+      requestId: context.get('requestId'),
+    });
+  }
+  if (recovery?.status === 'ineligible') {
+    throw new ApiError(
+      'COVER_PUBLICATION_CONFLICT',
+      'That cover change cannot be retried. Choose the photo again.',
+      409,
+    );
+  }
   if (!dispatched) {
-    context.header('Retry-After', '2');
+    const operation = await readCoverPublication(context.env, {
+      eventId: auth.event.id,
+      operationId: request.operationId,
+      now,
+    });
+    const lateTerminalResponse = await coverPublicationTerminalResponse(
+      context, auth.event.id, request.operationId, now,
+    );
+    if (lateTerminalResponse) return lateTerminalResponse;
+    context.header('Retry-After', String(recovery?.retryAfterSeconds ?? 2));
     return context.json({
       data: {
         applied: false,
-        operation: await readCoverPublication(context.env, {
-          eventId: auth.event.id,
-          operationId: request.operationId,
-          now,
-        }),
+        operation,
       },
       requestId: context.get('requestId'),
     }, 503);
   }
 
+  const operation = recovery?.view ?? await readCoverPublication(context.env, {
+    eventId: auth.event.id,
+    operationId: request.operationId,
+    now,
+  }) ?? acceptance.view;
+  const lateTerminalResponse = await coverPublicationTerminalResponse(
+    context, auth.event.id, request.operationId, now,
+  );
+  if (lateTerminalResponse) return lateTerminalResponse;
   context.header('Location', `${coverBase(auth.event.id)}/publications/${request.operationId}`);
   context.header('Retry-After', '2');
   return context.json({
-    data: { applied: false, operation: acceptance.view },
+    data: {
+      applied: false,
+      operation,
+    },
     requestId: context.get('requestId'),
   }, 202);
 });
@@ -421,15 +545,41 @@ eventCoverRoutes.get(
     // Side-effect-free: the platform map is applied in memory for the product
     // view. The Workflow handler, the restart POST, and bounded cleanup are the
     // only writers.
-    const operation = await readCoverPublication(context.env, {
+    const now = new Date();
+    const operationId = context.req.param('operationId');
+    let terminal = await readCoverPublicationTerminalResult(
+      context.env,
+      auth.event.id,
+      operationId,
+    );
+    let operation = terminal?.view ?? await readCoverPublication(context.env, {
       eventId: auth.event.id,
-      operationId: context.req.param('operationId'),
-      now: new Date(),
+      operationId,
+      now,
     });
+    if (!terminal) {
+      terminal = await readCoverPublicationTerminalResult(
+        context.env,
+        auth.event.id,
+        operationId,
+      );
+      if (terminal) operation = terminal.view;
+    }
     if (!operation) {
       throw new ApiError('EVENT_NOT_FOUND', 'That cover change could not be found.', 404);
     }
-    return context.json({ data: { operation }, requestId: context.get('requestId') });
+    return context.json({
+      data: {
+        operation,
+        ...(terminal?.status === 'applied'
+          ? {
+              appliedRevision: terminal.appliedRevision,
+              event: await currentEventView(context, auth.event.id, now),
+            }
+          : {}),
+      },
+      requestId: context.get('requestId'),
+    });
   },
 );
 
@@ -440,8 +590,15 @@ eventCoverRoutes.post(
     // Strictly empty: the client never reconstructs or resubmits the recipe.
     // Everything the restart needs is pinned on the receipt, which is what lets
     // `Try again` survive a reload with every scrap of local state cleared.
-    const raw = await context.req.json().catch(() => ({}));
-    if (!emptyBodySchema.safeParse(raw ?? {}).success) {
+    let raw: unknown;
+    try {
+      raw = await context.req.json();
+    } catch {
+      throw new ApiError(
+        'VALIDATION_FAILED', 'That retry could not be read. Reload and try again.', 422,
+      );
+    }
+    if (!emptyBodySchema.safeParse(raw).success) {
       throw new ApiError('VALIDATION_FAILED', 'That retry could not be read. Reload and try again.', 422);
     }
 
@@ -470,7 +627,7 @@ eventCoverRoutes.post(
       return context.json({
         data: { operation: result.view },
         requestId: context.get('requestId'),
-      });
+      }, result.view?.status === 'conflict' ? 409 : 200);
     }
 
     context.header('Location', `${coverBase(auth.event.id)}/publications/${operationId}`);
@@ -489,38 +646,107 @@ eventCoverRoutes.post(
  * failure — so an error is only fatal once a fresh status read cannot confirm
  * the instance exists.
  */
+interface CoverRenderDispatchResult {
+  dispatched: boolean;
+  recovery: CoverPublicationRestartResult | null;
+}
+
 async function dispatchCoverRender(
   context: Context<AppBindings>,
   eventId: string,
   operationId: string,
   now: Date,
-): Promise<boolean> {
+): Promise<CoverRenderDispatchResult> {
   const accessor = defaultCoverWorkflowAccessor(context.env);
   const workflowInstanceId = await coverWorkflowInstanceId(eventId, operationId);
+  const claim = await claimInitialCoverDispatch(context.env, {
+    eventId,
+    operationId,
+    workflowInstanceId,
+  });
+  if (claim.kind === 'confirmed') return { dispatched: true, recovery: null };
+  if (claim.kind === 'in-flight') {
+    const lookup = await accessor.lookup(workflowInstanceId)
+      .catch(() => ({ kind: 'unknown' as const, telemetry: 'cover_platform_lookup_failed' }));
+    const disposition = dispositionForLookup(lookup);
+    emitCoverPlatformTelemetry('publication', disposition.telemetry);
+    // The exact open-fence claim belongs to another caller. Any recognized
+    // platform state is durable progress and returns 202/polling; only unknown
+    // or unmapped evidence is transiently unavailable. This caller never
+    // repeats create/resume/restart for the retained ID.
+    return {
+      dispatched: disposition.kind !== 'unknown'
+        && disposition.telemetry !== 'cover_platform_unmapped',
+      recovery: null,
+    };
+  }
+  if (claim.kind === 'stale') {
+    const recovery = await restartCoverPublication(context.env, {
+      eventId,
+      operationId,
+      now,
+      workflow: accessor,
+    });
+    return {
+      dispatched: recovery.status === 'restarted' || recovery.status === 'active',
+      recovery,
+    };
+  }
+  if (claim.kind !== 'claimed') return { dispatched: false, recovery: null };
 
   try {
     await accessor.create(workflowInstanceId, { eventId, operationId });
   } catch {
     // `create()` refuses an ID a live instance already holds, which is the same
-    // fenced operation rather than a failure. Anything else is a failed
-    // dispatch: a single `!== 'unknown'` compare treated `errored`,
-    // `terminated`, and `complete` as success and answered 202 for work that
-    // was never running.
+    // fenced operation rather than a failure. A follow-up lookup must prove
+    // that active instance before confirmation. An unknown lookup preserves the
+    // durable claim for reconciliation; a known non-active result may fail only
+    // the exact claim generation this request owns.
     const lookup = await accessor.lookup(workflowInstanceId)
-      .catch(() => ({ kind: 'unknown' as const, telemetry: 'cover_platform_accessor_rejected' }));
-    if (dispositionForLookup(lookup).kind !== 'active') {
-      await markDispatchFailed(context.env, eventId, operationId, now);
-      return false;
+      .catch(() => ({ kind: 'unknown' as const, telemetry: 'cover_platform_lookup_failed' }));
+    const disposition = dispositionForLookup(lookup);
+    emitCoverPlatformTelemetry('publication', disposition.telemetry);
+    if (disposition.kind === 'unknown' || disposition.telemetry === 'cover_platform_unmapped') {
+      await guardCoverDispatchAfterPlatformCall(context.env, {
+        eventId,
+        operationId,
+        workflowInstanceId,
+        dispatchGeneration: claim.dispatchGeneration,
+        workflow: accessor,
+      });
+      return { dispatched: false, recovery: null };
+    }
+    if (disposition.kind !== 'active') {
+      const failed = await markDispatchFailed(context.env, eventId, operationId, now, {
+        workflowInstanceId,
+        dispatchState: 'creating',
+        dispatchGeneration: claim.dispatchGeneration,
+      });
+      if (!failed) {
+        await confirmCoverDispatch(context.env, {
+          eventId,
+          operationId,
+          workflowInstanceId,
+          dispatchGeneration: claim.dispatchGeneration,
+          now,
+          workflow: accessor,
+        });
+      }
+      return { dispatched: false, recovery: null };
     }
   }
 
-  return confirmCoverDispatch(context.env, {
-    eventId,
-    operationId,
-    workflowInstanceId,
-    now,
-    workflow: accessor,
-  });
+  return {
+    dispatched: await confirmCoverDispatch(context.env, {
+      eventId,
+      operationId,
+      workflowInstanceId,
+      dispatchGeneration: claim.dispatchGeneration,
+      now,
+      workflow: accessor,
+    }),
+    recovery: null,
+  };
 }
 
 /** The Manager event view, read fresh, with its one safe preparation summary. */
