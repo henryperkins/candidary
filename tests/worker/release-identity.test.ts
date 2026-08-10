@@ -35,7 +35,7 @@ describe('runtime release identity', () => {
     expect(await response.json()).toEqual({
       buildSha: BUILD_SHA,
       workerVersionId: 'worker-version-1',
-      guestJourneyVersion: 1,
+      guestJourneyVersion: 2,
       migrationManifestSha256: MIGRATION_SHA,
     });
     expect(metadataReads).toBe(2);
@@ -52,7 +52,7 @@ describe('runtime release identity', () => {
     })).toEqual({
       buildSha: BUILD_SHA,
       workerVersionId: 'worker-version-1',
-      guestJourneyVersion: 1,
+      guestJourneyVersion: 2,
       migrationManifestSha256: MIGRATION_SHA,
     });
   });

@@ -6,7 +6,6 @@ import {
   EVENT_COVER_TABLES,
   migrationOnly,
   migrationsUpTo,
-  orderedMigrations,
   seedEventCoverGraph,
 } from './helpers';
 
@@ -387,7 +386,11 @@ describe('migration 0012 on an empty database', () => {
     const overLegacy = await schemaSnapshot();
 
     await reset();
-    await applyD1Migrations(env.DB, orderedMigrations);
+    // Through 0012 inclusive, not `orderedMigrations`: this compares what 0012
+    // itself reaches, and the legacy path above stops there. Since `main` merged
+    // in, `orderedMigrations` also carries 0013's guest-message column and index,
+    // which would show up as a difference 0012 never made.
+    await applyD1Migrations(env.DB, [...migrationsUpTo('0012'), migrationOnly('0012')]);
     const fromEmpty = await schemaSnapshot();
 
     expect(fromEmpty).toEqual(overLegacy);

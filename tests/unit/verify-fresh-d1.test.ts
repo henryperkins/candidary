@@ -63,13 +63,14 @@ const eventColumnNames = [
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// verifier refuses a candidate whose ledger is not exactly twelve, and a
-// thirteenth file is how 0013 would arrive.
+// verifier refuses a candidate whose ledger is not exactly thirteen, and a
+// fourteenth file is how the phase-3 invariants migration would arrive.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
+  '0013_guest_message_hardening.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.

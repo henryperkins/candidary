@@ -21,7 +21,18 @@ export default defineConfig({
         bindings: {
           TEST_MIGRATIONS: JSON.stringify(migrations),
           TEST_MIGRATION_QUERIES: JSON.stringify(migrationQueries),
-          APP_ORIGIN: 'http://127.0.0.1:5173',
+          // `http://localhost` because that is the origin Hono's test client
+          // actually gives a request made with a bare pathname, which is how most
+          // of this suite calls the Worker. Naming any other host as canonical
+          // would leave the fixture disagreeing with itself: links are built from
+          // the origin a request arrives on, so they would come out on one host
+          // while `origin` in `helpers.ts` claimed another.
+          APP_ORIGIN: 'http://localhost',
+          // Extra front doors, so the suite exercises the multi-origin path
+          // rather than a deployment that happens to have exactly one.
+          // `tests/worker/origins.test.ts` uses a hostname deliberately absent
+          // from both settings to prove the exchange guard still fires.
+          ALTERNATE_ORIGINS: 'http://127.0.0.1:4173, https://candidary.test',
           TOKEN_HMAC_KEY: 'test-token-hmac-key-with-at-least-32-bytes',
           SESSION_HMAC_KEY: 'test-session-hmac-key-with-at-least-32-bytes',
           GUEST_TOKEN_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',

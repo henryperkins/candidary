@@ -2,11 +2,16 @@ import type { Context } from 'hono';
 
 import { ApiError } from '../../shared/errors';
 import type { AppBindings } from '../env';
+import { isApplicationOrigin } from '../origins';
 import { constantTimeEqual, digestSecret } from '../security/crypto';
 import { getCsrfCookie, type CookieScope } from './cookies';
 
+// Membership, not equality. The deployment answers on more than one hostname and
+// each one is a real front door, so a write from either is this application
+// writing to itself. A missing `Origin` header still fails: no header is not one
+// of the origins.
 export function assertRequestOrigin(context: Context<AppBindings>): void {
-  if (context.req.header('Origin') !== context.env.APP_ORIGIN) {
+  if (!isApplicationOrigin(context.env, context.req.header('Origin'))) {
     throw new ApiError('ORIGIN_FORBIDDEN', 'This request came from an untrusted origin.', 403);
   }
 }

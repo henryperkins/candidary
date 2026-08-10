@@ -97,7 +97,7 @@ function migratedDatabase(): DatabaseSync {
   const migrations = readdirSync(migrationRoot)
     .filter((entry) => entry.endsWith('.sql'))
     .sort();
-  expect(migrations).toHaveLength(12);
+  expect(migrations).toHaveLength(13);
   for (const migration of migrations) {
     database.exec(readFileSync(resolve(migrationRoot, migration), 'utf8'));
   }
@@ -721,6 +721,7 @@ describe('the generated cover-backfill operator loop', () => {
         '0010_event_start.sql',
         '0011_release_certifications.sql',
         '0012_event_cover_storage.sql',
+        '0013_guest_message_hardening.sql',
       ]);
       for (const migration of migrations) {
         runLocalD1File(persistTo, resolve(migrationRoot, migration));

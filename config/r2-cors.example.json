@@ -3,7 +3,8 @@
     {
       "allowed": {
         "origins": [
-          "https://candidary.example.com"
+          "https://candidary.example.com",
+          "https://candidary.example.net"
         ],
         "methods": [
           "PUT"

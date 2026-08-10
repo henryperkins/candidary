@@ -27,6 +27,7 @@ export interface MessageView {
   body: string;
   moderationStatus: 'pending' | 'approved' | 'rejected';
   createdAt: string;
+  mediaId?: string | null;
 }
 
 export interface ExportView {

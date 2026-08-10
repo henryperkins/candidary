@@ -156,26 +156,26 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .faq__item summary svg { flex: 0 0 auto; color: var(--chestnut); transition: transform 180ms; }
 .faq__item[open] summary svg { transform: rotate(180deg); }
 .faq__item p { margin: 0; padding: 0 0 26px; max-width: 62ch; color: var(--muted); line-height: 1.75; }
-/* Footer. Paper rather than parchment so the page ends on a surface instead of trailing off. On a
-   phone the link groups are ONE column of full-width rows, not two cramped ones: the whole row is
-   the target, hairlines do the separating, and no row is shorter than 52px. Two-up columns at 390
-   gave each link about 155px of width and 44px of height — a thumb-sized target sitting inside a
-   not-thumb-sized row. Three-across beside the brand returns at 761. */
-.site-footer { padding: 40px 20px calc(30px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--paper); }
-.site-footer__top { display: grid; gap: 30px; }
-.site-footer__blurb { margin: 14px 0 0; max-width: 38ch; color: var(--muted); font-size: .925rem; line-height: 1.7; }
-.site-footer__groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
-.site-footer h3.section-label { margin: 0 0 4px; }
-.site-footer ul { margin: 0; padding: 0; display: grid; border-top: 1px solid var(--border); list-style: none; }
-.site-footer__groups li { border-bottom: 1px solid var(--border); }
+/* Footer. Paper rather than parchment so the page ends on a surface instead of trailing off. The
+   accepted mobile rhythm treats each group as a small ledger: a labelled rule, full-width 52px
+   rows, then a separate retention line. Three compact columns return only when 761px gives every
+   label and link room to breathe. */
+.site-footer { --footer-rule: color-mix(in srgb, var(--border) 68%, transparent); padding: 36px 20px calc(28px + env(safe-area-inset-bottom)); display: grid; gap: 28px; border-top: 1px solid var(--border); background: var(--paper); }
+.site-footer__top { display: grid; gap: 28px; }
+.site-footer__blurb { margin: 12px 0 0; max-width: 35ch; color: var(--muted); font-size: .925rem; line-height: 1.65; }
+.site-footer__groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.site-footer h3.section-label { margin: 0; padding-bottom: 10px; border-bottom: 1px solid var(--footer-rule); }
+.site-footer ul { margin: 0; padding: 0; display: grid; border: 0; list-style: none; }
+.site-footer__groups li { border-bottom: 1px solid var(--footer-rule); }
 .site-footer__groups a { min-height: 52px; display: flex; align-items: center; }
 /* Scoped to the nav lists rather than every anchor in the footer: `.site-footer a` outranks
    `.brand` and would repaint the footer's own brand mark grey at .95rem. */
 .site-footer__groups a { color: var(--ink); font-size: .95rem; text-decoration: none; }
 .site-footer__groups a:hover { color: var(--chestnut); text-decoration: underline; }
+.site-footer__groups a:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 /* Stacked and left-aligned: `space-between` on a narrow bar pushed the retention line to a ragged
    second row that read as a caption for nothing. */
-.site-footer__bottom { margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--border); display: grid; gap: 7px; color: var(--muted); font-size: .85rem; line-height: 1.6; }
+.site-footer__bottom { margin: 0; padding-top: 18px; border-top: 1px solid var(--footer-rule); display: grid; gap: 6px; color: var(--muted); font-size: .85rem; line-height: 1.6; }
 .site-footer__bottom p { margin: 0; }
 /* Privacy and Terms: one measure, the same paper card the recovery page uses. Prose, not layout. */
 .legal-page { width: 100%; max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
@@ -220,7 +220,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .empty-state { min-height: 220px; display: grid; place-items: center; align-content: center; padding: 30px; text-align: center; border: 1px dashed var(--border); border-radius: 9px; }.empty-state svg { color: var(--denim); font-size: 2rem; }.empty-state h3 { margin: 14px 0 3px; font-size: 1.4rem; }.empty-state p { color: var(--muted); }
 .contributions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 25px; }.contributions > p { color: var(--muted); }.contributions ul { margin: 0; padding: 0; display: grid; gap: 8px; list-style: none; }.contributions li { min-height: 64px; display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 6px; border-bottom: 1px solid var(--border); }.contributions img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; }
 .status { display: inline-flex; align-items: center; gap: 6px; width: fit-content; padding: 6px 10px; border-radius: 999px; font-size: .75rem; font-style: normal; font-weight: 600; text-transform: capitalize; }.status--approved { background: var(--moss-soft); color: #4e5b28; }.status--pending { background: var(--denim-soft); color: var(--chestnut); }.status--rejected { background: #fbe0dc; color: var(--danger); }
-.note-form textarea { margin-bottom: 12px; background: rgb(255 255 255 / 7%); border-color: rgb(255 255 255 / 30%); color: white; }.note-form textarea::placeholder { color: #c7bcb8; }.note-form label { display: block; }.note-form .button { background: var(--denim-soft); color: var(--chestnut); }.notes-feed { margin: 35px 0 0; padding: 0; list-style: none; }.notes-feed li { padding: 18px 0; border-top: 1px solid rgb(255 255 255 / 18%); }.notes-feed p { margin-bottom: 6px; }.notes-feed small { color: var(--denim-soft); }
+.note-form label { min-width: 0; display: grid; gap: 8px; }.notes-feed { margin: 18px 0 0; padding: 0; list-style: none; }.notes-feed li { min-width: 0; padding: 18px 0; border-top: 1px solid; }.notes-feed p { margin-bottom: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .guest-shell footer { padding: 32px 6vw; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; color: var(--muted); }.guest-shell footer p { margin: 0; }
 
 /* These choice cards sit in Candidary's creation and manager chrome, so they intentionally use the
@@ -333,14 +333,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .faq { padding: 70px 5vw 60px; }
   .legal-page { padding-top: 56px; }
   .legal-page > section { padding: 40px; }
-  .site-footer { padding: 56px 5vw 38px; }
-  .site-footer__top { grid-template-columns: minmax(260px, 1fr) auto; gap: 6vw; }
-  .site-footer__groups { grid-template-columns: repeat(3, auto); gap: 0 clamp(32px, 5vw, 80px); }
-  .site-footer h3.section-label { margin: 0 0 6px; }
-  .site-footer ul { border-top: 0; }
+  .site-footer { padding: 52px 5vw 36px; gap: 34px; }
+  .site-footer__top { grid-template-columns: minmax(260px, 1fr) minmax(420px, auto); gap: 6vw; align-items: start; }
+  .site-footer__groups { grid-template-columns: repeat(3, minmax(112px, auto)); gap: 0 clamp(30px, 4vw, 68px); }
+  .site-footer h3.section-label { padding: 0 0 8px; border-bottom: 0; }
   .site-footer__groups li { border-bottom: 0; }
   .site-footer__groups a { min-height: 44px; display: inline-flex; }
-  .site-footer__bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 24px; }
+  .site-footer__bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; }
   .contributions { padding: 75px 6vw; }
   .photo-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 15px; }
   .photo-grid figure { grid-column: span 4; }
@@ -460,9 +459,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .event-extra:last-child { border-bottom: 1px solid var(--event-section-border); }
 .event-extra summary { min-height: 72px; padding: 15px 3px; display: flex; align-items: center; justify-content: space-between; gap: 20px; font-family: 'Manrope'; font-weight: 700; cursor: pointer; list-style: none; }
 .event-extra summary::-webkit-details-marker { display: none; }
-.event-extra summary span { display: flex; align-items: baseline; gap: 10px; }
-.event-extra summary small { color: var(--event-secondary-muted-text); font-family: 'DM Sans'; font-size: .7rem; font-weight: 500; }
-.event-extra summary svg { transition: transform 180ms; }
+.event-extra summary span { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; overflow-wrap: anywhere; }
+.event-extra summary small { color: var(--event-secondary-muted-text); font-family: 'DM Sans'; font-size: .7rem; font-weight: 500; overflow-wrap: anywhere; }
+.event-extra summary svg { flex: 0 0 auto; transition: transform 180ms; }
 .event-extra[open] summary svg { transform: rotate(180deg); }
 .event-extra__content { padding: 5px 0 35px; }
 .secondary-actions { margin-bottom: 18px; display: flex; justify-content: flex-end; }
@@ -478,20 +477,46 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .contributions--compact ul { width: 100%; }
 .guest-shell--drop .contributions li { border-bottom-color: var(--event-section-border); }
 .guest-shell--drop .status--pending { background: var(--event-accent-soft); color: var(--event-accent-soft-foreground); }
-.notes-secondary { display: grid; grid-template-columns: .8fr 1.2fr; gap: 50px; }
+.notes-secondary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.notes-secondary > div { min-width: 0; }
 .notes-secondary > div:first-child > svg { color: var(--event-accent); font-size: 1.7rem; }
-.notes-secondary h3 { margin: 12px 0 5px; font-size: 1.45rem; }
+.notes-secondary h3 { margin: 12px 0 5px; font-size: 1.45rem; overflow-wrap: anywhere; }
 .notes-secondary p { color: var(--event-secondary-muted-text); }
+.notes-secondary__privacy { margin-top: 14px; max-width: 42ch; font-size: .85rem; line-height: 1.55; }
+.notes-secondary__workspace { display: grid; gap: 0; }
+.note-form { display: grid; gap: 12px; }
+.note-form__label { color: var(--event-page-text); font-size: .85rem; font-weight: 700; overflow-wrap: anywhere; }
 .notes-secondary .note-form textarea { background: var(--event-raised-surface); border-color: var(--event-input-border); color: var(--event-page-text); }
 .notes-secondary .note-form textarea::placeholder { color: var(--event-muted-text); }
+.notes-secondary .note-form textarea[readonly] { opacity: .72; }
+.note-form__footer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.note-form__footer small { color: var(--event-secondary-muted-text); font-size: .75rem; }
+.note-form__footer .button { width: 100%; }
 .guest-shell--drop .note-form .button { border-radius: var(--event-action-radius); background: var(--event-primary); color: var(--event-primary-foreground); box-shadow: 0 8px 22px var(--event-primary-shadow); }
-.guest-shell--drop .note-form .button:hover { background: var(--event-primary-hover); }
-/* The notes feed was written for the dark chestnut band, where denim-soft on chestnut reads. Reused on
-   the light guest surface it inherited that rule and rendered the guest's name at 1.72:1 — the body
-   text was already reclaimed for this surface, and the byline belongs with it. */
+@media (hover: hover) {
+  .guest-shell--drop .note-form .button:hover { background: var(--event-primary-hover); }
+}
+[dir='rtl'] .note-form .button svg { transform: scaleX(-1); }
+.note-submit-feedback { min-height: 1.5em; margin-top: 10px; }
+.note-submit-feedback p { margin: 0; color: var(--moss); font-size: .85rem; font-weight: 650; }
+.note-submit-feedback .note-submit-feedback__error { color: var(--danger); }
+.notes-feed-region { min-width: 0; padding-top: 22px; }
+.notes-feed-region h4 { margin: 0; color: var(--event-page-text); font-family: 'Manrope', sans-serif; font-size: 1rem; }
+.notes-feed__state { margin: 12px 0 0; font-size: .85rem; }
+.notes-feed__recovery { margin-top: 14px; display: grid; gap: 12px; justify-items: start; }
+.notes-feed__recovery p, .notes-feed__more p { margin: 0; color: var(--danger); font-size: .85rem; }
 .notes-secondary .notes-feed { color: var(--event-page-text); }
 .notes-secondary .notes-feed li { border-top-color: var(--event-section-border); }
 .notes-secondary .notes-feed small { color: var(--event-secondary-muted-text); }
+.notes-feed-region .button--secondary { max-width: 100%; border-color: var(--event-primary-on-surface); color: var(--event-primary-on-surface); white-space: normal; }
+.notes-feed__entry { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; }
+.notes-feed__thumbnail { width: 58px; height: 58px; object-fit: cover; border-radius: max(0px, calc(var(--event-card-radius) - 4px)); }
+.notes-feed__body { min-width: 0; }
+.notes-feed__meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.notes-feed__meta small { min-width: 0; overflow-wrap: anywhere; }
+.notes-feed__meta .status { max-width: 100%; flex: 0 0 auto; overflow-wrap: anywhere; text-align: start; text-transform: none; }
+.notes-feed__visibility { display: block; margin-top: 5px; overflow-wrap: anywhere; }
+.notes-feed__more { margin-top: 18px; display: grid; gap: 10px; justify-items: start; }
 
 /* Household RSVP is deliberately isolated from the upload state machine. It
    shares only the event semantic tokens and the narrow guest shell. */
@@ -558,6 +583,18 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .rsvp-flow--with-hero .rsvp-flow__body { padding: 32px 40px 40px; }
 }
 
+@media (min-width: 480px) {
+  .note-form__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+  .note-form__footer .button { width: auto; }
+}
+
+@media (min-width: 700px) {
+  .notes-secondary {
+    grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr);
+    gap: clamp(32px, 5vw, 50px);
+  }
+}
+
 @media (max-width: 360px) {
   /* Embedded is excluded: its own page body already holds the narrow gutter, and insetting it twice
      costs the household roster 28px it does not have at 320. */
@@ -608,7 +645,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   /* The same documented Parchment the wider shell now stands on, so the secondary band reads the
      same on a phone as it does above 699 and its muted captions clear the contrast floor either way. */
   .guest-secondary { background: var(--event-page); }
-  .notes-secondary { grid-template-columns: 1fr; gap: 20px; }
 }
 
 @media (max-width: 390px) {

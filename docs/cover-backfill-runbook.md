@@ -29,8 +29,11 @@ Before production execution, require all of the following:
 3. The account, Worker `candidary`, D1 database `candidary-core` with ID
    `60bec5de-c8c7-41b5-a26b-2d3f7d184c71`, and Workflows `candidary-cover-render` and
    `candidary-cover-backfill` match the approved target.
-4. Remote D1 has exactly the approved `0001` through `0012` migration set. Applying `0012`, deploying
-   a Worker, and running this backfill remain separate authorizations.
+4. Remote D1 has exactly the approved `0001` through `0013` migration set. `0013_guest_message_hardening.sql`
+   arrived with the `main` integration and is unrelated to covers; the phase-3 invariants migration is
+   `0014` and must still be absent. As of the integration, remote D1 is at `0010`, so `0011`, `0012`,
+   and `0013` are all unapplied. Applying them, deploying a Worker, and running this backfill remain
+   separate authorizations.
 5. No other cover run is `inventorying` or `executing`, no event purge/fence backlog is unexplained,
    and a no-deploy window is owned for the later verification interval.
 6. Phase 3 remains closed. A green Phase-2 proof permits only a later request to open a Phase-3
@@ -689,7 +692,7 @@ npx vitest run --config vitest.worker.config.ts tests/worker/cover-backfill-rehe
 if ($LASTEXITCODE -ne 0) { throw 'Populated Worker rehearsal failed.' }
 ```
 
-The operator-loop test pins Wrangler 4.113.0, applies exactly `0001` through `0012` to a unique
+The operator-loop test pins Wrangler 4.113.0, applies exactly `0001` through `0013` to a unique
 `--local --persist-to` D1, runs inventory/claim/confirm/proof D1 equivalents, and proves a failing
 claim file rolls back. The Worker rehearsal supplies deterministic Images and Workflow fakes. It
 validates generated Workflow command strings and order only; it never executes a trigger, terminate,

@@ -81,14 +81,20 @@ const INVARIANT_STATEMENT_COUNT = 12;
 /**
  * Pinned, not derived.
  *
- * The ledger comparison alone cannot prove `0013` is absent: it derives its
- * expectation from `collectMigrationManifest(candidateRoot)`, so a file that is
- * not checked in is never seen, and a correctly numbered `0013` that *is*
- * checked in would simply be accepted as the thirteenth entry. The phase-3
- * candidate updates this number and the trigger set together; one candidate
- * never claims both states.
+ * The ledger comparison alone cannot prove a phase-3 migration is absent: it
+ * derives its expectation from `collectMigrationManifest(candidateRoot)`, so a
+ * file that is not checked in is never seen, and a correctly numbered extra file
+ * that *is* checked in would simply be accepted as the next entry.
+ *
+ * Thirteen since `main` merged into the cover line: `0013_guest_message_hardening.sql`
+ * is a guest-message column and index, unrelated to covers. It is deliberately
+ * **not** the phase-3 invariants migration, which is now `0014`. Raising this
+ * number does not disarm the phase-3 tripwire, because `EXPECTED_TRIGGERS` below
+ * is what actually distinguishes that state and `0013` adds no trigger. The
+ * phase-3 candidate updates this number and the trigger set together; one
+ * candidate never claims both states.
  */
-const EXPECTED_MIGRATION_COUNT = 12;
+const EXPECTED_MIGRATION_COUNT = 13;
 
 /** Exactly the triggers that existed before 0012. 0013's are not among them. */
 const EXPECTED_TRIGGERS = [

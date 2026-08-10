@@ -1,13 +1,13 @@
 import { NotificationOutboxRepository, type ClaimedOutboxRow } from '../db/notification-outbox';
 import type { EventRecord } from '../db/types';
 import type { AppEnv } from '../env';
+import { canonicalOrigin } from '../origins';
 import { constantTimeEqual, digestSecret } from '../security/crypto';
 import { EmailService, layout } from './email';
 
 export async function unsubscribeUrl(env: AppEnv, accountId: string): Promise<string> {
   const digest = await digestSecret(`unsubscribe:${accountId}`, env.LOGIN_HMAC_KEY);
-  const origin = env.APP_ORIGIN.replace(/\/$/u, '');
-  return `${origin}/host/unsubscribe/${accountId}.${digest}`;
+  return `${canonicalOrigin(env)}/host/unsubscribe/${accountId}.${digest}`;
 }
 
 // One-click unsubscribe has to work with no session — the whole point is that it
@@ -41,8 +41,11 @@ export class NotificationService {
     this.email = new EmailService(env);
   }
 
+  // Canonical, never the request's origin: these are composed by the hourly
+  // Cron, where there is no request, and mail links have to match the `From`
+  // domain the message was sent under.
   private get origin(): string {
-    return this.env.APP_ORIGIN.replace(/\/$/u, '');
+    return canonicalOrigin(this.env);
   }
 
   private gettingStartedMessage(event: EventRecord, unsubscribe: string) {

@@ -506,7 +506,7 @@ test('full-page manager recovery is labelled, associated, touch-sized, contained
   await expect(input).toHaveAttribute('aria-invalid', 'true');
   const errorId = await input.getAttribute('aria-describedby');
   expect(errorId, 'the visible validation message is field-associated').toBeTruthy();
-  await expect(page.locator(`#${errorId}`)).toHaveText('Enter a Candidary management link from this site.');
+  await expect(page.locator(`#${errorId}`)).toHaveText('Enter a Candidary management link.');
 
   for (const target of [
     page.getByRole('link', { name: 'Sign in' }),
@@ -607,7 +607,7 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
   for (const [summary, rendered] of [
     ['Shared gallery', '.photo-grid figure'],
     ['My deliveries', '.contributions li'],
-    ['Leave a note', '.note-form textarea'],
+    ['Guest notes', '.note-form textarea'],
   ] as const) {
     await page.locator('.event-extra summary').filter({ hasText: summary }).click();
     await expect(page.locator(rendered).first()).toBeVisible();

@@ -84,7 +84,7 @@ The two Phase-2 rehearsals establish different local facts and must not be promo
   counters, proof, and Worker-only atomic closure. Its Images and Workflow implementations are
   deterministic injected fakes.
 - `tests/unit/cover-backfill-operator-loop.test.ts` pins Wrangler 4.113.0, applies exactly migrations
-  `0001` through `0012` to a unique disposable local D1, walks the generated inventory/claim/read/
+  `0001` through `0013` to a unique disposable local D1, walks the generated inventory/claim/read/
   confirm/receipt/proof order, and proves a failing claim file rolls back. It inspects generated
   Workflow command strings only and deliberately executes no trigger, terminate, resume, or restart.
 

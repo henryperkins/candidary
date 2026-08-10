@@ -66,7 +66,7 @@ async function releaseCandidateRepository(): Promise<{ root: string; sha: string
 const CERTIFICATION: ReleaseCertification = {
   buildSha: BUILD_SHA,
   workerVersionId: 'candidary-worker-v1',
-  guestJourneyVersion: 1,
+  guestJourneyVersion: 2,
   migrationManifestSha256: MIGRATION_SHA,
   evidenceManifestSha256: EVIDENCE_SHA,
   physicalEvidenceRefs: [{
@@ -191,9 +191,9 @@ describe('release contract', () => {
 
   // Production break caught: an evidence-format knob in the runtime config relabels an unchanged manifest.
   it('keeps evidence schema versioning in the evidence contract', () => {
-    expect(releaseConfig).toEqual({ guestJourneyVersion: 1 });
+    expect(releaseConfig).toEqual({ guestJourneyVersion: 2 });
     expect(CANDIDATE_MANIFEST_SCHEMA_VERSION).toBe(1);
-    expect(GUEST_JOURNEY_VERSION).toBe(1);
+    expect(GUEST_JOURNEY_VERSION).toBe(2);
   });
 
   // Production break caught: a complete runtime identity is rejected or normalized instead of copied exactly.
@@ -201,7 +201,7 @@ describe('release contract', () => {
     expect(parseRuntimeReleaseIdentity(runtimeInput())).toEqual({
       buildSha: BUILD_SHA,
       workerVersionId: 'candidary-worker-v1',
-      guestJourneyVersion: 1,
+      guestJourneyVersion: 2,
       migrationManifestSha256: MIGRATION_SHA,
     });
   });
@@ -361,7 +361,7 @@ describe('release certification matching', () => {
   const identity: RuntimeReleaseIdentity = {
     buildSha: BUILD_SHA,
     workerVersionId: 'candidary-worker-v1',
-    guestJourneyVersion: 1,
+    guestJourneyVersion: 2,
     migrationManifestSha256: MIGRATION_SHA,
   };
   const certification = CERTIFICATION;
@@ -379,7 +379,7 @@ describe('release certification matching', () => {
   it.each([
     ['build SHA', { buildSha: 'fedcba9876543210fedcba9876543210fedcba98' }],
     ['Worker version ID', { workerVersionId: 'different-worker-version' }],
-    ['guest journey version', { guestJourneyVersion: 2 }],
+    ['guest journey version', { guestJourneyVersion: 1 }],
     ['migration digest', { migrationManifestSha256: 'd'.repeat(64) }],
   ])('returns false for a mismatched %s', (_label, override) => {
     expect(releaseCertificationMatches(identity, { ...certification, ...override })).toBe(false);
