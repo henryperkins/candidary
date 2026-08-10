@@ -107,7 +107,7 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   event_cover_render_set_manifest_insert: 'df734d0e6c3695c545043c6dec35fc7752982df931df8bae7d7e740747771cf8',
   event_cover_render_set_manifest_update: '90ce5414d984e4adeeefa901a20d2e169ff0a5f80f943d922bc0e95081ab4815',
   event_cover_source_pointer_insert: 'a9fbab82a3e6ad5e3f98cae72d0c5cddddaf10a1e94d823bc0d3090fb91d7991',
-  event_cover_source_pointer_update: 'b84f89091ec51761bd9ce26c562a83d2f42d70ddd60e0271a0f2daabf6dba6e9',
+  event_cover_source_pointer_update: '047746e2f68a3b5560756f3d750cc45aa78688349f922bcab86102775dea99fd',
   events_rsvp_deadline_insert: 'b96be8b8983ad7ed6d354e1bb3da6959cca61c89c09d83d796d22649d079b110',
   events_rsvp_deadline_update: '9154c51a32504396624c7d36205c11a573e53847e7a944cc2062e627ada682d5',
   media_stamp_stored_at_compat: '921740a4d74caa9802c6d862070ca3fa52f2765a5fc845adcf848c5bb0ee44c4',

@@ -124,6 +124,8 @@ BEGIN
   SELECT RAISE(ABORT, 'event cover source/pointer insert invariant');
 END;
 
+-- A semantic no-op still advances the optimistic revision, but only its exact
+-- applied receipt may authorize that otherwise indistinguishable revision move.
 CREATE TRIGGER event_cover_source_pointer_update
 BEFORE UPDATE OF cover_config, cover_object_key, cover_render_set_id, cover_revision, deleted_at ON events
 WHEN NOT (
@@ -251,6 +253,25 @@ WHEN NOT (
         NEW.cover_config IS NOT OLD.cover_config
         OR NEW.cover_object_key IS NOT OLD.cover_object_key
         OR NEW.cover_render_set_id IS NOT OLD.cover_render_set_id
+      )
+    )
+    OR (
+      NEW.cover_revision = OLD.cover_revision + 1
+      AND NEW.cover_config IS OLD.cover_config
+      AND NEW.cover_object_key IS OLD.cover_object_key
+      AND NEW.cover_render_set_id IS OLD.cover_render_set_id
+      AND EXISTS (
+        SELECT 1 FROM event_cover_publish_receipts r
+        WHERE r.event_id = NEW.id
+          AND r.action = CASE
+            WHEN json_extract(NEW.cover_config, '$.source.kind') = 'none' THEN 'remove'
+            ELSE 'publish'
+          END
+          AND r.expected_revision = OLD.cover_revision
+          AND r.status = 'applied' AND r.applied_revision = NEW.cover_revision
+          AND r.result_cover_json = NEW.cover_config AND r.retryable = 0
+          AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL AND r.draft_id IS NULL
+          AND r.dispatch_state = 'confirmed' AND r.dispatch_generation = 0
       )
     )
     OR (

@@ -121,6 +121,31 @@ describe('migration 0014 cover invariants', () => {
     `).bind(UPLOAD, graph.masterKey, graph.setId).run()).resolves.toBeDefined();
   });
 
+  it('permits a revision-only semantic publication only with its exact applied receipt', async () => {
+    await applyD1Migrations(env.DB, [...migrationsUpTo('0014'), migrationOnly('0014')]);
+    await seedEvent();
+
+    await expect(env.DB.prepare(`
+      UPDATE events SET cover_revision = 1 WHERE id = 'event-a'
+    `).run()).rejects.toThrow();
+
+    await env.DB.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, request_sha256, action, expected_revision, status,
+        dependency_versions_json, completed_profiles, required_profiles,
+        applied_revision, result_cover_json, retryable, dispatch_state,
+        dispatch_generation, created_at, updated_at, expires_at
+      ) VALUES (
+        'event-a', 'operation-semantic-noop', ?, 'remove', 0, 'applied', '{}',
+        0, 0, 1, ?, 0, 'confirmed', 0, ?, ?, ?
+      )
+    `).bind(HEX_64, NONE, NOW, NOW, NOW).run();
+
+    await expect(env.DB.prepare(`
+      UPDATE events SET cover_revision = 1 WHERE id = 'event-a'
+    `).run()).resolves.toBeDefined();
+  });
+
   it('rejects malformed semantic sources and mutation beneath a frozen set', async () => {
     await applyD1Migrations(env.DB, [...migrationsUpTo('0014'), migrationOnly('0014')]);
     await seedEvent();
