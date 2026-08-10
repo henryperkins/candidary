@@ -68,7 +68,7 @@ export async function conformanceBackfillIdentity(
   caseId: string,
   index = 0,
 ): Promise<ConformanceBackfillIdentity> {
-  const runId = await conformanceUuid(rootRunId, caseId, 'run', index);
+  const runId = assertConformanceRunId(rootRunId);
   const jobId = await conformanceUuid(rootRunId, caseId, 'job', index);
   const eventId = await conformanceUuid(rootRunId, caseId, 'event', index);
   return {

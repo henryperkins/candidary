@@ -20,6 +20,7 @@ import {
   coverRenderProfileStep,
   type CoverRenderPayload,
 } from './workflows/cover-render';
+import { consumeStagingFailOnce } from './workflows/staging-conformance-fault';
 
 export { StagingConformanceEntrypoint } from './staging-conformance';
 
@@ -100,7 +101,10 @@ export class CoverBackfillWorkflow extends WorkflowEntrypoint<AppEnv, CoverBackf
 
     const normalized = await step.do(
       'normalize legacy cover master',
-      async () => coverBackfillNormalize(this.env, event.payload),
+      async () => {
+        await consumeStagingFailOnce(this.env, event.payload, 'normalize');
+        return coverBackfillNormalize(this.env, event.payload);
+      },
     );
     if (!normalized.shouldContinue) return normalized.outcome;
 
