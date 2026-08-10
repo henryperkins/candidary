@@ -334,7 +334,16 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .legal-page { padding-top: 56px; }
   .legal-page > section { padding: 40px; }
   .site-footer { padding: 52px 5vw 36px; gap: 34px; }
-  .site-footer__top { grid-template-columns: minmax(260px, 1fr) minmax(420px, auto); gap: 6vw; align-items: start; }
+  /* The floors have to clear the narrow edge of this band, not just its middle.
+     At 761 the padded content box is 90vw = 684.9px, while `260 + 6vw + 420`
+     demands 725.7 — so the grid overflowed its container and, because the left
+     gutter is only 5vw, escaped the viewport at 763.7. Above ~764 the same
+     overflow stayed inside the viewport and went unseen. 420 was never the
+     groups' real minimum either: `repeat(3, minmax(112px, auto))` plus its own
+     gap measures about 401.7 here. Lowering both floors fixes the narrow edge
+     and changes nothing wider, where `1fr` and `auto` already distribute the
+     track sizes without either floor binding. */
+  .site-footer__top { grid-template-columns: minmax(220px, 1fr) minmax(396px, auto); gap: 6vw; align-items: start; }
   .site-footer__groups { grid-template-columns: repeat(3, minmax(112px, auto)); gap: 0 clamp(30px, 4vw, 68px); }
   .site-footer h3.section-label { padding: 0 0 8px; border-bottom: 0; }
   .site-footer__groups li { border-bottom: 0; }
