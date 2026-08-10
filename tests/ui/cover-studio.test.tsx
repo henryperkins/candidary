@@ -8,6 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EventCoverEffectId, EventCoverPreparationView } from '../../shared/event-cover';
 import { CoverStudio, type CoverStudioDraft } from '../../src/features/cover/CoverStudio';
 import type { CoverOperationAnswer } from '../../src/features/cover/cover-draft-client';
+import type { CoverSourceChoice } from '../../src/features/cover/CoverSourcePicker';
+import type { CoverDraftSessionState, CoverStyleThumbnail } from '../../src/features/cover/use-cover-studio-session';
+import type { CoverAccessFailure } from '../../src/features/cover/use-cover-operation-reconciler';
 import {
   createCoverOperationController,
   type CoverOperationState,
@@ -20,11 +23,23 @@ import {
 
 const DRAFT: CoverStudioDraft = {
   id: 'draft-a',
-  safeZoomMaximum: 1.6,
   previewUrl: 'blob:preview',
-  available2xProfiles: ['compact-default'],
+  master: { width: 1600, height: 1000, safeZoomMaximum: 1.6 },
+  available2xProfiles: [
+    'compact-default',
+    'compact-expanded',
+    'framed-default',
+    'short-lookup',
+    'standard-default',
+    'wide-expanded',
+  ],
+  initialFocus: { x: 0.5, y: 0.4, zoom: 1 },
   automaticFocus: { x: 0.5, y: 0.4, zoom: 1 },
 };
+
+function readyThumbnail(effect: EventCoverEffectId): CoverStyleThumbnail {
+  return { status: 'ready', url: `blob:${effect}`, error: null };
+}
 
 function preparing(patch: Partial<EventCoverPreparationView> = {}): EventCoverPreparationView {
   return {
@@ -52,6 +67,7 @@ function answer(
 }
 
 function Harness({
+  open = true,
   canvas,
   draft = null,
   canRemove = false,
@@ -59,8 +75,16 @@ function Harness({
   onDiscardDraft = vi.fn(),
   onClose = vi.fn(),
   onUpload = vi.fn(),
+  onEnterCompose = vi.fn(),
   initialEffect = 'natural' as EventCoverEffectId,
+  initialSource = null as CoverSourceChoice | { kind: 'none' } | null,
+  composeState,
+  focusMode = 'manual' as 'auto' | 'manual',
+  styleThumbnail = readyThumbnail,
+  accessFailure = null as CoverAccessFailure | null,
+  settledOperation = null as EventCoverPreparationView | null,
 }: {
+  open?: boolean;
   canvas?: ReactNode;
   draft?: CoverStudioDraft | null;
   canRemove?: boolean;
@@ -68,7 +92,14 @@ function Harness({
   onDiscardDraft?: () => void;
   onClose?: () => void;
   onUpload?: (file: File) => void;
+  onEnterCompose?: () => void;
   initialEffect?: EventCoverEffectId;
+  initialSource?: CoverSourceChoice | { kind: 'none' } | null;
+  composeState?: CoverDraftSessionState;
+  focusMode?: 'auto' | 'manual';
+  styleThumbnail?: (effect: EventCoverEffectId) => CoverStyleThumbnail;
+  accessFailure?: CoverAccessFailure | null;
+  settledOperation?: EventCoverPreparationView | null;
 }) {
   const [controller] = useState(() => createCoverOperationController({
     eventId: 'event-a',
@@ -81,19 +112,39 @@ function Harness({
     controller.subscribe(setState);
     return controller;
   });
+  const [source, setSource] = useState<typeof initialSource>(initialSource);
+  const [effect, setEffect] = useState(initialEffect);
+  const [focus, setFocus] = useState(DRAFT.initialFocus);
+  const [mode, setMode] = useState(focusMode);
+  useEffect(() => {
+    if (!settledOperation) return;
+    controller.beginDispatch(settledOperation.operationId);
+    controller.dispatchSettled(answer({ operation: settledOperation }));
+  }, [controller, settledOperation]);
 
   return <CoverStudio
-    open
+    open={open}
     canvas={canvas}
     operation={live}
     operationState={state}
     draft={draft}
-    initialSource={null}
-    initialEffect={initialEffect}
+    source={source}
+    focus={focus}
+    focusMode={mode}
+    effect={effect}
+    composeState={composeState ?? (draft
+      ? { status: 'ready', error: null }
+      : { status: 'idle', error: null })}
+    accessFailure={accessFailure}
     canRemove={canRemove}
     presetThumbnail={(presetId) => `/assets/event-covers/v1/${presetId}.webp`}
-    styleThumbnail={(effect) => `blob:${effect}`}
+    styleThumbnail={styleThumbnail}
+    onSourceChange={setSource}
     onUpload={onUpload}
+    onEnterCompose={onEnterCompose}
+    onFocusChange={(next) => { setMode('manual'); setFocus(next); }}
+    onResetFocus={() => { setMode('auto'); setFocus(draft?.automaticFocus ?? DRAFT.automaticFocus); }}
+    onEffectChange={setEffect}
     onPublish={onPublish}
     onDiscardDraft={onDiscardDraft}
     onClose={onClose}
@@ -125,6 +176,20 @@ describe('cover studio', () => {
     expect(screen.getAllByText('Ready for every size')).toHaveLength(6);
   });
 
+  it('separates the upload source choice from the labelled native file control', () => {
+    const onUpload = vi.fn();
+    render(<Harness onUpload={onUpload} />);
+    expect(screen.getByRole('radio', { name: 'Upload a photo' })).toBeVisible();
+    const chooser = screen.getByLabelText('Choose photo');
+    expect(chooser).toHaveAttribute('type', 'file');
+
+    // Canceling the native picker emits no file and must not invent a draft or
+    // advance the step.
+    fireEvent.change(chooser, { target: { files: [] } });
+    expect(onUpload).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+  });
+
   it('walks a built-in design through the accurate three-step path', async () => {
     const user = userEvent.setup();
     render(<Harness />);
@@ -153,6 +218,26 @@ describe('cover studio', () => {
     expect(document.activeElement).toBe(composing);
   });
 
+  it('requests an existing-upload draft once and reuses it across Back', async () => {
+    const user = userEvent.setup();
+    const onEnterCompose = vi.fn();
+    render(<Harness
+      initialSource={{ kind: 'upload' }}
+      draft={null}
+      composeState={{ status: 'loading', error: null }}
+      onEnterCompose={onEnterCompose}
+    />);
+
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(onEnterCompose).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveTextContent('Preparing your photo');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(onEnterCompose).toHaveBeenCalledTimes(1);
+  });
+
   it('sends removal straight to a focused Done', async () => {
     const user = userEvent.setup();
     render(<Harness canRemove />);
@@ -169,13 +254,29 @@ describe('cover studio', () => {
     const { rerender } = render(<Harness draft={null} />);
     await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
-    // Compose cannot render without a draft, so Continue carries to Style.
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
+    // Step state alone cannot skip a missing draft into Style.
+    expect(screen.getByRole('heading', { name: 'Position the photo' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
 
     rerender(<Harness draft={DRAFT} />);
     expect(screen.getByRole('dialog', { name: 'Cover Studio' })).toBeVisible();
+  });
+
+  it('keeps a compose error actionable and focuses its retry', async () => {
+    const user = userEvent.setup();
+    const onEnterCompose = vi.fn();
+    render(<Harness
+      initialSource={{ kind: 'upload' }}
+      composeState={{ status: 'error', error: new Error('Inspection unavailable') }}
+      onEnterCompose={onEnterCompose}
+    />);
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    const retry = screen.getByRole('button', { name: 'Try preparing again' });
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be prepared');
+    expect(document.activeElement).toBe(retry);
+    await user.click(retry);
+    // The initial Choose → Compose request plus the explicit correction.
+    expect(onEnterCompose).toHaveBeenCalledTimes(2);
   });
 
   it('publishes the chosen design and style', async () => {
@@ -206,7 +307,7 @@ describe('cover studio', () => {
     const confirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
     expect(onClose).not.toHaveBeenCalled();
 
-    await user.click(within(confirm).getByRole('button', { name: 'Discard' }));
+    await user.click(within(confirm).getByRole('button', { name: 'Discard draft' }));
     expect(onDiscardDraft).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -218,6 +319,19 @@ describe('cover studio', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('shows the automatic proposal before exposing manual ranges without a jump', async () => {
+    const user = userEvent.setup();
+    render(<Harness draft={DRAFT} focusMode="auto" />);
+    await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.queryByRole('slider')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Adjust focus' }));
+    expect(screen.getByRole('slider', { name: 'Horizontal focus' }))
+      .toHaveAttribute('aria-valuetext', '50 percent from left');
+    expect(screen.getByRole('slider', { name: 'Vertical focus' }))
+      .toHaveAttribute('aria-valuetext', '40 percent from top');
   });
 
   it('exposes the three crop ranges with bounds, step, and value text', async () => {
@@ -259,6 +373,24 @@ describe('cover studio', () => {
     expect(screen.getByRole('status').textContent)
       .toContain('70 percent from left');
     vi.useRealTimers();
+  });
+
+  it('implements one-step, ten-step, and bound range keys while retaining focus', () => {
+    render(<Harness draft={DRAFT} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    const horizontal = screen.getByRole('slider', { name: 'Horizontal focus' });
+    horizontal.focus();
+
+    fireEvent.keyDown(horizontal, { key: 'ArrowRight' });
+    expect(horizontal).toHaveAttribute('aria-valuetext', '51 percent from left');
+    fireEvent.keyDown(horizontal, { key: 'PageUp' });
+    expect(horizontal).toHaveAttribute('aria-valuetext', '61 percent from left');
+    fireEvent.keyDown(horizontal, { key: 'End' });
+    expect(horizontal).toHaveAttribute('aria-valuetext', '100 percent from left');
+    fireEvent.keyDown(horizontal, { key: 'Home' });
+    expect(horizontal).toHaveAttribute('aria-valuetext', '0 percent from left');
+    expect(document.activeElement).toBe(horizontal);
   });
 
   it('says nothing until the host has actually adjusted something', async () => {
@@ -309,13 +441,19 @@ describe('cover studio', () => {
       .toHaveAttribute('aria-valuetext', '90 percent from top');
 
     await user.click(screen.getByRole('button', { name: 'Reset to automatic' }));
-    expect(screen.getByRole('slider', { name: 'Vertical focus' }))
-      .toHaveAttribute('aria-valuetext', '40 percent from top');
+    expect(screen.queryByRole('slider', { name: 'Vertical focus' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Adjust focus' })).toBeVisible();
+    expect(document.querySelector('.cover-composer__surface img'))
+      .toHaveStyle({ objectPosition: '50% 40%' });
   });
 
   it('shows the softness note only when no 2x profile qualifies', async () => {
     const user = userEvent.setup();
-    render(<Harness draft={{ ...DRAFT, available2xProfiles: [] }} />);
+    render(<Harness draft={{
+      ...DRAFT,
+      master: { width: 620, height: 420, safeZoomMaximum: 1 },
+      available2xProfiles: [],
+    }} />);
     await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     expect(screen.getByText(/may look slightly softer on some high-density screens/u)).toBeVisible();
@@ -340,6 +478,37 @@ describe('cover studio', () => {
     }
     // No intensity slider anywhere in this step.
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
+  });
+
+  it('keeps style radios usable while real thumbnails load or fail', async () => {
+    const user = userEvent.setup();
+    render(<Harness styleThumbnail={(effect) => effect === 'warm'
+      ? { status: 'error', url: null, error: new Error('Preview unavailable') }
+      : effect === 'film'
+        ? { status: 'loading', url: null, error: null }
+        : readyThumbnail(effect)} />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    expect(screen.getByRole('radio', { name: /^Warm/u })).toBeEnabled();
+    expect(screen.getByText('Preview unavailable. Try this preview again.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Retry Warm preview' })).toBeVisible();
+    expect(screen.getByText('Loading Film preview')).toBeVisible();
+  });
+
+  it('renders a before-dispatch access failure without sending Done', async () => {
+    const user = userEvent.setup();
+    const onPublish = vi.fn();
+    render(<Harness
+      onPublish={onPublish}
+      accessFailure={{ phase: 'before_dispatch', error: new Error('Session expired') }}
+    />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('access');
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
+    expect(onPublish).not.toHaveBeenCalled();
   });
 });
 
@@ -391,6 +560,93 @@ describe('cover studio environment', () => {
     fireEvent.popState(window);
     expect(screen.getByRole('alertdialog', { name: 'Discard cover changes' })).toBeVisible();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('rearms the owned history sentinel before leaving discard confirmation', async () => {
+    const user = userEvent.setup();
+    const push = vi.spyOn(history, 'pushState');
+    const back = vi.spyOn(history, 'back').mockImplementation(() => undefined);
+    const onClose = vi.fn();
+    const onDiscardDraft = vi.fn();
+    render(<Harness onClose={onClose} onDiscardDraft={onDiscardDraft} />);
+    const choice = screen.getByRole('radio', { name: /Pressed Paper/u });
+    await user.click(choice);
+    expect(push).toHaveBeenCalledTimes(1);
+
+    fireEvent.popState(window);
+    const firstConfirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
+    const keep = within(firstConfirm).getByRole('button', { name: 'Keep editing' });
+    expect(document.activeElement).toBe(keep);
+    await user.click(keep);
+    // Rearmed synchronously, with focus restored inside Studio.
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(choice);
+
+    fireEvent.popState(window);
+    const secondConfirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
+    await user.click(within(secondConfirm).getByRole('button', { name: 'Discard draft' }));
+    expect(onDiscardDraft).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // Browser Back already consumed the sentinel; discard performs no extra
+    // navigation.
+    expect(back).not.toHaveBeenCalled();
+  });
+
+  it('traps alertdialog focus and returns it to the initiating Studio control', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const choice = screen.getByRole('radio', { name: /Warm Linen/u });
+    await user.click(choice);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    const confirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
+    const keep = within(confirm).getByRole('button', { name: 'Keep editing' });
+    const discard = within(confirm).getByRole('button', { name: 'Discard draft' });
+    expect(document.activeElement).toBe(keep);
+
+    discard.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(keep);
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(discard);
+
+    await user.click(keep);
+    expect(document.activeElement).toBe(choice);
+  });
+
+  it('consumes exactly its own history entry on ordinary Close', async () => {
+    const user = userEvent.setup();
+    const back = vi.spyOn(history, 'back').mockImplementation(() => undefined);
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('auto-closes once after an applied receipt', async () => {
+    const onClose = vi.fn();
+    render(<Harness
+      onClose={onClose}
+      settledOperation={preparing({ status: 'applied', completedSteps: 6 })}
+    />);
+    await act(async () => undefined);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores focus to the exact control that opened Studio', async () => {
+    const user = userEvent.setup();
+    function FocusHarness() {
+      const [open, setOpen] = useState(false);
+      return <>
+        <button type="button" onClick={() => setOpen(true)}>Change cover</button>
+        <Harness open={open} onClose={() => setOpen(false)} />
+      </>;
+    }
+    render(<FocusHarness />);
+    const trigger = screen.getByRole('button', { name: 'Change cover' });
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(trigger);
   });
 
   it('binds its box to the visible rectangle rather than the layout viewport', () => {
@@ -546,18 +802,30 @@ describe('cover studio dispatch and recovery', () => {
 
   function LiveHarness({ controller }: { controller: ReturnType<typeof dispatchHarness>['controller'] }) {
     const [state, setState] = useState(controller.getState());
+    const [source, setSource] = useState<CoverSourceChoice | { kind: 'none' } | null>(null);
+    const [effect, setEffect] = useState<EventCoverEffectId>('natural');
+    const [focus, setFocus] = useState(DRAFT.initialFocus);
     useEffect(() => controller.subscribe(setState), [controller]);
     return <CoverStudio
       open
       operation={controller}
       operationState={state}
       draft={DRAFT}
-      initialSource={null}
-      initialEffect="natural"
+      composeState={{ status: 'ready', error: null }}
+      source={source}
+      focus={focus}
+      focusMode="manual"
+      effect={effect}
+      accessFailure={null}
       canRemove={false}
       presetThumbnail={(presetId) => `/assets/${presetId}.webp`}
-      styleThumbnail={(effect) => `blob:${effect}`}
+      styleThumbnail={readyThumbnail}
+      onSourceChange={setSource}
       onUpload={vi.fn()}
+      onEnterCompose={vi.fn()}
+      onFocusChange={setFocus}
+      onResetFocus={() => setFocus(DRAFT.automaticFocus)}
+      onEffectChange={setEffect}
       onPublish={vi.fn()}
       onDiscardDraft={vi.fn()}
       onClose={vi.fn()}

@@ -1,19 +1,10 @@
+import { useId } from 'react';
+
+import { COVER_UPLOAD_MIME_TYPES } from '../../../shared/constants';
 import {
   EVENT_COVER_PRESETS,
   type EventCoverPresetId,
 } from '../../../shared/event-cover';
-import { COVER_UPLOAD_MIME_TYPES } from '../../../shared/constants';
-
-/**
- * Upload, plus exactly six built-in designs.
- *
- * Six global choices, not six per theme: the same artwork is coordinated with
- * any of the four event themes by a runtime overlay recipe, so a theme change
- * never silently swaps the picture.
- *
- * `Remove cover` is a secondary action beside these, deliberately not a seventh
- * tile — removing a cover is not choosing one.
- */
 
 export type CoverSourceChoice =
   | { kind: 'upload' }
@@ -24,12 +15,12 @@ interface CoverSourcePickerProps {
   onChoose(choice: CoverSourceChoice): void;
   onUpload(file: File): void;
   onRemove?(): void;
-  /** Preset thumbnails come from the versioned static manifest, not a guess. */
   presetThumbnail(presetId: EventCoverPresetId): string;
   busy?: boolean;
   canRemove?: boolean;
 }
 
+/** The source choice and native file chooser are distinct accessible controls. */
 export function CoverSourcePicker({
   value,
   onChoose,
@@ -39,31 +30,41 @@ export function CoverSourcePicker({
   busy = false,
   canRemove = false,
 }: CoverSourcePickerProps) {
+  const fileId = useId();
+
   return <div className="cover-source-picker">
     <fieldset className="cover-source-picker__group">
       <legend>Cover</legend>
 
-      <label className="cover-source-picker__upload">
+      <div className="cover-source-picker__upload">
+        <label className="cover-source-picker__upload-choice">
+          <input
+            type="radio"
+            name="cover-source"
+            value="upload"
+            checked={value?.kind === 'upload'}
+            disabled={busy}
+            onChange={() => onChoose({ kind: 'upload' })}
+          />
+          <span className="cover-source-picker__name">Upload a photo</span>
+        </label>
+        <label className="button button--secondary" htmlFor={fileId}>Choose photo</label>
         <input
-          type="radio"
-          name="cover-source"
-          value="upload"
-          checked={value?.kind === 'upload'}
-          disabled={busy}
-          onChange={() => onChoose({ kind: 'upload' })}
-        />
-        <span className="cover-source-picker__name">Upload a photo</span>
-        <input
+          id={fileId}
           className="sr-only cover-source-picker__file"
           type="file"
+          aria-label="Choose photo"
           accept={COVER_UPLOAD_MIME_TYPES.join(',')}
           disabled={busy}
           onChange={(event) => {
             const file = event.target.files?.[0];
-            if (file) onUpload(file);
+            // Native-picker cancellation supplies no file and changes nothing.
+            if (!file) return;
+            onChoose({ kind: 'upload' });
+            onUpload(file);
           }}
         />
-      </label>
+      </div>
 
       <ul className="cover-source-picker__presets">
         {EVENT_COVER_PRESETS.map((preset) => <li key={preset.id}>
@@ -76,11 +77,8 @@ export function CoverSourcePicker({
               disabled={busy}
               onChange={() => onChoose({ kind: 'preset', presetId: preset.id })}
             />
-            {/* Named, always. An image alone never communicates selection. */}
             <img src={presetThumbnail(preset.id)} alt="" aria-hidden="true" />
             <span className="cover-source-picker__name">{preset.name}</span>
-            {/* Already composed for every size, which is why a preset skips
-                Compose entirely rather than opening an empty step. */}
             <span className="cover-source-picker__note">Ready for every size</span>
           </label>
         </li>)}

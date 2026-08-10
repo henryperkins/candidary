@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   EventCoverEffectId,
+  EventCoverProfileId,
   EventCoverPresetId,
 } from '../../../shared/event-cover';
-import { EVENT_COVER_EFFECTS } from '../../../shared/event-cover';
+import { EVENT_COVER_EFFECTS, qualifiedCover2xProfiles } from '../../../shared/event-cover';
 import type { EventView } from '../../../shared/contracts';
 import { ClientApiError } from '../../app/api';
 import type { CoverFocusValue } from './CoverComposer';
 import type { CoverSourceChoice } from './CoverSourcePicker';
+import type { CoverStyleThumbnailState } from './CoverStylePicker';
 import {
   createCoverDraft,
   discardCoverDraft,
@@ -33,15 +35,22 @@ export type CoverSessionSource = CoverSourceChoice | { kind: 'none' } | null;
 export interface CoverStudioSelection {
   source: CoverSessionSource;
   focus: CoverFocusValue | null;
+  focusMode: 'auto' | 'manual';
   effect: EventCoverEffectId;
 }
 
 export interface CoverSessionDraft {
+  id: string;
   view: CoverDraftView;
   previewUrl: string;
+  initialFocus: CoverFocusValue;
   automaticFocus: CoverFocusValue;
-  safeZoomMaximum: number;
-  available2xProfiles: readonly string[];
+  master: {
+    width: number;
+    height: number;
+    safeZoomMaximum: number;
+  };
+  available2xProfiles: readonly EventCoverProfileId[];
 }
 
 export type CoverDraftSessionState =
@@ -50,11 +59,7 @@ export type CoverDraftSessionState =
   | { status: 'ready'; error: null }
   | { status: 'error'; error: unknown };
 
-export type CoverStyleThumbnail =
-  | { status: 'idle'; url: null; error: null }
-  | { status: 'loading'; url: null; error: null }
-  | { status: 'ready'; url: string; error: null }
-  | { status: 'error'; url: null; error: unknown };
+export type CoverStyleThumbnail = CoverStyleThumbnailState;
 
 export type CoverCanvasPreview =
   | { kind: 'authoritative' }
@@ -99,13 +104,14 @@ function idleThumbnails(): Record<EventCoverEffectId, CoverStyleThumbnail> {
 function selectionFor(event: EventView): CoverStudioSelection {
   const config = event.cover.config;
   if (config.source.kind === 'none') {
-    return { source: null, focus: null, effect: 'natural' };
+    return { source: null, focus: null, focusMode: 'auto', effect: 'natural' };
   }
   if (config.source.kind === 'preset') {
     const presetConfig = config as Extract<typeof config, { source: { kind: 'preset' } }>;
     return {
       source: { kind: 'preset', presetId: presetConfig.source.presetId },
       focus: null,
+      focusMode: 'auto',
       effect: presetConfig.effect,
     };
   }
@@ -115,6 +121,7 @@ function selectionFor(event: EventView): CoverStudioSelection {
     focus: uploadConfig.focus.mode === 'manual'
       ? { x: uploadConfig.focus.x, y: uploadConfig.focus.y, zoom: uploadConfig.focus.zoom }
       : null,
+    focusMode: uploadConfig.focus.mode,
     effect: uploadConfig.effect,
   };
 }
@@ -158,11 +165,6 @@ export function useCoverStudioSession({
   const generationRef = useRef(0);
   const draftPromiseRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const draftIntentKeyRef = useRef<string | null>(null);
-  const focusModeRef = useRef<'auto' | 'manual'>(
-    event.cover.config.source.kind === 'upload'
-      ? (event.cover.config as Extract<EventView['cover']['config'], { source: { kind: 'upload' } }>).focus.mode
-      : 'auto',
-  );
   const previewBytesRef = useRef(new Map<EventCoverEffectId, ArrayBuffer>());
   const previewAttemptedRef = useRef(new Set<EventCoverEffectId>());
   const previewUrlsRef = useRef(new Map<EventCoverEffectId, string>());
@@ -209,9 +211,6 @@ export function useCoverStudioSession({
   useEffect(() => {
     if (open || draftRef.current) return;
     updateSelection(selectionFor(event));
-    focusModeRef.current = event.cover.config.source.kind === 'upload'
-      ? (event.cover.config as Extract<EventView['cover']['config'], { source: { kind: 'upload' } }>).focus.mode
-      : 'auto';
   }, [event.cover.revision, event.id, open]);
 
   const setThumbnail = useCallback((
@@ -269,25 +268,33 @@ export function useCoverStudioSession({
   }, [event.id, setThumbnail]);
 
   const installReadyDraft = useCallback((view: CoverDraftView, naturalBytes: ArrayBuffer) => {
+    if (!view.master) throw new Error('The ready cover draft is missing master geometry.');
     const automaticFocus: CoverFocusValue = {
       x: view.focus?.x ?? 0.5,
       y: view.focus?.y ?? 0.5,
       zoom: 1,
     };
+    const initialFocus = selectionRef.current.focus ?? automaticFocus;
     const url = createPreviewUrl(naturalBytes);
     previewBytesRef.current.set('natural', naturalBytes);
     previewAttemptedRef.current.add('natural');
     previewUrlsRef.current.set('natural', url);
     setThumbnail('natural', { status: 'ready', url, error: null });
     updateDraft({
+      id: view.id,
       view,
       previewUrl: url,
+      initialFocus,
       automaticFocus,
-      safeZoomMaximum: view.master?.safeZoomMaximum ?? 1,
-      available2xProfiles: view.master?.available2xProfiles ?? [],
+      master: {
+        width: view.master.width,
+        height: view.master.height,
+        safeZoomMaximum: view.master.safeZoomMaximum,
+      },
+      available2xProfiles: qualifiedCover2xProfiles(view.master, initialFocus),
     });
     if (selectionRef.current.focus === null) {
-      updateSelection({ ...selectionRef.current, focus: automaticFocus });
+      updateSelection({ ...selectionRef.current, focus: initialFocus });
     }
     setDraftState({ status: 'ready', error: null });
   }, [setThumbnail]);
@@ -334,7 +341,7 @@ export function useCoverStudioSession({
         if (view.state === 'inspected') {
           const focus = await resolveCompositionFromPreview(naturalBytes, compositionRunner);
           view = await writeCoverComposition({ eventId: event.id, draft: view, focus });
-          focusModeRef.current = 'auto';
+          updateSelection({ ...selectionRef.current, focusMode: 'auto' });
         }
         if (view.state !== 'ready') throw new Error('The cover draft did not become ready.');
         if (generation !== generationRef.current) return;
@@ -361,8 +368,14 @@ export function useCoverStudioSession({
   }, [ensureEffectPreview]);
 
   const chooseSource = useCallback((source: CoverSessionSource) => {
-    updateSelection({ ...selectionRef.current, source, focus: source?.kind === 'upload' ? selectionRef.current.focus : null });
-    if (source?.kind !== 'upload') focusModeRef.current = 'auto';
+    const keepUploadFocus = source?.kind === 'upload'
+      && selectionRef.current.source?.kind === 'upload';
+    updateSelection({
+      ...selectionRef.current,
+      source,
+      focus: keepUploadFocus ? selectionRef.current.focus : null,
+      focusMode: keepUploadFocus ? selectionRef.current.focusMode : 'auto',
+    });
   }, []);
 
   const chooseFile = useCallback(async (file: File) => {
@@ -370,9 +383,9 @@ export function useCoverStudioSession({
     updateSelection({
       source: { kind: 'upload' },
       focus: null,
+      focusMode: 'auto',
       effect: selectionRef.current.effect,
     });
-    focusModeRef.current = 'auto';
     await runDraft(fileIntentKey(file), { kind: 'new-upload', file });
   }, [runDraft]);
 
@@ -383,15 +396,27 @@ export function useCoverStudioSession({
   }, [event.cover.config.source.kind, event.cover.revision, runDraft]);
 
   const setFocus = useCallback((focus: CoverFocusValue) => {
-    focusModeRef.current = 'manual';
-    updateSelection({ ...selectionRef.current, focus });
+    updateSelection({ ...selectionRef.current, focus, focusMode: 'manual' });
+    const heldDraft = draftRef.current;
+    if (heldDraft) {
+      updateDraft({
+        ...heldDraft,
+        available2xProfiles: qualifiedCover2xProfiles(heldDraft.master, focus),
+      });
+    }
   }, []);
 
   const resetFocus = useCallback(() => {
     const automatic = draftRef.current?.automaticFocus;
     if (!automatic) return;
-    focusModeRef.current = 'auto';
-    updateSelection({ ...selectionRef.current, focus: automatic });
+    updateSelection({ ...selectionRef.current, focus: automatic, focusMode: 'auto' });
+    const heldDraft = draftRef.current;
+    if (heldDraft) {
+      updateDraft({
+        ...heldDraft,
+        available2xProfiles: qualifiedCover2xProfiles(heldDraft.master, automatic),
+      });
+    }
   }, []);
 
   const setEffect = useCallback(async (effect: EventCoverEffectId) => {
@@ -421,7 +446,7 @@ export function useCoverStudioSession({
       const focus = selected.focus ?? heldDraft.automaticFocus;
       intent = {
         source: { kind: 'upload', draftId: heldDraft.view.id },
-        focus: focusModeRef.current === 'auto'
+        focus: selected.focusMode === 'auto'
           ? { mode: 'auto' }
           : { mode: 'manual', x: focus.x, y: focus.y, zoom: focus.zoom },
         effect: selected.effect,

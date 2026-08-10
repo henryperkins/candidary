@@ -1145,7 +1145,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 .cover-source-picker fieldset { border: 0; padding: 0; margin: 0; }
 .cover-source-picker legend { margin-bottom: 10px; font-weight: 600; }
-.cover-source-picker__upload { min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+.cover-source-picker__upload { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; }
+.cover-source-picker__upload-choice { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.cover-source-picker__upload > .button { min-height: 44px; display: inline-flex; align-items: center; cursor: pointer; }
 .cover-source-picker__presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; padding: 0; list-style: none; }
 @media (min-width: 761px) { .cover-source-picker__presets { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .cover-source-picker__presets label { min-height: 44px; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
@@ -1157,8 +1159,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .cover-source-picker__note { color: var(--muted); font-size: .78rem; }
 .cover-source-picker__remove { margin-top: 16px; min-height: 44px; }
 
-.cover-composer__surface { aspect-ratio: 620 / 265; border: 1px solid var(--border); border-radius: 7px; background-repeat: no-repeat; background-color: #eee4d8; touch-action: pan-y; cursor: grab; }
+.cover-composer__surface { position: relative; overflow: hidden; aspect-ratio: 620 / 265; border: 1px solid var(--border); border-radius: 7px; background-color: #eee4d8; touch-action: pan-y pinch-zoom; cursor: grab; }
+.cover-composer__surface img { width: 100%; height: 100%; display: block; object-fit: cover; user-select: none; pointer-events: none; }
 .cover-composer__note { margin-top: 10px; color: var(--muted); font-size: .82rem; }
+.cover-composer__adjust { min-height: 44px; margin-top: 16px; }
 .cover-composer__controls { display: grid; gap: 14px; margin-top: 16px; }
 .cover-composer__controls label { display: grid; gap: 6px; }
 .cover-composer__controls input[type='range'] { min-height: 44px; accent-color: var(--chestnut); }
@@ -1171,8 +1175,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .cover-style-picker label { min-height: 44px; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
 .cover-style-picker label:has(input:checked) { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }
 .cover-style-picker img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 5px; background: #eee4d8; }
+.cover-style-picker__placeholder { width: 100%; aspect-ratio: 1; display: block; border-radius: 5px; background: #eee4d8; }
 .cover-style-picker__name { font-weight: 600; font-size: .85rem; }
 .cover-style-picker__note { color: var(--muted); font-size: .75rem; }
+.cover-style-picker__state { display: block; margin-top: 6px; color: var(--muted); font-size: .75rem; }
+.cover-style-picker__state--error { color: var(--danger); }
+.cover-style-picker__state .button { min-height: 44px; margin-top: 6px; padding-inline: 10px; }
+.cover-studio__compose-state [role='alert'] { display: grid; gap: 10px; }
 
 /* The responsive reader. Layer order is image, grain, scrim, then content, and
    every layer above the image is runtime CSS: none is baked into a rendered

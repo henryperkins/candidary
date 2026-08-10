@@ -286,6 +286,7 @@ describe('useCoverStudioSession', () => {
     expect(none.result.current.selection).toEqual({
       source: null,
       focus: null,
+      focusMode: 'auto',
       effect: 'natural',
     });
     expect(none.result.current.draftState.status).toBe('idle');
@@ -304,6 +305,7 @@ describe('useCoverStudioSession', () => {
     expect(preset.result.current.selection).toEqual({
       source: { kind: 'preset', presetId: 'coastal-haze' },
       focus: null,
+      focusMode: 'auto',
       effect: 'soft',
     });
   });
@@ -342,6 +344,7 @@ describe('useCoverStudioSession', () => {
 
     act(() => session.result.current.openStudio());
     expect(session.result.current.selection.focus).toEqual({ x: 0.8, y: 0.7, zoom: 1.25 });
+    expect(session.result.current.selection.focusMode).toBe('manual');
     await act(async () => {
       await Promise.all([
         session.result.current.enterCompose(),
@@ -351,9 +354,29 @@ describe('useCoverStudioSession', () => {
     expect(requests.filter((path) => path.endsWith('/cover/drafts'))).toHaveLength(1);
     expect(session.result.current.draftState.status).toBe('ready');
     expect(session.result.current.canvasPreview).toEqual({ kind: 'draft', url: 'blob:natural' });
+    expect(session.result.current.draft).toMatchObject({
+      id: 'draft-a',
+      initialFocus: { x: 0.8, y: 0.7, zoom: 1.25 },
+      automaticFocus: { x: 0.3, y: 0.4, zoom: 1 },
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6 },
+    });
+
+    act(() => session.result.current.setFocus({ x: 0.8, y: 0.7, zoom: 1.6 }));
+    expect(session.result.current.selection.focusMode).toBe('manual');
+    expect(session.result.current.draft?.available2xProfiles)
+      .toEqual(['compact-default', 'short-lookup']);
 
     act(() => session.result.current.resetFocus());
     expect(session.result.current.selection.focus).toEqual({ x: 0.3, y: 0.4, zoom: 1 });
+    expect(session.result.current.selection.focusMode).toBe('auto');
+    expect(session.result.current.draft?.available2xProfiles).toEqual([
+      'compact-default',
+      'compact-expanded',
+      'framed-default',
+      'short-lookup',
+      'standard-default',
+      'wide-expanded',
+    ]);
     session.unmount();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:natural');
   });

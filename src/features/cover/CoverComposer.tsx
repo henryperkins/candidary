@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 
 import { MAX_COVER_MANUAL_ZOOM } from '../../../shared/constants';
 
@@ -26,7 +29,9 @@ interface CoverComposerProps {
   previewUrl: string;
   /** Empty when the selected crop can produce no 2x profile at all. */
   available2xProfiles: readonly string[];
+  manual: boolean;
   onChange(value: CoverFocusValue): void;
+  onAdjust(): void;
   onReset(): void;
   disabled?: boolean;
 }
@@ -44,7 +49,9 @@ export function CoverComposer({
   safeZoomMaximum,
   previewUrl,
   available2xProfiles,
+  manual,
   onChange,
+  onAdjust,
   onReset,
   disabled = false,
 }: CoverComposerProps) {
@@ -84,7 +91,7 @@ export function CoverComposer({
   // move the crop before the host had asked for anything.
   function move(event: ReactPointerEvent<HTMLDivElement>) {
     const origin = dragOriginRef.current;
-    if (!origin || disabled) return;
+    if (!origin || disabled || !manual) return;
     const surface = surfaceRef.current;
     if (!surface) return;
     const bounds = surface.getBoundingClientRect();
@@ -96,19 +103,34 @@ export function CoverComposer({
     });
   }
 
+  function rangeKey(
+    event: ReactKeyboardEvent<HTMLInputElement>,
+    current: number,
+    minimum: number,
+    maximum: number,
+    step: number,
+    apply: (next: number) => void,
+  ) {
+    let next: number | null = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = current + step;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = current - step;
+    if (event.key === 'PageUp') next = current + step * 10;
+    if (event.key === 'PageDown') next = current - step * 10;
+    if (event.key === 'Home') next = minimum;
+    if (event.key === 'End') next = maximum;
+    if (next === null) return;
+    event.preventDefault();
+    apply(Math.min(maximum, Math.max(minimum, next)));
+  }
+
   return <div className="cover-composer">
     <div
       ref={surfaceRef}
       className="cover-composer__surface"
-      style={{
-        backgroundImage: `url("${previewUrl}")`,
-        backgroundPosition: `${percent(value.x)}% ${percent(value.y)}%`,
-        backgroundSize: `${percent(value.zoom)}%`,
-      }}
       // Not a two-pointer surface. Browser pinch and page zoom stay native, and
       // the viewport never sets `user-scalable=no`.
       onPointerDown={(event) => {
-        if (disabled) return;
+        if (disabled || !manual) return;
         dragOriginRef.current = { x: event.clientX, y: event.clientY, from: value };
         event.currentTarget.setPointerCapture(event.pointerId);
       }}
@@ -117,7 +139,19 @@ export function CoverComposer({
         dragOriginRef.current = null;
         event.currentTarget.releasePointerCapture(event.pointerId);
       }}
-    />
+    >
+      <img
+        src={previewUrl}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        style={{
+          objectPosition: `${percent(value.x)}% ${percent(value.y)}%`,
+          transform: `scale(${value.zoom})`,
+          transformOrigin: `${percent(value.x)}% ${percent(value.y)}%`,
+        }}
+      />
+    </div>
 
     {available2xProfiles.length === 0 && <p className="cover-composer__note">
       {/* Non-blocking: the photo is valid at every 1x profile, and zoom can
@@ -126,7 +160,16 @@ export function CoverComposer({
       high-density screens.
     </p>}
 
-    <div className="cover-composer__controls">
+    {!manual
+      ? <button
+          type="button"
+          className="button button--secondary cover-composer__adjust"
+          disabled={disabled}
+          onClick={onAdjust}
+        >
+          Adjust focus
+        </button>
+      : <div className="cover-composer__controls">
       <label>
         <span>Horizontal focus</span>
         <input
@@ -138,6 +181,14 @@ export function CoverComposer({
           disabled={disabled}
           aria-valuetext={`${percent(value.x)} percent from left`}
           onChange={(event) => change({ ...value, x: Number(event.target.value) / 100 })}
+          onKeyDown={(event) => rangeKey(
+            event,
+            percent(value.x),
+            0,
+            100,
+            1,
+            (next) => change({ ...value, x: next / 100 }),
+          )}
         />
       </label>
       <label>
@@ -151,6 +202,14 @@ export function CoverComposer({
           disabled={disabled}
           aria-valuetext={`${percent(value.y)} percent from top`}
           onChange={(event) => change({ ...value, y: Number(event.target.value) / 100 })}
+          onKeyDown={(event) => rangeKey(
+            event,
+            percent(value.y),
+            0,
+            100,
+            1,
+            (next) => change({ ...value, y: next / 100 }),
+          )}
         />
       </label>
       <label>
@@ -164,6 +223,14 @@ export function CoverComposer({
           disabled={disabled}
           aria-valuetext={`${percent(value.zoom)} percent zoom`}
           onChange={(event) => change({ ...value, zoom: Number(event.target.value) / 100 })}
+          onKeyDown={(event) => rangeKey(
+            event,
+            percent(value.zoom),
+            100,
+            percent(ceiling),
+            5,
+            (next) => change({ ...value, zoom: next / 100 }),
+          )}
         />
       </label>
       {/* Immediately after the ranges in focus order, so the way back is where
@@ -176,7 +243,7 @@ export function CoverComposer({
       >
         Reset to automatic
       </button>
-    </div>
+      </div>}
 
     <p className="sr-only" role="status">{summary}</p>
   </div>;

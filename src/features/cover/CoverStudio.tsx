@@ -1,48 +1,69 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
-import type { EventCoverEffectId, EventCoverPresetId } from '../../../shared/event-cover';
+import type {
+  EventCoverEffectId,
+  EventCoverPresetId,
+  EventCoverProfileId,
+} from '../../../shared/event-cover';
 import { CoverComposer, type CoverFocusValue } from './CoverComposer';
 import { CoverSourcePicker, type CoverSourceChoice } from './CoverSourcePicker';
-import { CoverStylePicker } from './CoverStylePicker';
+import {
+  CoverStylePicker,
+  type CoverStyleThumbnailState,
+} from './CoverStylePicker';
 import type { CoverOperationController, CoverOperationState } from './cover-operation-controller';
-
-/**
- * One short path: Choose, Compose for an upload only, Style, Done.
- *
- * A built-in design is already composed for every size, so it takes the honest
- * three-step path rather than being walked through an empty Compose. Removal is
- * the explicit exception and goes straight to a focused, labelled Done — there
- * is nothing to compose or style about not having a cover.
- *
- * Unwired in this release. Nothing shipped opens it.
- */
+import type { CoverDraftSessionState } from './use-cover-studio-session';
+import type { CoverAccessFailure } from './use-cover-operation-reconciler';
 
 export type CoverStudioStep = 'choose' | 'compose' | 'style' | 'done';
 
 export interface CoverStudioDraft {
   id: string;
-  safeZoomMaximum: number;
   previewUrl: string;
-  available2xProfiles: readonly string[];
+  /** The focus active when this edit draft opened. */
+  initialFocus: CoverFocusValue;
+  /** The master's stored proposal used by Adjust and Reset. */
   automaticFocus: CoverFocusValue;
+  master: {
+    width: number;
+    height: number;
+    safeZoomMaximum: number;
+  };
+  available2xProfiles: readonly EventCoverProfileId[];
 }
+
+type StudioSource = CoverSourceChoice | { kind: 'none' } | null;
 
 export interface CoverStudioProps {
   open: boolean;
-  /** The same live canvas the host is already looking at, not a second preview. */
   canvas?: ReactNode;
   operation: CoverOperationController;
   operationState: CoverOperationState;
-  /** Null until an upload has been inspected and its composition stored. */
   draft: CoverStudioDraft | null;
-  initialSource: CoverSourceChoice | null;
-  initialEffect: EventCoverEffectId;
+  composeState: CoverDraftSessionState;
+  source: StudioSource;
+  focus: CoverFocusValue | null;
+  focusMode: 'auto' | 'manual';
+  effect: EventCoverEffectId;
+  accessFailure: CoverAccessFailure | null;
   canRemove: boolean;
   presetThumbnail(presetId: EventCoverPresetId): string;
-  styleThumbnail(effect: EventCoverEffectId): string;
+  styleThumbnail(effect: EventCoverEffectId): CoverStyleThumbnailState;
+  onSourceChange(source: StudioSource): void;
   onUpload(file: File): void;
+  onEnterCompose(): void;
+  onFocusChange(focus: CoverFocusValue): void;
+  onResetFocus(): void;
+  onEffectChange(effect: EventCoverEffectId): void;
   onPublish(intent: {
     source: CoverSourceChoice | { kind: 'none' };
     focus: CoverFocusValue | null;
@@ -59,22 +80,20 @@ const STEP_TITLES: Record<CoverStudioStep, string> = {
   done: 'Save this cover',
 };
 
-/**
- * The geometry mode, measured rather than assumed.
- *
- * `short` is §6's short-height mode: below 421 visual pixels — which is also
- * what an approximately 320x180 viewport at 400% page zoom produces — sticky
- * geometry is abandoned for one dialog-level scroller, because a sticky header,
- * canvas, and footer would leave nothing for the controls.
- */
 type CoverStudioViewport = 'default' | 'compact' | 'short';
+type HistorySentinelState = 'disarmed' | 'armed' | 'consumed';
 
 function readViewportMode(height: number): CoverStudioViewport {
   if (height <= 420) return 'short';
-  // An onscreen keyboard is open: the canvas compacts to 96 rather than pushing
-  // the active control out of the visible rectangle.
   if (height < 500) return 'compact';
   return 'default';
+}
+
+function focusableWithin(root: HTMLElement | null): HTMLElement[] {
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  ));
 }
 
 export function CoverStudio({
@@ -83,23 +102,39 @@ export function CoverStudio({
   operation,
   operationState,
   draft,
-  initialSource,
-  initialEffect,
+  composeState,
+  source,
+  focus,
+  focusMode,
+  effect,
+  accessFailure,
   canRemove,
   presetThumbnail,
   styleThumbnail,
+  onSourceChange,
   onUpload,
+  onEnterCompose,
+  onFocusChange,
+  onResetFocus,
+  onEffectChange,
   onPublish,
   onDiscardDraft,
   onClose,
 }: CoverStudioProps) {
-  const [source, setSource] = useState<CoverSourceChoice | { kind: 'none' } | null>(initialSource);
-  const [effect, setEffect] = useState<EventCoverEffectId>(initialEffect);
-  const [focus, setFocus] = useState<CoverFocusValue | null>(null);
   const [step, setStep] = useState<CoverStudioStep>('choose');
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [dirty, setDirty] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const confirmKeepRef = useRef<HTMLButtonElement>(null);
+  const composeRetryRef = useRef<HTMLButtonElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const continueRef = useRef<HTMLButtonElement>(null);
+  const pendingBackFocusRef = useRef(false);
+  const confirmOriginRef = useRef<HTMLElement | null>(null);
+  const returnFocusRef = useRef<Element | null>(null);
+  const composeRequestedRef = useRef(false);
+  const autoClosedRef = useRef(false);
   const hostRef = useRef<HTMLDivElement | null>(null);
   if (hostRef.current === null && typeof document !== 'undefined') {
     hostRef.current = document.createElement('div');
@@ -107,29 +142,74 @@ export function CoverStudio({
   }
   const [viewport, setViewport] = useState<CoverStudioViewport>('default');
   const [visualRect, setVisualRect] = useState<{ top: number; height: number } | null>(null);
-  const headingRef = useRef<HTMLHeadingElement>(null);
-  const returnFocusRef = useRef<Element | null>(null);
-  const poppedRef = useRef(false);
-  const originRef = useRef<Partial<Record<CoverStudioStep, HTMLElement | null>>>({});
 
-  // An upload takes four steps; a built-in design takes the accurate three.
+  const historyTokenRef = useRef(`cover-studio-${crypto.randomUUID()}`);
+  const sentinelRef = useRef<HistorySentinelState>('disarmed');
+  const suppressPopRef = useRef(false);
+
   const steps = useMemo<CoverStudioStep[]>(() => {
     if (source?.kind === 'upload') return ['choose', 'compose', 'style', 'done'];
     if (source?.kind === 'none') return ['choose', 'done'];
     return ['choose', 'style', 'done'];
   }, [source?.kind]);
-
   const stepIndex = Math.max(0, steps.indexOf(step));
   const dispatched = operationState.dispatched;
+
+  const armSentinel = useCallback(() => {
+    history.pushState({
+      ...(typeof history.state === 'object' && history.state ? history.state : {}),
+      coverStudio: historyTokenRef.current,
+    }, '');
+    sentinelRef.current = 'armed';
+  }, []);
+
+  const consumeSentinel = useCallback(() => {
+    if (sentinelRef.current !== 'armed') return;
+    sentinelRef.current = 'consumed';
+    suppressPopRef.current = true;
+    history.back();
+  }, []);
+
+  const finishClose = useCallback(() => {
+    consumeSentinel();
+    onClose();
+  }, [consumeSentinel, onClose]);
+
+  const requestClose = useCallback(() => {
+    if (dispatched || !dirty) {
+      finishClose();
+      return;
+    }
+    const active = document.activeElement;
+    confirmOriginRef.current = active instanceof HTMLElement && dialogRef.current?.contains(active)
+      ? active
+      : headingRef.current;
+    setConfirmingDiscard(true);
+  }, [dirty, dispatched, finishClose]);
+  const closeRef = useRef(requestClose);
+  closeRef.current = requestClose;
+
+  const keepEditing = useCallback(() => {
+    // A real browser Back consumed the entry. Replace it before the alertdialog
+    // closes, so a second Back has exactly the same meaning.
+    if (sentinelRef.current === 'consumed') armSentinel();
+    setConfirmingDiscard(false);
+    confirmOriginRef.current?.focus();
+  }, [armSentinel]);
+
+  useEffect(() => {
+    if (!open) return;
+    setStep('choose');
+    setDirty(false);
+    setConfirmingDiscard(false);
+    composeRequestedRef.current = false;
+    autoClosedRef.current = false;
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     returnFocusRef.current = document.activeElement;
     operation.attach();
-
-    // The Manager page behind the sheet is genuinely inert and scroll-locked,
-    // rather than merely described as such. The studio is portalled to the body
-    // so its own subtree is not among the siblings being inerted.
     const host = hostRef.current;
     const inerted: HTMLElement[] = [];
     for (const sibling of Array.from(document.body.children)) {
@@ -140,10 +220,7 @@ export function CoverStudio({
     }
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-
     return () => {
-      // Detaching stops polling and nothing else. It never cancels or discards
-      // work an accepted receipt may still be doing.
       operation.detach();
       for (const sibling of inerted) sibling.removeAttribute('inert');
       document.body.style.overflow = previousOverflow;
@@ -152,9 +229,6 @@ export function CoverStudio({
     };
   }, [open, operation]);
 
-  // Bound to the visible rectangle, not the layout viewport: with a keyboard
-  // open they are different, and a footer pinned to the layout viewport sits
-  // underneath the keyboard where nothing can reach it.
   useEffect(() => {
     if (!open) return;
     const visual = window.visualViewport;
@@ -174,68 +248,71 @@ export function CoverStudio({
     };
   }, [open]);
 
-  // After Continue, focus moves to the new step heading rather than staying on
-  // a button that has just changed meaning.
-  useEffect(() => {
-    if (open) headingRef.current?.focus();
-  }, [open, step]);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!open || !host) return;
+    document.body.append(host);
+    return () => host.remove();
+  }, [open]);
 
-  useEffect(() => {
-    if (draft && focus === null) setFocus(draft.automaticFocus);
-  }, [draft, focus]);
-
-  const requestClose = useCallback(() => {
-    // Once dispatch begins, Cancel is Close: there is no state left that closing
-    // may throw away, whatever the client observed.
-    if (dispatched || !dirty) {
-      onClose();
-      return;
-    }
-    setConfirmingDiscard(true);
-  }, [dispatched, dirty, onClose]);
-
-  // Browser Back is a dismissal like any other, so it takes the same
-  // confirmation rather than leaving the sheet behind on the previous route.
-  //
-  // The handler reads `requestClose` through a ref rather than depending on it.
-  // As a dependency, every change of `dirty` would tear the effect down — and
-  // its cleanup pushes history back, which fires `popstate` against the closure
-  // that was just replaced.
-  const closeRef = useRef(requestClose);
-  closeRef.current = requestClose;
   useEffect(() => {
     if (!open) return;
-    history.pushState({ coverStudio: true }, '');
-    poppedRef.current = false;
+    armSentinel();
     const onPopState = () => {
-      poppedRef.current = true;
+      if (suppressPopRef.current) {
+        suppressPopRef.current = false;
+        return;
+      }
+      if (sentinelRef.current !== 'armed') return;
+      sentinelRef.current = 'consumed';
       closeRef.current();
     };
     window.addEventListener('popstate', onPopState);
     return () => {
       window.removeEventListener('popstate', onPopState);
-      // Only unwind the entry this sheet pushed, and only if Back did not
-      // already consume it.
-      if (!poppedRef.current && (history.state as { coverStudio?: boolean } | null)?.coverStudio) {
-        history.back();
-      }
+      // External unmount must not leave the Studio-owned entry behind.
+      consumeSentinel();
+      sentinelRef.current = 'disarmed';
     };
-  }, [open]);
+  }, [armSentinel, consumeSentinel, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (pendingBackFocusRef.current) {
+      pendingBackFocusRef.current = false;
+      continueRef.current?.focus();
+    } else {
+      headingRef.current?.focus();
+    }
+  }, [open, step]);
+
+  useEffect(() => {
+    if (confirmingDiscard) confirmKeepRef.current?.focus();
+  }, [confirmingDiscard]);
+
+  useEffect(() => {
+    if (step === 'compose' && composeState.status === 'error') composeRetryRef.current?.focus();
+  }, [composeState.status, step]);
+
+  useEffect(() => {
+    if (!open || operationState.phase !== 'applied' || autoClosedRef.current) return;
+    autoClosedRef.current = true;
+    finishClose();
+  }, [finishClose, open, operationState.phase]);
 
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        requestClose();
+        if (confirmingDiscard) keepEditing();
+        else requestClose();
         return;
       }
       if (event.key !== 'Tab') return;
-      // Focus stays inside the sheet; the Manager page behind it is inert.
-      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusable || focusable.length === 0) return;
+      const root = confirmingDiscard ? confirmRef.current : dialogRef.current;
+      const focusable = focusableWithin(root);
+      if (focusable.length === 0) return;
       const first = focusable[0]!;
       const last = focusable[focusable.length - 1]!;
       if (!event.shiftKey && document.activeElement === last) {
@@ -248,59 +325,60 @@ export function CoverStudio({
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [open, requestClose]);
-
-  useLayoutEffect(() => {
-    const host = hostRef.current;
-    if (!open || !host) return;
-    document.body.append(host);
-    return () => host.remove();
-  }, [open]);
+  }, [confirmingDiscard, keepEditing, open, requestClose]);
 
   if (!open || !hostRef.current) return null;
 
-  function choose(choice: CoverSourceChoice) {
-    setSource(choice);
+  function choose(next: CoverSourceChoice) {
+    if (next.kind !== 'upload' || source?.kind !== 'upload') composeRequestedRef.current = false;
+    onSourceChange(next);
     setDirty(true);
   }
 
   function advance() {
     const next = steps[stepIndex + 1];
-    if (next) setStep(next);
+    if (!next) return;
+    if (next === 'compose' && !composeRequestedRef.current) {
+      composeRequestedRef.current = true;
+      onEnterCompose();
+    }
+    setStep(next);
   }
 
   function back() {
     const previous = steps[stepIndex - 1];
     if (!previous) return;
+    pendingBackFocusRef.current = true;
     setStep(previous);
-    // Back restores the control that originated the later step.
-    originRef.current[previous]?.focus();
   }
 
   function remove() {
-    setSource({ kind: 'none' });
+    onSourceChange({ kind: 'none' });
     setDirty(true);
-    // The one path that skips the middle: there is nothing to compose or style.
     setStep('done');
   }
 
   function publish() {
-    if (!source) return;
+    if (!source || accessFailure?.phase === 'before_dispatch') return;
     onPublish({
       source,
-      focus: source.kind === 'upload' ? focus : null,
+      focus: source.kind === 'upload' ? (focus ?? draft?.initialFocus ?? null) : null,
       effect,
     });
   }
 
-  const uploadIncomplete = source?.kind === 'upload' && (!draft || focus === null);
-  const doneDisabled = !source || uploadIncomplete || operationState.phase === 'dispatching';
-
+  const effectiveFocus = focus ?? draft?.initialFocus ?? null;
+  const available2xProfiles = draft?.available2xProfiles ?? [];
+  const composeReady = composeState.status === 'ready' && Boolean(draft && effectiveFocus);
+  const uploadIncomplete = source?.kind === 'upload' && !composeReady;
+  const doneDisabled = !source
+    || uploadIncomplete
+    || operationState.phase === 'dispatching'
+    || accessFailure?.phase === 'before_dispatch';
   const preparing = operationState.phase === 'preparing';
   const stepLabel = `Step ${stepIndex + 1} of ${steps.length}`;
 
   return createPortal(<div className="cover-studio-shell">
-    {/* Dismissal here takes the same confirmation as Close, Escape, and Back. */}
     <div className="cover-studio__backdrop" onClick={requestClose} data-testid="cover-studio-backdrop" />
     <div
       className="cover-studio"
@@ -311,104 +389,133 @@ export function CoverStudio({
       style={visualRect ? { top: `${visualRect.top}px`, height: `${visualRect.height}px` } : undefined}
       ref={dialogRef}
     >
-    <header className="cover-studio__header">
-      <button type="button" className="cover-studio__close" onClick={requestClose}>
-        {dispatched ? 'Close' : 'Cancel'}
-      </button>
-      <p className="cover-studio__step">{stepLabel}</p>
-      <h2 tabIndex={-1} ref={headingRef}>{STEP_TITLES[step]}</h2>
-    </header>
+      <header className="cover-studio__header">
+        <button type="button" className="cover-studio__close" onClick={requestClose}>
+          {dispatched ? 'Close' : 'Cancel'}
+        </button>
+        <p className="cover-studio__step">{stepLabel}</p>
+        <h2 tabIndex={-1} ref={headingRef}>{STEP_TITLES[step]}</h2>
+      </header>
 
-    {/* The same canvas, sticky above the controls — not a second preview. It
-        compacts with the visible rectangle rather than requesting a new
-        composition because the editor chrome got shorter. */}
-    {canvas && <div className="cover-studio__canvas">{canvas}</div>}
+      {canvas && <div className="cover-studio__canvas">{canvas}</div>}
 
-    <div className="cover-studio__controls">
-      {step === 'choose' && <CoverSourcePicker
-        value={source && source.kind !== 'none' ? source : null}
-        onChoose={choose}
-        onUpload={(file) => { setDirty(true); onUpload(file); }}
-        onRemove={remove}
-        presetThumbnail={presetThumbnail}
-        canRemove={canRemove}
-      />}
+      <div className="cover-studio__controls">
+        {step === 'choose' && <CoverSourcePicker
+          value={source && source.kind !== 'none' ? source : null}
+          onChoose={choose}
+          onUpload={(file) => { setDirty(true); onUpload(file); }}
+          onRemove={remove}
+          presetThumbnail={presetThumbnail}
+          canRemove={canRemove}
+          busy={composeState.status === 'loading'}
+        />}
 
-      {step === 'compose' && draft && focus && <CoverComposer
-        value={focus}
-        safeZoomMaximum={draft.safeZoomMaximum}
-        previewUrl={draft.previewUrl}
-        available2xProfiles={draft.available2xProfiles}
-        onChange={(next) => { setFocus(next); setDirty(true); }}
-        onReset={() => setFocus(draft.automaticFocus)}
-      />}
+        {step === 'compose' && composeState.status !== 'ready' && <div className="cover-studio__compose-state">
+          {composeState.status !== 'error'
+            ? <p role="status">Preparing your photo…</p>
+            : <div role="alert">
+                <p>That photo could not be prepared. Your current cover is still live.</p>
+                <button
+                  ref={composeRetryRef}
+                  type="button"
+                  className="button button--secondary"
+                  onClick={onEnterCompose}
+                >
+                  Try preparing again
+                </button>
+              </div>}
+        </div>}
 
-      {step === 'style' && <CoverStylePicker
-        value={effect}
-        onChange={(next) => { setEffect(next); setDirty(true); }}
-        thumbnail={styleThumbnail}
-      />}
+        {step === 'compose' && composeReady && draft && effectiveFocus && <CoverComposer
+          value={effectiveFocus}
+          safeZoomMaximum={draft.master.safeZoomMaximum}
+          previewUrl={draft.previewUrl}
+          available2xProfiles={available2xProfiles}
+          manual={focusMode === 'manual'}
+          onAdjust={() => onFocusChange(draft.automaticFocus)}
+          onChange={(next) => { onFocusChange(next); setDirty(true); }}
+          onReset={() => { onResetFocus(); setDirty(true); }}
+        />}
 
-      {step === 'done' && <div className="cover-studio__done">
-        {preparing && <p role="status">
-          {operationState.slow
-            ? 'Still preparing. Your current cover is safe, and you can close this window.'
-            : `Preparing cover ${Math.min((operationState.view?.completedSteps ?? 0) + 1, operationState.view?.requiredSteps ?? 6)} of ${operationState.view?.requiredSteps ?? 6}.`}
-        </p>}
-        {operationState.phase === 'retryable-failed' && <button
+        {step === 'style' && <CoverStylePicker
+          value={effect}
+          onChange={(next) => { onEffectChange(next); setDirty(true); }}
+          onRetry={onEffectChange}
+          thumbnail={styleThumbnail}
+        />}
+
+        {step === 'done' && <div className="cover-studio__done">
+          {accessFailure && <p role="alert">
+            {accessFailure.phase === 'before_dispatch'
+              ? 'Manager access must be restored before this cover can be sent.'
+              : 'Manager access changed after this cover was sent. The same operation will resume after access is restored.'}
+          </p>}
+          {preparing && <p role="status">
+            {operationState.slow
+              ? 'Still preparing. Your current cover is safe, and you can close this window.'
+              : `Preparing cover ${Math.min((operationState.view?.completedSteps ?? 0) + 1, operationState.view?.requiredSteps ?? 6)} of ${operationState.view?.requiredSteps ?? 6}.`}
+          </p>}
+          {operationState.phase === 'retryable-failed' && <button
+            type="button"
+            className="button button--secondary"
+            onClick={() => { void operation.retry(); }}
+          >
+            Try again
+          </button>}
+        </div>}
+      </div>
+
+      <footer className="cover-studio__footer">
+        {stepIndex > 0 && <button type="button" className="button button--secondary" onClick={back}>
+          Back
+        </button>}
+        {step === 'done'
+          ? <button
+              type="button"
+              className="button button--primary"
+              disabled={doneDisabled}
+              onClick={publish}
+            >
+              Done
+            </button>
+          : <button
+              ref={continueRef}
+              type="button"
+              className="button button--primary"
+              disabled={!source || (step === 'compose' && !composeReady)}
+              onClick={advance}
+            >
+              Continue
+            </button>}
+      </footer>
+
+      {confirmingDiscard && <div
+        ref={confirmRef}
+        className="cover-studio__confirm"
+        role="alertdialog"
+        aria-modal="true"
+        aria-label="Discard cover changes"
+      >
+        <p>Discard this cover change?</p>
+        <button
+          ref={confirmKeepRef}
           type="button"
           className="button button--secondary"
-          onClick={() => { void operation.retry(); }}
+          onClick={keepEditing}
         >
-          Try again
-        </button>}
-      </div>}
-    </div>
-
-    <footer className="cover-studio__footer">
-      {stepIndex > 0 && <button type="button" className="button button--secondary" onClick={back}>
-        Back
-      </button>}
-      {step === 'done'
-        ? <button
-          type="button"
-          className="button button--primary"
-          disabled={doneDisabled}
-          onClick={publish}
-        >
-          Done
+          Keep editing
         </button>
-        : <button
+        <button
           type="button"
           className="button button--primary"
-          disabled={!source}
-          ref={(node) => {
-            const next = steps[stepIndex + 1];
-            if (next) originRef.current[next] = node;
+          onClick={() => {
+            if (operation.canDiscardDraft()) onDiscardDraft();
+            finishClose();
           }}
-          onClick={advance}
         >
-          Continue
-        </button>}
-    </footer>
-
-    {confirmingDiscard && <div className="cover-studio__confirm" role="alertdialog" aria-label="Discard cover changes">
-      <p>Discard this cover change?</p>
-      <button type="button" className="button button--secondary" onClick={() => setConfirmingDiscard(false)}>
-        Keep editing
-      </button>
-      <button
-        type="button"
-        className="button button--primary"
-        onClick={() => {
-          // Guarded on the server side too: a `publishing` draft refuses.
-          if (operation.canDiscardDraft()) onDiscardDraft();
-          onClose();
-        }}
-      >
-        Discard
-      </button>
-    </div>}
+          Discard draft
+        </button>
+      </div>}
     </div>
   </div>, hostRef.current);
 }
