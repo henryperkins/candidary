@@ -2,7 +2,9 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
+import type { EventView } from '../../shared/contracts';
 import { EVENT_THEME_PRESETS } from '../../shared/event-theme';
+import { PHOTOGRAPHIC_COVER } from './fixtures/cover-images';
 import {
   EVENT_FIXTURE,
   RSVP_HOUSEHOLD_FIXTURE,
@@ -664,7 +666,7 @@ test('theme radios have textual names, native checked state, and a full-document
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Event appearance editor' })).toBeVisible();
-  await expect(page.locator('.event-appearance-preview')).toBeVisible();
+  await expect(page.locator('.event-appearance-canvas')).toBeVisible();
   const colorInputBorder = await page.getByLabel('Primary color picker').evaluate((element) => {
     const tokenProbe = document.createElement('span');
     tokenProbe.style.color = 'var(--border)';
@@ -699,6 +701,103 @@ test('theme radios have textual names, native checked state, and a full-document
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expectNoAxeViolations(page, 'manager Settings editor and preview');
 });
+
+test('Cover Studio loading, error, edit, confirmation, and preparing states are axe-clean', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploadCover: EventView['cover'] = {
+    ...EVENT_FIXTURE.cover,
+    config: {
+      version: 1,
+      source: { kind: 'upload' },
+      focus: { mode: 'manual', x: 0.3, y: 0.7, zoom: 1.2 },
+      effect: 'soft',
+    },
+    revision: 9,
+    hasCover: true,
+  };
+  await stubManagerRoutes(page, {
+    event: { cover: uploadCover },
+    mediaPages: { first: { media: [], nextCursor: null } },
+    cover: PHOTOGRAPHIC_COVER,
+    coverScenario: {
+      previewFailures: { natural: 1 },
+      previewDelaysMs: { natural: 2_500 },
+      publicationReplies: [{ operationStatus: 'preparing', status: 202, retryAfter: '30' }],
+    },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expectNoAxeViolations(page, 'Manager cover canvas');
+
+  await page.getByRole('button', { name: 'Change cover' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a cover' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Cover Studio Choose');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByText('Preparing your photo…')).toBeVisible();
+  await expectNoAxeViolations(page, 'Cover Studio loading');
+
+  const retry = page.getByRole('button', { name: 'Try preparing again' });
+  await expect(retry).toBeFocused({ timeout: 5_000 });
+  await expectNoAxeViolations(page, 'Cover Studio actionable error');
+  await retry.click();
+  await expect(page.getByRole('button', { name: 'Adjust focus' })).toBeVisible({ timeout: 5_000 });
+  await expectNoAxeViolations(page, 'Cover Studio Compose');
+
+  await page.getByRole('button', { name: 'Adjust focus' }).click();
+  await page.getByRole('slider', { name: 'Horizontal focus' }).press('ArrowRight');
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  const discard = page.getByRole('alertdialog', { name: 'Discard cover changes' });
+  await expect(discard.getByRole('button', { name: 'Keep editing' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Cover Studio discard alertdialog');
+  await discard.getByRole('button', { name: 'Keep editing' }).click();
+
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a style' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Cover Studio Style');
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Save this cover' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Cover Studio Done');
+
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByRole('dialog', { name: 'Cover Studio' }).getByRole('status'))
+    .toContainText('Preparing cover');
+  await expectNoAxeViolations(page, 'Cover Studio preparing');
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect(page.locator('.cover-preparation')).toContainText('Preparing cover');
+  await expectNoAxeViolations(page, 'Manager cover preparation');
+});
+
+for (const terminal of [
+  { name: 'retryable', status: 'retryable-failed' as const, code: 503, retryable: true },
+  { name: 'permanent', status: 'permanent-failed' as const, code: 503, retryable: false },
+  { name: 'conflict', status: 'conflict' as const, code: 409, retryable: false },
+]) {
+  test(`Cover Studio ${terminal.name} terminal state is axe-clean`, async ({ page }, testInfo) => {
+    onlyOnce(testInfo);
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await stubManagerRoutes(page, {
+      mediaPages: { first: { media: [], nextCursor: null } },
+      coverScenario: {
+        publicationReplies: [{
+          operationStatus: terminal.status,
+          status: terminal.code,
+          retryable: terminal.retryable,
+          includeEvent: true,
+        }],
+      },
+    });
+    await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Change cover' }).click();
+    await page.getByRole('radio', { name: 'Warm Linen' }).check();
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await page.getByRole('button', { name: 'Done' }).click();
+    await expect(page.getByRole('dialog', { name: 'Cover Studio' })).toBeVisible();
+    await expectNoAxeViolations(page, `Cover Studio ${terminal.name} terminal`);
+  });
+}
 
 test('every manager section carries no automated accessibility violation', async ({ page }) => {
   await stubManagerRoutes(page, {

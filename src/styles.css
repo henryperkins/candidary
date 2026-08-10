@@ -1095,7 +1095,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* 100dvh, not 100vh: a mobile browser's dynamic toolbars make them different,
    and the difference is exactly the footer. */
 @media (max-width: 760px) { .cover-studio { height: 100dvh; } }
-@media (min-width: 761px) { .cover-studio { inset: auto 50% auto 50%; top: 50%; translate: 50% -50%; width: min(720px, 92vw); max-height: min(88dvh, 900px); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 30px 80px rgb(43 29 23 / 25%); overflow: hidden; } }
+@media (min-width: 761px) { .cover-studio { inset: auto auto auto 50%; top: 50%; translate: -50% -50%; width: min(720px, 92vw); max-height: min(88dvh, 900px); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 30px 80px rgb(43 29 23 / 25%); overflow: hidden; } }
 .cover-studio__header { position: sticky; top: 0; z-index: 2; min-height: 56px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--paper); }
 .cover-studio__header h2 { grid-column: 1 / -1; margin: 0; font-size: 1.35rem; }
 .cover-studio__header h2:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }

@@ -3,6 +3,7 @@ import type { Page } from '@playwright/test';
 
 import {
   PHOTOGRAPHIC_COVER,
+  UPLOAD_EFFECT_COVERS,
 } from './fixtures/cover-images';
 import {
   EVENT_FIXTURE,
@@ -19,6 +20,13 @@ const IMAGE = {
   mimeType: 'image/png',
   buffer: PHOTOGRAPHIC_COVER,
 };
+
+const COVER_THEME_CASES = [
+  { id: 'candidary-default', uploadEffect: 'natural' },
+  { id: 'garden-party', uploadEffect: 'warm' },
+  { id: 'midnight-film', uploadEffect: 'soft' },
+  { id: 'coastal-light', uploadEffect: 'monochrome' },
+] as const;
 
 async function settle(page: Page) {
   await settleRendering(page, { parkPointer: true });
@@ -67,7 +75,7 @@ test.describe('mobile event-theme visual evidence', () => {
       },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await expect(page.locator('.photo-drop__hero--cover')).toBeVisible();
+    await expect(page.locator('.photo-drop__hero .responsive-cover--image')).toBeVisible();
     await settle(page);
     await expect(page).toHaveScreenshot('guest-default-cover-390.png');
   });
@@ -94,7 +102,7 @@ test.describe('mobile event-theme visual evidence', () => {
       },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await expect(page.locator('.photo-drop__hero--cover')).toBeVisible();
+    await expect(page.locator('.photo-drop__hero .responsive-cover--image')).toBeVisible();
     await settle(page);
     await expect(page).toHaveScreenshot('guest-garden-cover-390.png');
   });
@@ -154,6 +162,65 @@ test.describe('mobile event-theme visual evidence', () => {
     expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(844);
     await expect(page).toHaveScreenshot('manager-event-appearance-390.png', { fullPage: true });
   });
+
+  for (const themeCase of COVER_THEME_CASES) {
+    test(`${themeCase.id} keeps an immutable preset inside the themed Manager canvas`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await stubManagerRoutes(page, {
+        event: {
+          theme: eventTheme(themeCase.id),
+          cover: {
+            ...EVENT_FIXTURE.cover,
+            config: {
+              version: 1,
+              source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+              effect: 'film',
+            },
+            revision: 4,
+            hasCover: true,
+            surfaceTreatment: 'film-grain-v1',
+          },
+        },
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      const canvas = page.locator('.event-appearance-canvas');
+      await expect(canvas.locator('.responsive-cover--image')).toBeVisible();
+      await settle(page);
+      await expect(canvas).toHaveScreenshot(`manager-${themeCase.id}-preset-film.png`);
+    });
+
+    test(`${themeCase.id} keeps the ${themeCase.uploadEffect} upload effect inside the themed Manager canvas`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await stubManagerRoutes(page, {
+        event: {
+          theme: eventTheme(themeCase.id),
+          cover: {
+            ...EVENT_FIXTURE.cover,
+            config: {
+              version: 1,
+              source: { kind: 'upload' },
+              focus: { mode: 'manual', x: 0.5, y: 0.5, zoom: 1 },
+              effect: themeCase.uploadEffect,
+            },
+            revision: 5,
+            hasCover: true,
+          },
+        },
+        mediaPages: { first: { media: [], nextCursor: null } },
+        cover: UPLOAD_EFFECT_COVERS[themeCase.uploadEffect],
+      });
+      await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      const canvas = page.locator('.event-appearance-canvas');
+      await expect(canvas.locator('.responsive-cover--image')).toBeVisible();
+      await settle(page);
+      await expect(canvas).toHaveScreenshot(
+        `manager-${themeCase.id}-upload-${themeCase.uploadEffect}.png`,
+      );
+    });
+  }
 });
 
 test('Midnight Film full-screen gallery holds a 1280 by 900 desktop composition', async ({ page }, testInfo) => {

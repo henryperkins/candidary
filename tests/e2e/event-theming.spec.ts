@@ -149,7 +149,7 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
       },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await expect(page.locator('.photo-drop__hero')).toHaveClass(/photo-drop__hero--cover/u);
+    await expect(page.locator('.photo-drop__hero .responsive-cover--image')).toBeVisible();
     await expectTargets([
       page.getByRole('button', { name: 'Take a photo', exact: true }),
       page.getByRole('button', { name: 'Choose recent photos', exact: true }),
@@ -723,7 +723,7 @@ for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'c
         cover,
       });
       await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-      const hero = page.locator('.photo-drop__hero--cover');
+      const hero = page.locator('.photo-drop__hero:has(.responsive-cover--image)');
       const result = await minimumWhiteContrastUnderText(page, hero, hero.locator('.photo-drop__hero-copy'));
       expect(result.rectangles.length, `${presetId} ${name} rendered text bounds`).toBeGreaterThan(0);
       expect(result.minimum, `${presetId} ${name} cover-text contrast`).toBeGreaterThanOrEqual(4.5);

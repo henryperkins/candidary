@@ -141,7 +141,7 @@ export function CoverStudio({
     hostRef.current.className = 'cover-studio-host';
   }
   const [viewport, setViewport] = useState<CoverStudioViewport>('default');
-  const [visualRect, setVisualRect] = useState<{ top: number; height: number } | null>(null);
+  const [visualRect, setVisualRect] = useState<{ top: number; height: number; width: number } | null>(null);
 
   const historyTokenRef = useRef(`cover-studio-${crypto.randomUUID()}`);
   const sentinelRef = useRef<HistorySentinelState>('disarmed');
@@ -235,7 +235,9 @@ export function CoverStudio({
     const apply = () => {
       const height = visual?.height ?? window.innerHeight;
       setViewport(readViewportMode(height));
-      setVisualRect(visual ? { top: visual.offsetTop, height: visual.height } : null);
+      setVisualRect(visual
+        ? { top: visual.offsetTop, height: visual.height, width: visual.width }
+        : null);
     };
     apply();
     visual?.addEventListener('resize', apply);
@@ -387,7 +389,9 @@ export function CoverStudio({
       aria-modal="true"
       aria-label="Cover Studio"
       data-viewport={viewport}
-      style={visualRect ? { top: `${visualRect.top}px`, height: `${visualRect.height}px` } : undefined}
+      style={visualRect && visualRect.width <= 760
+        ? { top: `${visualRect.top}px`, height: `${visualRect.height}px` }
+        : undefined}
       ref={dialogRef}
     >
       <header className="cover-studio__header">
