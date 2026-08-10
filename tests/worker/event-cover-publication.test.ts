@@ -13,6 +13,7 @@ import type { AppEnv } from '../../worker/env';
 import {
   acceptCoverPublication,
   applyRemovalPublication,
+  applySemanticCoverPublication,
   claimInitialCoverDispatch,
   confirmCoverDispatch,
   coverWorkflowInstanceId,
@@ -122,6 +123,132 @@ function uploadRequest(draftId: string, patch: Partial<EventCoverPublishRequestV
     effect: 'natural',
     ...patch,
   } as EventCoverPublishRequestV1;
+}
+
+function presetRequest(patch: Partial<EventCoverPublishRequestV1> = {}): EventCoverPublishRequestV1 {
+  return {
+    operationId: OPERATION,
+    expectedRevision: 0,
+    source: { kind: 'preset', presetId: 'warm-linen' },
+    effect: 'film',
+    ...patch,
+  } as EventCoverPublishRequestV1;
+}
+
+function noneRequest(patch: Partial<EventCoverPublishRequestV1> = {}): EventCoverPublishRequestV1 {
+  return {
+    operationId: OPERATION,
+    expectedRevision: 0,
+    source: { kind: 'none' },
+    ...patch,
+  } as EventCoverPublishRequestV1;
+}
+
+async function seedActiveUploadCover(
+  access: Access,
+  options: { receiptExpiry?: string } = {},
+) {
+  const masterId = 'master-active';
+  const setId = 'set-active';
+  const objectKey = coverMasterKey(access.event.id, masterId);
+  const timestamp = now.toISOString();
+  await insertCoverMaster(testEnv.DB, {
+    id: masterId,
+    eventId: access.event.id,
+    objectKey,
+    byteSize: 900_000,
+    width: 2480,
+    height: 1680,
+    sha256: HEX_64,
+    normalizationVersion: 1,
+    normalizationRung: 1,
+    now,
+  });
+  await testEnv.MEDIA_BUCKET.put(objectKey, new Uint8Array([4, 5, 6]));
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_sets (
+      id, event_id, master_id, recipe_json, recipe_sha256, state,
+      required_slots, manifest_sha256, published_revision, created_at,
+      ready_at, published_at
+    ) VALUES (?, ?, ?, ?, ?, 'active', 12, ?, 0, ?, ?, ?)
+  `).bind(
+    setId,
+    access.event.id,
+    masterId,
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    HEX_64,
+    OTHER_HEX,
+    timestamp,
+    timestamp,
+    timestamp,
+  ).run();
+  await testEnv.DB.prepare(`
+    UPDATE events SET
+      cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 0
+    WHERE id = ?
+  `).bind(
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    objectKey,
+    setId,
+    access.event.id,
+  ).run();
+  if (options.receiptExpiry) {
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, render_set_id, request_sha256, action,
+        expected_revision, status, dependency_versions_json, completed_profiles,
+        required_profiles, applied_revision, result_cover_json, retryable,
+        dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+      ) VALUES (?, 'old-upload-operation', ?, ?, 'publish', 0, 'applied', '{}',
+        6, 6, 0, ?, 0, 'confirmed', 0, ?, ?, ?)
+    `).bind(
+      access.event.id,
+      setId,
+      OTHER_HEX,
+      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+      timestamp,
+      timestamp,
+      options.receiptExpiry,
+    ).run();
+  }
+  return { masterId, setId, objectKey };
+}
+
+async function applySemanticForTest(
+  access: Access,
+  request: EventCoverPublishRequestV1,
+  requestDigest = HEX_64,
+  env: AppEnv = testEnv,
+) {
+  return applySemanticCoverPublication(env, {
+    event: await reload(access.event.id),
+    request,
+    requestDigest,
+    now,
+  });
+}
+
+function zeroSemanticTailDb(fragment: string) {
+  let injected = false;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (sql: string) => {
+          if (!injected && sql.includes(fragment)) {
+            injected = true;
+            // Preserve the production statement and every one of its bindings;
+            // only make the final predicate false so D1 executes it normally
+            // and reports zero changed rows instead of a bind-count error.
+            return target.prepare(`${sql}\nAND 0`);
+          }
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { db, wasInjected: () => injected };
 }
 
 async function draftState(id: string): Promise<string> {
@@ -2558,10 +2685,16 @@ describe('synchronous removal publication', () => {
     await testEnv.DB.prepare('UPDATE events SET cover_revision = 4 WHERE id = ?')
       .bind(access.event.id).run();
 
-    await expect(applyRemovalPublication(testEnv, {
+    const outcome = await applyRemovalPublication(testEnv, {
       event: { ...await reload(access.event.id), coverRevision: 0 },
       operationId: OPERATION, requestDigest: HEX_64, expectedRevision: 0, now,
-    })).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 409 });
+    });
+    expect(outcome).toMatchObject({
+      applied: false,
+      appliedRevision: null,
+      receipt: { status: 'conflict' },
+      view: { status: 'conflict' },
+    });
 
     const retired = await testEnv.DB.prepare(
       'SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?',
@@ -2582,10 +2715,16 @@ describe('synchronous removal publication', () => {
       UPDATE events SET cover_revision = 1, cover_object_key = ? WHERE id = ?
     `).bind(winningKey, access.event.id).run();
 
-    await expect(applyRemovalPublication(testEnv, {
+    const outcome = await applyRemovalPublication(testEnv, {
       event: staleEvent,
       operationId: OPERATION, requestDigest: HEX_64, expectedRevision: 0, now,
-    })).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 409 });
+    });
+    expect(outcome).toMatchObject({
+      applied: false,
+      appliedRevision: null,
+      receipt: { status: 'conflict' },
+      view: { status: 'conflict' },
+    });
 
     expect((await reload(access.event.id)).coverObjectKey).toBe(winningKey);
     expect(await testEnv.DB.prepare(`
@@ -2597,5 +2736,317 @@ describe('synchronous removal publication', () => {
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
     `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+});
+
+describe('strict synchronous semantic publications', () => {
+  let access: Access;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    access = await eventAccess();
+  });
+
+  it('pins the exact preset config, nulls owned pointers, and replays one applied revision', async () => {
+    const first = await applySemanticForTest(access, presetRequest());
+
+    expect(first).toMatchObject({
+      receipt: {
+        action: 'publish',
+        status: 'applied',
+        applied_revision: 1,
+        result_cover_json: JSON.stringify({
+          version: 1,
+          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+          effect: 'film',
+        }),
+        draft_id: null,
+        render_set_id: null,
+        workflow_instance_id: null,
+      },
+      view: { status: 'applied' },
+      event: {
+        coverConfig: JSON.stringify({
+          version: 1,
+          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+          effect: 'film',
+        }),
+        coverObjectKey: null,
+        coverRenderSetId: null,
+        coverRevision: 1,
+      },
+    });
+    expect(await reload(access.event.id)).toMatchObject({
+      coverConfig: JSON.stringify({
+        version: 1,
+        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+        effect: 'film',
+      }),
+      coverObjectKey: null,
+      coverRenderSetId: null,
+      coverRevision: 1,
+    });
+
+    const replay = await applySemanticForTest(access, presetRequest());
+    expect(replay).toMatchObject({
+      receipt: { status: 'applied', applied_revision: 1 },
+      view: { status: 'applied' },
+    });
+    expect((await reload(access.event.id)).coverRevision).toBe(1);
+
+    await expect(applySemanticForTest(access, presetRequest(), OTHER_HEX))
+      .rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
+  });
+
+  it('records a first-seen stale preset as conflict without allocating or mutating', async () => {
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 3 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const outcome = await applySemanticForTest(access, presetRequest());
+
+    expect(outcome).toMatchObject({
+      receipt: {
+        action: 'publish',
+        status: 'conflict',
+        draft_id: null,
+        render_set_id: null,
+        workflow_instance_id: null,
+      },
+      view: { status: 'conflict' },
+    });
+    expect(await reload(access.event.id)).toMatchObject({
+      coverRevision: 3,
+      coverObjectKey: null,
+      coverRenderSetId: null,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_render_sets WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
+  it('records conflict when a competing publication already retired the stale uploaded predecessor', async () => {
+    const active = await seedActiveUploadCover(access);
+    const staleEvent = await reload(access.event.id);
+    const winnerConfig = JSON.stringify({
+      version: 1,
+      source: { kind: 'preset', presetId: 'pressed-paper', assetVersion: 1 },
+      effect: 'natural',
+    });
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE events SET cover_config = ?, cover_object_key = NULL,
+          cover_render_set_id = NULL, cover_revision = 1
+        WHERE id = ?
+      `).bind(winnerConfig, access.event.id),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_render_sets
+        SET state = 'retired', retired_at = ?, cleanup_after = ?
+        WHERE id = ?
+      `).bind(now.toISOString(), '2026-08-11T12:00:00.000Z', active.setId),
+      testEnv.DB.prepare(`
+        UPDATE event_cover_masters SET cleanup_after = ? WHERE id = ?
+      `).bind('2026-08-11T12:00:00.000Z', active.masterId),
+    ]);
+
+    const outcome = await applySemanticCoverPublication(testEnv, {
+      event: staleEvent,
+      request: presetRequest(),
+      requestDigest: HEX_64,
+      now,
+    });
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      appliedRevision: null,
+      receipt: { status: 'conflict' },
+      event: {
+        coverConfig: winnerConfig,
+        coverRevision: 1,
+        coverObjectKey: null,
+        coverRenderSetId: null,
+      },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT state, cleanup_after FROM event_cover_render_sets WHERE id = ?
+    `).bind(active.setId).first()).toEqual({
+      state: 'retired', cleanup_after: '2026-08-11T12:00:00.000Z',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT cleanup_after FROM event_cover_masters WHERE id = ?
+    `).bind(active.masterId).first()).toEqual({ cleanup_after: '2026-08-11T12:00:00.000Z' });
+  });
+
+  it('classifies a mismatched removal receipt before a preset can use its guard', async () => {
+    const timestamp = now.toISOString();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, request_sha256, action, expected_revision, status,
+        dependency_versions_json, completed_profiles, required_profiles, retryable,
+        dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, 'remove', 0, 'conflict', '{}', 0, 0, 0,
+        'pending', 0, ?, ?, ?)
+    `).bind(
+      access.event.id,
+      OPERATION,
+      HEX_64,
+      timestamp,
+      timestamp,
+      '2026-08-05T12:00:00.000Z',
+    ).run();
+
+    await expect(applySemanticForTest(access, presetRequest()))
+      .rejects.toMatchObject({ code: 'COVER_PUBLICATION_CONFLICT', status: 409 });
+    expect(await reload(access.event.id)).toMatchObject({
+      coverRevision: 0,
+      coverObjectKey: null,
+      coverRenderSetId: null,
+    });
+  });
+
+  it('returns a terminal replay before inspecting or allocating publication owners', async () => {
+    await applySemanticForTest(access, presetRequest());
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => {
+            if (sql.includes('SELECT s.master_id')
+              || sql.includes('INSERT INTO event_cover_publish_receipts')
+              || sql.includes('UPDATE events SET')) {
+              throw new Error('terminal replay allocated or mutated');
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const replay = await applySemanticForTest(
+      access,
+      presetRequest(),
+      HEX_64,
+      { ...testEnv, DB: db },
+    );
+
+    expect(replay).toMatchObject({
+      applied: true,
+      appliedRevision: 1,
+      receipt: { status: 'applied' },
+    });
+    expect((await reload(access.event.id)).coverRevision).toBe(1);
+  });
+
+  it.each([
+    ['preset', presetRequest()],
+    ['removal', noneRequest()],
+  ])('retires a displaced normalized upload for %s at the receipt retention floor', async (
+    _name,
+    request,
+  ) => {
+    const retainedUntil = '2026-08-20T12:00:00.000Z';
+    const active = await seedActiveUploadCover(access, { receiptExpiry: retainedUntil });
+
+    const outcome = await applySemanticForTest(access, request);
+
+    expect(outcome.receipt.status).toBe('applied');
+    const event = await reload(access.event.id);
+    expect(event.coverRevision).toBe(1);
+    expect(event.coverObjectKey).toBeNull();
+    expect(event.coverRenderSetId).toBeNull();
+    const set = await testEnv.DB.prepare(`
+      SELECT state, retired_at, cleanup_after FROM event_cover_render_sets WHERE id = ?
+    `).bind(active.setId).first();
+    expect(set).toEqual({
+      state: 'retired',
+      retired_at: now.toISOString(),
+      cleanup_after: retainedUntil,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT cleanup_after FROM event_cover_masters WHERE id = ?
+    `).bind(active.masterId).first()).toEqual({ cleanup_after: retainedUntil });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+    expect(await testEnv.MEDIA_BUCKET.head(active.objectKey)).not.toBeNull();
+  });
+
+  it('schedules no master when preset and none predecessors own no event bytes', async () => {
+    await applySemanticForTest(access, presetRequest());
+    const second = noneRequest({
+      operationId: 'c7f70915-e746-41a6-9e59-fc2b8812550a',
+      expectedRevision: 1,
+    });
+    await applySemanticForTest(access, second, OTHER_HEX);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_masters WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
+  it.each([
+    ['applied receipt', "SET status = 'applied', applied_revision"],
+    ['set retirement', "SET state = 'retired', retired_at"],
+    ['master retention', 'UPDATE event_cover_masters'],
+  ])('rolls the entire winning graph back when the %s tail changes zero rows', async (
+    _name,
+    fragment,
+  ) => {
+    const active = await seedActiveUploadCover(access, {
+      receiptExpiry: '2026-08-20T12:00:00.000Z',
+    });
+    const beforeEvent = await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(access.event.id).first();
+    const beforeSet = await testEnv.DB.prepare('SELECT * FROM event_cover_render_sets WHERE id = ?')
+      .bind(active.setId).first();
+    const beforeMaster = await testEnv.DB.prepare('SELECT * FROM event_cover_masters WHERE id = ?')
+      .bind(active.masterId).first();
+    const fault = zeroSemanticTailDb(fragment);
+
+    await expect(applySemanticForTest(
+      access,
+      presetRequest(),
+      HEX_64,
+      { ...testEnv, DB: fault.db },
+    )).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual(beforeEvent);
+    expect(await testEnv.DB.prepare('SELECT * FROM event_cover_render_sets WHERE id = ?')
+      .bind(active.setId).first()).toEqual(beforeSet);
+    expect(await testEnv.DB.prepare('SELECT * FROM event_cover_masters WHERE id = ?')
+      .bind(active.masterId).first()).toEqual(beforeMaster);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first()).toBeNull();
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0 });
+  });
+
+  it('rolls a zero-row conflict tail and its newly inserted receipt back together', async () => {
+    await testEnv.DB.prepare('UPDATE events SET cover_revision = 2 WHERE id = ?')
+      .bind(access.event.id).run();
+    const beforeEvent = await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(access.event.id).first();
+    const fault = zeroSemanticTailDb("SET status = 'conflict'");
+
+    await expect(applySemanticForTest(
+      access,
+      presetRequest(),
+      HEX_64,
+      { ...testEnv, DB: fault.db },
+    )).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual(beforeEvent);
+    expect(await testEnv.DB.prepare(`
+      SELECT * FROM event_cover_publish_receipts WHERE event_id = ? AND operation_id = ?
+    `).bind(access.event.id, OPERATION).first()).toBeNull();
   });
 });

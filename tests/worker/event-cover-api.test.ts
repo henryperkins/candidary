@@ -6,10 +6,8 @@ import {
 } from '../../shared/constants';
 import { COVER_PIPELINE_VERSIONS, canonicalCoverRequest } from '../../shared/event-cover';
 import { createApp } from '../../worker/app';
-import { EventsRepository } from '../../worker/db/events';
 import type { AppEnv } from '../../worker/env';
 import {
-  acceptCoverPublication,
   coverRequestDigest,
 } from '../../worker/services/event-cover-publication';
 import {
@@ -623,12 +621,23 @@ describe('cover publication', () => {
       expectedRevision: 0,
       source: { kind: 'none' as const },
     };
-    await acceptCoverPublication(testEnv, {
-      event: (await new EventsRepository(testEnv.DB).getById(access.event.id))!,
-      request,
-      requestDigest: await coverRequestDigest(canonicalCoverRequest(request)),
-      now: new Date(),
-    });
+    const requestDigest = await coverRequestDigest(canonicalCoverRequest(request));
+    const timestamp = new Date().toISOString();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, request_sha256, action, expected_revision, status,
+        dependency_versions_json, completed_profiles, required_profiles, retryable,
+        dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, 'remove', 0, 'queued', '{}', 0, 0, 0,
+        'pending', 0, ?, ?, ?)
+    `).bind(
+      access.event.id,
+      operationId,
+      requestDigest,
+      timestamp,
+      timestamp,
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    ).run();
 
     let receiptReads = 0;
     const wrapStatement = (
@@ -1494,15 +1503,35 @@ describe('cover publication', () => {
     expect(second.status).toBe(409);
   });
 
-  it('refuses a preset publication in this release', async () => {
+  it('applies a preset publication synchronously with its pinned semantic config', async () => {
     const access = await eventAccess();
     const response = await publish(access, {
       operationId: crypto.randomUUID(),
       expectedRevision: 0,
       source: { kind: 'preset', presetId: 'warm-linen' },
-      effect: 'natural',
+      effect: 'film',
     });
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data).toMatchObject({
+      applied: true,
+      appliedRevision: 1,
+      event: {
+        coverRevision: 1,
+        coverObjectKey: null,
+      },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT cover_config, cover_object_key, cover_render_set_id
+      FROM events WHERE id = ?
+    `).bind(access.event.id).first()).toEqual({
+      cover_config: JSON.stringify({
+        version: 1,
+        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+        effect: 'film',
+      }),
+      cover_object_key: null,
+      cover_render_set_id: null,
+    });
   });
 
   it('refuses an unknown preset, effect, or focus value', async () => {

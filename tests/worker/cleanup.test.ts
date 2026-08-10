@@ -3042,6 +3042,28 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_render_objects', access.event.id)).toBe(0);
   });
 
+  it('keeps a displaced normalized set and master in R2 until their shared retention deadline', async () => {
+    const masterKey = await insertMaster('master-retained', { cleanupAfter: FUTURE });
+    await insertSet('set-retained', {
+      state: 'retired', masterId: 'master-retained', cleanupAfter: FUTURE,
+    });
+    const renderedKey = await insertRenderObject(
+      'object-retained', 'set-retained', 'wide-expanded',
+    );
+
+    const early = await cleanupEventCovers(testEnv, NOW);
+    expect(early).toMatchObject({ renderObjectsDeleted: 0, setsDeleted: 0, mastersDeleted: 0 });
+    expect(await exists(renderedKey)).toBe(true);
+    expect(await exists(masterKey)).toBe(true);
+
+    const due = await cleanupEventCovers(testEnv, new Date(FUTURE));
+    expect(due).toMatchObject({ renderObjectsDeleted: 1, setsDeleted: 1, mastersDeleted: 1 });
+    expect(await exists(renderedKey)).toBe(false);
+    expect(await exists(masterKey)).toBe(false);
+    expect(await countRows('event_cover_render_sets', access.event.id)).toBe(0);
+    expect(await countRows('event_cover_masters', access.event.id)).toBe(0);
+  });
+
   it('deletes a retired legacy original but never the key the event still serves', async () => {
     const displaced = await put(`${prefix()}/legacy-old.jpg`);
     const current = await put(`${prefix()}/legacy-current.jpg`);

@@ -31,7 +31,7 @@ import {
 } from '../services/event-cover-drafts';
 import {
   acceptCoverPublication,
-  applyRemovalPublication,
+  applySemanticCoverPublication,
   claimInitialCoverDispatch,
   confirmCoverDispatch,
   coverRequestDigest,
@@ -368,19 +368,55 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
     );
   }
   const request = parsed.data;
-  // Parsed and validated, but not publishable in this release: there is no
-  // preset applier yet, and accepting one would durably record a receipt no
-  // pipeline can ever apply. The six designs arrive with Cover Studio.
-  if (request.source.kind === 'preset') {
-    throw new ApiError(
-      'COVER_SOURCE_UNSUPPORTED',
-      'Built-in cover designs are not available yet. Upload a photo instead.',
-      422,
-    );
-  }
-
   const now = new Date();
   const requestDigest = await coverRequestDigest(canonicalCoverRequest(request));
+  if (request.source.kind !== 'upload') {
+    try {
+      const outcome = await withRateRetryAfter(context, now, () => (
+        applySemanticCoverPublication(context.env, {
+          event: auth.event,
+          request,
+          requestDigest,
+          now,
+        })
+      ));
+      if (outcome.receipt.status === 'conflict') {
+        return context.json({
+          data: {
+            applied: false,
+            operation: outcome.view,
+            event: await currentEventView(context, auth.event.id, now),
+          },
+          requestId: context.get('requestId'),
+        }, 409);
+      }
+      return context.json({
+        data: {
+          applied: outcome.applied,
+          appliedRevision: outcome.appliedRevision,
+          operation: outcome.view,
+          event: await currentEventView(context, auth.event.id, now),
+        },
+        requestId: context.get('requestId'),
+      });
+    } catch (error) {
+      if (error instanceof ApiError
+        && error.code === 'COVER_PUBLICATION_CONFLICT'
+        && error.status === 409) {
+        return context.json({
+          code: error.code,
+          message: error.message,
+          data: {
+            operation: await selectEventCoverPreparation(context.env, auth.event.id, now),
+            event: await currentEventView(context, auth.event.id, now),
+          },
+          requestId: context.get('requestId'),
+        }, 409);
+      }
+      throw error;
+    }
+  }
+
   let acceptance: Awaited<ReturnType<typeof acceptCoverPublication>>;
   try {
     acceptance = await withRateRetryAfter(context, now, () => acceptCoverPublication(context.env, {
@@ -415,35 +451,6 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
       },
       requestId: context.get('requestId'),
     }, 409);
-  }
-
-  if (request.source.kind === 'none') {
-    const outcome = await applyRemovalPublication(context.env, {
-      event: auth.event,
-      operationId: request.operationId,
-      requestDigest,
-      expectedRevision: request.expectedRevision,
-      now,
-    });
-    if (outcome.receipt.status === 'conflict') {
-      return context.json({
-        data: {
-          applied: false,
-          operation: outcome.view,
-          event: await currentEventView(context, auth.event.id, now),
-        },
-        requestId: context.get('requestId'),
-      }, 409);
-    }
-    return context.json({
-      data: {
-        applied: outcome.applied,
-        appliedRevision: outcome.appliedRevision,
-        operation: outcome.view,
-        event: await currentEventView(context, auth.event.id, now),
-      },
-      requestId: context.get('requestId'),
-    });
   }
 
   if (acceptance.receipt.status === 'applied') {

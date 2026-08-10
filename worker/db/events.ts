@@ -111,12 +111,13 @@ export interface CoverPointerMove {
    * displaces are the ones the compatibility reader was still serving.
    */
   reason?: 'replaced' | 'removed' | 'backfilled';
-  /**
-   * Optional exact synchronous-removal owner. When present, the event pointer
-   * moves only while that accepted receipt is still the original nonterminal
-   * generation; a deletion settlement cannot be overwritten by the batch.
-   */
-  publicationGuard?: { operationId: string; requestSha256: string };
+  /** Exact owner for a synchronous preset or removal pointer move. */
+  semanticPublicationGuard?: {
+    action: 'publish' | 'remove';
+    operationId: string;
+    requestSha256: string;
+    expectedRevision: number;
+  };
   /** Exact durable owner for an uploaded-cover Workflow pointer move. */
   renderPublicationGuard?: {
     operationId: string;
@@ -248,9 +249,9 @@ export function coverPointerStatements(
           ? IS NULL OR EXISTS (
             SELECT 1 FROM event_cover_publish_receipts r
             WHERE r.event_id = events.id AND r.operation_id = ?
-              AND r.request_sha256 = ? AND r.action = 'remove'
+              AND r.request_sha256 = ? AND r.action = ?
               AND r.expected_revision = ? AND r.status = 'queued' AND r.retryable = 0
-              AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL
+              AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL AND r.draft_id IS NULL
               AND r.dispatch_state = 'pending' AND r.dispatch_generation = 0
           )
         )
@@ -264,10 +265,11 @@ export function coverPointerStatements(
       input.expectedRevision,
       input.expectedCurrentKey,
       input.expectedCurrentRenderSetId,
-      input.publicationGuard?.operationId ?? null,
-      input.publicationGuard?.operationId ?? null,
-      input.publicationGuard?.requestSha256 ?? null,
-      input.expectedRevision,
+      input.semanticPublicationGuard?.operationId ?? null,
+      input.semanticPublicationGuard?.operationId ?? null,
+      input.semanticPublicationGuard?.requestSha256 ?? null,
+      input.semanticPublicationGuard?.action ?? null,
+      input.semanticPublicationGuard?.expectedRevision ?? null,
       ...ownerBindings,
     ),
     db.prepare(`
