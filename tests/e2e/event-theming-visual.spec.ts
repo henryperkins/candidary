@@ -6,6 +6,7 @@ import {
 } from './fixtures/cover-images';
 import {
   EVENT_FIXTURE,
+  GUEST_EVENT_FIXTURE,
   eventTheme,
   stubGuestRoutes,
   stubManagerRoutes,
@@ -62,7 +63,7 @@ test.describe('mobile event-theme visual evidence', () => {
     await stubGuestRoutes(page, {
       event: {
         theme: eventTheme('candidary-default'),
-        coverObjectKey: 'events/event-a/cover.png',
+        cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
       },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
@@ -89,7 +90,7 @@ test.describe('mobile event-theme visual evidence', () => {
     await stubGuestRoutes(page, {
       event: {
         theme: eventTheme('garden-party'),
-        coverObjectKey: 'events/event-a/cover.png',
+        cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
       },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);

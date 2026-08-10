@@ -9,6 +9,7 @@ import {
 } from './fixtures/cover-images';
 import {
   EVENT_FIXTURE,
+  GUEST_EVENT_FIXTURE,
   RSVP_HOUSEHOLD_FIXTURE,
   eventTheme,
   stubGuestRoutes,
@@ -142,7 +143,10 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
   } else if (state === 'cover entry') {
     await stubGuestRoutes(page, {
       ...baseOptions,
-      event: { ...baseOptions.event, coverObjectKey: 'events/event-a/cover.png' },
+      event: {
+        ...baseOptions.event,
+        cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
+      },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
     await expect(page.locator('.photo-drop__hero')).toHaveClass(/photo-drop__hero--cover/u);
@@ -714,7 +718,7 @@ for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'c
       await stubGuestRoutes(page, {
         event: {
           theme: eventTheme(presetId),
-          coverObjectKey: `events/event-a/${name.replace(' ', '-')}.png`,
+          cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
         },
         cover,
       });

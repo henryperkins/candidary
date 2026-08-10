@@ -11,6 +11,9 @@ const event = {
   eventDate: '2026-09-14',
   welcomeMessage: 'Help us remember tonight.',
   uploadsEnabled: true,
+  cover: {
+    revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' as const,
+  },
 };
 
 function transport(): UploadTransport {
@@ -51,7 +54,7 @@ describe('mobile guest photo delivery', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
     const { container } = render(<GuestUploadFlow
-      event={{ ...event, coverObjectKey: 'events/event-a/cover/private.jpg' }}
+      event={{ ...event, cover: { ...event.cover, hasCover: true } }}
       slug="alex/jordan?"
       transport={transport()}
     />);
@@ -81,7 +84,7 @@ describe('mobile guest photo delivery', () => {
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
     vi.stubGlobal('fetch', vi.fn(coverRead));
     const { container } = render(<GuestUploadFlow
-      event={{ ...event, coverObjectKey: 'events/event-a/cover/private.jpg' }}
+      event={{ ...event, cover: { ...event.cover, hasCover: true } }}
       slug="alex-jordan"
       transport={transport()}
     />);

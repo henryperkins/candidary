@@ -40,7 +40,7 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.',
-  coverObjectKey: null,
+  cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
@@ -63,9 +63,15 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
 
 export const EVENT_FIXTURE: EventView = {
   ...GUEST_EVENT_FIXTURE,
-  // Manager-only. The guest fixture it spreads deliberately has neither.
-  coverPreparation: null,
-  coverRevision: 0,
+  // Manager-only semantic configuration and preparation never reach the guest.
+  cover: {
+    config: { version: 1, source: { kind: 'none' } },
+    revision: 0,
+    hasCover: false,
+    available2xProfiles: [],
+    surfaceTreatment: 'none',
+    preparation: null,
+  },
   eventStartTime: '17:00',
   // Permitted and past its start, which is the state every manager fixture is in.
   photosOpen: true,
@@ -304,7 +310,7 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
     contentType: 'image/png',
     body: PHOTOGRAPHIC_COVER,
   }));
-  if (event.coverObjectKey) {
+  if (event.cover.hasCover) {
     await page.route(`${base}/cover`, (route) => route.fulfill({
       status: 200,
       contentType: 'image/png',
@@ -679,7 +685,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     contentType: 'image/png',
     body: PHOTOGRAPHIC_COVER,
   }));
-  if (event.coverObjectKey) {
+  if (event.cover.hasCover) {
     await page.route(`${base}/cover`, (route) => route.fulfill({
       status: 200,
       contentType: 'image/png',
@@ -736,7 +742,10 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
                 safeFailureCode: null,
                 updatedAt: '2026-08-06T00:00:00.000Z',
               },
-              event: { ...event, coverRevision: event.coverRevision + 1 },
+              event: {
+                ...event,
+                cover: { ...event.cover, revision: event.cover.revision + 1 },
+              },
             },
             requestId: 'request-a',
           },

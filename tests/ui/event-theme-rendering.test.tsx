@@ -6,7 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { GuestEventView, ResolvedEventTheme } from '../../shared/contracts';
+import type { EventView, GuestEventView, ResolvedEventTheme } from '../../shared/contracts';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_PRESETS,
@@ -27,15 +27,26 @@ const previewEvent = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Come share the moments you caught.',
-  coverObjectKey: 'cover-present',
-};
+  cover: {
+    config: {
+      version: 1,
+      source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+      effect: 'natural',
+    },
+    revision: 1,
+    hasCover: true,
+    available2xProfiles: [],
+    surfaceTreatment: 'none',
+    preparation: null,
+  },
+} satisfies Pick<EventView, 'id' | 'name' | 'eventDate' | 'welcomeMessage' | 'cover'>;
 const baseGuestEvent: Omit<GuestEventView, 'theme'> = {
   id: 'event-a',
   slug: 'maya-theo',
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Come share the moments you caught.',
-  coverObjectKey: null,
+  cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
@@ -159,7 +170,7 @@ describe('event theme primitives', () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(preview.style.getPropertyValue('--event-cover')).toContain('blob:cover-a');
 
-    view.rerender(<EventAppearancePreview event={{ ...previewEvent, id: 'event-b', coverObjectKey: 'cover-present' }} theme={coastalTheme} />);
+    view.rerender(<EventAppearancePreview event={{ ...previewEvent, id: 'event-b' }} theme={coastalTheme} />);
     await waitFor(() => expect(preview.style.getPropertyValue('--event-cover')).toContain('blob:cover-b'));
     expect(signals[0]?.aborted).toBe(true);
     expect(fetchMock).toHaveBeenLastCalledWith(managerEventCoverPath('event-b'), expect.objectContaining({
@@ -201,7 +212,7 @@ describe('event theme primitives', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const view = render(<EventAppearancePreview event={previewEvent} theme={coastalTheme} />);
-    view.rerender(<EventAppearancePreview event={{ ...previewEvent, id: 'event-b', coverObjectKey: 'cover-present' }} theme={coastalTheme} />);
+    view.rerender(<EventAppearancePreview event={{ ...previewEvent, id: 'event-b' }} theme={coastalTheme} />);
     const preview = screen.getByTestId('event-appearance-preview');
     await waitFor(() => expect(preview.style.getPropertyValue('--event-cover')).toContain('blob:cover-b'));
     await act(async () => { resolveFirst!(new Response(new Blob(['a']), { status: 200 })); });

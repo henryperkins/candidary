@@ -7,7 +7,7 @@ export interface GuestEventHeroProps {
   name: string;
   eventDate: string;
   welcomeMessage: string;
-  coverObjectKey?: string | null;
+  hasCover: boolean;
   slug: string;
   /* Photo drop owns the page heading here. RSVP keeps its task heading, so the
      welcome is painted the same size without claiming another level-one. */
@@ -23,11 +23,11 @@ export function GuestEventHero({
   name,
   eventDate,
   welcomeMessage,
-  coverObjectKey,
+  hasCover,
   slug,
   welcomeIsHeading = true,
 }: GuestEventHeroProps) {
-  const cover = useEventCover(coverObjectKey ? guestEventCoverPath(slug) : null);
+  const cover = useEventCover(hasCover ? guestEventCoverPath(slug) : null);
   const [welcomeExpanded, setWelcomeExpanded] = useState(false);
   const message = welcomeMessage || 'Help us remember tonight.';
   const welcomeNeedsDisclosure = message.length > 180;

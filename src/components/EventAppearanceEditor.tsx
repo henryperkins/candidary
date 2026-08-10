@@ -341,7 +341,7 @@ export function EventAppearanceEditor({
         file,
         // Every publication carries the revision this page last read. A stale one
         // is a 409 whose recovery view carries the current number.
-        expectedRevision: event.coverRevision,
+        expectedRevision: event.cover.revision,
         runComposition: compositionRunner,
       }));
       // An upload answers `202`: the receipt is accepted and durable, but the
@@ -360,13 +360,13 @@ export function EventAppearanceEditor({
   }
 
   async function removeCover() {
-    if (coverBusy || !event.coverObjectKey) return;
+    if (coverBusy || !event.cover.hasCover) return;
     setCoverBusy(true);
     setCoverError(null);
     try {
       // Removal is a publication like any other: one of exactly two configs this
       // release can publish, through the same revision guard and receipt.
-      const result = await onEventWrite(() => publishCoverRemoval(event.id, event.coverRevision));
+      const result = await onEventWrite(() => publishCoverRemoval(event.id, event.cover.revision));
       // A `409` carries the winning event, so adopting it rebases this page onto
       // the revision the next change has to send.
       if (result.event) onCoverSaved(result.event);
@@ -424,19 +424,19 @@ export function EventAppearanceEditor({
     <div className="event-appearance-editor__cover">
       <div className="event-appearance-editor__cover-copy">
         <strong>Cover photo</strong>
-        <p>{event.coverObjectKey
+        <p>{event.cover.hasCover
           ? 'Shown on the guest hero for RSVP and photo delivery.'
           : `Optional. JPEG, PNG, WebP, or HEIC · ${COVER_MAX_MB} MB max.`}</p>
         <ManagerCoverPreparationStatus
           eventId={event.id}
-          preparation={event.coverPreparation}
+          preparation={event.cover.preparation}
           onResolved={() => { void refreshEvent(); }}
         />
       </div>
       <div className="event-appearance-editor__cover-actions">
         <label className="cover-field cover-field--compact">
           <ImagePlus aria-hidden="true" />
-          <span className="button button--secondary">{coverBusy ? 'Working…' : event.coverObjectKey ? 'Change cover' : 'Add cover'}</span>
+          <span className="button button--secondary">{coverBusy ? 'Working…' : event.cover.hasCover ? 'Change cover' : 'Add cover'}</span>
           <input
             ref={coverInput}
             className="sr-only cover-field__input"
@@ -449,7 +449,7 @@ export function EventAppearanceEditor({
             }}
           />
         </label>
-        {event.coverObjectKey && <button
+        {event.cover.hasCover && <button
           type="button"
           className="button button--secondary"
           disabled={coverLocked}

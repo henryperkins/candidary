@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import { EventsRepository } from '../../worker/db/events';
-import { eventView, guestEventView } from '../../worker/http/event-view';
+import { selectGuestEventView, selectManagerEventView } from '../../worker/http/event-view';
 import { coverMasterKey, coverRenderKey } from '../../worker/storage/event-cover-keys';
-import { eventAccess, resetDatabase, testEnv } from './helpers';
+import { eventAccess, resetDatabase, seedEventCoverGraph, testEnv } from './helpers';
 
 const now = new Date('2026-08-04T12:00:00.000Z');
 const HEX_64 = 'a'.repeat(64);
@@ -15,39 +15,34 @@ async function reload(eventId: string) {
   return (await new EventsRepository(testEnv.DB).getById(eventId))!;
 }
 
-/** An active render set with its `wide-expanded` 1x JPEG present in R2. */
+/** A valid active render set with its `wide-expanded` 1x JPEG present in R2. */
 async function activeRenderSet(access: Access) {
   const eventId = access.event.id;
   const timestamp = now.toISOString();
-  await testEnv.DB.prepare(`
-    INSERT INTO event_cover_masters (id, event_id, object_key, mime_type, byte_size, width,
-      height, sha256, normalization_version, normalization_rung, created_at)
-    VALUES ('m1', ?, ?, 'image/webp', 900000, 2480, 1680, ?, 1, 1, ?)
-  `).bind(eventId, coverMasterKey(eventId, 'm1'), HEX_64, timestamp).run();
-  await testEnv.DB.prepare(`
-    INSERT INTO event_cover_render_sets (id, event_id, master_id, recipe_json, recipe_sha256,
-      state, required_slots, manifest_sha256, published_revision, created_at)
-    VALUES ('s1', ?, 'm1', '{}', ?, 'active', 12, ?, 1, ?)
-  `).bind(eventId, HEX_64, HEX_64, timestamp).run();
-
-  const derivative = coverRenderKey(eventId, 's1', 'wide-expanded', '1x', 'jpeg');
-  await testEnv.DB.prepare(`
-    INSERT INTO event_cover_render_objects (id, render_set_id, event_id, profile_id, density,
-      format, object_key, content_type, byte_size, width, height, quality_rung, sha256, created_at)
-    VALUES ('o1', 's1', ?, 'wide-expanded', '1x', 'jpeg', ?, 'image/jpeg', 40, 620, 420, 1, ?, ?)
-  `).bind(eventId, derivative, HEX_64, timestamp).run();
+  const graph = await seedEventCoverGraph(testEnv.DB, eventId, timestamp);
+  const derivative = coverRenderKey(eventId, graph.renderSetId, 'wide-expanded', '1x', 'jpeg');
   await testEnv.MEDIA_BUCKET.put(derivative, new Uint8Array(40).fill(9), {
     httpMetadata: { contentType: 'image/jpeg' },
   });
 
   await testEnv.DB.prepare(
-    'UPDATE events SET cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1 WHERE id = ?',
-  ).bind(coverMasterKey(eventId, 'm1'), 's1', eventId).run();
+    `UPDATE events
+     SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
+     WHERE id = ?`,
+  ).bind(
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    coverMasterKey(eventId, graph.masterId),
+    graph.renderSetId,
+    eventId,
+  ).run();
   return derivative;
 }
 
 async function legacyOriginal(access: Access) {
   const key = `events/${access.event.id}/cover/9f1c-porch.png`;
+  // The post-0014 schema makes this row unrepresentable. Drop only the pointer
+  // guard to retain one compatibility-reader regression for an old snapshot.
+  await testEnv.DB.prepare('DROP TRIGGER event_cover_source_pointer_update').run();
   await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
     .bind(key, access.event.id).run();
   await testEnv.MEDIA_BUCKET.put(key, new Uint8Array(24).fill(1), {
@@ -56,41 +51,39 @@ async function legacyOriginal(access: Access) {
   return key;
 }
 
-describe('cover presence projection', () => {
+describe('nested cover projection', () => {
   let access: Access;
   beforeEach(async () => {
     await resetDatabase();
     access = await eventAccess();
   });
 
-  it('projects a constant sentinel, never the repurposed key, to either audience', async () => {
+  it('projects capability, never the repurposed master key, to either audience', async () => {
     await activeRenderSet(access);
     const event = await reload(access.event.id);
 
-    for (const view of [eventView(event, now), guestEventView(event, now)]) {
-      expect(view.coverObjectKey).toBe('cover-present');
-      // The column now holds a private normalized master. Projecting it would
-      // be worse than the status quo, not merely unchanged.
-      expect(view.coverObjectKey).not.toContain('events/');
-      expect(view.coverObjectKey!.startsWith('events/')).toBe(false);
+    for (const view of [
+      await selectManagerEventView(testEnv, event, now),
+      await selectGuestEventView(testEnv.DB, event, now),
+    ]) {
+      expect(view.cover.hasCover).toBe(true);
+      expect(JSON.stringify(view.cover)).not.toContain('events/');
+      expect(view).not.toHaveProperty('coverObjectKey');
     }
   });
 
-  it('projects the same sentinel for a legacy original, and null for no cover', async () => {
-    await legacyOriginal(access);
-    expect(eventView(await reload(access.event.id), now).coverObjectKey).toBe('cover-present');
-
-    await testEnv.DB.prepare('UPDATE events SET cover_object_key = NULL WHERE id = ?')
-      .bind(access.event.id).run();
+  it('projects an explicit no-cover capability instead of a null sentinel', async () => {
     const bare = await reload(access.event.id);
-    expect(eventView(bare, now).coverObjectKey).toBeNull();
-    expect(guestEventView(bare, now).coverObjectKey).toBeNull();
+    expect((await selectManagerEventView(testEnv, bare, now)).cover.hasCover).toBe(false);
+    expect((await selectGuestEventView(testEnv.DB, bare, now)).cover.hasCover).toBe(false);
   });
 
   it('projects the revision a first publication has no other way to learn', async () => {
-    expect(eventView(await reload(access.event.id), now).coverRevision).toBe(0);
+    expect((await selectManagerEventView(testEnv, await reload(access.event.id), now)).cover.revision)
+      .toBe(0);
     await activeRenderSet(access);
-    expect(eventView(await reload(access.event.id), now).coverRevision).toBe(1);
+    expect((await selectManagerEventView(testEnv, await reload(access.event.id), now)).cover.revision)
+      .toBe(1);
   });
 });
 
@@ -125,19 +118,21 @@ describe('manager event read', () => {
     // No session storage involved: the server picks the receipt, which is what
     // makes a reload with cleared local state still resume.
     expect(await managerEvent()).toMatchObject({
-      coverPreparation: {
-        operationId: 'op-1', status: 'preparing', completedSteps: 2, requiredSteps: 6,
+      cover: {
+        preparation: {
+          operationId: 'op-1', status: 'preparing', completedSteps: 2, requiredSteps: 6,
+        },
       },
     });
   });
 
   it('carries null when nothing is selectable', async () => {
-    expect((await managerEvent()).coverPreparation).toBeNull();
+    expect((await managerEvent()).cover.preparation).toBeNull();
   });
 
   it('never leaks a workflow ID, object key, or platform status', async () => {
     await seedReceipt('failed', 1);
-    const preparation = (await managerEvent()).coverPreparation;
+    const preparation = (await managerEvent()).cover.preparation;
     expect(Object.keys(preparation).sort()).toEqual([
       'completedSteps', 'operationId', 'requiredSteps', 'retryable',
       'safeFailureCode', 'status', 'updatedAt',
@@ -153,6 +148,11 @@ describe('manager event read', () => {
     const event = (await response.json<any>()).data.event;
     expect(event).not.toHaveProperty('coverPreparation');
     expect(event).not.toHaveProperty('coverRevision');
+    expect(Object.keys(event.cover).sort()).toEqual([
+      'available2xProfiles', 'hasCover', 'revision', 'surfaceTreatment',
+    ]);
+    expect(event.cover).not.toHaveProperty('config');
+    expect(event.cover).not.toHaveProperty('preparation');
   });
 });
 

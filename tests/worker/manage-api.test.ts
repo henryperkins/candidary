@@ -368,9 +368,9 @@ describe('manager settings and private photo intake', () => {
     );
     expect(removed.status).toBe(200);
     const data = (await removed.json<any>()).data;
-    expect(data.event.coverObjectKey).toBeNull();
+    expect(data.event.cover.hasCover).toBe(false);
     // Exactly once, and only because the expected revision still matched.
-    expect(data.event.coverRevision).toBe(1);
+    expect(data.event.cover.revision).toBe(1);
 
     const gone = await createApp().request(`/api/event/${access.event.slug}/cover`, {
       headers: { cookie: access.guest.cookie },

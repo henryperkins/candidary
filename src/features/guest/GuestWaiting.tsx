@@ -15,7 +15,7 @@ export function GuestWaiting({ event }: { event: GuestEventView }) {
       name={event.name}
       eventDate={event.eventDate}
       welcomeMessage={event.welcomeMessage}
-      coverObjectKey={event.coverObjectKey}
+      hasCover={event.cover.hasCover}
       slug={event.slug}
       welcomeIsHeading={false}
     />

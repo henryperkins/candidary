@@ -207,7 +207,8 @@ test('guest photo sources have mobile-sized targets and name errors focus the fi
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event: {
     id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Help us remember tonight.',
     uploadsEnabled: true, galleryVisible: false, moderationRequired: true,
-    coverObjectKey: null, eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
+    cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
+    eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
     rsvpDeadlineAt: null, rsvpDeadlineDate: null, phase: 'photos-primary', rsvpState: 'disabled',
     rsvpAccess: 'unavailable', lifecycleRecheckAfterMs: null,
     theme: eventTheme('candidary-default'),

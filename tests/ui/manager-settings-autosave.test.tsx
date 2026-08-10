@@ -22,7 +22,11 @@ function errorJson(body: Record<string, unknown>, status: number) {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', coverObjectKey: null,
+  welcomeMessage: 'Welcome.',
+  cover: {
+    config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
+    available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
+  },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
@@ -783,8 +787,18 @@ describe('manager settings autosave guards', () => {
     // a whole event, so it is what can carry stale neighbours back.
     const covered = {
       ...MANAGED_EVENT,
-      coverObjectKey: 'cover-present',
-      coverRevision: 1,
+      cover: {
+        config: {
+          version: 1,
+          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+          effect: 'natural',
+        },
+        revision: 1,
+        hasCover: true,
+        available2xProfiles: [],
+        surfaceTreatment: 'none',
+        preparation: null,
+      },
     };
     let releaseCover: (() => void) | null = null;
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } }, covered);
@@ -800,8 +814,14 @@ describe('manager settings autosave guards', () => {
           operation: null,
           event: {
             ...covered,
-            coverObjectKey: null,
-            coverRevision: 2,
+            cover: {
+              config: { version: 1, source: { kind: 'none' } },
+              revision: 2,
+              hasCover: false,
+              available2xProfiles: [],
+              surfaceTreatment: 'none',
+              preparation: null,
+            },
             moderationRequired: true,
             theme: MANAGED_EVENT.theme,
           },

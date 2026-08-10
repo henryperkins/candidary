@@ -5,8 +5,7 @@ import { requireManager } from '../auth/manager';
 import { AuthService } from '../auth/service';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
-import { eventView, guestEventView } from '../http/event-view';
-import { selectEventCoverPreparation } from '../services/event-cover-publication';
+import { selectGuestEventView, selectManagerEventView } from '../http/event-view';
 
 export const eventRoutes = new Hono<AppBindings>();
 
@@ -17,7 +16,7 @@ eventRoutes.get('/event/:slug', async (context) => {
   }
   return context.json({
     data: {
-      event: guestEventView(auth.event),
+      event: await selectGuestEventView(context.env.DB, auth.event),
       role: auth.session.role,
     },
     requestId: context.get('requestId'),
@@ -32,9 +31,8 @@ eventRoutes.get('/manage/events/:eventId', async (context) => {
   // true if this response carries the server-selected receipt. One `now` for
   // both, so the selection and the projection cannot disagree.
   const now = new Date();
-  const preparation = await selectEventCoverPreparation(context.env, auth.event.id, now);
   return context.json({
-    data: { event: eventView(auth.event, now, preparation) },
+    data: { event: await selectManagerEventView(context.env, auth.event, now) },
     requestId: context.get('requestId'),
   });
 });

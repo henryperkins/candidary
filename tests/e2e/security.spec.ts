@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 import {
   EVENT_ENTRY_FIXTURE_TOKEN,
   EVENT_FIXTURE,
+  GUEST_EVENT_FIXTURE,
   RSVP_HOUSEHOLD_FIXTURE,
   eventTheme,
   stubEntryExchange,
@@ -198,7 +199,7 @@ test('production preview enforces the shipped CSP while themed cover images rend
   await stubGuestRoutes(page, {
     event: {
       theme: eventTheme('midnight-film'),
-      coverObjectKey: 'events/event-a/cover.png',
+      cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
     },
   });
   const response = await page.goto(`/event/${EVENT_FIXTURE.slug}`);

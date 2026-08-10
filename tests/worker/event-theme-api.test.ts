@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as EventTheme from '../../shared/event-theme';
 import { createApp } from '../../worker/app';
 import { EventsRepository } from '../../worker/db/events';
+import { coverMasterKey, coverRenderKey } from '../../worker/storage/event-cover-keys';
 import {
   cookiesFrom,
   eventAccess,
@@ -12,6 +13,7 @@ import {
   origin,
   png,
   resetDatabase,
+  seedEventCoverGraph,
   testEnv,
   uploadPending,
   writeHeaders,
@@ -23,7 +25,7 @@ const EVENT_VIEW_KEYS = [
   'name',
   'eventDate',
   'welcomeMessage',
-  'coverObjectKey',
+  'cover',
   'uploadsEnabled',
   'galleryVisible',
   'moderationRequired',
@@ -47,10 +49,6 @@ const EVENT_VIEW_KEYS = [
   'rsvpDeadlineDate',
   'rsvpRosterVersion',
   'theme',
-  // Manager-only. The guest list below is deliberately untouched, and is the
-  // guard proving neither field reaches a guest.
-  'coverPreparation',
-  'coverRevision',
 ] as const;
 
 const GUEST_EVENT_VIEW_KEYS = [
@@ -59,7 +57,7 @@ const GUEST_EVENT_VIEW_KEYS = [
   'name',
   'eventDate',
   'welcomeMessage',
-  'coverObjectKey',
+  'cover',
   'uploadsEnabled',
   'galleryVisible',
   'moderationRequired',
@@ -660,11 +658,25 @@ describe('authorized event theme updates', () => {
 describe('manager-authorized event cover reads', () => {
   async function coveredEvent() {
     const access = await eventAccess();
-    const objectKey = `events/${access.event.id}/cover/test.png`;
-    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-      .bind(objectKey, access.event.id)
-      .run();
-    await testEnv.MEDIA_BUCKET.put(objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
+    const graph = await seedEventCoverGraph(testEnv.DB, access.event.id);
+    const objectKey = coverRenderKey(
+      access.event.id,
+      graph.renderSetId,
+      'wide-expanded',
+      '1x',
+      'jpeg',
+    );
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
+      WHERE id = ?
+    `).bind(
+      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+      coverMasterKey(access.event.id, graph.masterId),
+      graph.renderSetId,
+      access.event.id,
+    ).run();
+    await testEnv.MEDIA_BUCKET.put(objectKey, png(), { httpMetadata: { contentType: 'image/jpeg' } });
     return { access, objectKey };
   }
 
@@ -674,7 +686,7 @@ describe('manager-authorized event cover reads', () => {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
     expect(linkRead.status).toBe(200);
-    expect(linkRead.headers.get('content-type')).toBe('image/png');
+    expect(linkRead.headers.get('content-type')).toBe('image/jpeg');
     expect(linkRead.headers.get('cache-control')).toBe('private, no-store');
 
     const host = await hostAccess([access]);

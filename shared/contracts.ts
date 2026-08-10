@@ -1,4 +1,4 @@
-import type { EventCoverPreparationView } from './event-cover';
+import type { EventCoverView, GuestEventCoverView } from './event-cover';
 import type { ApiErrorBody } from './errors';
 
 // Access links only ever grant these two. Keeping `Role` narrow is what stops a
@@ -112,7 +112,7 @@ export interface EventView {
   name: string;
   eventDate: string;
   welcomeMessage: string;
-  coverObjectKey: string | null;
+  cover: EventCoverView;
   uploadsEnabled: boolean;
   galleryVisible: boolean;
   moderationRequired: boolean;
@@ -146,18 +146,6 @@ export interface EventView {
   rsvpDeadlineDate: string | null;
   rsvpRosterVersion: number;
   theme: ResolvedEventTheme;
-  // Manager-only, and transitional. The server picks the one unresolved
-  // receipt, otherwise the most recent terminal one from the last 24 hours, so
-  // accepted cover work stays discoverable after a reload with every scrap of
-  // local state cleared. Phase 3 removes this when Manager switches to
-  // `cover: EventCoverView`, preventing two owners for the same receipt.
-  coverPreparation: EventCoverPreparationView | null;
-  // Not optional polish. Every publication sends `expectedRevision` and a stale
-  // value is a 409 whose recovery view carries the current number — but a
-  // manager who has never published has no recovery view to read, and the
-  // sentinel `coverObjectKey` deliberately carries no revision. Without this
-  // the first publication of every event has no legal value to send.
-  coverRevision: number;
 }
 
 // Deliberately an allowlist rather than an omission of what is secret: a field
@@ -170,7 +158,6 @@ export type GuestEventView = Pick<
   | 'name'
   | 'eventDate'
   | 'welcomeMessage'
-  | 'coverObjectKey'
   | 'uploadsEnabled'
   | 'galleryVisible'
   | 'moderationRequired'
@@ -181,7 +168,7 @@ export type GuestEventView = Pick<
   | 'rsvpDeadlineAt'
   | 'rsvpDeadlineDate'
   | 'theme'
-> & GuestPhaseView;
+> & GuestPhaseView & { cover: GuestEventCoverView };
 
 // RSVP. Every shape below is written out rather than derived from a database
 // record, because the difference between what a household may see and what a

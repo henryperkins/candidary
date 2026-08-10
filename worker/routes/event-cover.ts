@@ -20,7 +20,7 @@ import {
 import { EventsRepository } from '../db/events';
 import type { CoverDraftRow, EventRecord } from '../db/types';
 import type { AppBindings } from '../env';
-import { eventView } from '../http/event-view';
+import { selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import {
   coverDraftView,
@@ -764,5 +764,5 @@ async function currentEventView(
 ) {
   const event = await new EventsRepository(context.env.DB).getById(eventId);
   if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
-  return eventView(event, now, await selectEventCoverPreparation(context.env, eventId, now));
+  return selectManagerEventView(context.env, event, now);
 }

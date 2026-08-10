@@ -5,7 +5,7 @@ import { managerEventCoverPath } from '../app/api';
 import { eventThemeStyle } from '../app/event-theme-style';
 import { useEventCover } from '../app/use-event-cover';
 
-type PreviewEvent = Pick<EventView, 'id' | 'name' | 'eventDate' | 'welcomeMessage' | 'coverObjectKey'>;
+type PreviewEvent = Pick<EventView, 'id' | 'name' | 'eventDate' | 'welcomeMessage' | 'cover'>;
 
 export interface EventAppearancePreviewProps {
   event: PreviewEvent;
@@ -18,7 +18,7 @@ function previewDate(eventDate: string): string {
 }
 
 export function EventAppearancePreview({ event, theme }: EventAppearancePreviewProps) {
-  const coverPath = event.coverObjectKey ? managerEventCoverPath(event.id) : null;
+  const coverPath = event.cover.hasCover ? managerEventCoverPath(event.id) : null;
   const coverUrl = useEventCover(coverPath);
   const style = {
     ...eventThemeStyle(theme.tokens),

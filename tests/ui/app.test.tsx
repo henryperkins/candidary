@@ -421,6 +421,7 @@ describe('public Candidary experience', () => {
 const GUEST_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
+  cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   galleryVisible: false, moderationRequired: true, phase: 'photos-primary',
   rsvpState: 'disabled', rsvpAccess: 'unavailable', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
   eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
@@ -664,7 +665,11 @@ describe('guest event experience', () => {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', coverObjectKey: null,
+  welcomeMessage: 'Welcome.',
+  cover: {
+    config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
+    available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
+  },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
@@ -2367,7 +2372,7 @@ describe('guest event phase composition', () => {
     name: 'Maya & Theo',
     eventDate: '2026-09-19',
     welcomeMessage: 'Come celebrate with us.',
-    coverObjectKey: null,
+    cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
     uploadsEnabled: true,
     galleryVisible: false,
     moderationRequired: true,

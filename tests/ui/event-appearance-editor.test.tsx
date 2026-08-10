@@ -34,9 +34,18 @@ const event: EventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
-  coverObjectKey: 'cover-present',
-  coverPreparation: null,
-  coverRevision: 0,
+  cover: {
+    config: {
+      version: 1,
+      source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+      effect: 'natural',
+    },
+    revision: 0,
+    hasCover: true,
+    available2xProfiles: [],
+    surfaceTreatment: 'none',
+    preparation: null,
+  },
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
@@ -64,7 +73,17 @@ const event: EventView = {
 
 // Theme tests do not need a cover. Keeping one out of their fixture prevents
 // the preview's independent cover read from consuming a queued theme response.
-const eventWithoutCover: EventView = { ...event, coverObjectKey: null };
+const eventWithoutCover: EventView = {
+  ...event,
+  cover: {
+    config: { version: 1, source: { kind: 'none' } },
+    revision: 0,
+    hasCover: false,
+    available2xProfiles: [],
+    surfaceTreatment: 'none',
+    preparation: null,
+  },
+};
 
 function Harness({ initial = eventWithoutCover }: { initial?: EventView }) {
   const [current, setCurrent] = useState(initial);
@@ -452,7 +471,13 @@ describe('event appearance editor', () => {
   });
 
   it('uploads through the draft pipeline and removes with one publication', async () => {
-    const cleared = { ...event, coverObjectKey: null, coverRevision: 2 };
+    const cleared = {
+      ...event,
+      cover: {
+        ...eventWithoutCover.cover,
+        revision: 2,
+      },
+    };
     const calls: string[] = [];
     const draft = (state: string, revision: number, extra: Record<string, unknown> = {}) => ({
       id: 'draft-a',
@@ -509,7 +534,7 @@ describe('event appearance editor', () => {
         return json({ applied: false, operation: { ...preparing, completedSteps: 0 } });
       }
       if (path === '/api/manage/events/event-a' && method === 'GET') {
-        return json({ event: { ...event, coverPreparation: preparing } });
+        return json({ event: { ...event, cover: { ...event.cover, preparation: preparing } } });
       }
       if (path === '/api/manage/events/event-a/cover/publications/operation-a' && method === 'GET') {
         return json({ operation: preparing });
@@ -537,7 +562,7 @@ describe('event appearance editor', () => {
     await waitFor(() => expect(screen.getByText(/Preparing cover 2 of 6/u)).toBeVisible());
 
     cleanup();
-    render(<Harness initial={{ ...event, coverRevision: 1 }} />);
+    render(<Harness initial={{ ...event, cover: { ...event.cover, revision: 1 } }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
     const removal = (fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>)
@@ -551,7 +576,10 @@ describe('event appearance editor', () => {
   });
 
   it('reads the recovery view out of a 409 envelope instead of reporting a generic error', async () => {
-    const winner = { ...event, coverObjectKey: null, coverRevision: 5 };
+    const winner = {
+      ...event,
+      cover: { ...eventWithoutCover.cover, revision: 5 },
+    };
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
@@ -570,7 +598,7 @@ describe('event appearance editor', () => {
       throw new Error('Unexpected request ' + method + ' ' + path);
     });
     vi.stubGlobal('fetch', fetchMock);
-    render(<Harness initial={{ ...event, coverRevision: 1 }} />);
+    render(<Harness initial={{ ...event, cover: { ...event.cover, revision: 1 } }} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeVisible());

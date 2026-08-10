@@ -1,5 +1,5 @@
 import type { EventView, GuestEventView } from '../../shared/contracts';
-import type { EventCoverPreparationView } from '../../shared/event-cover';
+import type { EventCoverView, GuestEventCoverView } from '../../shared/event-cover';
 import {
   localDateForInstant,
   localTimeForInstant,
@@ -12,6 +12,12 @@ import {
   resolvePhotoIntake,
 } from '../../shared/rsvp';
 import type { EventRecord } from '../db/types';
+import type { AppEnv } from '../env';
+import { selectEventCoverPreparation } from '../services/event-cover-publication';
+import {
+  guestCoverView,
+  selectManagerEventCoverView,
+} from './event-cover-view';
 
 function deadlineDate(event: EventRecord): string | null {
   return event.rsvpDeadlineAt
@@ -26,37 +32,15 @@ function deadlineDate(event: EventRecord): string | null {
  * seeded with the documented default rather than with the epoch rendered in the
  * event's zone — which would be a real-looking time nobody chose.
  */
-function startTime(event: EventRecord): string {
+export function eventStartTime(event: EventRecord): string {
   if (isLegacyEventStart(event.eventStartAt)) return '00:00';
   return localTimeForInstant(event.eventStartAt, event.eventTimezone);
 }
 
-/**
- * The one place the presence sentinel is introduced.
- *
- * `cover_object_key` now holds a private normalized master for a published
- * upload, so projecting the column would be worse than the status quo: it would
- * hand out the key of a high-resolution original rather than a legacy one. Both
- * audiences use this field for presence only and then request the authorized
- * route, so a constant truthy value says everything either of them needs.
- *
- * It belongs here and not in `mapEvent`, because delivery reads
- * `auth.event.coverObjectKey` from the record — sentinelling there would make
- * the cover route fetch an object literally named `cover-present`.
- */
-const COVER_PRESENT_SENTINEL = 'cover-present';
-
-function coverPresence(event: EventRecord): string | null {
-  return event.coverObjectKey || event.coverRenderSetId ? COVER_PRESENT_SENTINEL : null;
-}
-
 export function eventView(
   event: EventRecord,
+  cover: EventCoverView,
   now = new Date(),
-  // Resolved by the caller and passed in, because it needs a D1 read and this
-  // projection stays pure and synchronous. The default keeps all eight existing
-  // call sites compiling.
-  coverPreparation: EventCoverPreparationView | null = null,
 ): EventView {
   const intake = resolvePhotoIntake(event, now);
   return {
@@ -65,7 +49,7 @@ export function eventView(
     name: event.name,
     eventDate: event.eventDate,
     welcomeMessage: event.welcomeMessage,
-    coverObjectKey: coverPresence(event),
+    cover,
     uploadsEnabled: event.uploadsEnabled,
     galleryVisible: event.galleryVisible,
     moderationRequired: event.moderationRequired,
@@ -80,7 +64,7 @@ export function eventView(
     deletedAt: event.deletedAt,
     eventTimezone: event.eventTimezone,
     eventStartAt: event.eventStartAt,
-    eventStartTime: startTime(event),
+    eventStartTime: eventStartTime(event),
     photosOpen: intake.photosOpen,
     photoIntakeState: intake.photoIntakeState,
     photoIntakeRecheckAfterMs: intake.photoIntakeRecheckAfterMs,
@@ -89,8 +73,6 @@ export function eventView(
     rsvpDeadlineDate: deadlineDate(event),
     rsvpRosterVersion: event.rsvpRosterVersion,
     theme: resolvedThemeView(event.themeConfig),
-    coverPreparation,
-    coverRevision: event.coverRevision,
   };
 }
 
@@ -101,7 +83,11 @@ export function eventView(
  * every field in one response is derived from a single instant. The browser is
  * never asked to compare the deadline, or the start, to its own clock.
  */
-export function guestEventView(event: EventRecord, now = new Date()): GuestEventView {
+export function guestEventView(
+  event: EventRecord,
+  cover: GuestEventCoverView,
+  now = new Date(),
+): GuestEventView {
   const rsvpConfigured = isRsvpConfigured(event);
   return {
     id: event.id,
@@ -109,7 +95,7 @@ export function guestEventView(event: EventRecord, now = new Date()): GuestEvent
     name: event.name,
     eventDate: event.eventDate,
     welcomeMessage: event.welcomeMessage,
-    coverObjectKey: coverPresence(event),
+    cover,
     uploadsEnabled: event.uploadsEnabled,
     galleryVisible: event.galleryVisible,
     moderationRequired: event.moderationRequired,
@@ -120,4 +106,25 @@ export function guestEventView(event: EventRecord, now = new Date()): GuestEvent
     ...resolveGuestEventPhase({ ...event, rsvpConfigured }, now),
     theme: resolvedThemeView(event.themeConfig),
   };
+}
+
+/** Route boundary: load the manager-only preparation and capability together. */
+export async function selectManagerEventView(
+  env: AppEnv,
+  event: EventRecord,
+  now = new Date(),
+): Promise<EventView> {
+  const preparation = await selectEventCoverPreparation(env, event.id, now);
+  const cover = await selectManagerEventCoverView(env.DB, event, preparation);
+  return eventView(event, cover, now);
+}
+
+/** Route boundary: derive the manager projection, then apply the guest allowlist. */
+export async function selectGuestEventView(
+  db: D1Database,
+  event: EventRecord,
+  now = new Date(),
+): Promise<GuestEventView> {
+  const cover = await selectManagerEventCoverView(db, event, null);
+  return guestEventView(event, guestCoverView(cover), now);
 }
