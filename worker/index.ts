@@ -21,6 +21,8 @@ import {
   type CoverRenderPayload,
 } from './workflows/cover-render';
 
+export { StagingConformanceEntrypoint } from './staging-conformance';
+
 const app = createApp();
 
 export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }> {

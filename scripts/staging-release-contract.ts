@@ -1,7 +1,8 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { isAbsolute, normalize, relative, resolve } from 'node:path';
 
-export const STAGING_ORIGIN = 'https://staging.candidary.invalid' as const;
+export { STAGING_ORIGIN } from '../shared/staging-conformance.ts';
+
 export const STAGING_RELEASE_MODES = [
   'probe',
   'deploy',
@@ -77,6 +78,7 @@ export interface RuntimeIdentityResult {
 export interface ImageCaseResult {
   readonly caseId: string;
   readonly outcome: ClosedOutcome;
+  readonly resultCode: string | null;
   readonly detectedType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/heic' | null;
   readonly format: 'webp' | 'jpeg' | null;
   readonly width: number | null;
