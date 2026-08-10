@@ -447,8 +447,8 @@ Require JPEG, opaque PNG, transparent PNG, WebP, iPhone HEIC, rejected HEIF/sequ
 expect(assertCompleteImageMatrix(plan)).toMatchObject({
   masterRungs: [1, 2, 3, 4, 5],
   previewRungs: [1, 2, 3, 4],
-  effects: ['natural', 'warm', 'cool', 'mono', 'vivid'],
-  formats: ['webp', 'jpeg'],
+  effects: ['natural', 'warm', 'film', 'soft', 'monochrome'],
+  formats: ['jpeg', 'webp'],
 });
 ```
 

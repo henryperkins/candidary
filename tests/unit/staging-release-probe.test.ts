@@ -61,11 +61,11 @@ describe('Workflow missing-instance fingerprinting', () => {
     expect(() => qualifyMissingFingerprint({
       absent: [absent(), { ...absent(), codeFields: [{ field: 'code', value: 10092 }] }, absent()],
       invalid: [], synthetic: [],
-    })).toThrow(/stable discriminator/u);
+    })).toThrow(/NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR/u);
     expect(() => qualifyMissingFingerprint({
       absent: [absent(), absent(), absent()],
       invalid: [absent()], synthetic: [],
-    })).toThrow(/stable discriminator/u);
+    })).toThrow(/NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR/u);
     const two = (): WorkflowErrorFingerprint => ({
       ...absent(),
       codeFields: [
@@ -75,7 +75,7 @@ describe('Workflow missing-instance fingerprinting', () => {
     });
     expect(() => qualifyMissingFingerprint({
       absent: [two(), two(), two()], invalid: [], synthetic: [],
-    })).toThrow(/exactly one/u);
+    })).toThrow(/AMBIGUOUS_WORKFLOW_MISSING_DISCRIMINATOR/u);
   });
 });
 
@@ -92,6 +92,7 @@ describe('route-disabled discovery probe', () => {
         name: STAGING_TARGET.workflows.backfill,
         binding: 'COVER_BACKFILL_WORKFLOW',
         class_name: 'CoverBackfillWorkflow',
+        script_name: STAGING_TARGET.workerName,
       }],
     });
     const caller = buildProbeCallerConfig();
@@ -121,7 +122,7 @@ describe('route-disabled discovery probe', () => {
       async observeAbsent() { calls.push('absent'); return true; },
     };
     await expect(runProbeDiscovery(adapter)).resolves.toEqual({
-      discriminator: { field: 'code', value: 10091 }, probeAbsent: true,
+      status: 'passed', discriminator: { field: 'code', value: 10091 }, probeAbsent: true,
     });
     expect(calls).toEqual(['deploy', 'sample', 'destroy', 'absent']);
 
@@ -129,6 +130,23 @@ describe('route-disabled discovery probe', () => {
     calls.length = 0;
     await expect(runProbeDiscovery(failing)).rejects.toThrow(/sampling failed/u);
     expect(calls).toEqual(['deploy', 'destroy', 'absent']);
+  });
+
+  it('records a blocked result when deployed missing errors match ordinary Errors', async () => {
+    const plain: WorkflowErrorFingerprint = {
+      constructorFamily: 'Error', name: 'Error', codeFields: [], ownKeys: [],
+    };
+    const adapter: ProbeDiscoveryAdapter = {
+      async deploy() {},
+      async sample() { return { absent: [plain, plain, plain], invalid: [], synthetic: [plain] }; },
+      async destroy() {},
+      async observeAbsent() { return true; },
+    };
+    await expect(runProbeDiscovery(adapter)).resolves.toEqual({
+      status: 'blocked',
+      blockerCode: 'NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR',
+      probeAbsent: true,
+    });
   });
 
   it('fails closed if probe absence cannot be proved', async () => {

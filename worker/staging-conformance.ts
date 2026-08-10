@@ -3,6 +3,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import {
   EVENT_COVER_EFFECTS,
   EVENT_COVER_PROFILES,
+  MAX_COVER_MANUAL_ZOOM,
   type CoverFocusPoint,
   type EventCoverDensity,
   type EventCoverEffectId,
@@ -133,7 +134,7 @@ function assertFocus(value: unknown): CoverFocusPoint {
     || typeof record.x !== 'number' || !Number.isFinite(record.x) || record.x < 0 || record.x > 1
     || typeof record.y !== 'number' || !Number.isFinite(record.y) || record.y < 0 || record.y > 1
     || typeof record.zoom !== 'number' || !Number.isFinite(record.zoom)
-    || record.zoom < 1 || record.zoom > 3) {
+    || record.zoom < 1 || record.zoom > MAX_COVER_MANUAL_ZOOM) {
     throw new Error('STAGING_CONFORMANCE_INPUT_INVALID');
   }
   return { x: record.x, y: record.y, zoom: record.zoom };

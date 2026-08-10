@@ -31,6 +31,17 @@ export interface CertifiedWorkflowMissingDiscriminator {
   readonly value: WorkflowCodeValue;
 }
 
+export type WorkflowFingerprintBlockerCode =
+  | 'NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR'
+  | 'AMBIGUOUS_WORKFLOW_MISSING_DISCRIMINATOR';
+
+export class WorkflowFingerprintQualificationError extends Error {
+  constructor(readonly blockerCode: WorkflowFingerprintBlockerCode) {
+    super(blockerCode);
+    this.name = 'WorkflowFingerprintQualificationError';
+  }
+}
+
 const CLOSED_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/u;
 const CLOSED_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_.:-]{0,63}$/u;
 
@@ -118,10 +129,10 @@ export function qualifyMissingFingerprint(
     .flatMap((sample) => [...observationMap(sample).keys()]);
   for (const key of controls) stable.delete(key);
   if (stable.size === 0) {
-    throw new Error('Probe found no stable discriminator distinct from control failures.');
+    throw new WorkflowFingerprintQualificationError('NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR');
   }
   if (stable.size !== 1) {
-    throw new Error('Probe found more than exactly one qualifying discriminator.');
+    throw new WorkflowFingerprintQualificationError('AMBIGUOUS_WORKFLOW_MISSING_DISCRIMINATOR');
   }
   return [...stable.values()][0]!;
 }

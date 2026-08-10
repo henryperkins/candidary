@@ -1,4 +1,5 @@
 import {
+  WorkflowFingerprintQualificationError,
   qualifyMissingFingerprint,
   type CertifiedWorkflowMissingDiscriminator,
   type WorkflowProbeSamples,
@@ -20,6 +21,7 @@ export function buildProbeWranglerConfig(): Record<string, unknown> {
       name: STAGING_TARGET.workflows.backfill,
       binding: 'COVER_BACKFILL_WORKFLOW',
       class_name: 'CoverBackfillWorkflow',
+      script_name: STAGING_TARGET.workerName,
     }],
   };
 }
@@ -68,18 +70,33 @@ export interface ProbeDiscoveryAdapter {
 }
 
 export interface ProbeDiscoveryResult {
+  readonly status: 'passed';
   readonly discriminator: CertifiedWorkflowMissingDiscriminator;
+  readonly probeAbsent: true;
+}
+
+export interface ProbeDiscoveryBlockedResult {
+  readonly status: 'blocked';
+  readonly blockerCode:
+    | 'NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR'
+    | 'AMBIGUOUS_WORKFLOW_MISSING_DISCRIMINATOR';
   readonly probeAbsent: true;
 }
 
 export async function runProbeDiscovery(
   adapter: ProbeDiscoveryAdapter,
-): Promise<ProbeDiscoveryResult> {
+): Promise<ProbeDiscoveryResult | ProbeDiscoveryBlockedResult> {
   let primaryFailure: unknown;
   let discriminator: CertifiedWorkflowMissingDiscriminator | null = null;
+  let blockerCode: ProbeDiscoveryBlockedResult['blockerCode'] | null = null;
   try {
     await adapter.deploy();
-    discriminator = qualifyMissingFingerprint(await adapter.sample());
+    try {
+      discriminator = qualifyMissingFingerprint(await adapter.sample());
+    } catch (error) {
+      if (!(error instanceof WorkflowFingerprintQualificationError)) throw error;
+      blockerCode = error.blockerCode;
+    }
   } catch (error) {
     primaryFailure = error;
   }
@@ -99,6 +116,7 @@ export async function runProbeDiscovery(
   }
   if (cleanupFailure !== undefined) throw cleanupFailure;
   if (primaryFailure !== undefined) throw primaryFailure;
+  if (blockerCode !== null) return { status: 'blocked', blockerCode, probeAbsent: true };
   if (discriminator === null) throw new Error('Probe produced no discriminator.');
-  return { discriminator, probeAbsent: true };
+  return { status: 'passed', discriminator, probeAbsent: true };
 }

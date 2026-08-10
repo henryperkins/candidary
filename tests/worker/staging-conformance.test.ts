@@ -119,6 +119,18 @@ describe('staging conformance RPC service', () => {
     expect(normalizeMaster).not.toHaveBeenCalled();
   });
 
+  it('rejects profile zoom beyond the product maximum before rendering', async () => {
+    const renderProfile = vi.fn(dependencies().renderProfile);
+    const service = new StagingConformanceService(env(), dependencies({ renderProfile }));
+    await expect(service.renderProfileCase({
+      runId: RUN_ID, caseId: 'zoom-over-limit', effect: 'natural',
+      profile: 'short-lookup', density: '1x', format: 'webp',
+      focus: { x: 0.5, y: 0.5, zoom: 2.01 },
+      master: { width: 2400, height: 1600 },
+    })).rejects.toThrow('STAGING_CONFORMANCE_INPUT_INVALID');
+    expect(renderProfile).not.toHaveBeenCalled();
+  });
+
   it('correlates runtime version metadata with the immutable build identity', () => {
     const service = new StagingConformanceService(env(), dependencies());
     expect(service.runtimeIdentity({ runId: RUN_ID })).toEqual({

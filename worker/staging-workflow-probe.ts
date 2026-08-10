@@ -10,6 +10,15 @@ export type ProbeSampleResult =
   | { readonly outcome: 'found' }
   | { readonly outcome: 'threw'; readonly fingerprint: WorkflowErrorFingerprint };
 
+// A default module export is required for Wrangler to bundle named
+// WorkerEntrypoints. This Worker is route-disabled; the handler is only a
+// closed fallback if a configuration is ever broadened accidentally.
+export default {
+  fetch(): Response {
+    return new Response(null, { status: 404 });
+  },
+};
+
 export class StagingWorkflowProbe extends WorkerEntrypoint<ProbeEnv> {
   async sample(instanceId: string): Promise<ProbeSampleResult> {
     if (typeof instanceId !== 'string' || instanceId.length === 0 || instanceId.length > 128
