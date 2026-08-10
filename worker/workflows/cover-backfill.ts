@@ -40,7 +40,12 @@ import { coverPointerStatements } from '../db/events';
 import type { EventRow } from '../db/events';
 import type { CoverBackfillJobRow, CoverMasterRow, CoverRenderSetRow } from '../db/types';
 import type { AppEnv } from '../env';
-import { STALE_DISPATCH_CLAIM_MS, coverRequestDigest } from '../services/event-cover-publication';
+import {
+  STALE_DISPATCH_CLAIM_MS,
+  coverPublicationTerminalAssertionStatement,
+  coverRequestDigest,
+  type BackfillPublicationOwner,
+} from '../services/event-cover-publication';
 import {
   normalizeCoverMaster,
   renderCoverProfileObject,
@@ -1530,14 +1535,97 @@ export async function coverBackfillProfileStep(
   return { profile, written, adopted };
 }
 
-/**
- * Steps 6-7: verify the exact manifest, then swap the pointers under guard.
- *
- * The legacy original is inventoried by the same statements that displace it —
- * `coverPointerStatements` with a `backfilled` reason — so there is no window in
- * which the pointer has moved and the only record of the old object has not been
- * written. Nothing is deleted from R2 here or anywhere in this Workflow.
- */
+async function recordBackfillReadyCheckpoint(
+  env: AppEnv,
+  payload: CoverBackfillPayload,
+  job: CoverBackfillJobRow,
+  event: EventRow,
+  set: CoverRenderSetRow,
+  now: Date,
+): Promise<void> {
+  const timestamp = now.toISOString();
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'ready', manifest_sha256 = ?, ready_at = ?
+      WHERE id = ? AND event_id = ? AND master_id = ? AND draft_id IS NULL
+        AND state = 'staging' AND manifest_sha256 IS NULL AND ready_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM event_cover_backfill_jobs j
+          JOIN event_cover_workflow_fences f
+            ON f.workflow_binding = ? AND f.workflow_instance_id = j.workflow_instance_id
+              AND f.event_id = j.event_id AND f.state = 'open'
+              AND f.dispatch_generation = j.dispatch_generation
+          JOIN events e ON e.id = j.event_id AND e.deleted_at IS NULL
+          WHERE j.id = ? AND j.run_id = ? AND j.event_id = ?
+            AND j.workflow_instance_id = ? AND j.dispatch_generation = ?
+            AND j.master_id = ? AND j.render_set_id = ?
+            AND j.status IN ('rendering', 'finalizing')
+            AND j.manifest_sha256 = ? AND e.cover_revision = j.expected_revision
+            AND e.cover_object_key IS ? AND e.cover_render_set_id IS NULL
+        )
+    `).bind(
+      job.manifest_sha256, timestamp, set.id, payload.eventId, job.master_id,
+      COVER_BACKFILL_BINDING, payload.jobId, payload.runId, payload.eventId,
+      job.workflow_instance_id, job.dispatch_generation, job.master_id, set.id,
+      job.manifest_sha256, event.cover_object_key,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'finalizing', updated_at = ?
+      WHERE id = ? AND run_id = ? AND event_id = ? AND workflow_instance_id = ?
+        AND dispatch_generation = ? AND master_id = ? AND render_set_id = ?
+        AND status = 'rendering' AND manifest_sha256 = ? AND changes() = 1
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = event_cover_backfill_jobs.render_set_id
+            AND s.event_id = event_cover_backfill_jobs.event_id
+            AND s.master_id = event_cover_backfill_jobs.master_id AND s.draft_id IS NULL
+            AND s.state = 'ready' AND s.manifest_sha256 = ? AND s.ready_at = ?
+        )
+    `).bind(
+      timestamp, payload.jobId, payload.runId, payload.eventId, job.workflow_instance_id,
+      job.dispatch_generation, job.master_id, set.id, job.manifest_sha256,
+      job.manifest_sha256, timestamp,
+    ),
+    env.DB.prepare(`
+      UPDATE event_cover_backfill_jobs
+      SET status = 'backfill-ready-checkpoint-assertion-failed'
+      WHERE id = ? AND run_id = ? AND event_id = ? AND workflow_instance_id = ?
+        AND dispatch_generation = ? AND master_id = ? AND render_set_id = ?
+        AND NOT (
+          status = 'finalizing' AND manifest_sha256 = ?
+          AND EXISTS (
+            SELECT 1 FROM event_cover_render_sets s
+            WHERE s.id = event_cover_backfill_jobs.render_set_id
+              AND s.event_id = event_cover_backfill_jobs.event_id
+              AND s.master_id = event_cover_backfill_jobs.master_id AND s.draft_id IS NULL
+              AND s.state = 'ready' AND s.manifest_sha256 = ? AND s.ready_at = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM events e
+            WHERE e.id = event_cover_backfill_jobs.event_id AND e.deleted_at IS NULL
+              AND e.cover_revision = event_cover_backfill_jobs.expected_revision
+              AND e.cover_object_key IS ? AND e.cover_render_set_id IS NULL
+          )
+          AND EXISTS (
+            SELECT 1 FROM event_cover_workflow_fences f
+            WHERE f.workflow_binding = ?
+              AND f.workflow_instance_id = event_cover_backfill_jobs.workflow_instance_id
+              AND f.event_id = event_cover_backfill_jobs.event_id AND f.state = 'open'
+              AND f.dispatch_generation = event_cover_backfill_jobs.dispatch_generation
+          )
+        )
+    `).bind(
+      payload.jobId, payload.runId, payload.eventId, job.workflow_instance_id,
+      job.dispatch_generation, job.master_id, set.id,
+      job.manifest_sha256, job.manifest_sha256, timestamp,
+      event.cover_object_key, COVER_BACKFILL_BINDING,
+    ),
+  ]);
+}
+
+/** Steps 6-7: checkpoint the exact manifest, then atomically publish it. */
 export async function coverBackfillFinalize(
   env: AppEnv,
   payload: CoverBackfillPayload,
@@ -1545,7 +1633,8 @@ export async function coverBackfillFinalize(
 ): Promise<CoverBackfillOutcome> {
   const state = await loadState(env, payload);
   if (!state) return stage('skipped').outcome;
-  const { job, event } = state;
+  const { event } = state;
+  let { job } = state;
   if (job.status === 'applied') {
     return {
       status: 'applied', appliedRevision: event.cover_revision, failureCode: null, retryable: false,
@@ -1559,7 +1648,7 @@ export async function coverBackfillFinalize(
     return stage('skipped').outcome;
   }
 
-  const set = await env.DB.prepare('SELECT * FROM event_cover_render_sets WHERE id = ?')
+  let set = await env.DB.prepare('SELECT * FROM event_cover_render_sets WHERE id = ?')
     .bind(job.render_set_id).first<CoverRenderSetRow>();
   const master = await env.DB.prepare('SELECT * FROM event_cover_masters WHERE id = ?')
     .bind(job.master_id).first<CoverMasterRow>();
@@ -1583,71 +1672,105 @@ export async function coverBackfillFinalize(
     };
   }
 
-  const verdict = await verifyCoverManifest(env, set.id, frozenSlots);
-  if (!verdict.complete || verdict.manifestSha256 !== job.manifest_sha256) {
-    await recordTerminal(env, payload, 'failed', now, job, {
-      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED',
-      abandonSetId: set.id,
-    });
-    return {
-      status: 'failed', appliedRevision: null,
-      failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED', retryable: false,
-    };
+  if (job.status === 'rendering' || (job.status === 'finalizing' && set.state === 'staging')) {
+    const verdict = await verifyCoverManifest(env, set.id, frozenSlots);
+    if (!verdict.complete || verdict.manifestSha256 !== job.manifest_sha256) {
+      await recordTerminal(env, payload, 'failed', now, job, {
+        failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED',
+        abandonSetId: set.id,
+      });
+      return {
+        status: 'failed', appliedRevision: null,
+        failureCode: 'COVER_OUTPUT_BUDGET_EXHAUSTED', retryable: false,
+      };
+    }
+    try {
+      await recordBackfillReadyCheckpoint(env, payload, job, event, set, now);
+    } catch (error) {
+      const current = await loadState(env, payload);
+      if (current?.job.status === 'applied') {
+        return {
+          status: 'applied', appliedRevision: current.event.cover_revision,
+          failureCode: null, retryable: false,
+        };
+      }
+      if (current?.job.status === 'failed') {
+        return {
+          status: 'failed', appliedRevision: null,
+          failureCode: current.job.failure_code, retryable: current.job.retryable === 1,
+        };
+      }
+      if (current && !await backfillPredicatesHold(current.job, current.event)) {
+        await recordTerminal(env, payload, 'skipped', now, current.job, {
+          abandonSetId: current.job.render_set_id,
+        });
+        return stage('skipped').outcome;
+      }
+      throw error;
+    }
+    const checkpoint = await loadState(env, payload);
+    if (!checkpoint) return stage('skipped').outcome;
+    job = checkpoint.job;
+    set = await env.DB.prepare('SELECT * FROM event_cover_render_sets WHERE id = ?')
+      .bind(job.render_set_id).first<CoverRenderSetRow>();
+    if (!set) return stage('skipped').outcome;
+  }
+
+  if (job.status !== 'finalizing' || set.state !== 'ready'
+    || !set.manifest_sha256 || !set.ready_at
+    || set.manifest_sha256 !== job.manifest_sha256) {
+    return stage('skipped').outcome;
   }
 
   const timestamp = now.toISOString();
   const nextRevision = job.expected_revision + 1;
   const { referenceReleaseAt, expiresAt } = terminalTimestamps(now, true);
+  const cleanupFloor = new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString();
+  const nextConfig = canonicalCoverConfig(BACKFILL_COVER_CONFIG);
+  const owner: BackfillPublicationOwner = {
+    kind: 'backfill',
+    eventId: payload.eventId,
+    runId: payload.runId,
+    jobId: payload.jobId,
+    workflowInstanceId: job.workflow_instance_id,
+    dispatchGeneration: job.dispatch_generation,
+    expectedRevision: job.expected_revision,
+    expectedCurrentKey: event.cover_object_key!,
+    nextConfig,
+    nextMasterId: master.id,
+    nextObjectKey: master.object_key,
+    renderSetId: set.id,
+    manifestSha256: job.manifest_sha256!,
+    readyAt: set.ready_at,
+    publishedAt: timestamp,
+    terminalAt: timestamp,
+    referenceReleaseAt: referenceReleaseAt!,
+    expiresAt: expiresAt!,
+    fenceExpiresAt: coverWorkflowFenceTerminalExpiry(now),
+    legacyKeyFingerprint: job.legacy_key_fingerprint,
+    retiredAt: timestamp,
+    cleanupFloor,
+  };
 
-  const results = await env.DB.batch([
-    ...coverPointerStatements(env.DB, {
-      eventId: payload.eventId,
-      expectedRevision: job.expected_revision,
-      expectedCurrentKey: event.cover_object_key,
-      expectedCurrentRenderSetId: null,
-      nextConfig: canonicalCoverConfig(BACKFILL_COVER_CONFIG),
-      nextObjectKey: master.object_key,
-      nextRenderSetId: set.id,
-      retiredAt: timestamp,
-      cleanupAfter: new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString(),
-      retiredKeyFingerprint: job.legacy_key_fingerprint,
-      reason: 'backfilled',
-      backfillGuard: {
-        runId: payload.runId,
-        jobId: payload.jobId,
-        workflowInstanceId: job.workflow_instance_id,
-        dispatchGeneration: job.dispatch_generation,
-        masterId: job.master_id,
-        renderSetId: job.render_set_id,
-        legacyKeyFingerprint: job.legacy_key_fingerprint,
-      },
-    }),
-    // Predicated on the revision having actually moved: a zero-change UPDATE does
-    // not error a D1 batch, so without this a lost guard would still activate the
-    // set and mark the job applied.
-    env.DB.prepare(`
-      UPDATE event_cover_render_sets
-      SET state = 'active', manifest_sha256 = ?, published_revision = ?,
-          ready_at = COALESCE(ready_at, ?), published_at = ?
-      WHERE id = ? AND state IN ('staging', 'ready')
-        AND EXISTS (
-          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
-            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
-        )
-    `).bind(
-      job.manifest_sha256, nextRevision, timestamp, timestamp,
-      set.id, payload.eventId, nextRevision, master.object_key, set.id,
-    ),
+  const statements: D1PreparedStatement[] = [
     env.DB.prepare(`
       UPDATE event_cover_backfill_jobs
       SET status = 'applied', failure_code = NULL, retryable = 0, terminal_at = ?,
           reference_release_at = ?, expires_at = ?, updated_at = ?
       WHERE id = ? AND run_id = ? AND event_id = ? AND workflow_instance_id = ?
         AND dispatch_generation = ? AND master_id = ? AND render_set_id = ?
-        AND status IN ('rendering', 'finalizing')
+        AND status = 'finalizing' AND manifest_sha256 = ?
         AND EXISTS (
-          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
-            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+          SELECT 1 FROM events e WHERE e.id = event_cover_backfill_jobs.event_id
+            AND e.deleted_at IS NULL AND e.cover_revision = event_cover_backfill_jobs.expected_revision
+            AND e.cover_object_key IS ? AND e.cover_render_set_id IS NULL
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_render_sets s
+          WHERE s.id = event_cover_backfill_jobs.render_set_id
+            AND s.event_id = event_cover_backfill_jobs.event_id
+            AND s.master_id = event_cover_backfill_jobs.master_id AND s.draft_id IS NULL
+            AND s.state = 'ready' AND s.manifest_sha256 = ? AND s.ready_at = ?
         )
         AND EXISTS (
           SELECT 1 FROM event_cover_workflow_fences f
@@ -1657,37 +1780,81 @@ export async function coverBackfillFinalize(
     `).bind(
       timestamp, referenceReleaseAt, expiresAt, timestamp,
       payload.jobId, payload.runId, payload.eventId, job.workflow_instance_id,
-      job.dispatch_generation, job.master_id, job.render_set_id,
+      job.dispatch_generation, job.master_id, job.render_set_id, job.manifest_sha256,
+      event.cover_object_key, job.manifest_sha256, set.ready_at,
+      COVER_BACKFILL_BINDING, job.workflow_instance_id, payload.eventId, job.dispatch_generation,
+    ),
+    ...coverPointerStatements(env.DB, {
+      eventId: payload.eventId,
+      expectedRevision: job.expected_revision,
+      expectedCurrentKey: event.cover_object_key,
+      expectedCurrentRenderSetId: null,
+      nextConfig,
+      nextObjectKey: master.object_key,
+      nextRenderSetId: set.id,
+      retiredAt: timestamp,
+      cleanupAfter: cleanupFloor,
+      retiredKeyFingerprint: job.legacy_key_fingerprint,
+      reason: 'backfilled',
+      backfillGuard: {
+        runId: payload.runId,
+        jobId: payload.jobId,
+        workflowInstanceId: job.workflow_instance_id,
+        dispatchGeneration: job.dispatch_generation,
+        masterId: master.id,
+        renderSetId: set.id,
+        legacyKeyFingerprint: job.legacy_key_fingerprint,
+      },
+      onlyIfPriorStatementChanged: true,
+    }),
+    env.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'active', published_revision = ?, published_at = ?
+      WHERE id = ? AND event_id = ? AND master_id = ? AND draft_id IS NULL
+        AND state = 'ready' AND manifest_sha256 = ? AND ready_at = ?
+        AND EXISTS (
+          SELECT 1 FROM events WHERE id = ? AND deleted_at IS NULL
+            AND cover_revision = ? AND cover_object_key IS ? AND cover_render_set_id IS ?
+        )
+        AND EXISTS (
+          SELECT 1 FROM event_cover_backfill_jobs j
+          WHERE j.id = ? AND j.run_id = ? AND j.event_id = ?
+            AND j.status = 'applied' AND j.master_id = ? AND j.render_set_id = ?
+        )
+    `).bind(
+      nextRevision, timestamp, set.id, payload.eventId, master.id,
+      job.manifest_sha256, set.ready_at,
       payload.eventId, nextRevision, master.object_key, set.id,
-      COVER_BACKFILL_BINDING, job.workflow_instance_id, payload.eventId,
-      job.dispatch_generation,
+      payload.jobId, payload.runId, payload.eventId, master.id, set.id,
     ),
     terminalFenceStatement(env, payload, now, true),
     recomputeBackfillRunCounters(env.DB, payload.runId, now, true),
-  ]);
+    coverPublicationTerminalAssertionStatement(env.DB, owner),
+  ];
 
-  if ((results[0]?.meta.changes ?? 0) !== 1) {
-    await recordTerminal(env, payload, 'skipped', now, job, { abandonSetId: set.id });
-    const current = await env.DB.prepare(`
-      SELECT status, failure_code, retryable FROM event_cover_backfill_jobs WHERE id = ?
-    `).bind(payload.jobId).first<{
-      status: CoverBackfillStatus; failure_code: string | null; retryable: number;
-    }>();
-    if (current?.status === 'applied') {
-      const applied = await env.DB.prepare('SELECT cover_revision FROM events WHERE id = ?')
-        .bind(payload.eventId).first<{ cover_revision: number }>();
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    const current = await loadState(env, payload);
+    if (current?.job.status === 'applied') {
       return {
-        status: 'applied', appliedRevision: applied?.cover_revision ?? null,
+        status: 'applied', appliedRevision: current.event.cover_revision,
         failureCode: null, retryable: false,
       };
     }
-    if (current?.status === 'failed') {
+    if (current?.job.status === 'failed') {
       return {
         status: 'failed', appliedRevision: null,
-        failureCode: current.failure_code, retryable: current.retryable === 1,
+        failureCode: current.job.failure_code, retryable: current.job.retryable === 1,
       };
     }
-    return stage('skipped').outcome;
+    if (current && !await backfillPredicatesHold(current.job, current.event)) {
+      await recordTerminal(env, payload, 'skipped', now, current.job, {
+        abandonSetId: current.job.render_set_id,
+      });
+      return stage('skipped').outcome;
+    }
+    throw error;
   }
   return { status: 'applied', appliedRevision: nextRevision, failureCode: null, retryable: false };
 }

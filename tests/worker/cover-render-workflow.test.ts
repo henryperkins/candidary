@@ -24,6 +24,7 @@ import type { AppEnv } from '../../worker/env';
 
 const now = new Date('2026-08-04T12:00:00.000Z');
 const HEX_64 = 'a'.repeat(64);
+const OTHER_HEX = 'b'.repeat(64);
 const OPERATION = '5f3a2b18-6c2d-4f0e-9a71-0c2d1e8b4a55';
 const FENCE_HOLD = '9999-12-31T23:59:59.999Z';
 const SMALL_MANIFEST_JSON = JSON.stringify({
@@ -101,6 +102,50 @@ async function publication(access: Access, master: { width: number; height: numb
     now,
   });
   return { draft, receipt: accepted.receipt };
+}
+
+async function seedActiveUploadCover(access: Access, receiptExpiry: string) {
+  const masterId = 'master-active';
+  const setId = 'set-active';
+  const objectKey = coverMasterKey(access.event.id, masterId);
+  const timestamp = now.toISOString();
+  await insertCoverMaster(testEnv.DB, {
+    id: masterId, eventId: access.event.id, objectKey,
+    byteSize: 900_000, width: 2480, height: 1680, sha256: OTHER_HEX,
+    normalizationVersion: 1, normalizationRung: 1, now,
+  });
+  await testEnv.MEDIA_BUCKET.put(objectKey, new Uint8Array([4, 5, 6]));
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_sets (
+      id, event_id, master_id, recipe_json, recipe_sha256, state,
+      required_slots, manifest_sha256, published_revision, created_at, ready_at, published_at
+    ) VALUES (?, ?, ?, ?, ?, 'active', 12, ?, 0, ?, ?, ?)
+  `).bind(
+    setId, access.event.id, masterId,
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    OTHER_HEX, HEX_64, timestamp, timestamp, timestamp,
+  ).run();
+  await testEnv.DB.prepare(`
+    UPDATE events SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?,
+      cover_revision = 0 WHERE id = ?
+  `).bind(
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    objectKey, setId, access.event.id,
+  ).run();
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_publish_receipts (
+      event_id, operation_id, render_set_id, request_sha256, action,
+      expected_revision, status, dependency_versions_json, completed_profiles,
+      required_profiles, applied_revision, result_cover_json, retryable,
+      dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+    ) VALUES (?, 'old-upload-operation', ?, ?, 'publish', 0, 'applied', '{}',
+      6, 6, 0, ?, 0, 'confirmed', 0, ?, ?, ?)
+  `).bind(
+    access.event.id, setId, OTHER_HEX,
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    timestamp, timestamp, receiptExpiry,
+  ).run();
+  return { masterId, setId, objectKey };
 }
 
 it('keeps a legacy-expired active render fence so a later profile write remains fenced', async () => {
@@ -220,6 +265,58 @@ function envBeforeFirstBatch(action: () => Promise<void>): AppEnv {
     },
   });
   return { ...testEnv, DB: db };
+}
+
+function envAfterFirstBatch(action: () => Promise<void>): AppEnv {
+  let batches = 0;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          const result = await target.batch(statements);
+          batches += 1;
+          if (batches === 1) await action();
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
+}
+
+function zeroRenderTailEnv(fragment: string): { env: AppEnv; wasInjected: () => boolean } {
+  let injected = false;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (sql: string) => {
+          if (!injected && sql.includes(fragment)) {
+            injected = true;
+            return target.prepare(`${sql}\nAND 0`);
+          }
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { env: { ...testEnv, DB: db }, wasInjected: () => injected };
+}
+
+function envRejectingManifestReads(): AppEnv {
+  const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
+    get(target, property) {
+      if (property === 'get') {
+        return async () => { throw new Error('ready checkpoint must be reused'); };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, MEDIA_BUCKET: bucket };
 }
 
 function envOnFirstObjectRead(action: () => Promise<void>): AppEnv {
@@ -656,6 +753,182 @@ describe('cover render finalize', () => {
     `, access.event.id);
     expect(set.manifest_sha256).toBe(await testSha256(SMALL_MANIFEST_JSON));
     expect(set.manifest_sha256).not.toBe(set.recipe_sha256);
+  });
+
+  it('persists and reuses the ready/finalizing checkpoint before the pointer swap', async () => {
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    const paused = envAfterFirstBatch(async () => {
+      throw new Error('pause after ready checkpoint');
+    });
+
+    await expect(coverRenderFinalize(paused, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).rejects.toThrow('pause after ready checkpoint');
+
+    expect(await row(`
+      SELECT state, manifest_sha256, ready_at, published_revision, published_at
+      FROM event_cover_render_sets WHERE id = ?
+    `, receipt.render_set_id)).toEqual({
+      state: 'ready',
+      manifest_sha256: await testSha256(SMALL_MANIFEST_JSON),
+      ready_at: now.toISOString(),
+      published_revision: null,
+      published_at: null,
+    });
+    expect(await row(`
+      SELECT status, applied_revision, result_cover_json
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `, OPERATION)).toEqual({
+      status: 'finalizing', applied_revision: null, result_cover_json: null,
+    });
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'publishing' });
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual({
+      cover_revision: 0, cover_object_key: null, cover_render_set_id: null,
+    });
+
+    await expect(coverRenderFinalize(envRejectingManifestReads(), {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).resolves.toMatchObject({ status: 'applied', appliedRevision: 1 });
+  });
+
+  it('settles one atomic conflict when the revision changes after the ready checkpoint', async () => {
+    const { draft, receipt } = await prepared(true, { width: 620, height: 420 });
+    const raced = envAfterFirstBatch(async () => {
+      await testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
+        .bind(access.event.id).run();
+    });
+
+    await expect(coverRenderFinalize(raced, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).resolves.toMatchObject({ status: 'conflict', appliedRevision: null });
+
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual({
+      cover_revision: 7,
+      cover_object_key: legacy(access.event.id),
+      cover_render_set_id: null,
+    });
+    expect(await row(`
+      SELECT status, applied_revision, result_cover_json FROM event_cover_publish_receipts
+      WHERE operation_id = ?
+    `, OPERATION)).toEqual({
+      status: 'conflict', applied_revision: null, result_cover_json: null,
+    });
+    expect(await row(`
+      SELECT state, manifest_sha256, ready_at, abandoned_reason
+      FROM event_cover_render_sets WHERE id = ?
+    `, receipt.render_set_id)).toEqual({
+      state: 'abandoned',
+      manifest_sha256: await testSha256(SMALL_MANIFEST_JSON),
+      ready_at: now.toISOString(),
+      abandoned_reason: 'revision-conflict',
+    });
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'ready' });
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `, access.event.id)).toEqual({ count: 0 });
+    expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE event_id = ?', access.event.id))
+      .toEqual({ expires_at: '2026-09-04T12:00:00.000Z' });
+  });
+
+  it.each([
+    ['applied receipt', "SET status = 'applied', applied_revision"],
+    ['conflict receipt', "SET status = 'conflict'"],
+  ])('rolls the complete final graph back when the %s tail changes zero rows', async (
+    _name,
+    fragment,
+  ) => {
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    await expect(coverRenderFinalize(envAfterFirstBatch(async () => {
+      throw new Error('checkpoint only');
+    }), { eventId: access.event.id, operationId: OPERATION }, now))
+      .rejects.toThrow('checkpoint only');
+    if (fragment.includes('conflict')) {
+      await testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
+        .bind(access.event.id).run();
+    }
+    const beforeEvent = await row('SELECT * FROM events WHERE id = ?', access.event.id);
+    const beforeSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id);
+    const beforeDraft = await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id);
+    const beforeReceipt = await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
+    const fault = zeroRenderTailEnv(fragment);
+
+    await expect(coverRenderFinalize(fault.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await row('SELECT * FROM events WHERE id = ?', access.event.id)).toEqual(beforeEvent);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id))
+      .toEqual(beforeSet);
+    expect(await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id)).toEqual(beforeDraft);
+    expect(await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
+      .toEqual(beforeReceipt);
+  });
+
+  it('retains a displaced normalized upload through the longest referencing receipt', async () => {
+    const retainedUntil = '2026-08-20T12:00:00.000Z';
+    const active = await seedActiveUploadCover(access, retainedUntil);
+    await prepared(false, { width: 620, height: 420 });
+
+    await expect(coverRenderFinalize(testEnv, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).resolves.toMatchObject({ status: 'applied', appliedRevision: 1 });
+
+    expect(await row(`
+      SELECT state, retired_at, cleanup_after FROM event_cover_render_sets WHERE id = ?
+    `, active.setId)).toEqual({
+      state: 'retired', retired_at: now.toISOString(), cleanup_after: retainedUntil,
+    });
+    expect(await row('SELECT cleanup_after FROM event_cover_masters WHERE id = ?', active.masterId))
+      .toEqual({ cleanup_after: retainedUntil });
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `, access.event.id)).toEqual({ count: 0 });
+    expect(await testEnv.MEDIA_BUCKET.head(active.objectKey)).not.toBeNull();
+  });
+
+  it.each([
+    ['displaced set', "SET state = 'retired', retired_at"],
+    ['displaced master', 'UPDATE event_cover_masters'],
+  ])('rolls the upload-over-upload graph back when the %s tail changes zero rows', async (
+    _name,
+    fragment,
+  ) => {
+    const active = await seedActiveUploadCover(access, '2026-08-20T12:00:00.000Z');
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    await expect(coverRenderFinalize(envAfterFirstBatch(async () => {
+      throw new Error('checkpoint only');
+    }), { eventId: access.event.id, operationId: OPERATION }, now))
+      .rejects.toThrow('checkpoint only');
+    const beforeEvent = await row('SELECT * FROM events WHERE id = ?', access.event.id);
+    const beforeOldSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', active.setId);
+    const beforeOldMaster = await row('SELECT * FROM event_cover_masters WHERE id = ?', active.masterId);
+    const beforeNewSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id);
+    const beforeDraft = await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id);
+    const beforeReceipt = await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
+    const fault = zeroRenderTailEnv(fragment);
+
+    await expect(coverRenderFinalize(fault.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await row('SELECT * FROM events WHERE id = ?', access.event.id)).toEqual(beforeEvent);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', active.setId))
+      .toEqual(beforeOldSet);
+    expect(await row('SELECT * FROM event_cover_masters WHERE id = ?', active.masterId))
+      .toEqual(beforeOldMaster);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id))
+      .toEqual(beforeNewSet);
+    expect(await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id)).toEqual(beforeDraft);
+    expect(await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
+      .toEqual(beforeReceipt);
   });
 
   it('refuses a count-preserving substitution outside the derived tuple set', async () => {
