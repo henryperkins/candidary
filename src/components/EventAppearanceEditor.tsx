@@ -1,4 +1,3 @@
-import { ImagePlus } from 'lucide-react';
 import { useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { KeyboardEvent, Ref } from 'react';
 
@@ -9,6 +8,7 @@ import type {
   HexColor,
   ResolvedEventTheme,
 } from '../../shared/contracts';
+import type { EventCoverProfileId } from '../../shared/event-cover';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_VERSION,
@@ -17,12 +17,10 @@ import {
   resolveEventTheme,
   serializeEventThemeConfig,
 } from '../../shared/event-theme';
-import { COVER_UPLOAD_MIME_TYPES, MAX_COVER_UPLOAD_BYTES } from '../../shared/constants';
-import { api, ClientApiError } from '../app/api';
-import {
-  CoverUploadRejected,
-  type CoverCompositionRunner,
-} from '../features/cover/cover-draft-client';
+import { presetCoverAssetPath } from '../../shared/event-cover-assets';
+import { api, ClientApiError, managerEventCoverSlotPath } from '../app/api';
+import { emitCoverUnavailable } from '../app/cover-observability';
+import type { CoverCompositionRunner } from '../features/cover/cover-draft-client';
 import { useCoverOperationReconciler } from '../features/cover/use-cover-operation-reconciler';
 import { useCoverStudioSession } from '../features/cover/use-cover-studio-session';
 import {
@@ -35,10 +33,15 @@ import {
   type DomainAutosaveState,
 } from '../features/settings/autosave-queue';
 import { AutosaveStatus } from './AutosaveStatus';
-import { EventAppearancePreview } from './EventAppearancePreview';
+import {
+  EventAppearanceCanvas,
+  type EventAppearanceCanvasPreview,
+} from './EventAppearanceCanvas';
 import { ManagerCoverPreparationStatus } from './ManagerCoverPreparationStatus';
 import { EventThemePresetSelector } from './EventThemePresetSelector';
+import { CoverStudio } from '../features/cover/CoverStudio';
 import { describeLoadFailure } from './States';
+import type { LoadFailure } from './States';
 
 interface EventAppearanceEditorProps {
   event: EventView;
@@ -52,6 +55,7 @@ interface EventAppearanceEditorProps {
   // A fresh whole-event read, so an outcome the host was not waiting on still
   // reaches the canvas. `EventSettingsEditor` already receives the same one.
   onEventRead<T>(request: () => Promise<T>): Promise<T>;
+  onCoverAccessFailure(failure: LoadFailure | null): void;
   // Injected in tests for the same reason `GuestUploadFlow` takes a transport:
   // the real one decodes an image in a Web Worker, and jsdom has neither.
   compositionRunner?: CoverCompositionRunner;
@@ -64,17 +68,10 @@ type ColorKind = 'primaryColor' | 'accentColor';
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/u;
 const SYNTAX_ERROR = 'Enter a six-digit hex color, such as #245c46.';
-// Driven by the server's own constants. The literals that stood here said JPEG,
-// PNG, and WebP at 10 MiB while the route accepted seven types at 20 MiB, and
-// neither control accepted HEIC — which is what an iPhone photo picker hands
-// over, so §15.4's HEIC acceptance was blocked in the browser before any server
-// saw it.
-const COVER_ACCEPT = COVER_UPLOAD_MIME_TYPES.join(',');
 // The recovery view travels in the response envelope rather than an error body,
 // so these two are the client's own prose over a payload it can actually read.
 const COVER_MOVED_ON = 'This cover changed somewhere else, so that change was not applied. The page is up to date now — try again.';
 const COVER_PREPARE_UNAVAILABLE = 'That cover could not be started just now. Your current cover is still live — try again in a moment.';
-const COVER_MAX_MB = Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000);
 
 function rawColors(theme: ResolvedEventTheme) {
   return {
@@ -94,6 +91,7 @@ export function EventAppearanceEditor({
   onAutosaveStateChange,
   onEventWrite,
   onEventRead,
+  onCoverAccessFailure,
   compositionRunner,
   ref,
 }: EventAppearanceEditorProps) {
@@ -103,10 +101,8 @@ export function EventAppearanceEditor({
   const [rawPrimary, setRawPrimary] = useState<string>(initialRaw.primary);
   const [rawAccent, setRawAccent] = useState<string>(initialRaw.accent);
   const [errors, setErrors] = useState<ThemeErrors>({});
-  const [coverBusy, setCoverBusy] = useState(false);
   const [coverError, setCoverError] = useState<string | null>(null);
   const [autosave, setAutosave] = useState<AutosaveState>({ status: 'saved', failure: null });
-  const coverInput = useRef<HTMLInputElement>(null);
   const queueRef = useRef<AutosaveQueue<EventThemeConfigV1> | null>(null);
   // The queue settles from a promise continuation, so what is on screen has to
   // be readable without waiting for a render.
@@ -122,6 +118,10 @@ export function EventAppearanceEditor({
   // than closed over from the first render.
   const themeSavedRef = useRef(onThemeSaved);
   themeSavedRef.current = onThemeSaved;
+  const coverAccessFailureRef = useRef(onCoverAccessFailure);
+  coverAccessFailureRef.current = onCoverAccessFailure;
+  const pendingUnavailableRef = useRef<string | null>(null);
+  const refreshedUnavailableRef = useRef<string | null>(null);
 
   async function readFreshEvent(): Promise<EventView> {
     const loaded = await onEventRead(() => api<{ event: EventView }>(
@@ -143,6 +143,13 @@ export function EventAppearanceEditor({
     reconciler: coverReconciler,
     compositionRunner,
   });
+
+  useEffect(() => {
+    const access = coverReconciler.accessFailure;
+    coverAccessFailureRef.current(access
+      ? describeLoadFailure(access.error, 'manager', 'Manager access must be restored before cover work can continue.')
+      : null);
+  }, [coverReconciler.accessFailure]);
 
   function adoptDraft(theme: ResolvedEventTheme) {
     draftRef.current = theme.config;
@@ -352,59 +359,89 @@ export function EventAppearanceEditor({
   }, [autosave, blockingField?.label, blockingField?.message, onAutosaveStateChange]);
   useImperativeHandle(ref, () => ({ flush: () => { queue.flush(); } }), [queue]);
 
-  async function uploadCover(file: File) {
-    if (coverBusy) return;
-    setCoverBusy(true);
+  async function publishCover() {
     setCoverError(null);
     try {
-      await coverSession.chooseFile(file);
       const result = await onEventWrite(() => coverSession.publish());
-      // An upload answers `202`: the receipt is accepted and durable, but the
-      // cover is not live until its renderings are. The status beside the summary
-      // owns the rest, and the current cover stays exactly as it was.
       if (result.status === 409) setCoverError(COVER_MOVED_ON);
       if (result.status === 503) setCoverError(COVER_PREPARE_UNAVAILABLE);
     } catch (caught) {
-      setCoverError(describeCoverFailure(caught, 'The cover photo could not be saved. Try again.'));
-    } finally {
-      coverSession.close();
-      setCoverBusy(false);
-      if (coverInput.current) coverInput.current.value = '';
+      setCoverError(caught instanceof ClientApiError
+        ? caught.message
+        : 'The cover could not be saved. Your current cover is still live.');
     }
-  }
-
-  async function removeCover() {
-    if (coverBusy || !event.cover.hasCover) return;
-    setCoverBusy(true);
-    setCoverError(null);
-    try {
-      // Removal is a publication like any other: one of exactly two configs this
-      // release can publish, through the same revision guard and receipt.
-      coverSession.chooseSource({ kind: 'none' });
-      const result = await onEventWrite(() => coverSession.publish());
-      // A `409` carries the winning event, so adopting it rebases this page onto
-      // the revision the next change has to send.
-      if (result.status === 409) setCoverError(COVER_MOVED_ON);
-    } catch (caught) {
-      setCoverError(describeCoverFailure(caught, 'The cover photo could not be removed. Try again.'));
-    } finally {
-      setCoverBusy(false);
-    }
-  }
-
-  function describeCoverFailure(caught: unknown, fallback: string): string {
-    if (caught instanceof CoverUploadRejected) return caught.message;
-    return caught instanceof ClientApiError ? caught.message : fallback;
   }
 
   const primaryError = errors['overrides.primaryColor'];
   const accentError = errors['overrides.accentColor'];
   const primaryPickerValue = HEX_COLOR.test(rawPrimary) ? rawPrimary : previewTheme.tokens.primary;
   const accentPickerValue = HEX_COLOR.test(rawAccent) ? rawAccent : previewTheme.tokens.accent;
-  const coverLocked = coverBusy
-    || coverReconciler.operationState.phase === 'dispatching'
+  const coverLocked = coverReconciler.operationState.phase === 'dispatching'
     || coverReconciler.operationState.phase === 'preparing'
     || coverReconciler.operationState.phase === 'retryable-failed';
+
+  const canvasPreview: EventAppearanceCanvasPreview = coverSession.open
+    ? coverSession.canvasPreview.kind === 'draft' && coverSession.selection.focus
+      ? {
+          kind: 'draft',
+          url: coverSession.canvasPreview.url,
+          focus: coverSession.selection.focus,
+        }
+      : coverSession.canvasPreview.kind === 'preset'
+        ? { ...coverSession.canvasPreview, assetVersion: 1 }
+        : coverSession.selection.source?.kind === 'none'
+          ? { kind: 'none' }
+          : { kind: 'authoritative' }
+    : { kind: 'authoritative' };
+
+  async function refreshCoverEvent() {
+    const key = pendingUnavailableRef.current;
+    if (!key || refreshedUnavailableRef.current === key) return;
+    refreshedUnavailableRef.current = key;
+    try {
+      const fresh = await readFreshEvent();
+      onCoverSaved(fresh);
+      coverAccessFailureRef.current(null);
+    } catch (caught) {
+      coverAccessFailureRef.current(describeLoadFailure(
+        caught,
+        'manager',
+        'The current cover could not be refreshed.',
+      ));
+    }
+  }
+
+  function recordCoverUnavailable(detail: { profile: EventCoverProfileId; revision: number }) {
+    pendingUnavailableRef.current = `${detail.revision}:${detail.profile}`;
+    emitCoverUnavailable({ audience: 'manager', ...detail });
+  }
+
+  const canvas = (summary?: boolean) => <EventAppearanceCanvas
+    event={event}
+    theme={previewTheme}
+    preview={canvasPreview}
+    sourceFor={(slot) => managerEventCoverSlotPath(event.id, slot)}
+    onCoverUnavailable={recordCoverUnavailable}
+    onRefreshCoverEvent={() => { void refreshCoverEvent(); }}
+    summary={summary ? <div className="event-appearance-editor__cover">
+      <div className="event-appearance-editor__cover-copy">
+        <strong>Cover</strong>
+        <p>{event.cover.hasCover
+          ? 'Shown on the guest hero for RSVP and photo delivery.'
+          : 'No cover is currently shown. The event theme gradient remains live.'}</p>
+        <ManagerCoverPreparationStatus reconciler={coverReconciler} />
+        {coverError && <p className="form-error" role="alert">{coverError}</p>}
+      </div>
+      <button
+        type="button"
+        className="button button--secondary"
+        disabled={coverLocked}
+        onClick={coverSession.openStudio}
+      >
+        Change cover
+      </button>
+    </div> : undefined}
+  />;
 
   function flushThemeOnEnter(keyEvent: KeyboardEvent) {
     if (keyEvent.key !== 'Enter') return;
@@ -426,45 +463,6 @@ export function EventAppearanceEditor({
         blockingField={blockingField}
         onRetry={() => enqueueTheme(true)}
       />
-    </div>
-
-    {coverError && <p className="form-error" role="alert">{coverError}</p>}
-
-    <div className="event-appearance-editor__cover">
-      <div className="event-appearance-editor__cover-copy">
-        <strong>Cover photo</strong>
-        <p>{event.cover.hasCover
-          ? 'Shown on the guest hero for RSVP and photo delivery.'
-          : `Optional. JPEG, PNG, WebP, or HEIC · ${COVER_MAX_MB} MB max.`}</p>
-        <ManagerCoverPreparationStatus
-          reconciler={coverReconciler}
-        />
-      </div>
-      <div className="event-appearance-editor__cover-actions">
-        <label className="cover-field cover-field--compact">
-          <ImagePlus aria-hidden="true" />
-          <span className="button button--secondary">{coverBusy ? 'Working…' : event.cover.hasCover ? 'Change cover' : 'Add cover'}</span>
-          <input
-            ref={coverInput}
-            className="sr-only cover-field__input"
-            type="file"
-            accept={COVER_ACCEPT}
-            disabled={coverLocked}
-            onChange={(changeEvent) => {
-              const file = changeEvent.target.files?.[0];
-              if (file) void uploadCover(file);
-            }}
-          />
-        </label>
-        {event.cover.hasCover && <button
-          type="button"
-          className="button button--secondary"
-          disabled={coverLocked}
-          onClick={() => void removeCover()}
-        >
-          Remove cover
-        </button>}
-      </div>
     </div>
 
     <form onSubmit={(formEvent) => {
@@ -555,10 +553,7 @@ export function EventAppearanceEditor({
         </div>
       </div>
 
-      <div className="event-appearance-editor__preview">
-        <h4>Guest preview</h4>
-        <EventAppearancePreview event={event} theme={previewTheme} />
-      </div>
+      {canvas(true)}
 
       <div className="event-appearance-editor__actions">
         <button type="button" className="button button--secondary" onClick={reset}>
@@ -566,5 +561,44 @@ export function EventAppearanceEditor({
         </button>
       </div>
     </form>
+    <CoverStudio
+      open={coverSession.open}
+      canvas={canvas(false)}
+      operation={coverReconciler.controller}
+      operationState={coverReconciler.operationState}
+      draft={coverSession.draft}
+      composeState={coverSession.draftState}
+      source={coverSession.selection.source}
+      focus={coverSession.selection.focus}
+      focusMode={coverSession.selection.focusMode}
+      effect={coverSession.selection.effect}
+      accessFailure={coverSession.accessFailure}
+      canRemove={event.cover.hasCover}
+      presetThumbnail={(presetId) => presetCoverAssetPath(
+        1,
+        presetId,
+        'natural',
+        'standard-default',
+        '1x',
+        'webp',
+      )}
+      styleThumbnail={(effect) => coverSession.styleThumbnails[effect]}
+      onSourceChange={coverSession.chooseSource}
+      onUpload={(file) => {
+        setCoverError(null);
+        void coverSession.chooseFile(file).catch((caught: unknown) => {
+          setCoverError(caught instanceof Error
+            ? caught.message
+            : 'That photo could not be prepared. Choose another photo.');
+        });
+      }}
+      onEnterCompose={() => { void coverSession.enterCompose().catch(() => undefined); }}
+      onFocusChange={coverSession.setFocus}
+      onResetFocus={coverSession.resetFocus}
+      onEffectChange={(effect) => { void coverSession.setEffect(effect).catch(() => undefined); }}
+      onPublish={() => { void publishCover(); }}
+      onDiscardDraft={() => { void coverSession.discard().catch(() => undefined); }}
+      onClose={coverSession.close}
+    />
   </section>;
 }

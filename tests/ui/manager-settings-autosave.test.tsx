@@ -716,7 +716,7 @@ describe('manager settings autosave guards', () => {
 
     await waitFor(() => expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked());
     // The settings response carried the pre-change theme; it must not travel.
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
     // And the theme response carried the pre-change switch; that must not travel either.
     expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
   });
@@ -806,12 +806,21 @@ describe('manager settings autosave guards', () => {
       const url = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/cover/publications') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { operationId: string };
         await new Promise<void>((resolve) => { releaseCover = resolve; });
         // Built from a row read before either later write.
         return json({
           applied: true,
           appliedRevision: 2,
-          operation: null,
+          operation: {
+            operationId: body.operationId,
+            status: 'applied',
+            completedSteps: 0,
+            requiredSteps: 0,
+            retryable: false,
+            safeFailureCode: null,
+            updatedAt: '2026-08-10T00:00:00.000Z',
+          },
           event: {
             ...covered,
             cover: {
@@ -839,7 +848,9 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
+    await user.click(screen.getByRole('button', { name: 'Change cover' }));
     await user.click(screen.getByRole('button', { name: 'Remove cover' }));
+    await user.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(releaseCover).not.toBeNull());
 
     await user.click(screen.getByLabelText('Review notes before sharing'));
@@ -849,8 +860,9 @@ describe('manager settings autosave guards', () => {
     releaseCover!();
 
     // The cover response owns the cover and nothing else.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Cover Studio' })).not.toBeInTheDocument());
+    expect(screen.getByText(/No cover is currently shown/u)).toBeVisible();
     expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
   });
 });

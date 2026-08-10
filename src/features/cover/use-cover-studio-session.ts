@@ -363,9 +363,22 @@ export function useCoverStudioSession({
   }, [compositionRunner, event.cover.revision, event.id, installReadyDraft, reconciler, revokeUrls]);
 
   const openStudio = useCallback(() => {
+    const terminal = reconciler.controller.getState().phase;
+    if (terminal === 'applied' || terminal === 'permanent-failed') {
+      generationRef.current += 1;
+      revokeUrls(false);
+      updateDraft(null);
+      setDraftState({ status: 'idle', error: null });
+      if (draftIntentKeyRef.current) {
+        forgetCoverDraftIntent(event.id, draftIntentKeyRef.current);
+        draftIntentKeyRef.current = null;
+      }
+      updateSelection(selectionFor(event));
+    }
+    reconciler.controller.releaseTerminal();
     setOpen(true);
     if (draftRef.current && !draftRef.current.previewUrl) void ensureEffectPreview('natural');
-  }, [ensureEffectPreview]);
+  }, [ensureEffectPreview, event, reconciler.controller, revokeUrls]);
 
   const chooseSource = useCallback((source: CoverSessionSource) => {
     const keepUploadFocus = source?.kind === 'upload'
@@ -421,8 +434,11 @@ export function useCoverStudioSession({
 
   const setEffect = useCallback(async (effect: EventCoverEffectId) => {
     updateSelection({ ...selectionRef.current, effect });
+    if (styleThumbnails[effect].status === 'error') {
+      previewAttemptedRef.current.delete(effect);
+    }
     if (draftRef.current) await ensureEffectPreview(effect);
-  }, [ensureEffectPreview]);
+  }, [ensureEffectPreview, styleThumbnails]);
 
   const publish = useCallback(async (): Promise<CoverOperationAnswer> => {
     if (reconciler.accessFailure?.phase === 'before_dispatch') {

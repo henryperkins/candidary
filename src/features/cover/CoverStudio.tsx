@@ -373,6 +373,7 @@ export function CoverStudio({
   const uploadIncomplete = source?.kind === 'upload' && !composeReady;
   const doneDisabled = !source
     || uploadIncomplete
+    || operationState.dispatched
     || operationState.phase === 'dispatching'
     || accessFailure?.phase === 'before_dispatch';
   const preparing = operationState.phase === 'preparing';

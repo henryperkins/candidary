@@ -99,6 +99,7 @@ function Harness({ initial = eventWithoutCover }: { initial?: EventView }) {
       compositionRunner={async () => ({ x: 0.42, y: 0.61 })}
       onThemeSaved={(updated) => setCurrent((held) => mergeThemeResponse(held, updated))}
       onCoverSaved={(updated) => setCurrent((held) => mergeCoverResponse(held, updated))}
+      onCoverAccessFailure={() => undefined}
       onAutosaveStateChange={setState}
     />
     <output data-testid="appearance-state">{state ? state.domain + ':' + state.status : 'none'}</output>
@@ -112,6 +113,21 @@ function themeMutationCalls(fetchMock: ReturnType<typeof vi.fn>) {
     String(input) === '/api/manage/events/event-a/theme'
     && String(init?.method).toUpperCase() === 'PUT'
   ));
+}
+
+function installMeasuredCover(width = 620) {
+  class TestResizeObserver {
+    constructor(private readonly callback: ResizeObserverCallback) {}
+    observe(target: Element) {
+      this.callback([{
+        target,
+        contentRect: { width } as DOMRectReadOnly,
+      } as ResizeObserverEntry], this as unknown as ResizeObserver);
+    }
+    disconnect() {}
+    unobserve() {}
+  }
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
 }
 
 afterEach(() => {
@@ -130,6 +146,7 @@ describe('event appearance editor', () => {
     expect(screen.getByRole('textbox', { name: 'Accent color' })).toHaveValue('#3f6d95');
     expect(screen.getByText('Event appearance saved')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save appearance' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Guest preview' })).not.toBeInTheDocument();
   });
 
   it('saves a preset the moment it is chosen', async () => {
@@ -157,7 +174,7 @@ describe('event appearance editor', () => {
     const primary = screen.getByRole('textbox', { name: 'Primary color' });
 
     fireEvent.change(primary, { target: { value: '#123456' } });
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#123456' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#123456' });
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
 
     await new Promise<void>((resolve) => { window.setTimeout(resolve, AUTOSAVE_DEBOUNCE_MS); });
@@ -175,7 +192,7 @@ describe('event appearance editor', () => {
     await new Promise<void>((resolve) => { window.setTimeout(resolve, AUTOSAVE_DEBOUNCE_MS * 2); });
 
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#4a2415' });
     expect(screen.getByText('Event appearance can’t save. Primary color: Enter a six-digit hex color, such as #245c46.')).toBeInTheDocument();
   });
 
@@ -190,7 +207,7 @@ describe('event appearance editor', () => {
     expect(primary).toHaveAccessibleDescription(
       'Primary color needs a 3:1 contrast ratio against the event surfaces.',
     );
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#4a2415' });
     expect(screen.getByTestId('appearance-state')).toHaveTextContent('appearance:invalid');
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
 
@@ -210,7 +227,7 @@ describe('event appearance editor', () => {
     expect(accent).toHaveAccessibleDescription(
       'Accent color needs a 3:1 contrast ratio against the event surfaces.',
     );
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-accent': '#3f6d95' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-accent': '#3f6d95' });
     expect(screen.getByTestId('appearance-state')).toHaveTextContent('appearance:invalid');
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
   });
@@ -230,7 +247,7 @@ describe('event appearance editor', () => {
       target: { value: '#123456' },
     });
 
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#123456' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#123456' });
     expect(screen.getByRole('textbox', { name: 'Primary color' })).toHaveAttribute('aria-invalid', 'false');
     expect(screen.getByRole('textbox', { name: 'Accent color' })).toHaveAccessibleDescription(
       'Accent color needs a 3:1 contrast ratio against the event surfaces.',
@@ -260,7 +277,7 @@ describe('event appearance editor', () => {
     expect(accent).toHaveAccessibleDescription(
       'Accent color needs a 3:1 contrast ratio against the event surfaces.',
     );
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-accent': '#3f6d95' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-accent': '#3f6d95' });
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
   });
 
@@ -279,7 +296,7 @@ describe('event appearance editor', () => {
     });
 
     expect(primary).toHaveAccessibleDescription('Enter a six-digit hex color, such as #245c46.');
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-accent': '#123456' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-accent': '#123456' });
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
   });
 
@@ -323,7 +340,7 @@ describe('event appearance editor', () => {
 
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Primary color' }))
       .toHaveValue('#234567'));
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#234567' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#234567' });
     await waitFor(() => expect(screen.getByTestId('appearance-state'))
       .toHaveTextContent('appearance:saved'));
   });
@@ -340,7 +357,7 @@ describe('event appearance editor', () => {
     await waitFor(() => expect(screen.getByTestId('appearance-confirmed')).toHaveTextContent('garden-party'));
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset to Candidary default' }));
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#4a2415' });
     await waitFor(() => expect(themeMutationCalls(fetchMock)).toHaveLength(2));
     await waitFor(() => expect(screen.getByTestId('appearance-confirmed')).toHaveTextContent('candidary-default'));
   });
@@ -408,7 +425,7 @@ describe('event appearance editor', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Garden Party' }));
     expect(await screen.findByText('Couldn’t save. Failed to fetch')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Retry event appearance' })).toBeVisible();
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
 
     const saved = { ...eventWithoutCover, theme: resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} }) };
     const fetchMock = vi.fn(() => json({ event: saved }));
@@ -529,7 +546,11 @@ describe('event appearance editor', () => {
         return Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) } as Response);
       }
       if (path === '/api/manage/events/event-a/cover/drafts/draft-a/composition' && method === 'PATCH') {
-        return json({ draft: draft('ready', 4, { focus: { x: 0.42, y: 0.61, modelVersion: 1 } }) });
+        return json({ draft: draft('ready', 4, {
+          master: { width: 2400, height: 1600, safeZoomMaximum: 2, available2xProfiles: [] },
+          focus: { x: 0.42, y: 0.61, modelVersion: 1 },
+          preview: { effect: 'natural', width: 1280, height: 853, byteSize: 900, recipeVersion: 1 },
+        }) });
       }
       if (path === '/api/manage/events/event-a/cover/publications' && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as {
@@ -558,13 +579,22 @@ describe('event appearance editor', () => {
       throw new Error('Unexpected request ' + method + ' ' + path);
     });
     vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('d2f3b2a0-885c-4380-bf20-8d44e9712176');
     render(<Harness initial={eventWithoutCover} />);
-    const input = document.querySelector<HTMLInputElement>('.cover-field__input')!;
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
+    const input = screen.getByLabelText<HTMLInputElement>('Choose photo');
     // HEIC, which is what an iPhone photo picker hands over and what neither
     // control accepted before.
     const file = new File([new Uint8Array([1, 2, 3])], 'porch.heic', { type: 'image/heic' });
 
     fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(calls).toContain('PATCH /api/manage/events/event-a/cover/drafts/draft-a/composition'));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Adjust focus' }));
+    await waitFor(() => expect(screen.getByRole('slider', { name: 'Horizontal focus' })).toBeVisible());
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(calls).toContain('POST /api/manage/events/event-a/cover/publications'));
 
     // Reserve, transfer, inspect, compose, publish — once each.
@@ -575,15 +605,17 @@ describe('event appearance editor', () => {
 
     // A 202 leaves the current cover exactly as it was; the status beside the
     // summary owns the rest, and its copy comes from durable step counts.
-    await waitFor(() => expect(screen.getByText(/Preparing cover 2 of 6/u)).toBeVisible());
+    await waitFor(() => expect(screen.getAllByText(/Preparing cover 2 of 6/u)).not.toHaveLength(0));
 
     cleanup();
     // The removal half is an independent Manager load, not an attempt to start
     // a second publication while the accepted upload above is still preparing.
     sessionStorage.clear();
     render(<Harness initial={{ ...event, cover: { ...event.cover, revision: 1 } }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Cover Studio' })).not.toBeInTheDocument());
     const removal = (fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>)
       .filter(([path, init]) => String(path).endsWith('/cover/publications') && String(init?.method) === 'POST')
       .map(([, init]) => JSON.parse(String(init?.body)) as { source: { kind: string }; expectedRevision: number })
@@ -592,6 +624,30 @@ describe('event appearance editor', () => {
     // DELETE that assumes it is still current.
     expect(removal?.expectedRevision).toBe(1);
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('guards one authoritative refresh across the Manager and open Studio canvases', async () => {
+    installMeasuredCover();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === '/api/manage/events/event-a') return json({ event });
+      throw new Error(`Unexpected request ${String(input)}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={event} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
+    await waitFor(() => expect(document.querySelectorAll('.event-appearance-canvas .responsive-cover__image')).toHaveLength(2));
+    for (const image of Array.from(document.querySelectorAll('.event-appearance-canvas .responsive-cover__image'))) {
+      fireEvent.error(image);
+    }
+    for (const image of Array.from(document.querySelectorAll('.event-appearance-canvas .responsive-cover__image'))) {
+      fireEvent.error(image);
+    }
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => (
+      String(path) === '/api/manage/events/event-a'
+    ))).toHaveLength(1));
   });
 
   it('reads the recovery view out of a 409 envelope instead of reporting a generic error', async () => {
@@ -618,22 +674,26 @@ describe('event appearance editor', () => {
       throw new Error('Unexpected request ' + method + ' ' + path);
     });
     vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('f33d6d0a-c2e9-4fc2-940a-51707065ec91');
     render(<Harness initial={{ ...event, cover: { ...event.cover, revision: 1 } }} />);
 
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeVisible());
     // Not "Something went wrong."
     expect(screen.getByRole('alert')).toHaveTextContent(/changed somewhere else/u);
     // And the page is rebased onto the winning revision, so the next change
     // sends an expectedRevision the server will accept.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+    expect(screen.getAllByTestId('event-appearance-canvas')).not.toHaveLength(0);
   });
 
   it('refuses an unsupported type before any request', async () => {
     const fetchMock = vi.fn(() => { throw new Error('No request should be made.'); });
     vi.stubGlobal('fetch', fetchMock);
     render(<Harness initial={eventWithoutCover} />);
-    const input = document.querySelector<HTMLInputElement>('.cover-field__input')!;
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
+    const input = screen.getByLabelText<HTMLInputElement>('Choose photo');
 
     fireEvent.change(input, {
       target: { files: [new File([new Uint8Array([1])], 'clip.gif', { type: 'image/gif' })] },
@@ -645,7 +705,8 @@ describe('event appearance editor', () => {
   it('states the real accepted formats and ceiling', () => {
     vi.stubGlobal('fetch', vi.fn());
     render(<Harness initial={eventWithoutCover} />);
-    const input = document.querySelector<HTMLInputElement>('.cover-field__input')!;
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
+    const input = screen.getByLabelText<HTMLInputElement>('Choose photo');
     expect(input.accept).toBe('image/jpeg,image/png,image/webp,image/heic');
     expect(screen.getByText(/JPEG, PNG, WebP, or HEIC · 19 MB max/u)).toBeVisible();
   });

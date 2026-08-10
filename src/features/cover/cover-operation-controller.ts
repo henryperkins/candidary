@@ -255,6 +255,26 @@ export function createCoverOperationController(options: CoverOperationController
       });
     },
 
+    /** Starts a later publication only after the previous receipt is terminal. */
+    releaseTerminal() {
+      if (state.phase !== 'applied'
+        && state.phase !== 'conflict'
+        && state.phase !== 'permanent-failed') return;
+      stopPolling();
+      attempt = 0;
+      settledKey = null;
+      emit({
+        phase: 'idle',
+        operationId: null,
+        view: null,
+        answer: null,
+        receiptPath: null,
+        retryAfterMs: null,
+        dispatched: false,
+        slow: false,
+      });
+    },
+
     attach() {
       attachmentCount += 1;
       if (attachmentCount !== 1) return;

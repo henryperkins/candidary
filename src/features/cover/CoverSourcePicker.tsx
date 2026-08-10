@@ -1,6 +1,6 @@
 import { useId } from 'react';
 
-import { COVER_UPLOAD_MIME_TYPES } from '../../../shared/constants';
+import { COVER_UPLOAD_MIME_TYPES, MAX_COVER_UPLOAD_BYTES } from '../../../shared/constants';
 import {
   EVENT_COVER_PRESETS,
   type EventCoverPresetId,
@@ -64,6 +64,9 @@ export function CoverSourcePicker({
             onUpload(file);
           }}
         />
+        <span className="cover-source-picker__note">
+          JPEG, PNG, WebP, or HEIC · {Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000)} MB max.
+        </span>
       </div>
 
       <ul className="cover-source-picker__presets">

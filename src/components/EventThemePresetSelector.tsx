@@ -31,10 +31,28 @@ export function EventThemePresetSelector({
           <span className="event-theme-preset-selector__name">{preset.name}</span>
           <span className="event-theme-preset-selector__description">{preset.description}</span>
         </span>
-        <span className="event-theme-preset-selector__swatch" data-event-theme-swatch aria-hidden="true">
-          <i style={{ backgroundColor: preset.tokens.primary }} />
-          <i style={{ backgroundColor: preset.tokens.accent }} />
-          <i style={{ backgroundColor: preset.tokens.surface }} />
+        <span
+          className="event-theme-preset-selector__swatch"
+          data-event-theme-swatch
+          aria-hidden="true"
+          style={{
+            backgroundColor: preset.tokens.surface,
+            borderColor: preset.tokens.border,
+            borderRadius: preset.tokens.cardRadius,
+          }}
+        >
+          <i
+            className="event-theme-preset-selector__sample-action"
+            style={{
+              backgroundColor: preset.tokens.primary,
+              color: preset.tokens.primaryForeground,
+              borderRadius: preset.tokens.actionRadius,
+            }}
+          />
+          <i
+            className="event-theme-preset-selector__sample-accent"
+            style={{ backgroundColor: preset.tokens.accent }}
+          />
         </span>
       </label>)}
     </div>

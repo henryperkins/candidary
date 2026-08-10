@@ -174,6 +174,7 @@ export function ManagerPage() {
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
+  const [coverAccessFailure, setCoverAccessFailure] = useState<LoadFailure | null>(null);
   const [autosaveRecovery, setAutosaveRecovery] = useState<{
     domain: DomainAutosaveState['domain'];
     failure: LoadFailure;
@@ -238,6 +239,9 @@ export function ManagerPage() {
     } else if (next.status === 'saved') {
       setAutosaveRecovery((current) => current?.domain === next.domain ? null : current);
     }
+  }, []);
+  const recordCoverAccessFailure = useCallback((next: LoadFailure | null) => {
+    setCoverAccessFailure(next);
   }, []);
   const unconfirmedDomains = Object.values(autosaveStates)
     .filter((domain): domain is DomainAutosaveState => Boolean(domain) && domain.status !== 'saved');
@@ -764,6 +768,8 @@ export function ManagerPage() {
   />;
   const visibleNotice: ManagerNotice | null = autosaveRecovery
     ? { type: 'load', failure: autosaveRecovery.failure }
+    : coverAccessFailure
+      ? { type: 'load', failure: coverAccessFailure }
     : actionError;
   return <div className="manager-shell manager-shell--intake">
     {/* The brand and the section navigation, which is a banner rather than complementary content. As
@@ -793,7 +799,11 @@ export function ManagerPage() {
             type="button"
             className="manager-action-error__dismiss"
             aria-label="Dismiss error"
-            onClick={() => autosaveRecovery ? setAutosaveRecovery(null) : setActionError(null)}
+            onClick={() => {
+              if (autosaveRecovery) setAutosaveRecovery(null);
+              else if (coverAccessFailure) setCoverAccessFailure(null);
+              else setActionError(null);
+            }}
           ><X aria-hidden="true" /></button>
         </div>
         {visibleNotice.type === 'load' && (
@@ -922,6 +932,7 @@ export function ManagerPage() {
           onEventRead={eventRead}
           onThemeSaved={(updated) => setEvent((current) => current ? mergeThemeResponse(current, updated) : updated)}
           onCoverSaved={(updated) => setEvent((current) => current ? mergeCoverResponse(current, updated) : updated)}
+          onCoverAccessFailure={recordCoverAccessFailure}
           onAutosaveStateChange={recordAutosaveState}
         />
         <EventAccountCard eventId={event.id} />

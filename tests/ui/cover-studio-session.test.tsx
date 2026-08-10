@@ -516,4 +516,28 @@ describe('useCoverStudioSession', () => {
     await expect(deniedSession.result.current.publish()).rejects.toBe(denied);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('releases a handed-off terminal receipt when a new Studio session opens', () => {
+    const owner = reconciler();
+    owner.controller.beginDispatch(OPERATION);
+    owner.controller.dispatchSettled({
+      status: 200,
+      operation: operation({ status: 'applied', completedSteps: 6 }),
+      receiptPath: `/api/manage/events/event-a/cover/publications/${OPERATION}`,
+      retryAfterMs: null,
+    });
+    expect(owner.controller.getState().phase).toBe('applied');
+
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: owner,
+    }));
+    act(() => session.result.current.openStudio());
+
+    expect(owner.controller.getState()).toMatchObject({
+      phase: 'idle',
+      operationId: null,
+      dispatched: false,
+    });
+  });
 });

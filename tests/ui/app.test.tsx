@@ -817,7 +817,7 @@ describe('manager experience', () => {
     // One PATCH, and no five-request manager refresh behind it.
     expect(after - before).toBe(1);
     // The stale theme in that response must not travel with the settings it owns.
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#4a2415' });
   });
 
   it('drops a whole-event read that a later write overtook', async () => {
@@ -855,15 +855,15 @@ describe('manager experience', () => {
     await waitFor(() => expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some(([input, init]) => (
       String(input).endsWith('/theme') && String(init?.method).toUpperCase() === 'PUT'
     ))).toBe(true));
-    await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
+    await waitFor(() => expect(screen.getByTestId('event-appearance-canvas'))
       .toHaveStyle({ '--event-primary': '#245c46' }));
 
     releaseRead!();
     // The overtaken read carries the pre-write theme. Adopting it would put the
     // old appearance back and then feed it into the next complete write.
-    await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
+    await waitFor(() => expect(screen.getByTestId('event-appearance-canvas'))
       .toHaveStyle({ '--event-primary': '#245c46' }));
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
   });
 
   it('appends the next media page and keeps every row unique', async () => {
