@@ -21,7 +21,7 @@ import {
   sha256,
   type CandidateManifest,
   type HashedFile,
-} from './release-evidence';
+} from './release-evidence.ts';
 import {
   RUN_ID_PATTERN,
   STAGING_ORIGIN,
@@ -29,7 +29,7 @@ import {
   assertCandidateSha,
   assertSafeStagingTarget,
   type StagingTarget,
-} from './staging-release-contract';
+} from './staging-release-contract.ts';
 
 const APPROVED_RELEASE_BASE_SHA = '0b92387d2e237d568d2514373dcc3044e7960d4b' as const;
 const WRANGLER_VERSION = '4.113.0' as const;

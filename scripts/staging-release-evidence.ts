@@ -9,7 +9,7 @@ import {
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { canonicalJson, sha256 } from './release-evidence';
+import { canonicalJson, sha256 } from './release-evidence.ts';
 import {
   SHA256_PATTERN,
   assertCandidateSha,
@@ -18,7 +18,7 @@ import {
   parseMode,
   type CleanupObservation,
   type PhaseReceipt,
-} from './staging-release-contract';
+} from './staging-release-contract.ts';
 
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
