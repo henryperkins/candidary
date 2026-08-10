@@ -214,6 +214,39 @@ describe('manager event merges', () => {
     expect(merged.cover.preparation).toEqual(preparation);
   });
 
+  it('never lets a delayed lower cover revision replace the current graph', () => {
+    const currentAtNine: EventView = {
+      ...current,
+      cover: { ...covered, revision: 9 },
+    };
+    const delayed = {
+      ...staleElsewhere,
+      cover: { ...noCover, revision: 8 },
+    };
+    expect(mergeCoverResponse(currentAtNine, delayed).cover).toBe(currentAtNine.cover);
+  });
+
+  it('allows same-revision reconciliation to update preparation', () => {
+    const currentAtNine: EventView = {
+      ...current,
+      cover: { ...covered, revision: 9, preparation: null },
+    };
+    const preparing = {
+      operationId: 'operation-b',
+      status: 'preparing' as const,
+      completedSteps: 3,
+      requiredSteps: 6,
+      retryable: false,
+      safeFailureCode: null,
+      updatedAt: '2026-08-04T00:00:00.000Z',
+    };
+    const sameRevision = {
+      ...staleElsewhere,
+      cover: { ...covered, revision: 9, preparation: preparing },
+    };
+    expect(mergeCoverResponse(currentAtNine, sameRevision).cover.preparation).toEqual(preparing);
+  });
+
   it('keeps settings, theme, and photo-intake responses out of the cover domain', () => {
     const coverMoved: EventView = {
       ...staleElsewhere,

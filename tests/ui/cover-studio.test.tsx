@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventCoverEffectId, EventCoverPreparationView } from '../../shared/event-cover';
 import { CoverStudio, type CoverStudioDraft } from '../../src/features/cover/CoverStudio';
+import type { CoverOperationAnswer } from '../../src/features/cover/cover-draft-client';
 import {
   createCoverOperationController,
   type CoverOperationState,
@@ -34,6 +35,18 @@ function preparing(patch: Partial<EventCoverPreparationView> = {}): EventCoverPr
     retryable: false,
     safeFailureCode: null,
     updatedAt: '2026-08-04T00:00:00.000Z',
+    ...patch,
+  };
+}
+
+function answer(
+  patch: Partial<CoverOperationAnswer> & { operation?: EventCoverPreparationView } = {},
+): CoverOperationAnswer {
+  return {
+    status: 202,
+    operation: preparing(),
+    receiptPath: '/api/manage/events/event-a/cover/publications/operation-a',
+    retryAfterMs: null,
     ...patch,
   };
 }
@@ -441,14 +454,17 @@ describe('cover operation controller', () => {
   it('allows a discard again only after a terminal, non-retryable outcome', () => {
     const { controller } = controllerHarness();
     controller.beginDispatch('operation-a');
-    controller.dispatchSettled(preparing());
+    controller.dispatchSettled(answer());
     expect(controller.canDiscardDraft()).toBe(false);
 
-    controller.dispatchSettled(preparing({ status: 'retryable-failed', retryable: true }));
+    controller.dispatchSettled(answer({
+      status: 503,
+      operation: preparing({ status: 'retryable-failed', retryable: true }),
+    }));
     // A retryable failure keeps the draft: the same operation may restart.
     expect(controller.canDiscardDraft()).toBe(false);
 
-    controller.dispatchSettled(preparing({ status: 'conflict' }));
+    controller.dispatchSettled(answer({ status: 409, operation: preparing({ status: 'conflict' }) }));
     expect(controller.canDiscardDraft()).toBe(true);
   });
 
@@ -456,7 +472,7 @@ describe('cover operation controller', () => {
     const onSettled = vi.fn();
     const { controller } = controllerHarness({ eventId: 'event-a', onSettled });
     controller.beginDispatch('operation-a');
-    controller.dispatchSettled(preparing({ status: 'applied' }));
+    controller.dispatchSettled(answer({ operation: preparing({ status: 'applied' }) }));
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(controller.getState().phase).toBe('applied');
   });
@@ -465,7 +481,7 @@ describe('cover operation controller', () => {
     const { controller, run } = controllerHarness();
     controller.attach();
     controller.beginDispatch('operation-a');
-    controller.dispatchSettled(preparing());
+    controller.dispatchSettled(answer());
     controller.detach();
     run();
     // Still dispatched, still undiscardable: closing a sheet decides nothing.
@@ -477,14 +493,41 @@ describe('cover operation controller', () => {
     let clock = 0;
     const { controller } = controllerHarness({ eventId: 'event-a', now: () => clock });
     controller.beginDispatch('operation-a');
-    controller.dispatchSettled(preparing());
+    controller.dispatchSettled(answer());
     expect(controller.getState().slow).toBe(false);
 
     clock = 60_000;
-    controller.dispatchSettled(preparing());
+    controller.dispatchSettled(answer());
     expect(controller.getState().slow).toBe(true);
     // Elapsed time never becomes a failure.
     expect(controller.getState().phase).toBe('preparing');
+  });
+
+  it('honors a longer server retry interval without shortening the local cadence', () => {
+    const scheduled: number[] = [];
+    const controller = createCoverOperationController({
+      eventId: 'event-a',
+      schedule: (_callback, delay) => {
+        scheduled.push(delay);
+        return () => undefined;
+      },
+    });
+    controller.attach();
+    controller.beginDispatch('operation-a');
+    controller.dispatchSettled(answer({ retryAfterMs: 11_000 }));
+    expect(scheduled.at(-1)).toBe(11_000);
+  });
+
+  it('returns to a discardable draft only when dispatch was refused before sending', () => {
+    const { controller } = controllerHarness();
+    controller.beginDispatch('operation-a');
+    controller.dispatchRejectedBeforeAcceptance();
+    expect(controller.getState()).toMatchObject({
+      phase: 'idle',
+      operationId: null,
+      dispatched: false,
+    });
+    expect(controller.canDiscardDraft()).toBe(true);
   });
 });
 
@@ -550,7 +593,7 @@ describe('cover studio dispatch and recovery', () => {
     render(<LiveHarness controller={controller} />);
     await act(async () => {
       controller.beginDispatch('operation-a');
-      controller.dispatchSettled(preparing({ completedSteps: 3 }));
+      controller.dispatchSettled(answer({ operation: preparing({ completedSteps: 3 }) }));
     });
     // Done is the step the sheet lands on once dispatch begins.
     fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
@@ -565,7 +608,7 @@ describe('cover studio dispatch and recovery', () => {
     const { unmount } = render(<LiveHarness controller={controller} />);
     await act(async () => {
       controller.beginDispatch('operation-a');
-      controller.dispatchSettled(preparing());
+      controller.dispatchSettled(answer());
     });
 
     unmount();
@@ -584,7 +627,10 @@ describe('cover studio dispatch and recovery', () => {
     render(<LiveHarness controller={controller} />);
     await act(async () => {
       controller.beginDispatch('operation-a');
-      controller.dispatchSettled(preparing({ status: 'retryable-failed', retryable: true }));
+      controller.dispatchSettled(answer({
+        status: 503,
+        operation: preparing({ status: 'retryable-failed', retryable: true }),
+      }));
     });
     fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -592,7 +638,9 @@ describe('cover studio dispatch and recovery', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
 
     await act(async () => {
-      controller.dispatchSettled(preparing({ status: 'permanent-failed', retryable: false }));
+      controller.dispatchSettled(answer({
+        operation: preparing({ status: 'permanent-failed', retryable: false }),
+      }));
     });
     // A permanent failure needs a corrected draft, not a retry.
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();

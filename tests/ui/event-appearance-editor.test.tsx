@@ -9,17 +9,17 @@ import { mergeCoverResponse, mergeThemeResponse } from '../../src/features/setti
 import { EventAppearanceEditor } from '../../src/components/EventAppearanceEditor';
 
 function json(data: unknown, status = 200) {
-  return Promise.resolve({
-    ok: status >= 200 && status < 300,
-    json: async () => ({ data, requestId: 'request-a' }),
-  } as Response);
+  return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  }));
 }
 
 function errorJson(body: Record<string, unknown>, status: number) {
-  return Promise.resolve({
-    ok: status >= 200 && status < 300,
-    json: async () => body,
-  } as Response);
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  }));
 }
 
 const defaultTheme = resolveEventTheme({
@@ -116,6 +116,7 @@ function themeMutationCalls(fetchMock: ReturnType<typeof vi.fn>) {
 
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -471,6 +472,10 @@ describe('event appearance editor', () => {
   });
 
   it('uploads through the draft pipeline and removes with one publication', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:cover-preview') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
     const cleared = {
       ...event,
       cover: {
@@ -527,11 +532,22 @@ describe('event appearance editor', () => {
         return json({ draft: draft('ready', 4, { focus: { x: 0.42, y: 0.61, modelVersion: 1 } }) });
       }
       if (path === '/api/manage/events/event-a/cover/publications' && method === 'POST') {
-        const body = JSON.parse(String(init?.body)) as { source: { kind: string } };
+        const body = JSON.parse(String(init?.body)) as {
+          operationId: string;
+          source: { kind: string };
+        };
         if (body.source.kind === 'none') {
-          return json({ applied: true, appliedRevision: 2, operation: null, event: cleared });
+          return json({
+            applied: true,
+            appliedRevision: 2,
+            operation: { ...preparing, operationId: body.operationId, status: 'applied', completedSteps: 6 },
+            event: cleared,
+          });
         }
-        return json({ applied: false, operation: { ...preparing, completedSteps: 0 } });
+        return json({
+          applied: false,
+          operation: { ...preparing, operationId: body.operationId, completedSteps: 1 },
+        }, 202);
       }
       if (path === '/api/manage/events/event-a' && method === 'GET') {
         return json({ event: { ...event, cover: { ...event.cover, preparation: preparing } } });
@@ -562,6 +578,9 @@ describe('event appearance editor', () => {
     await waitFor(() => expect(screen.getByText(/Preparing cover 2 of 6/u)).toBeVisible());
 
     cleanup();
+    // The removal half is an independent Manager load, not an attempt to start
+    // a second publication while the accepted upload above is still preparing.
+    sessionStorage.clear();
     render(<Harness initial={{ ...event, cover: { ...event.cover, revision: 1 } }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
@@ -584,12 +603,13 @@ describe('event appearance editor', () => {
       const path = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
       if (path === '/api/manage/events/event-a/cover/publications' && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { operationId: string };
         // §11's recovery view travels in the response envelope, not in an error
         // body — so it carries no `code` and no `message`.
         return Promise.resolve(new Response(JSON.stringify({
           data: {
             applied: false,
-            operation: { operationId: 'operation-a', status: 'conflict', completedSteps: 0, requiredSteps: 0, retryable: false, safeFailureCode: null, updatedAt: '2026-08-04T00:00:00Z' },
+            operation: { operationId: body.operationId, status: 'conflict', completedSteps: 0, requiredSteps: 0, retryable: false, safeFailureCode: null, updatedAt: '2026-08-04T00:00:00Z' },
             event: winner,
           },
           requestId: 'request-a',

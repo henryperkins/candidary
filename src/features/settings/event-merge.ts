@@ -108,5 +108,11 @@ export function mergeThemeResponse(current: EventView, response: EventView): Eve
 }
 
 export function mergeCoverResponse(current: EventView, response: EventView): EventView {
+  // A whole-event read or unrelated write may have started before a newer
+  // publication settled. Cover revision is monotonic, so that delayed graph is
+  // never allowed to restore an older semantic config or pointer projection.
+  // Same-revision responses remain useful: preparation can advance or settle
+  // without incrementing the published cover revision.
+  if (response.cover.revision < current.cover.revision) return current;
   return mergeOwned(current, response, COVER_OWNED);
 }

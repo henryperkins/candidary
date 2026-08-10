@@ -21,10 +21,10 @@ import { COVER_UPLOAD_MIME_TYPES, MAX_COVER_UPLOAD_BYTES } from '../../shared/co
 import { api, ClientApiError } from '../app/api';
 import {
   CoverUploadRejected,
-  publishCoverRemoval,
-  publishCoverUpload,
   type CoverCompositionRunner,
 } from '../features/cover/cover-draft-client';
+import { useCoverOperationReconciler } from '../features/cover/use-cover-operation-reconciler';
+import { useCoverStudioSession } from '../features/cover/use-cover-studio-session';
 import {
   createAutosaveQueue,
   type AutosaveFailure,
@@ -122,6 +122,27 @@ export function EventAppearanceEditor({
   // than closed over from the first render.
   const themeSavedRef = useRef(onThemeSaved);
   themeSavedRef.current = onThemeSaved;
+
+  async function readFreshEvent(): Promise<EventView> {
+    const loaded = await onEventRead(() => api<{ event: EventView }>(
+      '/api/manage/events/' + event.id,
+    ));
+    return loaded.event;
+  }
+
+  // Mounted at Manager scope: this remains attached when the Studio sheet is
+  // closed, and is the only owner that polls a publication receipt.
+  const coverReconciler = useCoverOperationReconciler({
+    eventId: event.id,
+    preparation: event.cover.preparation,
+    onCoverEvent: onCoverSaved,
+    onFreshEventRequired: readFreshEvent,
+  });
+  const coverSession = useCoverStudioSession({
+    event,
+    reconciler: coverReconciler,
+    compositionRunner,
+  });
 
   function adoptDraft(theme: ResolvedEventTheme) {
     draftRef.current = theme.config;
@@ -336,24 +357,17 @@ export function EventAppearanceEditor({
     setCoverBusy(true);
     setCoverError(null);
     try {
-      const result = await onEventWrite(() => publishCoverUpload({
-        eventId: event.id,
-        file,
-        // Every publication carries the revision this page last read. A stale one
-        // is a 409 whose recovery view carries the current number.
-        expectedRevision: event.cover.revision,
-        runComposition: compositionRunner,
-      }));
+      await coverSession.chooseFile(file);
+      const result = await onEventWrite(() => coverSession.publish());
       // An upload answers `202`: the receipt is accepted and durable, but the
       // cover is not live until its renderings are. The status beside the summary
       // owns the rest, and the current cover stays exactly as it was.
-      if (result.event) onCoverSaved(result.event);
-      else await refreshEvent();
       if (result.status === 409) setCoverError(COVER_MOVED_ON);
       if (result.status === 503) setCoverError(COVER_PREPARE_UNAVAILABLE);
     } catch (caught) {
       setCoverError(describeCoverFailure(caught, 'The cover photo could not be saved. Try again.'));
     } finally {
+      coverSession.close();
       setCoverBusy(false);
       if (coverInput.current) coverInput.current.value = '';
     }
@@ -366,24 +380,16 @@ export function EventAppearanceEditor({
     try {
       // Removal is a publication like any other: one of exactly two configs this
       // release can publish, through the same revision guard and receipt.
-      const result = await onEventWrite(() => publishCoverRemoval(event.id, event.cover.revision));
+      coverSession.chooseSource({ kind: 'none' });
+      const result = await onEventWrite(() => coverSession.publish());
       // A `409` carries the winning event, so adopting it rebases this page onto
       // the revision the next change has to send.
-      if (result.event) onCoverSaved(result.event);
-      else await refreshEvent();
       if (result.status === 409) setCoverError(COVER_MOVED_ON);
     } catch (caught) {
       setCoverError(describeCoverFailure(caught, 'The cover photo could not be removed. Try again.'));
     } finally {
       setCoverBusy(false);
     }
-  }
-
-  async function refreshEvent() {
-    const loaded = await onEventRead(() => api<{ event: EventView }>(
-      '/api/manage/events/' + event.id,
-    ));
-    onCoverSaved(loaded.event);
   }
 
   function describeCoverFailure(caught: unknown, fallback: string): string {
@@ -395,7 +401,10 @@ export function EventAppearanceEditor({
   const accentError = errors['overrides.accentColor'];
   const primaryPickerValue = HEX_COLOR.test(rawPrimary) ? rawPrimary : previewTheme.tokens.primary;
   const accentPickerValue = HEX_COLOR.test(rawAccent) ? rawAccent : previewTheme.tokens.accent;
-  const coverLocked = coverBusy;
+  const coverLocked = coverBusy
+    || coverReconciler.operationState.phase === 'dispatching'
+    || coverReconciler.operationState.phase === 'preparing'
+    || coverReconciler.operationState.phase === 'retryable-failed';
 
   function flushThemeOnEnter(keyEvent: KeyboardEvent) {
     if (keyEvent.key !== 'Enter') return;
@@ -428,9 +437,7 @@ export function EventAppearanceEditor({
           ? 'Shown on the guest hero for RSVP and photo delivery.'
           : `Optional. JPEG, PNG, WebP, or HEIC · ${COVER_MAX_MB} MB max.`}</p>
         <ManagerCoverPreparationStatus
-          eventId={event.id}
-          preparation={event.cover.preparation}
-          onResolved={() => { void refreshEvent(); }}
+          reconciler={coverReconciler}
         />
       </div>
       <div className="event-appearance-editor__cover-actions">
