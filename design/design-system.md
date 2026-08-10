@@ -313,10 +313,34 @@ The corrected cover-field copy on both upload controls is
 are read from the same server-owned constants the route enforces, so the two
 cannot drift.
 
-Cover Studio's own copy, the six preset names (`Warm Linen`, `Botanical Shadow`,
-`Pressed Paper`, `Candlelit Grain`, `Coastal Haze`, `Midnight Wash`), and the five
-style names (`natural`, `warm`, `film`, `soft`, `monochrome`) are **reserved, not
-yet allowed**: they ship unrendered and no surface can reach them. They return to
-this list for review when the studio is wired.
+Cover Studio is live behind the Manager canvas's `Change cover` action. At 760 px
+and below it is a bottom sheet; at 761 px and above it is a centered dialog. It is
+one controlled, focus-trapped flow with the visible stages `Choose a cover`,
+`Position the photo` (uploads only), `Choose a style`, and `Save this cover`.
+Removal goes from Choose directly to Done; a preset skips Compose. Browser Back
+moves within the flow before it asks to discard, and close/Back preserve an
+already accepted publication. Compact visual-keyboard and 200%/400%-equivalent
+layouts keep the current action and error reachable without moving Manager
+chrome into the event theme.
+
+The six preset names (`Warm Linen`, `Botanical Shadow`, `Pressed Paper`,
+`Candlelit Grain`, `Coastal Haze`, `Midnight Wash`) and five style names
+(`natural`, `warm`, `film`, `soft`, `monochrome`) are approved live product copy.
+Uploads expose automatic focus, an explicit manual focus/zoom adjustment, Reset,
+and real bounded effect previews. Presets and upload previews update the one live
+`EventAppearanceCanvas`; there is no detached inert preview or second canvas.
+The canvas layers event theme and cover intent only inside its guest simulation.
+Its summary, `Change cover`, progress, retry, and all surrounding Manager controls
+remain global Candidary semantics and colors.
+
+The delivered hero measures its actual container before requesting an image and
+chooses exactly one registered profile. Lookup at container width <=360 and
+viewport height <=600 uses `short-lookup`; ordinary <=390 uses
+`compact-default`, while 391 and above uses `standard-default`; expanded welcome
+uses `compact-expanded` through 390 and `wide-expanded` from 391; the framed
+default requires viewport width >=700 and height >=760. It advertises 2x only
+when the server projection names that profile. Runtime layer order is image,
+optional film grain, contrast scrim, then copy. A missing current image becomes
+the existing event gradient, never a broken-image icon, legacy object, or master.
 
 Apart from those entry points, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.

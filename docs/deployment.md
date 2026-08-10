@@ -251,6 +251,134 @@ Worker Version Metadata supplies the runtime version ID, tag, and timestamp thro
 `CF_VERSION_METADATA`; runtime identity fails closed unless the tag equals the embedded build SHA.
 The wrapper does not migrate D1 and does not create a certification row.
 
+### Phase 3 release sequence — current 14-migration contract
+
+The current boundaries are exact: the Phase-2 proof has 13 migrations and ends at
+`0013_guest_message_hardening.sql`; the Phase-3 candidate has 14 and adds only
+`0014_event_cover_invariants.sql`. The older cover plan called the invariant migration `0013` before
+the guest-message migration was integrated. Do not rename either file, reuse the old number, or infer
+a migration boundary from prose in a historical plan.
+
+Each row below requires its own named authorization and evidence. Passing one row does not authorize
+the next.
+
+| Gate | Required action and proof | Explicitly still unproven |
+| --- | --- | --- |
+| Local candidate | Commit a clean Phase-3 head, run the complete local gate and `verify:release`, then independently review the exact SHA and manifest/sidecar. | Any remote resource, platform behavior, deployment, production state, or physical device. |
+| Workflow-conformance staging | On isolated disposable resources ending at migration 0013, deploy the exact Phase-3 Worker with no route, `workers.dev`, preview URL, or cron. Prove the Phase-3-modified `CoverBackfillWorkflow`, then destroy every resource and verify absence. | User-serving cutover behavior. These resources and fixtures may not be reused by cutover staging. |
+| Cutover staging | Initialize a different empty D1 through 0013, deploy the exact Phase-2 proof at 100%, apply only 0014, prove the Phase-2 reader/publication/removal/hard-purge canaries, deploy the exact Phase-3 candidate at 100%, then prove real Images, render Workflow, delivery, Studio, recovery, and browser matrices. Destroy everything and verify absence. | Landing, production, or physical-device support. |
+| Staging evidence | Finalize and independently verify the canonical artifact and sidecar only after both staging topologies and all fixtures are absent. | Permission to push or mutate production. |
+| Exact-SHA landing | With a new authorization naming the expected old `origin/main` and candidate SHA, fast-forward that exact SHA only and re-read the remote ref. | Production migration or deployment. |
+| Production cutover | Reverify landing, candidate, staging artifact, production topology/ledger/zero counts, and a fresh Time Travel bookmark. Apply only 0014, prove the still-deployed Phase-2 Worker, then deploy only the staged Phase-3 SHA and close runtime checks. | iPhone, Android, VoiceOver, TalkBack, or wedding-readiness evidence. |
+| Physical acceptance | Run the separately named real-device and assistive-technology matrix against the exact deployed SHA. | Nothing may substitute for the named physical observations. |
+
+#### Strict staging inputs and outputs
+
+Every external JSON input is canonical, regular, nonsymlinked, exact-schema data beneath ignored
+`output/staging-input/`; unknown, duplicate, empty, path-escaping, secret-shaped, or production-reusing
+fields fail closed. The v1 target descriptor has exactly the top-level keys `kind`, `schemaVersion`,
+`purpose`, `accountId`, `worker`, `d1`, `r2`, `images`, `assets`, `email`, `rateLimits`, `workflows`,
+`crons`, `vars`, `requiredSecretNames`, `observability`, `placement`, `expiresAt`, and `cleanupOwner`.
+Its nested contract names:
+
+- Worker name, routes, `workersDev`, and `previewUrls`;
+- D1 `DB`, R2 `MEDIA_BUCKET`, Images `IMAGES`, assets `ASSETS`, Email `EMAIL`, both rate-limit
+  bindings with their fixed limits, and all three Workflow bindings/classes;
+- cron list; `APP_ORIGIN`, `ALTERNATE_ORIGINS`, `R2_ACCOUNT_ID`, `R2_BUCKET_NAME`, and `EMAIL_FROM`;
+- the exact required secret-name set, smart placement, observability state, expiry, and cleanup owner.
+
+It contains no secret value, token, object key, private URL, private image, or reusable production
+identity. `purpose: workflow-conformance` additionally requires empty routes/crons and false
+`workersDev`/`previewUrls`; `purpose: cutover` may expose only the separately authorized staging
+topology. The review authorization binds approved main, the 13-migration Phase-2 SHA/manifest digest,
+the 14-migration Phase-3 SHA/manifest digest, reviewer, issue time, and expiry. The staging
+authorization binds its review digest, run ID, both candidate SHAs, both target digests, allowed
+modes/crons, all three expected schema digests, issue/expiry times, and cleanup owner.
+
+The sanitized evidence input and final output use the exact
+`candidary.staging-conformance` v1 schema: `status: passed`, candidate/run/approved-main identity;
+Phase-2 and Phase-3 source/manifest/migration-manifest digests; both authorization and target digests;
+the 13- and 14-file ledgers, bootstrap/migration/bundle hashes, nine trigger names, integrity,
+foreign-key result, and four zero counts; three deployment version/tag/metadata/100%-traffic records;
+complete Images, Backfill Workflow, Render Workflow, route, and browser case matrices; complete
+absence booleans for both topologies; and start/finish times. It is written as canonical JSON plus
+`staging-conformance.json.sha256` beneath
+`output/staging/<phase3-sha>/<run-id>/`. `finalize` re-derives source and bundle hashes; `verify`
+independently rechecks both manifests, authorizations, the artifact bytes, sidecar, all matrices, and
+both destruction records.
+
+#### Guarded staging commands
+
+Populate every variable below only from the separately approved descriptors and canonical artifacts:
+
+```powershell
+npm run release:staging -- initialize --candidate-root $phase2Root --sha $phase2Sha --manifest $phase2Manifest --target $workflowTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --run-id $runId --through 0013_guest_message_hardening.sql
+npm run release:staging -- deploy --candidate-root $phase3Root --sha $candidateSha --manifest $candidateManifest --target $workflowTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --run-id $runId
+
+# After conformance passes, destroy that entire topology and verify absence.
+npm run release:staging -- initialize --candidate-root $phase2Root --sha $phase2Sha --manifest $phase2Manifest --target $cutoverTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --run-id $runId --through 0013_guest_message_hardening.sql
+npm run release:staging -- deploy --candidate-root $phase2Root --sha $phase2Sha --manifest $phase2Manifest --target $cutoverTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --run-id $runId
+npm run release:staging -- migrate --candidate-root $phase3Root --sha $candidateSha --manifest $candidateManifest --target $cutoverTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --run-id $runId
+# Prove the Phase-2 compatibility canaries under 0014 before this upload.
+npm run release:staging -- deploy --candidate-root $phase3Root --sha $candidateSha --manifest $candidateManifest --target $cutoverTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --run-id $runId
+
+# After every real-platform matrix passes and both topologies are destroyed:
+npm run release:staging -- finalize --sha $candidateSha --manifest $candidateManifest --phase2-manifest $phase2Manifest --workflow-target $workflowTarget --cutover-target $cutoverTarget --review-authorization $reviewAuthorization --authorization $stagingAuthorization --evidence-input $sanitizedEvidenceInput --run-id $runId
+npm run release:staging -- verify --artifact $stagingArtifact --sidecar $stagingArtifactSidecar --manifest $candidateManifest --phase2-manifest $phase2Manifest --review-authorization $reviewAuthorization --authorization $stagingAuthorization
+```
+
+For each remote mode the wrapper rebuilds and rehashes the exact source, then creates only
+`output/staging/<candidate-sha>/<run-id>/deploy-root/`. That owned root contains the verified
+`dist/candidary/wrangler.json`, Worker bundle/files, `dist/client/`, and `migrations/` in their original
+relative layout. A closed overlay replaces or disables every production-capable binding. Wrangler
+runs from that root with `--config dist/candidary/wrangler.json`; the wrapper rehashes the files and
+removes the entire owned root after the command. Never copy a bare config elsewhere or let relative
+`main`, assets, or `migrations_dir` paths resolve against a caller-owned directory.
+
+Empty-D1 initialization and the 0014 cutover deliberately do **not** use
+`wrangler d1 migrations apply --remote`. Pinned Wrangler 4.113.0 cannot parse the repository's
+compound `0008_event_rsvp.sql` through that path. The wrapper instead generates one manifest-hashed
+file containing the exact ordered migration bytes and deterministic ledger writes, then invokes only
+the repository-pinned `wrangler d1 execute DB --remote --config dist/candidary/wrangler.json --file
+<owned-bundle>`. D1's file-import boundary is atomic remotely; the pinned local implementation uses a
+single `db.batch()`. The wrapper does not add `BEGIN`/`COMMIT` because D1 rejects explicit transaction
+SQL in this API. A failed bootstrap must re-prove the same database entirely empty before retry; any
+residue requires verified destruction and a new descriptor/authorization. A failed 0014 import must
+re-prove the exact 13-file ledger/schema pre-state. Never synthesize a ledger row, resume a partial
+prefix, use `migrations apply`, upgrade Wrangler during the run, or reuse a failed disposable D1.
+
+#### Production migration-first cutover
+
+Remote migration is first because `0014` is explicitly tested with the exact Phase-2 writer and hard
+purge. This leaves the Phase-2 Worker as the rollback deployment while the new triggers are proved.
+The production authorization is a strict v1 record binding run ID, approved main/candidate/manifest,
+canonical production topology/account/D1, `0014` name and migration/bundle hashes, Time Travel
+bookmark digest, pre/post schema hashes, authorization/expiry times, and named no-deploy-window and
+rollback owners. The bookmark is a separate exact v1 record binding the same account/D1 plus bookmark
+ID and recording time. With those inputs, and only after the independently verified staging artifact:
+
+```powershell
+npm run release:migrate -- --sha $candidateSha --manifest $candidateManifest --authorization $productionAuthorization --bookmark $timeTravelBookmarkArtifact
+# Keep Phase 2 at 100% and prove reader, publication, removal, and hard purge under 0014.
+npm run deploy -- --sha $candidateSha --manifest $candidateManifest
+```
+
+`release:migrate` accepts only those four flags, verifies the exact clean landed 14-migration
+candidate, canonical production topology, bookmark/authorization digests, 13-file ledger, sole pending
+0014, four zero counts, integrity, foreign keys, and pre-schema hash before it runs the hashed atomic
+single-file import. It then requires the exact 14-file ledger, nine triggers, post-schema hash, zero
+counts, integrity, and foreign keys. `npm run deploy` remains the only Worker deployment command and
+does not migrate. Require one 100% version whose tag and `CF_VERSION_METADATA` equal the reviewed SHA,
+then verify protected negatives, nested projections, current/stale slots, preset redirect, upload
+no-store bytes, cover-only refresh, D1 integrity/zero counts, and fixture R2 inventory.
+
+If migration fails, do not deploy. If the migration succeeds but the Phase-2 canary fails, keep Phase
+2 at 100%, preserve the bookmark/evidence, and let the named rollback owner choose a reviewed forward
+repair or restore after accounting for post-bookmark writes. If Phase-3 upload or runtime checks fail,
+keep or restore the exact Phase-2 Worker; do not drop triggers, edit the ledger, enable a legacy reader,
+or return a normalized master. Only after all runtime evidence correlates to one SHA may the no-deploy
+window close. Physical device and assistive-technology acceptance remains a later, separate gate.
+
 `placement.mode` is `smart`, and it is in `wrangler.jsonc` because anything the live Worker has that the
 repository does not declare is silently dropped by the next deploy. It arrived the other way around: an
 account API token named `Clouder-App-d4911219-1785224589` patched the Worker's settings directly on
@@ -259,8 +387,8 @@ discard the setting. That refusal is the guard behaving correctly — a Worker w
 and whose repository disagree cannot be deployed from the repository without losing the difference.
 Settle such a difference by declaring it here, not by weakening the upload.
 
-The following migration note and numbered runbooks remain authoritative when their exact migration
-is separately approved.
+The following 0008 note records a historical incident. The numbered legacy runbooks remain useful for
+their own migrations, but the Phase-2/Phase-3 cover boundaries use the guarded wrappers above.
 
 > **`migrations apply --remote` failed on 0008 (wrangler 4.113.0).** It returned
 > `incomplete input: SQLITE_ERROR [code: 7500]` and applied nothing — the ledger stayed at 0007 and no
@@ -269,18 +397,13 @@ is separately approved.
 > from 0001–0007 executed all 17 statements cleanly, and so did the same command against production.
 > It is a fault in the `migrations apply` code path, not in the SQL.
 >
-> If it happens again, do not edit the migration to work around it. Take an export first, apply the
-> file directly, then record it in the ledger yourself so future migrations still resolve:
->
-> ```powershell
-> npx wrangler d1 export candidary-core --remote --output pre-migration-backup.sql
-> npx wrangler d1 execute candidary-core --remote --file migrations/<name>.sql
-> npx wrangler d1 execute candidary-core --remote --command "INSERT INTO d1_migrations (name) VALUES ('<name>.sql')"
-> npx wrangler d1 migrations list candidary-core --remote   # expect: No migrations to apply
-> ```
->
-> The export contains real event, guest, and message data — keep it outside the repository and delete
-> it once the deploy is confirmed.
+> Do not generalize the historical recovery into a current operator pattern. In particular, never run
+> a migration file and its ledger insert as separate Phase-2/Phase-3 commands. The current wrappers
+> build a manifest-hashed file whose migration bytes and ledger write share D1's atomic import
+> boundary, verify the exact before/after state, and refuse `migrations apply --remote`. A new failure
+> stops for diagnosis and the migration-specific rollback rule; it is not repaired with a hand-written
+> ledger row. Any export contains real event, guest, and message data and must remain outside the
+> repository under its separately approved retention procedure.
 
 Migration-before-compatible-Worker order is load-bearing rather than tidy: the manager's intake
 queries select and order by
@@ -570,7 +693,7 @@ therefore still uncertified until a future, explicitly designed physical-evidenc
 exact matching Worker version, build SHA, journey version, migration digest, evidence-manifest digest,
 and redacted physical references. See [operations.md](operations.md) for the fail-closed contract.
 
-### 0012 is the first of three cover phases, and applying it authorizes none of the others
+### Historical Phase-1/Phase-2 cover boundary: 0012 authorizes no later phase
 
 `0012_event_cover_storage.sql` is additive: three `events` columns and twelve cover inventory tables.
 It is the widest schema change in this repository's history, and it is also the one most likely to be
@@ -579,9 +702,9 @@ explicitly separated releases, each with its own authorization:
 
 | Phase | What it is | What it does **not** authorize |
 | --- | --- | --- |
-| 1 | Apply `0012`; deploy the Worker with `COVER_RENDER_WORKFLOW`, `COVER_BACKFILL_WORKFLOW`, and the versioned preset assets. New and replacement uploads use the bounded pipeline; the client contract is unchanged. | Running the backfill. Enabling Cover Studio or the responsive reader. Authoring `0013`. |
+| 1 | Apply `0012`; deploy the Worker with `COVER_RENDER_WORKFLOW`, `COVER_BACKFILL_WORKFLOW`, and the versioned preset assets. New and replacement uploads use the bounded pipeline; the client contract is unchanged. | Running the backfill. Enabling Cover Studio or the responsive reader. Authoring the later invariant migration. |
 | 2 | Convert every pre-`0012` legacy cover with the backfill launcher and produce the zero-legacy proof. | Phase 3. A green proof authorizes opening that candidate and nothing else. |
-| 3 | `0013_event_cover_invariants.sql`, the new Manager and guest projections, the revision-scoped delivery routes, and Cover Studio. | Anything before its own review and release. |
+| 3 | `0014_event_cover_invariants.sql` after integrated `0013_guest_message_hardening.sql`, the new Manager and guest projections, the revision-scoped delivery routes, and Cover Studio. | Anything before its own review and release. |
 
 Phase 2 itself has three authorization gates. They are sequential evidence boundaries, not three
 steps authorized by one approval:
@@ -593,9 +716,9 @@ steps authorized by one approval:
 | Production backfill | New explicit production authorization after both earlier gates pass; exact account/Worker/D1/Workflow/migration identity; the exact candidate at 100% traffic; an owned no-deploy window; and execution of the bounded claim/launch/confirm/proof protocol in the runbook. | `0014_event_cover_invariants.sql`, responsive projections/routes, Cover Studio activation, or a Phase-3 deployment. |
 
 A new commit, migration, deployed version/tag, binding change, or staging remediation invalidates later
-gate evidence until the affected gate is repeated on the new exact candidate. The current remediation
-plan deliberately stops before candidate verification; this section describes future gates and does
-not mark any of them passed.
+gate evidence until the affected gate is repeated on the new exact candidate. This table records the
+Phase-1/Phase-2 authorization boundary; it is not the current Phase-3 execution runbook and marks no
+Phase-3 gate passed. Use the 14-migration sequence above for current work.
 
 Two properties make the phase-1 apply safe to perform on its own. Every new column has a SQLite-safe
 constant default, so a populated database migrates without a data pass. And the compatibility reader

@@ -8,6 +8,47 @@ Every event-scoped request resolves an HttpOnly session, loads its current acces
 
 Access links contain a random token ID and 256-bit secret. D1 stores keyed HMAC digests, not raw secrets. The guest secret is additionally stored as AES-256-GCM ciphertext so an authenticated manager can redisplay the current share link; the one-time management secret is not recoverable. Rotating a role revokes both its tokens and sessions.
 
+## Event cover delivery
+
+Cover configuration is public presentation, but cover storage identity is private. Manager event JSON
+contains one nested `cover` object with exactly `config`, `revision`, `hasCover`,
+`available2xProfiles`, `surfaceTreatment`, and the sanitized `preparation`; the guest projection
+contains only `revision`, `hasCover`, `available2xProfiles`, and `surfaceTreatment`. Neither response
+contains an R2 key, normalized-master or render-set ID, draft ID, publication receipt ID, Workflow ID,
+private URL, recipe, or manifest. A projection that cannot prove the stored semantic config and active
+inventory agree emits one identifier-free invariant reason and returns a generic failure rather than
+guessing a safe-looking view.
+
+Guests and Managers fetch bytes only through these same-origin allowlisted shapes:
+
+```text
+GET /api/event/:slug/cover/:revision/:profile/:density.:format
+GET /api/manage/events/:eventId/cover/:revision/:profile/:density.:format
+```
+
+Each request resolves current authorization and the current event again. The guest route requires the
+authenticated event slug; the Manager route uses the ordinary manager-link/account boundary. Both
+require an exact non-negative current revision and registered profile, density, and format. An uploaded
+cover additionally requires the event's exact active render set, its published revision, an event-owned
+object key, and the expected content type before the one read-only R2 `GET`. The response is always
+`private, no-store` with `X-Content-Type-Options: nosniff`. Presets return a `307` carrying the same
+private/no-store boundary to a versioned, event-free static asset path; the static prefix alone carries
+`Cache-Control: public, max-age=31536000, immutable`.
+
+The revisionless guest and Manager readers do not exist. Stale/future revisions, `none`, missing or
+retired slots, cross-event sets, wrong audiences, and missing objects fail closed. Delivery never reads
+or returns a normalized master or legacy object, never invokes Images, and never falls back to another
+revision, profile, density, or format. The browser may try current WebP and then current JPEG; if both
+fail it removes the image, emits one sanitized `(audience, profile, revision)` observation, and requests
+at most one event-view refresh for that slot. It does not expose the failed URL or storage state.
+
+Publication recovery follows the same no-key rule. One Manager-level controller retains only the
+event-scoped operation ID needed to re-read the server-selected sanitized receipt; closing Cover Studio,
+a dropped response, a hidden tab, or temporary access loss does not mint a second operation. Receipt
+views expose bounded status/progress/failure codes and no platform or storage identity. Server and
+cleanup observations are closed low-cardinality codes without raw Cloudflare errors, Workflow IDs,
+object keys, event IDs, or private image data.
+
 ## The printed event entry
 
 A guest reaches an event only by scanning the code printed on the invitation, and that code must not change for the life of the event. `event_entry_credentials` holds one permanent `id.secret` per event, digested with `ENTRY_HMAC_KEY` and additionally stored as AES-256-GCM ciphertext under `ENTRY_ENCRYPTION_KEY` so a manager can redisplay it.

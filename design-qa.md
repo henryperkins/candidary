@@ -99,6 +99,64 @@ before production backfill authorization; pinning a discriminator creates a new 
 both gates. The rehearsals also provide no physical-device, Safari, Android, native picker, remote D1,
 deployment, production-data, or Phase-3 evidence.
 
+### Phase-3 cover contract evidence
+
+Phase 3 ends at `0014_event_cover_invariants.sql`: 14 migrations total, with the Phase-2 proof ending
+at `0013_guest_message_hardening.sql`. Its focused static/release-tooling gate is:
+
+```powershell
+npm run verify:cover-presets
+npm run verify:bindings
+$freshRunRoot = Join-Path ([IO.Path]::GetTempPath()) 'candidary-release-<unique-run-id>'
+New-Item -ItemType Directory -Path $freshRunRoot
+npm run verify:fresh-d1 -- --run-root $freshRunRoot --report-file (Join-Path $freshRunRoot 'migration-verification.json')
+npm run test:unit -- tests/unit/release-candidate.test.ts tests/unit/deploy-release.test.ts tests/unit/migrate-release.test.ts tests/unit/staging-release-evidence.test.ts tests/unit/staging-release.test.ts
+npm run typecheck
+npm run typecheck:e2e
+npm run lint
+git diff --check
+```
+
+The aggregate `verify:release` runner creates this owned temporary root and supplies both Fresh-D1
+arguments itself. A direct focused invocation must do the same; the no-argument package command is not
+a standalone run because it has nowhere safe to publish the schema report.
+
+The release-tooling slice passed 36/36 locally. It covers exact-candidate verification, production
+deploy parity, closed staging topology overlays, owned deploy-root path resolution, strict artifact
+schemas, deterministic bootstrap/0014 bundles, pinned Wrangler 4.113.0 dry run and migration discovery,
+a real 13-file local bootstrap, local 0014 apply, and fault-injected atomic rollback. These tests prove
+the wrapper and local D1 behavior only. They do not prove a remote import, binding identity, deployed
+version metadata, Images output, Workflow lifecycle, resource destruction, or a finalized staging
+artifact.
+
+The production-build browser evidence command is:
+
+```powershell
+npm run test:e2e -- tests/e2e/event-cover-studio.spec.ts tests/e2e/accessibility.spec.ts tests/e2e/guest-responsive.spec.ts tests/e2e/guest-lifecycle.spec.ts tests/e2e/event-theming-visual.spec.ts tests/e2e/security.spec.ts
+```
+
+It passed 142 cases with 76 intentional project-specific skips and zero failures. It proves semantic
+none/preset and upload publication journeys, existing-upload editing/reset, removal/discard, one
+operation owner across dropped responses/close/reopen/hidden-tab/access recovery, Retry-After-aware
+polling, all six responsive profiles and exact 360/361, 390/391, 599/600/601, 699/700, and 759/760
+boundaries, advertised current-revision candidates, WebP-to-JPEG-to-gradient recovery, one sanitized
+refresh, unchanged-revision anti-loop, newer-revision reset, and dynamic axe across the complete
+Studio/Manager/guest states.
+
+Twenty-nine changed PNGs were inspected at original resolution: 12 profile/directional crops, five
+sheet/dialog/keyboard/zoom geometries, four intentionally invalidated hero/canvas baselines, and eight
+four-theme preset/upload-effect canvases. `design/fidelity-ledger.md` lists every exact filename and
+accepted category. The first visually identical upload-effect fixtures were rejected and replaced with
+one deterministic source rendered into distinct natural, warm, soft, and monochrome fixtures. The run
+also found and fixed a real desktop defect where `visualViewport` sheet positioning overrode centered
+dialog geometry; the inline visual-viewport bounds now apply only through 760 px.
+
+Playwright uses local stateful route fixtures and deterministic image bytes. Dynamic axe does not
+measure text-over-image pixels, so the 720 preset/effect/theme/profile contrast matrix remains a
+deterministic compositor proof and arbitrary-upload safety remains a monotonic brightest-source proof.
+No local result is promoted to real Images/HEIC/metadata, Workflow, remote D1, staging, production,
+Safari/native picker, physical-device, VoiceOver, or TalkBack evidence.
+
 ## Tracked visual baselines
 
 The two landing baselines were recaptured on Windows and inspected side by side at their natural
@@ -489,18 +547,16 @@ No waiting, automatic-transition, or manager photo-intake PNG is claimed.
   cursor-less first-page request through the normal route stub. The answered poll keeps all 120
   unique rows and does not restore `Load more photos`. `tests/ui/app.test.tsx` separately pins
   overlap, discontinuity, stale-query, and concurrent append ordering with controlled timers.
-- **The `cover-present` sentinel.** The compatibility Manager and guest projections return the
-  constant string `cover-present` when an event has any cover, and null otherwise. They deliberately
-  do not return the `cover_object_key` column, because that column now holds the private normalized
-  master rather than a legacy original — projecting it would be worse than the status quo, not a
-  neutral carry-forward. Every current client uses the field only as a presence flag and requests the
-  authorized route, so neither audience loses anything.
-- **A replaced cover becomes visible only after a reload.** `useEventCover` keys its effect on the
-  request path, and neither compatibility cover URL carries a key or a revision, so nothing in the
-  client can detect a replacement. This predates the cover work — replacing a cover already produced
-  no refetch — but under a constant sentinel it is now unconditional. It is accepted for this
-  release and is fixed by the revision-scoped delivery routes, not by a client change.
-- **Miniflare proves Workflow creation and nothing else about a Workflow's life.**
+- **Nested projections replace the sentinel.** Manager event JSON owns exactly six cover keys and
+  guest JSON the exact four-key safe subset. Both carry the current revision and qualified 2x profile
+  list; neither carries the private master/object key, render-set ID, receipt ID, or Workflow ID.
+  Impossible semantic/pointer/set graphs emit one identifier-free invariant reason and fail closed.
+- **Replacement and failure use the revisioned contract.** Every picture candidate includes the
+  event's current revision. A publication response/event refresh updates that revision immediately;
+  a missing current WebP falls to current JPEG, a second failure becomes the gradient, and the event
+  owner performs one cover-only refresh for that revision/profile. A newer revision resets recovery;
+  an unchanged revision does not loop. There is no revisionless endpoint or legacy/master fallback.
+- **Local Workflow evidence does not prove platform lifecycle behavior.**
   `EXPORT_WORKFLOW.create()` is awaited before a `202` and asserted by `export-api.test.ts:29`, so
   binding presence and instance creation are genuinely demonstrated under the workerd pool. Cover
   Workflow lifecycle calls — `get()`, `.status()`, `.resume()`, `.restart()`, `.terminate()`, and
@@ -508,7 +564,8 @@ No waiting, automatic-transition, or manager photo-intake PNG is claimed.
   not execute its generated platform strings. Every §9.4 disposition depends on real platform
   behavior those local tests cannot establish. No local probe was run against real statuses, and none
   of this candidate's tests should be read as evidence that the platform behaves as the fake does.
-  Closing that distance is the exact-candidate §15.5 staging gate's job.
+  Closing that distance requires the separately authorized route-disabled Workflow-conformance and
+  cutover staging matrices in `docs/deployment.md`.
 - **Cover contrast is arithmetic, not screenshots.** All 720 preset, effect, theme, and profile
   contexts are composited by `coverTextContrast` over the brightest pixel each rendered profile
   actually contains, measured once at build time into the asset manifest. A separate monotonicity
@@ -516,9 +573,9 @@ No waiting, automatic-transition, or manager photo-intake PNG is claimed.
   hardest to read over the brightest possible source. 720 Playwright screenshots would be slower,
   flakier, and would still say nothing about uploads; axe reads declared colours and cannot speak to
   text over an image at all.
-- **No rows were added to `design/fidelity-ledger.md`.** This release renders no new guest surface
-  and exactly one small Manager status. The ledger's convention is that evidence is recorded at the
-  strength it was observed, and there is no new responsive state to record.
+- **The fidelity ledger records Phase 3 at local strength.** It now names all 29 inspected files,
+  responsive/delivery recovery, the live Manager canvas, dynamic axe coverage, and the exact remote/
+  device boundaries. It does not promote local route fakes or deterministic bytes into staging proof.
 
 ## Contrast remediation
 

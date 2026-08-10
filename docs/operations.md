@@ -297,22 +297,35 @@ A lost `cover_revision` race deliberately gets **no** new code: it is the existi
 envelope at HTTP 409 with cover-appropriate prose, following the precedent recorded above for a stale
 photo-delivery transition.
 
-Two cover behaviours have no error code and will still generate questions:
+Cover delivery itself has no new guest-visible error taxonomy. Current behavior is:
 
-- **The compatibility reader serves three different things behind one URL.** An event with an active
-  render set gets the `wide-expanded` 1x JPEG derivative; a legacy row with no set still gets its
-  original; and a `none` or `preset` row gets a 404. All three respond `private, no-store` with
-  `nosniff`. A host reporting that their cover "looks slightly different" after a replacement is
-  seeing the derivative, not a bug.
-- **A replaced cover becomes visible only after a reload.** `useEventCover` keys its effect on the
-  path, and the current cover URL carries no revision, so nothing in the client can detect a
-  replacement. This is a known limitation of the compatibility contract and is fixed by the
-  revision-scoped delivery routes, not by a client change.
+- Manager and guest event responses carry a nested cover view and revision, never a storage key. The
+  browser requests only `/api/event/:slug/cover/:revision/:profile/:density.:format` or the equivalent
+  `/api/manage/events/:eventId/...` route. The revisionless compatibility readers are absent.
+- Every slot read reauthorizes the current event and requires the exact current revision and one of the
+  six registered profiles. Uploaded bytes are read only from the exact active set and return
+  `private, no-store` plus `nosniff`; presets return a private/no-store `307` to the immutable event-free
+  asset. Missing, stale, retired, or cross-event inventory returns no alternate object. Never work
+  around a 404 by returning a legacy object or normalized master.
+- `ResponsiveEventCover` measures its actual container, advertises only server-qualified 2x slots,
+  tries current WebP and then current JPEG once, and replaces a double failure with the event gradient
+  before the broken-image icon can appear. It emits one sanitized audience/profile/revision observation
+  and asks its event owner for at most one refresh for that revision/profile. A newer revision resets
+  recovery; an unchanged revision cannot loop.
 
-Displaced cover originals are no longer deleted when they are replaced. Each is inventoried in
-`event_cover_retired_legacy_objects` with a seven-day `cleanup_after`, and only the bounded daily
-sweep removes it — R2 first, absence verified, then the row. Within that window the previous original
-is still recoverable by key from the inventory; after it, nothing is.
+One Manager-level reconciler owns an accepted publication. It persists the operation reference before
+dispatch, adopts any server-selected preparation on an event read, respects the greater of its bounded
+poll cadence and `Retry-After`, pauses authorization-dependent reads while hidden or signed out, and
+resumes the same operation after access recovery. Closing and reopening Cover Studio does not abandon
+or duplicate the receipt. A dropped create response is ambiguous, not a new-operation signal; only a
+terminal applied, conflict, or permanent failure releases the owner for later work. A retryable failure
+restarts the same receipt.
+
+Displaced uploaded render sets and normalized masters, and any displaced legacy original, are never
+deleted eagerly. They share a cleanup deadline no earlier than seven days after displacement and no
+earlier than the publication receipt's expiry. The bounded scheduled sweep removes inventoried R2
+objects first, verifies absence, and only then removes the row that named each object. Within that
+window the inventory remains the recovery boundary; after verified cleanup, it does not.
 
 ### Backfill and deletion signals
 
