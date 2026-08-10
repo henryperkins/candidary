@@ -16,10 +16,7 @@ import {
   type CoverOperationState,
 } from '../../src/features/cover/cover-operation-controller';
 
-/**
- * Cover Studio ships complete and reachable from nothing. These cover the
- * contracts in §6 and §13 directly, because no shipped surface can.
- */
+/** Cover Studio component contracts beneath the live Manager canvas owner. */
 
 const DRAFT: CoverStudioDraft = {
   id: 'draft-a',
@@ -513,8 +510,9 @@ describe('cover studio', () => {
 });
 
 describe('cover studio environment', () => {
-  function setVisualViewport(height: number, offsetTop = 0) {
+  function setVisualViewport(height: number, offsetTop = 0, width = 390) {
     vi.stubGlobal('visualViewport', {
+      width,
       height,
       offsetTop,
       addEventListener: vi.fn(),
