@@ -368,12 +368,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .guest-shell--drop :focus-visible { outline-color: var(--event-focus); }
 .guest-drop-main { min-height: 100svh; }
 .photo-drop { width: 100%; max-width: 620px; min-height: 100svh; margin: 0 auto; overflow: hidden; background: var(--event-surface); color: var(--event-text); }
-.photo-drop__hero { min-height: 218px; padding: 26px 22px 24px; display: flex; flex-direction: column; justify-content: flex-end; position: relative; isolation: isolate; color: var(--event-fullscreen-foreground); background: linear-gradient(145deg, var(--event-hero-start) 0%, var(--event-hero-mid) 53%, var(--event-hero-end) 100%); }
-.photo-drop__hero::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(180deg, var(--event-hero-overlay-top), var(--event-hero-overlay-bottom)); }
-.photo-drop__hero--cover { background-image: var(--event-cover); background-position: center; background-size: cover; }
-.photo-drop__hero--cover::after { background: linear-gradient(180deg, var(--event-cover-overlay-top), var(--event-cover-overlay-bottom)); }
-.photo-drop__hero-copy { display: contents; }
-.photo-drop__hero--cover .photo-drop__hero-copy { width: min(100%, 540px); padding: 18px; display: block; border-radius: var(--event-card-radius); background: var(--event-cover-text-scrim); }
+.photo-drop__hero { min-height: 218px; padding: 26px 22px 24px; display: flex; flex-direction: column; justify-content: flex-end; position: relative; isolation: isolate; overflow: hidden; color: var(--event-fullscreen-foreground); }
+.photo-drop__hero > .responsive-cover { position: absolute; inset: 0; z-index: 0; }
+.photo-drop__hero-copy { position: relative; z-index: 1; width: 100%; }
+.photo-drop__hero:has(.responsive-cover--image) .photo-drop__hero-copy { width: min(100%, 540px); padding: 18px; display: block; border-radius: var(--event-card-radius); background: var(--event-cover-text-scrim); }
 .photo-drop__event { margin: 0 0 7px; font-size: .72rem; font-weight: 700; letter-spacing: .11em; line-height: 1.35; text-transform: uppercase; }
 .photo-drop__hero h1, .photo-drop__welcome { max-width: 520px; margin: 0; color: var(--event-fullscreen-foreground); font-size: clamp(1.9rem, 8vw, 3.1rem); line-height: 1.05; overflow-wrap: anywhere; text-wrap: balance; }
 .photo-drop__welcome--clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
@@ -1170,6 +1168,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    every layer above the image is runtime CSS: none is baked into a rendered
    derivative, so changing a theme re-renders nothing. */
 .responsive-cover { position: relative; overflow: hidden; background: linear-gradient(145deg, var(--event-hero-start) 0%, var(--event-hero-mid) 53%, var(--event-hero-end) 100%); }
+.responsive-cover picture { position: absolute; inset: 0; }
 .responsive-cover__image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .responsive-cover__treatment, .responsive-cover__scrim { position: absolute; inset: 0; pointer-events: none; }
 /* The one versioned tileable grain asset, layered at runtime rather than baked

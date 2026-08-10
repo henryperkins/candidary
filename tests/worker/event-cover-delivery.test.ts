@@ -53,19 +53,6 @@ async function activeRenderSet(access: Access) {
   return derivative;
 }
 
-async function legacyOriginal(access: Access) {
-  const key = `events/${access.event.id}/cover/9f1c-porch.png`;
-  // The post-0014 schema makes this row unrepresentable. Drop only the pointer
-  // guard to retain one compatibility-reader regression for an old snapshot.
-  await testEnv.DB.prepare('DROP TRIGGER event_cover_source_pointer_update').run();
-  await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-    .bind(key, access.event.id).run();
-  await testEnv.MEDIA_BUCKET.put(key, new Uint8Array(24).fill(1), {
-    httpMetadata: { contentType: 'image/png' },
-  });
-  return key;
-}
-
 const DENSITIES = ['1x', '2x'] as const satisfies readonly EventCoverDensity[];
 const FORMATS = ['webp', 'jpeg'] as const satisfies readonly EventCoverFormat[];
 
@@ -293,86 +280,6 @@ describe('manager event read', () => {
   });
 });
 
-describe('compatibility cover delivery', () => {
-  let access: Access;
-  beforeEach(async () => {
-    await resetDatabase();
-    access = await eventAccess();
-  });
-
-  const guestCover = () => createApp().request(
-    `/api/event/${access.event.slug}/cover`, { headers: { cookie: access.guest.cookie } }, testEnv,
-  );
-  const managerCover = () => createApp().request(
-    `/api/manage/events/${access.event.id}/cover`, { headers: { cookie: access.manager.cookie } }, testEnv,
-  );
-
-  it('serves the active set’s wide-expanded 1x JPEG, never the normalized master', async () => {
-    const derivative = await activeRenderSet(access);
-    for (const response of [await guestCover(), await managerCover()]) {
-      expect(response.status).toBe(200);
-      expect(response.headers.get('content-type')).toBe('image/jpeg');
-      expect(response.headers.get('cache-control')).toBe('private, no-store');
-      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
-      // 40 bytes is the derivative; the master row records 900,000.
-      expect(response.headers.get('content-length')).toBe('40');
-    }
-    expect(derivative).toContain('/rendered/');
-  });
-
-  it('keeps the current original response for a legacy null-set row', async () => {
-    await legacyOriginal(access);
-    const response = await guestCover();
-    expect(response.status).toBe(200);
-    expect(response.headers.get('content-type')).toBe('image/png');
-    expect(response.headers.get('content-length')).toBe('24');
-    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
-  });
-
-  it('is the existing 404 when there is no cover at all', async () => {
-    const response = await guestCover();
-    expect(response.status).toBe(404);
-    expect((await response.json<any>()).code).toBe('EVENT_NOT_FOUND');
-  });
-
-  it('never falls back when a derivative is missing', async () => {
-    const derivative = await activeRenderSet(access);
-    await testEnv.MEDIA_BUCKET.delete(derivative);
-    // The master is still in the bucket and still named by cover_object_key.
-    await testEnv.MEDIA_BUCKET.put(coverMasterKey(access.event.id, 'm1'), new Uint8Array(9));
-
-    const response = await guestCover();
-    expect(response.status).toBe(404);
-    expect((await response.json<any>()).code).toBe('UPLOAD_OBJECT_MISSING');
-  });
-
-  it('refuses a manager cover request carrying only a guest cookie', async () => {
-    await activeRenderSet(access);
-    const response = await createApp().request(
-      `/api/manage/events/${access.event.id}/cover`,
-      { headers: { cookie: access.guest.cookie } },
-      testEnv,
-    );
-    expect(response.status).toBe(403);
-    expect((await response.json<any>()).code).toBe('ROLE_FORBIDDEN');
-  });
-
-  it('preserves the guest route’s deliberately loose slug check', async () => {
-    await activeRenderSet(access);
-    const other = await eventAccess('Other Event');
-    // Session slug versus path slug, and nothing else: no role, gallery, phase,
-    // or uploads test. That looseness is intentional and is preserved exactly.
-    const crossEvent = await createApp().request(
-      `/api/event/${other.event.slug}/cover`, { headers: { cookie: access.guest.cookie } }, testEnv,
-    );
-    expect(crossEvent.status).toBe(404);
-
-    await testEnv.DB.prepare('UPDATE events SET gallery_visible = 0, uploads_enabled = 0 WHERE id = ?')
-      .bind(access.event.id).run();
-    expect((await guestCover()).status).toBe(200);
-  });
-});
-
 describe('revisioned cover slot delivery', () => {
   let access: Access;
   beforeEach(async () => {
@@ -432,17 +339,22 @@ describe('revisioned cover slot delivery', () => {
     expect(observation.imageCalls).toEqual([]);
   });
 
-  it('keeps the old reader only as local Tasks 6-9 migration scaffolding that Task 10 removes', async () => {
+  it('does not register the revisionless compatibility reader', async () => {
     await fullActiveRenderSet(access);
     const compatibility = await createApp().request(
       `/api/event/${access.event.slug}/cover`,
       { headers: { cookie: access.guest.cookie } },
       testEnv,
     );
+    const managerCompatibility = await createApp().request(
+      `/api/manage/events/${access.event.id}/cover`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
     const revisioned = await guestSlot('1');
-    expect(compatibility.status).toBe(200);
+    expect(compatibility.status).toBe(404);
+    expect(managerCompatibility.status).toBe(404);
     expect(revisioned.status).toBe(200);
-    expect(compatibility.headers.get('cache-control')).toBe('private, no-store');
     expect(revisioned.headers.get('cache-control')).toBe('private, no-store');
   });
 

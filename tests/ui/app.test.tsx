@@ -2396,16 +2396,38 @@ describe('guest event phase composition', () => {
   }
 
   it('puts RSVP first for the rsvp-primary phase without mounting photo controls', async () => {
+    class TestResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{
+          target,
+          contentRect: { width: 360 } as DOMRectReadOnly,
+        } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    window.innerWidth = 360;
+    window.innerHeight = 600;
+    const lookupEvent = {
+      ...guestEvent,
+      uploadsEnabled: false,
+      phase: 'rsvp-primary' as const,
+      cover: { ...guestEvent.cover, revision: 7, hasCover: true },
+    };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, uploadsEnabled: false, phase: 'rsvp-primary' }, role: 'guest' });
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: lookupEvent, role: 'guest' });
       if (path.endsWith('/rsvp/household')) return errorJson({ code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'r' }, 401);
       throw new Error(`Unexpected request ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    renderEvent({ ...guestEvent, uploadsEnabled: false, phase: 'rsvp-primary' });
+    const { container } = renderEvent(lookupEvent);
     await screen.findByRole('button', { name: 'Find my invitation' });
+    await waitFor(() => expect(container.querySelector('.responsive-cover'))
+      .toHaveAttribute('data-cover-profile', 'short-lookup'));
     expect(screen.queryByRole('button', { name: 'Take a photo' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Your name')).not.toBeInTheDocument();
   });
@@ -2428,6 +2450,54 @@ describe('guest event phase composition', () => {
     await user.click(screen.getByText('View or change RSVP'));
     await screen.findByRole('button', { name: 'Find my invitation' });
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('/api/event/maya-theo/rsvp/household');
+  });
+
+  it('installs a cover-only ticketed refresh after final guest delivery failure', async () => {
+    class TestResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{
+          target,
+          contentRect: { width: 390 } as DOMRectReadOnly,
+        } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const initial = {
+      ...guestEvent,
+      cover: { ...guestEvent.cover, revision: 41, hasCover: true },
+    };
+    const refreshed = {
+      ...initial,
+      cover: { ...initial.cover, revision: 42 },
+    };
+    let eventReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? initial : refreshed, role: 'guest' });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+
+    const { container } = renderEvent(initial);
+    await waitFor(() => expect(container.querySelector('.responsive-cover__image')).not.toBeNull());
+    const first = container.querySelector<HTMLImageElement>('.responsive-cover__image')!;
+    expect(first.getAttribute('src')).toContain('/41/compact-default/');
+
+    fireEvent.error(first);
+    fireEvent.error(container.querySelector<HTMLImageElement>('.responsive-cover__image')!);
+
+    await waitFor(() => expect(
+      container.querySelector<HTMLImageElement>('.responsive-cover__image')?.getAttribute('src'),
+    ).toContain('/42/compact-default/'));
+    expect(eventReads).toBe(2);
   });
 
   it.each(['closed', 'paused'] as const)('offers a secondary saved-response view for %s RSVP without delaying photo controls', async (rsvpState) => {

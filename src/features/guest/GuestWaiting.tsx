@@ -1,4 +1,5 @@
 import type { GuestEventView } from '../../../shared/contracts';
+import { guestEventCoverSlotPath } from '../../app/api';
 import { GuestEventHero } from '../../components/GuestEventHero';
 
 /**
@@ -12,11 +13,9 @@ import { GuestEventHero } from '../../components/GuestEventHero';
 export function GuestWaiting({ event }: { event: GuestEventView }) {
   return <section className="rsvp-flow rsvp-flow--with-hero guest-waiting">
     <GuestEventHero
-      name={event.name}
-      eventDate={event.eventDate}
-      welcomeMessage={event.welcomeMessage}
-      hasCover={event.cover.hasCover}
-      slug={event.slug}
+      event={event}
+      sourceFor={(slot) => guestEventCoverSlotPath(event.slug, slot)}
+      lookup={false}
       welcomeIsHeading={false}
     />
     <div className="rsvp-flow__body">

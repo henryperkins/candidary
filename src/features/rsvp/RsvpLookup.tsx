@@ -61,7 +61,7 @@ export function RsvpLookup({
   const withIdentity = presentation === 'secondary';
   const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
 
-  return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--lookup">
+  return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--lookup" lookup>
     <header className="rsvp-identity">
       {withIdentity && <p className="rsvp-identity__event">{event.name}</p>}
       <HeadingTag>{presentation === 'embedded'

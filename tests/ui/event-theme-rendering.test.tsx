@@ -14,14 +14,11 @@ import {
   resolveEventTheme,
 } from '../../shared/event-theme';
 import {
-  guestEventCoverPath,
   guestEventCoverSlotPath,
-  managerEventCoverPath,
   managerEventCoverSlotPath,
 } from '../../src/app/api';
 import { EVENT_THEME_CSS_PROPERTIES } from '../../src/app/event-theme-style';
 import { emitCoverUnavailable } from '../../src/app/cover-observability';
-import { useEventCover } from '../../src/app/use-event-cover';
 import { EventAppearanceCanvas } from '../../src/components/EventAppearanceCanvas';
 import { EventThemePresetSelector } from '../../src/components/EventThemePresetSelector';
 import { EventPage } from '../../src/pages/EventPage';
@@ -109,12 +106,6 @@ function installMeasuredCover(width = 620) {
     unobserve() {}
   }
   vi.stubGlobal('ResizeObserver', TestResizeObserver);
-}
-
-function CoverRenderProbe({ path, onRender }: { path: string | null; onRender: (state: { path: string | null; cover: string | null; hasCoverModifier: boolean }) => void }) {
-  const cover = useEventCover(path);
-  onRender({ path, cover, hasCoverModifier: Boolean(cover) });
-  return <output className={cover ? 'cover-modifier' : ''} data-testid="cover-render-probe">{cover}</output>;
 }
 
 afterEach(() => {
@@ -231,43 +222,26 @@ describe('event theme primitives', () => {
     expect(sourceFor).not.toHaveBeenCalled();
   });
 
-  it('emits one sanitized observation per Manager tuple', () => {
+  it('emits one sanitized observation per audience tuple', () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(emitCoverUnavailable({ audience: 'manager', profile: 'framed-default', revision: 991 })).toBe(true);
     expect(emitCoverUnavailable({ audience: 'manager', profile: 'framed-default', revision: 991 })).toBe(false);
-    expect(warning).toHaveBeenCalledOnce();
-    expect(warning).toHaveBeenCalledWith('cover_unavailable', {
+    expect(emitCoverUnavailable({ audience: 'guest', profile: 'framed-default', revision: 991 })).toBe(true);
+    expect(emitCoverUnavailable({ audience: 'guest', profile: 'framed-default', revision: 991 })).toBe(false);
+    expect(warning).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenNthCalledWith(1, 'cover_unavailable', {
       audience: 'manager',
+      profile: 'framed-default',
+      revision: 991,
+    });
+    expect(warning).toHaveBeenNthCalledWith(2, 'cover_unavailable', {
+      audience: 'guest',
       profile: 'framed-default',
       revision: 991,
     });
   });
 
-  it('does not render a previous private cover while a replacement path is still loading', async () => {
-    const renders: Array<{ path: string | null; cover: string | null; hasCoverModifier: boolean }> = [];
-    let resolveSecond: ((response: Response) => void) | undefined;
-    vi.stubGlobal('URL', { createObjectURL: vi.fn().mockReturnValue('blob:cover-a'), revokeObjectURL: vi.fn() });
-    vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(new Response(new Blob(['a']), { status: 200 }))
-      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveSecond = resolve; })));
-
-    const view = render(<CoverRenderProbe path="/api/manage/events/event-a/cover" onRender={(state) => renders.push(state)} />);
-    await waitFor(() => expect(screen.getByTestId('cover-render-probe')).toHaveTextContent('blob:cover-a'));
-    renders.length = 0;
-
-    view.rerender(<CoverRenderProbe path="/api/manage/events/event-b/cover" onRender={(state) => renders.push(state)} />);
-
-    expect(renders[0]).toEqual({
-      path: '/api/manage/events/event-b/cover', cover: null, hasCoverModifier: false,
-    });
-    expect(screen.getByTestId('cover-render-probe')).not.toHaveClass('cover-modifier');
-    expect(screen.getByTestId('cover-render-probe')).toHaveTextContent('');
-    await act(async () => { resolveSecond!(new Response(null, { status: 404 })); });
-  });
-
   it('encodes guest and manager cover identifiers into only their authorized paths', () => {
-    expect(guestEventCoverPath('maya/theo?')).toBe('/api/event/maya%2Ftheo%3F/cover');
-    expect(managerEventCoverPath('event/a?')).toBe('/api/manage/events/event%2Fa%3F/cover');
     const slot = {
       revision: 7,
       profile: 'compact-expanded' as const,
@@ -379,8 +353,8 @@ describe('guest event theme rendering', () => {
     expect(brightPrimaryTheme.tokens.primaryOnSurface).not.toBe(brightPrimaryTheme.tokens.primary);
     expect(declaration('.selection-card__spinner, .selection-card__delivered', 'color')).toBe('var(--event-primary-on-surface)');
     expect(declaration('.selection-card__status progress', 'accent-color')).toBe('var(--event-primary)');
-    expect(declaration('.photo-drop__hero::after', 'background'))
-      .toContain('var(--event-hero-overlay-top)');
+    expect(declaration('.responsive-cover__scrim', 'background'))
+      .toContain('var(--event-cover-overlay-top)');
     expect(declaration('.selection-card--failed', 'border-color')).toBe('#d99b93');
     expect(declaration('.selection-card--delivered', 'border-color')).toBe('#b8c9ae');
     expect(declaration('.selection-card__delivered', 'color')).toBe('#31552d');

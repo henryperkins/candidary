@@ -151,14 +151,6 @@ export function mediaOriginal(id: string): string {
   return `/api/media/${encodeURIComponent(id)}/original`;
 }
 
-export function guestEventCoverPath(slug: string): string {
-  return `/api/event/${encodeURIComponent(slug)}/cover`;
-}
-
-export function managerEventCoverPath(eventId: string): string {
-  return `/api/manage/events/${encodeURIComponent(eventId)}/cover`;
-}
-
 export interface EventCoverSlotPathOptions extends EventCoverAssetSlot {
   revision: number;
 }
@@ -174,14 +166,14 @@ export function guestEventCoverSlotPath(
   slug: string,
   options: EventCoverSlotPathOptions,
 ): string {
-  return `${guestEventCoverPath(slug)}/${eventCoverSlotSuffix(options)}`;
+  return `/api/event/${encodeURIComponent(slug)}/cover/${eventCoverSlotSuffix(options)}`;
 }
 
 export function managerEventCoverSlotPath(
   eventId: string,
   options: EventCoverSlotPathOptions,
 ): string {
-  return `${managerEventCoverPath(eventId)}/${eventCoverSlotSuffix(options)}`;
+  return `/api/manage/events/${encodeURIComponent(eventId)}/cover/${eventCoverSlotSuffix(options)}`;
 }
 
 export const mediaContent = mediaPreview;

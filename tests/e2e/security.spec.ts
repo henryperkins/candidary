@@ -11,6 +11,7 @@ import {
   stubManagerRoutes,
   stubRsvpRosterBatchRoutes,
 } from './fixtures/routes';
+import { PHOTOGRAPHIC_COVER } from './fixtures/cover-images';
 import { makeMedia } from './fixtures/ui-data';
 import { settleRendering } from './helpers/rendering';
 
@@ -185,6 +186,7 @@ test('a refused staged guest list forgets its private source after discard', asy
 test('production preview enforces the shipped CSP while themed cover images render', async ({ page }) => {
   const consoleErrors: string[] = [];
   const fontRequests: string[] = [];
+  const coverRequests: string[] = [];
   // Keep a real production asset request open long enough to prove the console audit waits for it.
   await page.route(/\/assets\/.*\.woff2?$/u, async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 750));
@@ -195,18 +197,42 @@ test('production preview enforces the shipped CSP while themed cover images rend
   });
   page.on('request', (request) => {
     if (request.resourceType() === 'font') fontRequests.push(request.url());
+    if (new URL(request.url()).pathname.includes('/cover/')) coverRequests.push(request.url());
   });
+  const coverRevision = 17;
   await stubGuestRoutes(page, {
     event: {
       theme: eventTheme('midnight-film'),
-      cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
+      cover: {
+        ...GUEST_EVENT_FIXTURE.cover,
+        revision: coverRevision,
+        hasCover: true,
+        available2xProfiles: [],
+      },
     },
   });
+  await page.route(
+    new RegExp(`/api/event/${EVENT_FIXTURE.slug}/cover/${coverRevision}/[^/]+/1x\\.(?:webp|jpeg)$`, 'u'),
+    (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PHOTOGRAPHIC_COVER }),
+  );
   const response = await page.goto(`/event/${EVENT_FIXTURE.slug}`);
   expect(response?.headers()['content-security-policy']).toContain("default-src 'self'");
   expect(response?.headers()['content-security-policy']).toContain("script-src 'self'");
   expect(response?.headers()['content-security-policy']).toContain("img-src 'self' blob: data:");
-  await expect(page.locator('.photo-drop__hero--cover')).toHaveCSS('background-image', /blob:/u);
+  const hero = page.locator('.photo-drop__hero');
+  const image = hero.locator('picture img');
+  await expect(image).toBeVisible();
+  const slotPattern = new RegExp(
+    `^/api/event/${EVENT_FIXTURE.slug}/cover/${coverRevision}/(?:short-lookup|compact-default|standard-default|framed-default|compact-expanded|wide-expanded)/1x\\.jpeg$`,
+    'u',
+  );
+  expect(await image.getAttribute('src')).toMatch(slotPattern);
+  expect(await image.getAttribute('alt')).toBe('');
+  const renderedCoverMarkup = await hero.locator('picture').evaluate((element) => element.outerHTML);
+  expect(renderedCoverMarkup).not.toContain('blob:');
+  expect(renderedCoverMarkup).not.toContain('events/');
+  expect(renderedCoverMarkup).not.toContain('master');
+  expect(renderedCoverMarkup).not.toContain(`/cover/${coverRevision - 1}/`);
   const settlement = await settleRendering(page);
   expect(fontRequests, 'production build requests emitted font assets').not.toEqual([]);
   const pageOrigin = new URL(page.url()).origin;
@@ -217,5 +243,14 @@ test('production preview enforces the shipped CSP while themed cover images rend
   ).toBe(true);
   expect(settlement.fontStatus, 'font work is settled before the console audit').toBe('loaded');
   expect(settlement.frames, 'font status stayed observable across a two-frame boundary').toBeGreaterThanOrEqual(2);
+  expect(coverRequests.length, 'the browser selected one current revisioned slot').toBeGreaterThan(0);
+  for (const requestUrl of coverRequests) {
+    const url = new URL(requestUrl);
+    expect(url.origin).toBe(new URL(page.url()).origin);
+    expect(url.pathname).toMatch(new RegExp(
+      `^/api/event/${EVENT_FIXTURE.slug}/cover/${coverRevision}/(?:short-lookup|compact-default|standard-default|framed-default|compact-expanded|wide-expanded)/(?:1x|2x)\\.(?:webp|jpeg)$`,
+      'u',
+    ));
+  }
   expect(consoleErrors, 'production CSP emits no browser console error').toEqual([]);
 });
