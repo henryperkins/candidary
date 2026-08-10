@@ -428,6 +428,34 @@ export async function resetDatabase() {
   }]);
 }
 
+const PHASE_3_COVER_TRIGGER_NAMES = [
+  'event_cover_master_live_reference_delete',
+  'event_cover_render_object_manifest_delete',
+  'event_cover_render_object_manifest_insert',
+  'event_cover_render_object_manifest_update',
+  'event_cover_render_set_live_reference_delete',
+  'event_cover_render_set_manifest_insert',
+  'event_cover_render_set_manifest_update',
+  'event_cover_source_pointer_insert',
+  'event_cover_source_pointer_update',
+] as const;
+
+/**
+ * Restore the route-disabled Phase 2 cover schema used by backfill rehearsals.
+ *
+ * The Worker test pool installs every migration as one bundle, including the
+ * Phase 3 cutover triggers from 0014. Backfill tests intentionally exercise
+ * legacy rows before that cutover, so they remove only the nine 0014 triggers
+ * after the ordinary isolated reset. Migration and invariant tests continue to
+ * use `resetDatabase()` and therefore always see the complete current schema.
+ */
+export async function resetDatabaseToPhase2CoverSchema() {
+  await resetDatabase();
+  await testEnv.DB.exec(PHASE_3_COVER_TRIGGER_NAMES
+    .map((name) => `DROP TRIGGER IF EXISTS ${name};`)
+    .join('\n'));
+}
+
 // The printed credential lives in the URL fragment, which `new URL().pathname`
 // deliberately excludes. Every caller has to send it in the POST body, exactly
 // as the join shell does, or it is not testing the real exchange.

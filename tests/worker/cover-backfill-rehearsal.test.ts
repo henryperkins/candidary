@@ -34,7 +34,7 @@ import {
 } from '../../worker/workflows/cleanup';
 import {
   batchD1Statements,
-  resetDatabase,
+  resetDatabaseToPhase2CoverSchema as resetDatabase,
   testEnv,
   withRecordingImages,
   withRecordingR2Puts,

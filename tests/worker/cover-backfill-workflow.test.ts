@@ -38,7 +38,7 @@ import {
 } from '../../worker/workflows/cleanup';
 import {
   eventAccess,
-  resetDatabase,
+  resetDatabaseToPhase2CoverSchema as resetDatabase,
   seedEventCoverGraph,
   testEnv,
   withRecordingImages,

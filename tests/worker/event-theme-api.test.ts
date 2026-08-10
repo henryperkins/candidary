@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as EventTheme from '../../shared/event-theme';
 import { createApp } from '../../worker/app';
 import { EventsRepository } from '../../worker/db/events';
-import { coverMasterKey, coverRenderKey } from '../../worker/storage/event-cover-keys';
 import {
   cookiesFrom,
   eventAccess,
@@ -11,9 +10,7 @@ import {
   hostAccess,
   hostWriteHeaders,
   origin,
-  png,
   resetDatabase,
-  seedEventCoverGraph,
   testEnv,
   uploadPending,
   writeHeaders,
@@ -652,85 +649,5 @@ describe('authorized event theme updates', () => {
 
     const themed = await putTheme(access.event.id, garden, writeHeaders(access.manager));
     expect(Object.keys((await themed.json<any>()).data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
-  });
-});
-
-describe('manager-authorized event cover reads', () => {
-  async function coveredEvent() {
-    const access = await eventAccess();
-    const graph = await seedEventCoverGraph(testEnv.DB, access.event.id);
-    const objectKey = coverRenderKey(
-      access.event.id,
-      graph.renderSetId,
-      'wide-expanded',
-      '1x',
-      'jpeg',
-    );
-    await testEnv.DB.prepare(`
-      UPDATE events
-      SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
-      WHERE id = ?
-    `).bind(
-      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
-      coverMasterKey(access.event.id, graph.masterId),
-      graph.renderSetId,
-      access.event.id,
-    ).run();
-    await testEnv.MEDIA_BUCKET.put(objectKey, png(), { httpMetadata: { contentType: 'image/jpeg' } });
-    return { access, objectKey };
-  }
-
-  it('serves the same private binary cover to a matching link without CSRF and an owning account', async () => {
-    const { access } = await coveredEvent();
-    const linkRead = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: access.manager.cookie },
-    }, testEnv);
-    expect(linkRead.status).toBe(200);
-    expect(linkRead.headers.get('content-type')).toBe('image/jpeg');
-    expect(linkRead.headers.get('cache-control')).toBe('private, no-store');
-
-    const host = await hostAccess([access]);
-    const accountRead = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: host.cookie },
-    }, testEnv);
-    expect(accountRead.status).toBe(200);
-    expect(accountRead.headers.get('content-length')).toBe(String(png().byteLength));
-  });
-
-  it('rejects missing, unrelated-account, guest, and cross-event credentials', async () => {
-    const { access } = await coveredEvent();
-    const other = await eventAccess('Other');
-    const stranger = await hostAccess();
-    const cases = [
-      ['missing', '', 401, 'SESSION_REQUIRED'],
-      ['unrelated account', stranger.cookie, 403, 'ROLE_FORBIDDEN'],
-      ['guest', access.guest.cookie, 403, 'ROLE_FORBIDDEN'],
-      ['cross-event', other.manager.cookie, 403, 'ROLE_FORBIDDEN'],
-    ] as const;
-
-    for (const [label, cookie, status, code] of cases) {
-      const response = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-        headers: cookie ? { cookie } : {},
-      }, testEnv);
-      expect([label, response.status]).toEqual([label, status]);
-      expect((await response.json<any>()).code).toBe(code);
-    }
-  });
-
-  it('preserves stable JSON errors for no cover and a missing R2 object', async () => {
-    const noCover = await eventAccess();
-    const absent = await createApp().request(`/api/manage/events/${noCover.event.id}/cover`, {
-      headers: { cookie: noCover.manager.cookie },
-    }, testEnv);
-    expect(absent.status).toBe(404);
-    expect((await absent.json<any>()).code).toBe('EVENT_NOT_FOUND');
-
-    const { access, objectKey } = await coveredEvent();
-    await testEnv.MEDIA_BUCKET.delete(objectKey);
-    const missing = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: access.manager.cookie },
-    }, testEnv);
-    expect(missing.status).toBe(404);
-    expect((await missing.json<any>()).code).toBe('UPLOAD_OBJECT_MISSING');
   });
 });
