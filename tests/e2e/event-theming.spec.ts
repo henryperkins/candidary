@@ -482,7 +482,7 @@ test('manager appearance autosaves the canonical config and adopts the normalize
     overrides: {},
   });
   await expect(page.locator('.event-appearance-editor__status .autosave-status__chip')).toHaveText('Saved');
-  await expectTheme(page.locator('.event-appearance-preview'), eventTheme('coastal-light'));
+  await expectTheme(page.getByTestId('event-appearance-canvas'), eventTheme('coastal-light'));
 });
 
 test('manager Settings saves without a Save button and stays contained at 320 and 390', async ({ page }, testInfo) => {

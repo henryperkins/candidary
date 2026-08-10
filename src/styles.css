@@ -1176,6 +1176,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    bytes as every other effect and why changing theme never re-renders. */
 .responsive-cover--film-grain .responsive-cover__treatment { background-image: var(--cover-film-grain, url('/assets/event-covers/v1/film-grain-v1.png')); background-repeat: repeat; opacity: .18; }
 .responsive-cover__scrim { background: linear-gradient(180deg, var(--event-cover-overlay-top), var(--event-cover-overlay-bottom)); }
+/* Theme-only heroes keep the stronger gradient overlay proved for white copy;
+   photographic covers use the separate image overlay immediately above. */
+.responsive-cover--gradient .responsive-cover__scrim { background: linear-gradient(180deg, var(--event-hero-overlay-top), var(--event-hero-overlay-bottom)); }
 @media (prefers-reduced-motion: reduce) { .cover-studio, .cover-studio__backdrop { transition: none; } }
 
 .event-appearance-canvas { width: min(100%, 620px); display: grid; gap: 12px; }
