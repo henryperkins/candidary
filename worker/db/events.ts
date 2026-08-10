@@ -253,9 +253,10 @@ export function coverPointerStatements(
             SELECT 1 FROM event_cover_publish_receipts r
             WHERE r.event_id = events.id AND r.operation_id = ?
               AND r.request_sha256 = ? AND r.action = ?
-              AND r.expected_revision = ? AND r.status = 'queued' AND r.retryable = 0
+              AND r.expected_revision = ? AND r.status = 'applied'
+              AND r.applied_revision = ? AND r.result_cover_json = ? AND r.retryable = 0
               AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL AND r.draft_id IS NULL
-              AND r.dispatch_state = 'pending' AND r.dispatch_generation = 0
+              AND r.dispatch_state = 'confirmed' AND r.dispatch_generation = 0
           )
         )
         ${renderGuardSql}
@@ -274,6 +275,8 @@ export function coverPointerStatements(
       input.semanticPublicationGuard?.requestSha256 ?? null,
       input.semanticPublicationGuard?.action ?? null,
       input.semanticPublicationGuard?.expectedRevision ?? null,
+      input.semanticPublicationGuard ? input.semanticPublicationGuard.expectedRevision + 1 : null,
+      input.semanticPublicationGuard ? input.nextConfig : null,
       ...ownerBindings,
     ),
     db.prepare(`

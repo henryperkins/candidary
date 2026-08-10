@@ -5,6 +5,7 @@ import { createApp } from '../../worker/app';
 import { AuthService } from '../../worker/auth/service';
 import { AccountsRepository } from '../../worker/db/accounts';
 import type { AppEnv } from '../../worker/env';
+import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 
 export const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 export const origin = env.APP_ORIGIN;
@@ -253,6 +254,33 @@ export async function seedEventCoverGraph(
   };
   const prefix = `events/${eventId}/cover`;
 
+  const renderObjectStatements = EVENT_COVER_PROFILES.flatMap((profile) => (
+    ['webp', 'jpeg'] as const
+  ).map((format) => {
+    const isReturnedObject = profile.id === 'wide-expanded' && format === 'jpeg';
+    const objectId = isReturnedObject
+      ? ids.renderObjectId
+      : `object-${suffix}-${profile.id}-${format}`;
+    return db.prepare(`
+      INSERT INTO event_cover_render_objects (
+        id, render_set_id, event_id, profile_id, density, format, object_key,
+        content_type, byte_size, width, height, quality_rung, sha256, created_at
+      ) VALUES (?, ?, ?, ?, '1x', ?, ?, ?, 120000, ?, ?, 1, ?, ?)
+    `).bind(
+      objectId,
+      ids.renderSetId,
+      eventId,
+      profile.id,
+      format,
+      `${prefix}/rendered/${ids.renderSetId}/${profile.id}-1x.${format}`,
+      format === 'webp' ? 'image/webp' : 'image/jpeg',
+      profile.width,
+      profile.height,
+      HEX_64,
+      now,
+    );
+  }));
+
   await db.batch([
     db.prepare(`
       INSERT INTO event_cover_masters (
@@ -284,18 +312,24 @@ export async function seedEventCoverGraph(
     db.prepare(`
       INSERT INTO event_cover_render_sets (
         id, event_id, master_id, draft_id, recipe_json, recipe_sha256, state,
-        required_slots, manifest_sha256, published_revision, created_at, ready_at, published_at
-      ) VALUES (?, ?, ?, ?, '{"effect":"natural"}', ?, 'active', 12, ?, 1, ?, ?, ?)
-    `).bind(ids.renderSetId, eventId, ids.masterId, ids.draftId, HEX_64, HEX_64, now, now, now),
-    db.prepare(`
-      INSERT INTO event_cover_render_objects (
-        id, render_set_id, event_id, profile_id, density, format, object_key,
-        content_type, byte_size, width, height, quality_rung, sha256, created_at
-      ) VALUES (?, ?, ?, 'wide-expanded', '1x', 'jpeg', ?, 'image/jpeg', 120000, 620, 420, 1, ?, ?)
+        required_slots, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'staging', 12, ?)
     `).bind(
-      ids.renderObjectId, ids.renderSetId, eventId,
-      `${prefix}/rendered/${ids.renderSetId}/wide-expanded-1x.jpeg`, HEX_64, now,
+      ids.renderSetId,
+      eventId,
+      ids.masterId,
+      ids.draftId,
+      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+      HEX_64,
+      now,
     ),
+    ...renderObjectStatements,
+    db.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = 'active', manifest_sha256 = ?, published_revision = 1,
+          ready_at = ?, published_at = ?
+      WHERE id = ?
+    `).bind(HEX_64, now, now, ids.renderSetId),
     db.prepare(`
       INSERT INTO event_cover_publish_receipts (
         event_id, operation_id, draft_id, render_set_id, request_sha256, action,

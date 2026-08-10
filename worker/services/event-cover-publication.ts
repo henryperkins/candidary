@@ -719,7 +719,6 @@ interface PublicationRetentionOwner {
 interface SemanticPublicationOwner extends PublicationRetentionOwner {
   kind: 'semantic';
   action: 'publish' | 'remove';
-  moveMarkerConfig: string;
   nextConfig: string;
 }
 
@@ -769,14 +768,6 @@ export interface BackfillPublicationOwner {
 
 type CoverReceiptPublicationOwner = SemanticPublicationOwner | RenderPublicationOwner;
 type CoverPublicationOwner = CoverReceiptPublicationOwner | BackfillPublicationOwner;
-
-function semanticMoveMarkerConfig(operationId: string, requestSha256: string): string {
-  return JSON.stringify({
-    version: 1,
-    source: { kind: 'none' },
-    semanticPublicationMove: { operationId, requestSha256 },
-  });
-}
 
 function retainedMasterDeadlineSql(): string {
   return `max(?, COALESCE((
@@ -1146,8 +1137,8 @@ export function coverPublicationTerminalAssertionStatement(
             AND NOT EXISTS (
               SELECT 1 FROM events e
               WHERE e.id = event_cover_publish_receipts.event_id
-                AND e.cover_revision = ? AND e.cover_config = ?
-                AND e.cover_object_key IS NULL AND e.cover_render_set_id IS NULL
+                AND e.deleted_at IS NULL AND e.cover_revision = ?
+                AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
             )
         )
         OR (
@@ -1198,8 +1189,9 @@ export function coverPublicationTerminalAssertionStatement(
     owner.requestSha256,
     owner.action,
     owner.expectedRevision,
-    owner.expectedRevision + 1,
-    owner.moveMarkerConfig,
+    owner.expectedRevision,
+    owner.expectedCurrentKey,
+    owner.expectedCurrentRenderSetId,
     owner.action,
     owner.expectedRevision,
     owner.expectedRevision + 1,
@@ -1299,7 +1291,6 @@ export async function applySemanticCoverPublication(
   }
   const timestamp = now.toISOString();
   const cleanupFloor = new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString();
-  const moveMarkerConfig = semanticMoveMarkerConfig(request.operationId, requestDigest);
   const owner: SemanticPublicationOwner = {
     kind: 'semantic',
     eventId: event.id,
@@ -1310,7 +1301,6 @@ export async function applySemanticCoverPublication(
     expectedCurrentKey: event.coverObjectKey,
     expectedCurrentRenderSetId: event.coverRenderSetId,
     displacedMasterId: displaced?.master_id ?? null,
-    moveMarkerConfig,
     nextConfig,
     retiredAt: timestamp,
     cleanupFloor,
@@ -1318,12 +1308,12 @@ export async function applySemanticCoverPublication(
       ? await coverKeyFingerprint(event.coverObjectKey)
       : '0'.repeat(64),
   };
-  const [movePointer] = coverPointerStatements(env.DB, {
+  const [movePointer, retireLegacy] = coverPointerStatements(env.DB, {
     eventId: event.id,
     expectedRevision: request.expectedRevision,
     expectedCurrentKey: event.coverObjectKey,
     expectedCurrentRenderSetId: event.coverRenderSetId,
-    nextConfig: moveMarkerConfig,
+    nextConfig,
     nextObjectKey: null,
     nextRenderSetId: null,
     retiredAt: timestamp,
@@ -1335,6 +1325,7 @@ export async function applySemanticCoverPublication(
       requestSha256: requestDigest,
       expectedRevision: request.expectedRevision,
     },
+    onlyIfPriorStatementChanged: true,
   });
   const statements: D1PreparedStatement[] = [];
   if (!existing) {
@@ -1367,7 +1358,6 @@ export async function applySemanticCoverPublication(
     ));
   }
   statements.push(
-    movePointer!,
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
       SET status = 'applied', applied_revision = ?, result_cover_json = ?, updated_at = ?,
@@ -1375,7 +1365,13 @@ export async function applySemanticCoverPublication(
       WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
         AND action = ? AND expected_revision = ? AND status = 'queued' AND retryable = 0
         AND workflow_instance_id IS NULL AND render_set_id IS NULL AND draft_id IS NULL
-        AND dispatch_state = 'pending' AND dispatch_generation = 0 AND changes() = 1
+        AND dispatch_state = 'pending' AND dispatch_generation = 0
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id AND e.deleted_at IS NULL
+            AND e.cover_revision = ? AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+        )
+        ${existing ? '' : 'AND changes() = 1'}
     `).bind(
       request.expectedRevision + 1,
       nextConfig,
@@ -1386,65 +1382,12 @@ export async function applySemanticCoverPublication(
       requestDigest,
       action,
       request.expectedRevision,
-    ),
-    // The pointer move writes an operation-specific transactional marker. Only
-    // the exact applied-receipt transition may replace it with the canonical
-    // semantic config; a zero-row applied tail therefore cannot masquerade as
-    // a clean conflict later in this batch.
-    env.DB.prepare(`
-      UPDATE events SET cover_config = ?
-      WHERE id = ? AND deleted_at IS NULL AND cover_revision = ?
-        AND cover_config = ? AND cover_object_key IS NULL AND cover_render_set_id IS NULL
-        AND changes() = 1
-        AND EXISTS (
-          SELECT 1 FROM event_cover_publish_receipts r
-          WHERE r.event_id = events.id AND r.operation_id = ? AND r.request_sha256 = ?
-            AND r.action = ? AND r.expected_revision = ?
-            AND r.status = 'applied' AND r.applied_revision = ?
-            AND r.result_cover_json = ?
-            AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL AND r.draft_id IS NULL
-        )
-    `).bind(
-      nextConfig,
-      event.id,
-      request.expectedRevision + 1,
-      moveMarkerConfig,
-      request.operationId,
-      requestDigest,
-      action,
       request.expectedRevision,
-      request.expectedRevision + 1,
-      nextConfig,
-    ),
-    env.DB.prepare(`
-      INSERT INTO event_cover_retired_legacy_objects (
-        id, event_id, object_key, key_fingerprint, reason, retired_at, cleanup_after
-      )
-      SELECT ?, ?, ?, ?, ?, ?, ?
-      WHERE ? IS NOT NULL AND ? IS NULL
-        AND EXISTS (
-          SELECT 1 FROM event_cover_publish_receipts r
-          WHERE r.event_id = ? AND r.operation_id = ? AND r.request_sha256 = ?
-            AND r.action = ? AND r.expected_revision = ?
-            AND r.status = 'applied' AND r.applied_revision = ?
-        )
-    `).bind(
-      crypto.randomUUID(),
-      event.id,
-      event.coverObjectKey,
-      owner.retiredKeyFingerprint,
-      action === 'remove' ? 'removed' : 'replaced',
-      timestamp,
-      cleanupFloor,
       event.coverObjectKey,
       event.coverRenderSetId,
-      event.id,
-      request.operationId,
-      requestDigest,
-      action,
-      request.expectedRevision,
-      request.expectedRevision + 1,
     ),
+    movePointer!,
+    retireLegacy!,
     ...coverDisplacedUploadRetentionStatements(env.DB, owner),
     env.DB.prepare(`
       UPDATE event_cover_publish_receipts
@@ -1454,8 +1397,8 @@ export async function applySemanticCoverPublication(
         AND NOT EXISTS (
           SELECT 1 FROM events e
           WHERE e.id = event_cover_publish_receipts.event_id
-            AND e.cover_revision = ? AND e.cover_config = ?
-            AND e.cover_object_key IS NULL AND e.cover_render_set_id IS NULL
+            AND e.deleted_at IS NULL AND e.cover_revision = ?
+            AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
         )
     `).bind(
       timestamp,
@@ -1465,8 +1408,9 @@ export async function applySemanticCoverPublication(
       requestDigest,
       action,
       request.expectedRevision,
-      request.expectedRevision + 1,
-      moveMarkerConfig,
+      request.expectedRevision,
+      event.coverObjectKey,
+      event.coverRenderSetId,
     ),
     coverPublicationTerminalAssertionStatement(env.DB, owner),
   );

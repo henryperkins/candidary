@@ -74,7 +74,7 @@ SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN (
   'event_cover_receipts_one_preparing_per_event',
   'event_cover_render_sets_one_active_per_event'
 ) ORDER BY name;
-SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name;`;
+SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name;`;
 
 const INVARIANT_STATEMENT_COUNT = 12;
 
@@ -86,22 +86,32 @@ const INVARIANT_STATEMENT_COUNT = 12;
  * file that is not checked in is never seen, and a correctly numbered extra file
  * that *is* checked in would simply be accepted as the next entry.
  *
- * Thirteen since `main` merged into the cover line: `0013_guest_message_hardening.sql`
+ * Fourteen after Phase 3: `0013_guest_message_hardening.sql`
  * is a guest-message column and index, unrelated to covers. It is deliberately
- * **not** the phase-3 invariants migration, which is now `0014`. Raising this
- * number does not disarm the phase-3 tripwire, because `EXPECTED_TRIGGERS` below
- * is what actually distinguishes that state and `0013` adds no trigger. The
- * phase-3 candidate updates this number and the trigger set together; one
- * candidate never claims both states.
+ * is unrelated to covers; `0014_event_cover_invariants.sql` is the phase-3
+ * migration. Count and exact trigger hashes move together in this candidate.
  */
-const EXPECTED_MIGRATION_COUNT = 13;
+const EXPECTED_MIGRATION_COUNT = 14;
 
-/** Exactly the triggers that existed before 0012. 0013's are not among them. */
-const EXPECTED_TRIGGERS = [
-  'events_rsvp_deadline_insert',
-  'events_rsvp_deadline_update',
-  'media_stamp_stored_at_compat',
-];
+/**
+ * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the nine
+ * large invariant bodies cannot drift behind a name-only schema check.
+ * Normalization collapses whitespace and nothing else.
+ */
+const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
+  event_cover_master_live_reference_delete: 'd5069b47f707cc6628854205e6c2083d272327af23e7d0682d129a58073b1870',
+  event_cover_render_object_manifest_delete: '92c9e535278587b8fe8c93226b82e2e7fec555cfe82f2d56e00260b051840764',
+  event_cover_render_object_manifest_insert: '11faa6b24659b53d19246edfe146b70ccb3c830330f7f01b35b1eb0cd32806e4',
+  event_cover_render_object_manifest_update: 'b4f22ff8987597674bb8d54c1a90d1d92802363529f0b596dd9dddc214cabd04',
+  event_cover_render_set_live_reference_delete: '43562a5276ac0183b67e68c0872e5dda3facb5639a4242b40759a3bf599479b0',
+  event_cover_render_set_manifest_insert: 'df734d0e6c3695c545043c6dec35fc7752982df931df8bae7d7e740747771cf8',
+  event_cover_render_set_manifest_update: '90ce5414d984e4adeeefa901a20d2e169ff0a5f80f943d922bc0e95081ab4815',
+  event_cover_source_pointer_insert: 'a9fbab82a3e6ad5e3f98cae72d0c5cddddaf10a1e94d823bc0d3090fb91d7991',
+  event_cover_source_pointer_update: 'b84f89091ec51761bd9ce26c562a83d2f42d70ddd60e0271a0f2daabf6dba6e9',
+  events_rsvp_deadline_insert: 'b96be8b8983ad7ed6d354e1bb3da6959cca61c89c09d83d796d22649d079b110',
+  events_rsvp_deadline_update: '9154c51a32504396624c7d36205c11a573e53847e7a944cc2062e627ada682d5',
+  media_stamp_stored_at_compat: '921740a4d74caa9802c6d862070ca3fa52f2765a5fc845adcf848c5bb0ee44c4',
+};
 
 const EXPECTED_COVER_TABLES = [
   'event_cover_backfill_jobs',
@@ -669,11 +679,14 @@ function assertPartialUniquePredicates(values: unknown[]): void {
 }
 
 function assertTriggers(values: unknown[]): void {
-  assertExactList(
-    values.map((value, index) => textField(value, ['name'], `Trigger ${index + 1}`).name!),
-    EXPECTED_TRIGGERS,
-    'Trigger set',
-  );
+  const rows = values.map((value, index) => textField(value, ['name', 'sql'], `Trigger ${index + 1}`));
+  assertExactList(rows.map((row) => row.name!), Object.keys(EXPECTED_TRIGGER_SQL_SHA256), 'Trigger set');
+  for (const row of rows) {
+    const normalized = row.sql!.replace(/\s+/gu, ' ').trim();
+    if (sha256(normalized) !== EXPECTED_TRIGGER_SQL_SHA256[row.name!]) {
+      throw new Error(`${row.name} SQL has drifted.`);
+    }
+  }
 }
 
 export function parseWranglerInvariantOutput(

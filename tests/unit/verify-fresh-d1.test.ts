@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   lstat,
   mkdir,
@@ -63,14 +64,13 @@ const eventColumnNames = [
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// verifier refuses a candidate whose ledger is not exactly thirteen, and a
-// fourteenth file is how the phase-3 invariants migration would arrive.
+// verifier refuses a candidate whose ledger is not exactly fourteen.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
-  '0013_guest_message_hardening.sql',
+  '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -89,7 +89,14 @@ const coverIndexRows = [{"tbl":"event_cover_backfill_jobs","idx":"event_cover_ba
 
 const partialUniqueRows = [{"name":"event_cover_receipts_one_preparing_per_event","sql":"CREATE UNIQUE INDEX event_cover_receipts_one_preparing_per_event\n  ON event_cover_publish_receipts (event_id)\n  WHERE status IN ('queued', 'rendering', 'finalizing')\n     OR (status = 'failed' AND retryable = 1)"},{"name":"event_cover_render_sets_one_active_per_event","sql":"CREATE UNIQUE INDEX event_cover_render_sets_one_active_per_event\n  ON event_cover_render_sets (event_id)\n  WHERE state = 'active'"}];
 
-const triggerRows = [{"name":"events_rsvp_deadline_insert"},{"name":"events_rsvp_deadline_update"},{"name":"media_stamp_stored_at_compat"}];
+const triggerRows = migrationFileNames.flatMap((name) => {
+  const source = readFileSync(join(process.cwd(), 'migrations', name), 'utf8');
+  return [...source.matchAll(/CREATE TRIGGER\s+([a-z0-9_]+)[\s\S]*?\nEND;/gu)].map((match) => ({
+    name: match[1]!,
+    // sqlite_master keeps the CREATE statement but omits the trailing semicolon.
+    sql: match[0].slice(0, -1),
+  }));
+}).sort((left, right) => left.name.localeCompare(right.name));
 
 
 const rosterColumnNames = [
@@ -399,9 +406,10 @@ describe('fresh local D1 verification', () => {
         const row = results.find((entry) => entry.name === 'event_cover_receipts_one_preparing_per_event')!;
         row.sql = row.sql.replace("\n     OR (status = 'failed' AND retryable = 1)", '');
       },
-      // A phase-3 trigger present in a phase-1 candidate.
+      // A trigger body drift is rejected even when its name remains exact.
       (output) => {
-        (output[11] as { results: unknown[] }).results.push({ name: 'event_cover_config_pointer_insert' });
+        const results = (output[11] as { results: Array<{ name: string; sql: string }> }).results;
+        results[0]!.sql = results[0]!.sql.replace('BEFORE DELETE', 'AFTER DELETE');
       },
     ];
     for (const mutate of mutations) {
@@ -411,15 +419,12 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly twelve migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly fourteen migrations', async () => {
     const candidate = await fixture();
-    const thirteen = [...candidate.ledgerNames, '0013_event_cover_invariants.sql'];
+    const fifteen = [...candidate.ledgerNames, '0015_unexpected.sql'];
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
-    output[0]!.results = thirteen.map((name, index) => ({ id: index + 1, name }));
-    // Well-formed, internally consistent, and still rejected: 0013 belongs to a
-    // later candidate, and the ledger comparison alone cannot say so because it
-    // derives its expectation from whatever is checked in.
-    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), thirteen)).toThrow();
+    output[0]!.results = fifteen.map((name, index) => ({ id: index + 1, name }));
+    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), fifteen)).toThrow();
   });
 
   it('keeps the reported terminal schema at exactly three keys', async () => {

@@ -142,11 +142,13 @@ describe('migration 0012 over a populated legacy database', () => {
     ]);
   });
 
-  it('adds no trigger', async () => {
+  it('adds none of the phase-3 triggers later owned by 0014', async () => {
     const { results } = await env.DB.prepare(
       `SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name`,
     ).all<{ name: string }>();
-    // 0013's invariant triggers are deliberately absent from this candidate.
+    // 0014's invariant triggers are deliberately absent when the database is
+    // built only through 0012. The intervening 0013 guest migration is not a
+    // cover migration and cannot make this assertion pass accidentally.
     expect(results.map((row) => row.name).sort()).toEqual([...EXISTING_TRIGGERS].sort());
   });
 

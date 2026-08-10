@@ -43,8 +43,22 @@ const SMALL_MANIFEST_JSON = JSON.stringify({
     { profile: 'wide-expanded', density: '1x', format: 'jpeg' },
   ],
 });
+const COMPETING_PRESET_CONFIG = JSON.stringify({
+  version: 1,
+  source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+  effect: 'natural',
+});
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+async function moveEventToCompetingPreset(eventId: string, revision: number): Promise<void> {
+  await testEnv.DB.prepare(`
+    UPDATE events
+    SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL,
+        cover_revision = ?
+    WHERE id = ?
+  `).bind(COMPETING_PRESET_CONFIG, revision, eventId).run();
+}
 
 /**
  * A platform that can tell the coordinator nothing.
@@ -118,16 +132,42 @@ async function seedActiveUploadCover(access: Access, receiptExpiry: string) {
   await testEnv.DB.prepare(`
     INSERT INTO event_cover_render_sets (
       id, event_id, master_id, recipe_json, recipe_sha256, state,
-      required_slots, manifest_sha256, published_revision, created_at, ready_at, published_at
-    ) VALUES (?, ?, ?, ?, ?, 'active', 12, ?, 0, ?, ?, ?)
+      required_slots, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'staging', 12, ?)
   `).bind(
     setId, access.event.id, masterId,
     '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
-    OTHER_HEX, HEX_64, timestamp, timestamp, timestamp,
+    OTHER_HEX, timestamp,
   ).run();
+  await testEnv.DB.batch(EVENT_COVER_PROFILES.flatMap((profile) => (
+    ['webp', 'jpeg'] as const
+  ).map((format) => testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_objects (
+      id, render_set_id, event_id, profile_id, density, format, object_key,
+      content_type, byte_size, width, height, quality_rung, sha256, created_at
+    ) VALUES (?, ?, ?, ?, '1x', ?, ?, ?, 100, ?, ?, 1, ?, ?)
+  `).bind(
+    `${setId}-${profile.id}-${format}`,
+    setId,
+    access.event.id,
+    profile.id,
+    format,
+    `events/${access.event.id}/cover/rendered/${setId}/${profile.id}-1x.${format}`,
+    format === 'webp' ? 'image/webp' : 'image/jpeg',
+    profile.width,
+    profile.height,
+    HEX_64,
+    timestamp,
+  ))));
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_render_sets
+    SET state = 'active', manifest_sha256 = ?, published_revision = 1,
+        ready_at = ?, published_at = ?
+    WHERE id = ?
+  `).bind(HEX_64, timestamp, timestamp, setId).run();
   await testEnv.DB.prepare(`
     UPDATE events SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?,
-      cover_revision = 0 WHERE id = ?
+      cover_revision = 1 WHERE id = ?
   `).bind(
     '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
     objectKey, setId, access.event.id,
@@ -139,7 +179,7 @@ async function seedActiveUploadCover(access: Access, receiptExpiry: string) {
       required_profiles, applied_revision, result_cover_json, retryable,
       dispatch_state, dispatch_generation, created_at, updated_at, expires_at
     ) VALUES (?, 'old-upload-operation', ?, ?, 'publish', 0, 'applied', '{}',
-      6, 6, 0, ?, 0, 'confirmed', 0, ?, ?, ?)
+      6, 6, 1, ?, 0, 'confirmed', 0, ?, ?, ?)
   `).bind(
     access.event.id, setId, OTHER_HEX,
     '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
@@ -426,8 +466,7 @@ describe('cover render preflight', () => {
     const beforeReceipt = await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
     const beforeSet = await row('SELECT * FROM event_cover_render_sets WHERE event_id = ?', access.event.id);
     const raced = envBeforeFirstBatch(async () => {
-      await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-        .bind(access.event.id).run();
+      await moveEventToCompetingPreset(access.event.id, 1);
     });
 
     const preflight = await coverRenderPreflight(raced, {
@@ -500,8 +539,7 @@ describe('cover render preflight', () => {
     const { draft } = await row<{ draft: string }>(
       'SELECT draft_id AS draft FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION,
     );
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 9 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id, 1);
 
     const recording = withRecordingImages();
     const preflight = await coverRenderPreflight(recording.env, {
@@ -687,22 +725,16 @@ describe('cover render profile steps', () => {
 
 describe('cover render finalize', () => {
   let access: Access;
-  const legacy = (id: string) => `events/${id}/cover/9f1c-porch.jpg`;
-
   beforeEach(async () => {
     await resetDatabase();
     access = await eventAccess();
   });
 
   async function prepared(
-    withLegacyCover = false,
+    _withLegacyCover = false,
     master: { width: number; height: number } = { width: 2480, height: 1680 },
   ) {
-    if (withLegacyCover) {
-      await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-        .bind(legacy(access.event.id), access.event.id).run();
-      await testEnv.MEDIA_BUCKET.put(legacy(access.event.id), new Uint8Array([1, 2, 3]));
-    }
+    void _withLegacyCover;
     const result = await publication(access, master);
     const env = renderEnv();
     await coverRenderPreflight(env, { eventId: access.event.id, operationId: OPERATION }, now);
@@ -710,8 +742,8 @@ describe('cover render finalize', () => {
     return result;
   }
 
-  it('commits the pointer, the retirement, both set transitions, and both terminal flips together', async () => {
-    const { draft } = await prepared(true);
+  it('commits the pointer, set transition, draft, receipt, and fence together', async () => {
+    const { draft } = await prepared(false);
     const finalizedAt = new Date('2026-08-11T12:00:00.000Z');
     const outcome = await coverRenderFinalize(testEnv, {
       eventId: access.event.id, operationId: OPERATION,
@@ -733,11 +765,8 @@ describe('cover render finalize', () => {
     expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE event_id = ?', access.event.id))
       .toEqual({ expires_at: '2026-09-11T12:00:00.000Z' });
 
-    // The displaced legacy original is inventoried by the same statements that
-    // moved the pointer, and is still in R2.
-    expect(await row('SELECT object_key, reason FROM event_cover_retired_legacy_objects WHERE event_id = ?', access.event.id))
-      .toEqual({ object_key: legacy(access.event.id), reason: 'replaced' });
-    expect(await testEnv.MEDIA_BUCKET.head(legacy(access.event.id))).not.toBeNull();
+    expect(await row('SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?', access.event.id))
+      .toEqual({ count: 0 });
   });
 
   it('stores the SHA-256 of the exact derived manifest rather than the recipe', async () => {
@@ -795,10 +824,9 @@ describe('cover render finalize', () => {
   });
 
   it('settles one atomic conflict when the revision changes after the ready checkpoint', async () => {
-    const { draft, receipt } = await prepared(true, { width: 620, height: 420 });
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
     const raced = envAfterFirstBatch(async () => {
-      await testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
-        .bind(access.event.id).run();
+      await moveEventToCompetingPreset(access.event.id, 1);
     });
 
     await expect(coverRenderFinalize(raced, {
@@ -808,8 +836,8 @@ describe('cover render finalize', () => {
     expect(await row(`
       SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
     `, access.event.id)).toEqual({
-      cover_revision: 7,
-      cover_object_key: legacy(access.event.id),
+      cover_revision: 1,
+      cover_object_key: null,
       cover_render_set_id: null,
     });
     expect(await row(`
@@ -849,8 +877,7 @@ describe('cover render finalize', () => {
     }), { eventId: access.event.id, operationId: OPERATION }, now))
       .rejects.toThrow('checkpoint only');
     if (fragment.includes('conflict')) {
-      await testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
-        .bind(access.event.id).run();
+      await moveEventToCompetingPreset(access.event.id, 1);
     }
     const beforeEvent = await row('SELECT * FROM events WHERE id = ?', access.event.id);
     const beforeSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id);
@@ -878,7 +905,7 @@ describe('cover render finalize', () => {
 
     await expect(coverRenderFinalize(testEnv, {
       eventId: access.event.id, operationId: OPERATION,
-    }, now)).resolves.toMatchObject({ status: 'applied', appliedRevision: 1 });
+    }, now)).resolves.toMatchObject({ status: 'applied', appliedRevision: 2 });
 
     expect(await row(`
       SELECT state, retired_at, cleanup_after FROM event_cover_render_sets WHERE id = ?
@@ -962,9 +989,8 @@ describe('cover render finalize', () => {
   });
 
   it('records a conflict and touches no active pointer when the final guard loses', async () => {
-    const { draft } = await prepared(true);
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
-      .bind(access.event.id).run();
+    const { draft } = await prepared(false);
+    await moveEventToCompetingPreset(access.event.id, 1);
 
     const outcome = await coverRenderFinalize(testEnv, {
       eventId: access.event.id, operationId: OPERATION,
@@ -972,9 +998,9 @@ describe('cover render finalize', () => {
 
     expect(outcome.status).toBe('conflict');
     const event = (await new EventsRepository(testEnv.DB).getById(access.event.id))!;
-    expect(event.coverRevision).toBe(7);
+    expect(event.coverRevision).toBe(1);
     // The winning cover is untouched, and no retirement row was written.
-    expect(event.coverObjectKey).toBe(legacy(access.event.id));
+    expect(event.coverObjectKey).toBeNull();
     expect(event.coverRenderSetId).toBeNull();
     expect(await row('SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?', access.event.id))
       .toEqual({ count: 0 });
@@ -1047,8 +1073,7 @@ describe('cover render finalize', () => {
     expect((await coverRenderPreflight(
       renderEnv(), { eventId: access.event.id, operationId: OPERATION }, now,
     )).shouldRender).toBe(true);
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id, 1);
     const recording = withRecordingImages({ encode: () => ({
       bytes: new Uint8Array(20_000).fill(2), width: 0, height: 0, contentType: 'image/webp',
     }) });
@@ -1061,14 +1086,10 @@ describe('cover render finalize', () => {
     expect(recording.calls).toHaveLength(0);
   });
 
-  it('cannot adopt a competing removal that reached the same next revision', async () => {
-    const { draft } = await prepared(true);
+  it('cannot adopt a competing semantic publication that reached the same next revision', async () => {
+    const { draft } = await prepared(false);
     const raced = envBeforeFirstBatch(async () => {
-      await testEnv.DB.prepare(`
-        UPDATE events
-        SET cover_revision = 1, cover_object_key = NULL, cover_render_set_id = NULL
-        WHERE id = ?
-      `).bind(access.event.id).run();
+      await moveEventToCompetingPreset(access.event.id, 1);
     });
 
     const outcome = await coverRenderFinalize(raced, {
@@ -1135,11 +1156,15 @@ describe('cover render finalize', () => {
   });
 
   it('does not let a lost-guard conflict writer overwrite a permanent deletion result', async () => {
-    const { draft } = await prepared(true);
+    const { draft } = await prepared(false);
     const raced = envBeforeFirstBatch(async () => {
       await testEnv.DB.batch([
-        testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
-          .bind(access.event.id),
+        testEnv.DB.prepare(`
+          UPDATE events
+          SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL,
+              cover_revision = 1
+          WHERE id = ?
+        `).bind(COMPETING_PRESET_CONFIG, access.event.id),
         testEnv.DB.prepare(`
           UPDATE event_cover_publish_receipts
           SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED'

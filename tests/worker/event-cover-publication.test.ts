@@ -1,3 +1,4 @@
+import { applyD1Migrations, reset } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -5,7 +6,10 @@ import {
   MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
   MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
 } from '../../shared/constants';
-import type { EventCoverPublishRequestV1 } from '../../shared/event-cover';
+import {
+  EVENT_COVER_PROFILES,
+  type EventCoverPublishRequestV1,
+} from '../../shared/event-cover';
 import { createCoverDraft, insertCoverMaster } from '../../worker/db/event-covers';
 import { EventsRepository } from '../../worker/db/events';
 import type { EventRecord } from '../../worker/db/types';
@@ -35,14 +39,32 @@ import {
   type CoverWorkflowAccessor,
   type CoverWorkflowLookup,
 } from '../../worker/workflows/cover-platform';
-import { eventAccess, resetDatabase, testEnv } from './helpers';
+import { eventAccess, migrationsUpTo, resetDatabase, testEnv } from './helpers';
 
 const now = new Date('2026-08-04T12:00:00.000Z');
 const HEX_64 = 'a'.repeat(64);
 const OTHER_HEX = 'b'.repeat(64);
 const OPERATION = '5f3a2b18-6c2d-4f0e-9a71-0c2d1e8b4a55';
+const COMPETING_PRESET_CONFIG = JSON.stringify({
+  version: 1,
+  source: { kind: 'preset', presetId: 'pressed-paper', assetVersion: 1 },
+  effect: 'natural',
+});
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+function competingPresetStatement(eventId: string): D1PreparedStatement {
+  return testEnv.DB.prepare(`
+    UPDATE events
+    SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL,
+        cover_revision = cover_revision + 1
+    WHERE id = ?
+  `).bind(COMPETING_PRESET_CONFIG, eventId);
+}
+
+async function moveEventToCompetingPreset(eventId: string): Promise<void> {
+  await competingPresetStatement(eventId).run();
+}
 
 /**
  * Records every lifecycle call, because none of them has a precedent locally.
@@ -168,23 +190,45 @@ async function seedActiveUploadCover(
   await testEnv.DB.prepare(`
     INSERT INTO event_cover_render_sets (
       id, event_id, master_id, recipe_json, recipe_sha256, state,
-      required_slots, manifest_sha256, published_revision, created_at,
-      ready_at, published_at
-    ) VALUES (?, ?, ?, ?, ?, 'active', 12, ?, 0, ?, ?, ?)
+      required_slots, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'staging', 12, ?)
   `).bind(
     setId,
     access.event.id,
     masterId,
     '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
     HEX_64,
-    OTHER_HEX,
-    timestamp,
-    timestamp,
     timestamp,
   ).run();
+  await testEnv.DB.batch(EVENT_COVER_PROFILES.flatMap((profile) => (
+    ['webp', 'jpeg'] as const
+  ).map((format) => testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_objects (
+      id, render_set_id, event_id, profile_id, density, format, object_key,
+      content_type, byte_size, width, height, quality_rung, sha256, created_at
+    ) VALUES (?, ?, ?, ?, '1x', ?, ?, ?, 100, ?, ?, 1, ?, ?)
+  `).bind(
+    `${setId}-${profile.id}-${format}`,
+    setId,
+    access.event.id,
+    profile.id,
+    format,
+    `events/${access.event.id}/cover/rendered/${setId}/${profile.id}-1x.${format}`,
+    format === 'webp' ? 'image/webp' : 'image/jpeg',
+    profile.width,
+    profile.height,
+    HEX_64,
+    timestamp,
+  ))));
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_render_sets
+    SET state = 'active', manifest_sha256 = ?, published_revision = 1,
+        ready_at = ?, published_at = ?
+    WHERE id = ?
+  `).bind(OTHER_HEX, timestamp, timestamp, setId).run();
   await testEnv.DB.prepare(`
     UPDATE events SET
-      cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 0
+      cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
     WHERE id = ?
   `).bind(
     '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
@@ -200,7 +244,7 @@ async function seedActiveUploadCover(
         required_profiles, applied_revision, result_cover_json, retryable,
         dispatch_state, dispatch_generation, created_at, updated_at, expires_at
       ) VALUES (?, 'old-upload-operation', ?, ?, 'publish', 0, 'applied', '{}',
-        6, 6, 0, ?, 0, 'confirmed', 0, ?, ?, ?)
+        6, 6, 1, ?, 0, 'confirmed', 0, ?, ?, ?)
     `).bind(
       access.event.id,
       setId,
@@ -212,6 +256,40 @@ async function seedActiveUploadCover(
     ).run();
   }
   return { masterId, setId, objectKey };
+}
+
+async function completeRenderSet(eventId: string, setId: string): Promise<void> {
+  const set = await testEnv.DB.prepare(`
+    SELECT required_slots FROM event_cover_render_sets WHERE id = ? AND event_id = ?
+  `).bind(setId, eventId).first<{ required_slots: number }>();
+  if (!set) throw new Error('Expected render-set fixture.');
+  const densities = set.required_slots === 24 ? ['1x', '2x'] as const : ['1x'] as const;
+  await testEnv.DB.batch(EVENT_COVER_PROFILES.flatMap((profile) => densities.flatMap((density) => (
+    ['webp', 'jpeg'] as const
+  ).map((format) => testEnv.DB.prepare(`
+    INSERT OR IGNORE INTO event_cover_render_objects (
+      id, render_set_id, event_id, profile_id, density, format, object_key,
+      content_type, byte_size, width, height, quality_rung, sha256, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?, 1, ?, ?)
+  `).bind(
+    `${setId}-${profile.id}-${density}-${format}`,
+    setId,
+    eventId,
+    profile.id,
+    density,
+    format,
+    `events/${eventId}/cover/rendered/${setId}/${profile.id}-${density}.${format}`,
+    format === 'webp' ? 'image/webp' : 'image/jpeg',
+    profile.width * (density === '2x' ? 2 : 1),
+    profile.height * (density === '2x' ? 2 : 1),
+    HEX_64,
+    now.toISOString(),
+  )))));
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_render_sets
+    SET state = 'ready', manifest_sha256 = ?, ready_at = ?
+    WHERE id = ? AND event_id = ?
+  `).bind(HEX_64, now.toISOString(), setId, eventId).run();
 }
 
 async function applySemanticForTest(
@@ -508,8 +586,7 @@ describe('publication acceptance', () => {
 
   it('records a conflict for an already-stale first attempt, with no set and no workflow', async () => {
     const draft = await readyDraft(access);
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 3 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     const event = await reload(access.event.id);
 
     const accepted = await acceptCoverPublication(testEnv, {
@@ -532,8 +609,7 @@ describe('publication acceptance', () => {
   it('rechecks revision inside acceptance before freezing or allocating', async () => {
     const draft = await readyDraft(access);
     const staleSnapshot = await reload(access.event.id);
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
 
     const accepted = await acceptCoverPublication(testEnv, {
       event: staleSnapshot,
@@ -773,8 +849,7 @@ describe('dispatch and the deletion fence', () => {
 
   it('settles revision movement in the acceptance-to-claim gap without dispatch', async () => {
     const { draft, accepted: publication } = await accepted();
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
 
     const claim = await claimInitialCoverDispatch(testEnv, {
       eventId: access.event.id,
@@ -821,8 +896,7 @@ describe('dispatch and the deletion fence', () => {
     const beforeFence = await testEnv.DB.prepare(`
       SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
     `).bind(publication.receipt.workflow_instance_id).first();
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
 
     const second = await claimInitialCoverDispatch(testEnv, {
       eventId: access.event.id,
@@ -860,8 +934,7 @@ describe('dispatch and the deletion fence', () => {
     const beforeFence = await testEnv.DB.prepare(`
       SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?
     `).bind(publication.receipt.workflow_instance_id).first();
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
 
     const replay = await claimInitialCoverDispatch(testEnv, {
       eventId: access.event.id,
@@ -949,8 +1022,7 @@ describe('side-effect-free status read', () => {
     workflow.accessor.lookup = async () => {
       workflow.calls.push('lookup');
       await testEnv.DB.batch([
-        testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-          .bind(access.event.id),
+        competingPresetStatement(access.event.id),
         testEnv.DB.prepare(`
           UPDATE event_cover_publish_receipts
           SET status = 'applied', applied_revision = 1, retryable = 0,
@@ -1787,8 +1859,7 @@ describe('operation restart', () => {
         UPDATE event_cover_workflow_fences SET dispatch_generation = 1
         WHERE workflow_instance_id = ?
       `).bind(instanceId),
-      testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-        .bind(access.event.id),
+      competingPresetStatement(access.event.id),
     ]);
     const beforeReceipt = await testEnv.DB.prepare(`
       SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?
@@ -1819,8 +1890,7 @@ describe('operation restart', () => {
       { kind: 'status', status: 'complete' },
       async () => {
         await testEnv.DB.batch([
-          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-            .bind(access.event.id),
+          competingPresetStatement(access.event.id),
           testEnv.DB.prepare(`
             UPDATE event_cover_publish_receipts
             SET status = 'applied', applied_revision = 1, retryable = 0
@@ -1931,8 +2001,7 @@ describe('operation restart', () => {
           UPDATE event_cover_workflow_fences SET dispatch_generation = 1
           WHERE workflow_instance_id = ?
         `).bind(instanceId),
-        testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-          .bind(access.event.id),
+        competingPresetStatement(access.event.id),
       ]);
       return { kind: 'status', status: 'errored' };
     };
@@ -2088,8 +2157,7 @@ describe('operation restart', () => {
     const before = await testEnv.DB.prepare(`
       SELECT draft_id, render_set_id FROM event_cover_publish_receipts WHERE operation_id = ?
     `).bind(OPERATION).first<{ draft_id: string; render_set_id: string }>();
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     const workflow = fakeWorkflow('errored');
     const result = await restartCoverPublication(testEnv, {
       eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
@@ -2130,8 +2198,7 @@ describe('operation restart', () => {
         UPDATE event_cover_workflow_fences SET dispatch_generation = 1
         WHERE workflow_instance_id = ?
       `).bind(instanceId),
-      testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-        .bind(access.event.id),
+      competingPresetStatement(access.event.id),
     ]);
     let platformStatus: CoverPlatformStatus = 'errored';
     const calls: string[] = [];
@@ -2276,8 +2343,7 @@ describe('operation restart', () => {
   });
 
   it('terminates a paused stale publication before settling its revision conflict', async () => {
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     let platformStatus: CoverPlatformStatus = 'paused';
     const calls: string[] = [];
     const workflow: CoverWorkflowAccessor = {
@@ -2322,6 +2388,9 @@ describe('operation restart', () => {
       const before = await testEnv.DB.prepare(`
         SELECT render_set_id FROM event_cover_publish_receipts WHERE operation_id = ?
       `).bind(OPERATION).first<{ render_set_id: string }>();
+      if (status === 'finalizing') {
+        await completeRenderSet(access.event.id, before!.render_set_id);
+      }
       await testEnv.DB.batch([
         testEnv.DB.prepare(`
           UPDATE event_cover_publish_receipts
@@ -2331,8 +2400,7 @@ describe('operation restart', () => {
         testEnv.DB.prepare(`
           UPDATE event_cover_render_sets SET state = ? WHERE id = ?
         `).bind(status === 'finalizing' ? 'ready' : 'staging', before!.render_set_id),
-        testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-          .bind(access.event.id),
+        competingPresetStatement(access.event.id),
       ]);
       let platformStatus: CoverPlatformStatus = 'paused';
       const calls: string[] = [];
@@ -2368,8 +2436,7 @@ describe('operation restart', () => {
   );
 
   it('preserves deletion when it wins during paused conflict termination', async () => {
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     let platformStatus: CoverPlatformStatus = 'paused';
     const calls: string[] = [];
     const workflow: CoverWorkflowAccessor = {
@@ -2416,8 +2483,7 @@ describe('operation restart', () => {
   });
 
   it('does not settle a newer generation that wins during paused conflict termination', async () => {
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     let platformStatus: CoverPlatformStatus = 'paused';
     const workflow: CoverWorkflowAccessor = {
       async create() {},
@@ -2461,8 +2527,7 @@ describe('operation restart', () => {
   });
 
   it('returns a terminal result that wins immediately before a paused conflict claim', async () => {
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 5 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     let batches = 0;
     const db = new Proxy(testEnv.DB, {
       get(target, property) {
@@ -2507,7 +2572,10 @@ describe('synchronous removal publication', () => {
   const legacyKey = (id: string) => `events/${id}/cover/9f1c-porch.jpg`;
 
   beforeEach(async () => {
-    await resetDatabase();
+    // Preserve the deployed phase-2 legacy writer contract on the exact schema
+    // where legacy pointers can still exist. 0014 itself proves they are gone.
+    await reset();
+    await applyD1Migrations(testEnv.DB, migrationsUpTo('0014'));
     access = await eventAccess();
     await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
       .bind(legacyKey(access.event.id), access.event.id).run();
@@ -2799,8 +2867,7 @@ describe('strict synchronous semantic publications', () => {
   });
 
   it('records a first-seen stale preset as conflict without allocating or mutating', async () => {
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 3 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
 
     const outcome = await applySemanticForTest(access, presetRequest());
 
@@ -2815,7 +2882,7 @@ describe('strict synchronous semantic publications', () => {
       view: { status: 'conflict' },
     });
     expect(await reload(access.event.id)).toMatchObject({
-      coverRevision: 3,
+      coverRevision: 1,
       coverObjectKey: null,
       coverRenderSetId: null,
     });
@@ -2835,7 +2902,7 @@ describe('strict synchronous semantic publications', () => {
     await testEnv.DB.batch([
       testEnv.DB.prepare(`
         UPDATE events SET cover_config = ?, cover_object_key = NULL,
-          cover_render_set_id = NULL, cover_revision = 1
+          cover_render_set_id = NULL, cover_revision = 2
         WHERE id = ?
       `).bind(winnerConfig, access.event.id),
       testEnv.DB.prepare(`
@@ -2850,7 +2917,7 @@ describe('strict synchronous semantic publications', () => {
 
     const outcome = await applySemanticCoverPublication(testEnv, {
       event: staleEvent,
-      request: presetRequest(),
+      request: presetRequest({ expectedRevision: 1 }),
       requestDigest: HEX_64,
       now,
     });
@@ -2861,7 +2928,7 @@ describe('strict synchronous semantic publications', () => {
       receipt: { status: 'conflict' },
       event: {
         coverConfig: winnerConfig,
-        coverRevision: 1,
+        coverRevision: 2,
         coverObjectKey: null,
         coverRenderSetId: null,
       },
@@ -2947,11 +3014,14 @@ describe('strict synchronous semantic publications', () => {
     const retainedUntil = '2026-08-20T12:00:00.000Z';
     const active = await seedActiveUploadCover(access, { receiptExpiry: retainedUntil });
 
-    const outcome = await applySemanticForTest(access, request);
+    const outcome = await applySemanticForTest(access, {
+      ...request,
+      expectedRevision: 1,
+    });
 
     expect(outcome.receipt.status).toBe('applied');
     const event = await reload(access.event.id);
-    expect(event.coverRevision).toBe(1);
+    expect(event.coverRevision).toBe(2);
     expect(event.coverObjectKey).toBeNull();
     expect(event.coverRenderSetId).toBeNull();
     const set = await testEnv.DB.prepare(`
@@ -3008,7 +3078,7 @@ describe('strict synchronous semantic publications', () => {
 
     await expect(applySemanticForTest(
       access,
-      presetRequest(),
+      presetRequest({ expectedRevision: 1 }),
       HEX_64,
       { ...testEnv, DB: fault.db },
     )).rejects.toThrow();
@@ -3029,8 +3099,7 @@ describe('strict synchronous semantic publications', () => {
   });
 
   it('rolls a zero-row conflict tail and its newly inserted receipt back together', async () => {
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 2 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id);
     const beforeEvent = await testEnv.DB.prepare('SELECT * FROM events WHERE id = ?')
       .bind(access.event.id).first();
     const fault = zeroSemanticTailDb("SET status = 'conflict'");
