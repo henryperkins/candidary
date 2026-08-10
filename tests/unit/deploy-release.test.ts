@@ -28,7 +28,25 @@ const SHA = 'a'.repeat(40);
 const OTHER_SHA = 'c'.repeat(40);
 const TREE = 'b'.repeat(40);
 const APPROVED_BASE = '0b92387d2e237d568d2514373dcc3044e7960d4b';
+const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const roots: string[] = [];
+
+const migrationNames = [
+  '0001_core.sql',
+  '0002_wedding_photo_drop.sql',
+  '0003_partitioned_exports.sql',
+  '0004_manager_media_pagination.sql',
+  '0005_media_stored_at.sql',
+  '0006_host_accounts.sql',
+  '0007_event_theme.sql',
+  '0008_event_rsvp.sql',
+  '0009_rsvp_roster_batches.sql',
+  '0010_event_start.sql',
+  '0011_release_certifications.sql',
+  '0012_event_cover_storage.sql',
+  '0013_guest_message_hardening.sql',
+  '0014_event_cover_invariants.sql',
+] as const;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
@@ -70,7 +88,9 @@ async function candidateFixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'candidary-deploy-test-'));
   roots.push(root);
   await put(root, 'config/release.json', '{"guestJourneyVersion":1}\n');
-  await put(root, 'migrations/0001_initial.sql', 'select 1;\n');
+  for (const [index, name] of migrationNames.entries()) {
+    await put(root, `migrations/${name}`, `select ${index + 1};\n`);
+  }
   await put(root, 'dist/candidary/index.js', `worker-${SHA}\n`);
   await put(root, 'dist/client/index.html', '<!doctype html><title>Candidary</title>\n');
 
@@ -92,10 +112,19 @@ async function candidateFixture(): Promise<Fixture> {
     observability: { enabled: true },
   };
   await put(root, 'dist/candidary/wrangler.json', JSON.stringify(generatedConfig));
+  const packageLock = `${canonicalJson({
+    lockfileVersion: 3,
+    packages: { 'node_modules/wrangler': { version: '4.113.0' } },
+  })}\n`;
+  const sourceConfig = `${canonicalJson({ ...generatedConfig, main: 'worker/index.ts' })}\n`;
+  await put(root, 'package.json', `${canonicalJson({ devDependencies: { wrangler: '4.113.0' } })}\n`);
+  await put(root, 'package-lock.json', packageLock);
+  await put(root, 'wrangler.jsonc', sourceConfig);
   const npmCliPath = resolve(root, 'tooling/npm-cli.js');
   const wranglerCliPath = resolve(root, 'node_modules/wrangler/bin/wrangler.js');
   await put(root, 'tooling/npm-cli.js', '');
   await put(root, 'node_modules/wrangler/bin/wrangler.js', '');
+  await put(root, 'node_modules/wrangler/package.json', '{"version":"4.113.0"}\n');
 
   const migrations = collectMigrationManifest(root);
   const artifacts = collectDeployableArtifacts(root);
@@ -109,15 +138,15 @@ async function candidateFixture(): Promise<Fixture> {
     failureCode: null,
     failureObservation: null,
     preconditionObservation: null,
-    runId: '11111111-1111-4111-8111-111111111111',
+    runId: RUN_ID,
     candidate: {
       gitSha: SHA,
       approvedBaseSha: APPROVED_BASE,
       gitTree: TREE,
       guestJourneyVersion: 1,
       migrationManifestSha256: migrations.sha256,
-      packageLockSha256: '1'.repeat(64),
-      sourceWranglerConfigSha256: '2'.repeat(64),
+      packageLockSha256: sha256(packageLock),
+      sourceWranglerConfigSha256: sha256(sourceConfig),
     },
     execution: {
       startedAt: '2026-08-03T00:00:00.000Z',
@@ -177,7 +206,7 @@ async function candidateFixture(): Promise<Fixture> {
       runtimeCertification: 'not_run',
     },
   };
-  const manifestPath = resolve(root, 'output/release', SHA, 'run-1/candidate-manifest.json');
+  const manifestPath = resolve(root, 'output/release', SHA, RUN_ID, 'candidate-manifest.json');
   const sidecarPath = `${manifestPath}.sha256`;
   const writeManifest = async (candidate: CandidateManifest = manifest): Promise<void> => {
     const bytes = `${canonicalJson(candidate)}\n`;

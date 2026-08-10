@@ -1,5 +1,4 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   lstatSync,
@@ -22,18 +21,16 @@ import {
 import { fileURLToPath } from 'node:url';
 
 import type * as ReleaseEvidenceModule from './release-evidence';
-import type { CandidateManifest } from './release-evidence';
+import {
+  verifyExactReleaseCandidate,
+  type ReleaseCandidateObservationAdapter,
+} from './release-candidate';
 
 const releaseEvidenceModulePath = './release-evidence.ts';
 const releaseEvidence: typeof ReleaseEvidenceModule = await import(releaseEvidenceModulePath);
-const assertRedactedCandidateManifest: typeof ReleaseEvidenceModule.assertRedactedCandidateManifest =
-  releaseEvidence.assertRedactedCandidateManifest;
 const {
-  canonicalJson,
   collectDeployableArtifacts,
-  collectMigrationManifest,
   deployWranglerConfigBytes,
-  normalizedBindingTopology,
   sha256,
 } = releaseEvidence;
 
@@ -244,12 +241,6 @@ export function parseDeployReleaseArgs(
   return { sha, manifestPath };
 }
 
-function exactGitObject(value: string, label: string): string {
-  const match = /^([0-9a-f]{40})(?:\r?\n)?$/u.exec(value);
-  if (!match) throw new Error(`${label} was not one exact lowercase Git object ID.`);
-  return match[1]!;
-}
-
 function within(container: string, target: string): boolean {
   const path = relative(container, target);
   return path === '' || (!path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path));
@@ -286,50 +277,20 @@ function resolveWranglerCliPath(candidateRoot: string): string {
   return cli;
 }
 
-function readGuestJourneyVersion(candidateRoot: string): number {
-  const value = JSON.parse(readFileSync(resolve(candidateRoot, 'config/release.json'), 'utf8')) as unknown;
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Release config must be an object.');
-  }
-  const version = (value as Record<string, unknown>).guestJourneyVersion;
-  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version <= 0) {
-    throw new Error('Checked-in guest journey version is invalid.');
-  }
-  return version;
-}
-
-function loadCandidateManifest(manifestPath: string): CandidateManifest {
-  const exactManifestPath = existingRegularFile(manifestPath, 'Candidate manifest');
-  if (basename(exactManifestPath) !== 'candidate-manifest.json') {
-    throw new Error('Candidate manifest filename must be candidate-manifest.json.');
-  }
-  const sidecarPath = existingRegularFile(`${exactManifestPath}.sha256`, 'Candidate manifest sidecar');
-  const bytes = readFileSync(exactManifestPath);
-  const digest = createHash('sha256').update(bytes).digest('hex');
-  const sidecar = readFileSync(sidecarPath, 'utf8');
-  if (sidecar !== `${digest}  candidate-manifest.json\n`) {
-    throw new Error('Candidate manifest sidecar does not match the exact manifest bytes.');
-  }
-  const value = JSON.parse(bytes.toString('utf8')) as unknown;
-  assertRedactedCandidateManifest(value);
-  return value;
-}
-
-function currentGitState(adapters: DeployReleaseAdapters, candidateRoot: string): {
-  head: string;
-  tree: string;
-  status: string;
-} {
+function releaseCandidateAdapters(adapters: DeployReleaseAdapters): ReleaseCandidateObservationAdapter {
   return {
-    head: exactGitObject(
-      adapters.git(['rev-parse', '--verify', 'HEAD^{commit}'], candidateRoot),
-      'HEAD commit',
-    ),
-    tree: exactGitObject(
-      adapters.git(['rev-parse', '--verify', 'HEAD^{tree}'], candidateRoot),
-      'HEAD tree',
-    ),
-    status: adapters.git(['status', '--porcelain=v1', '--untracked-files=all'], candidateRoot),
+    resolveCommit(candidateRoot, sha) {
+      return adapters.git(['rev-parse', '--verify', `${sha}^{commit}`], candidateRoot);
+    },
+    head(candidateRoot) {
+      return adapters.git(['rev-parse', '--verify', 'HEAD^{commit}'], candidateRoot);
+    },
+    tree(candidateRoot) {
+      return adapters.git(['rev-parse', '--verify', 'HEAD^{tree}'], candidateRoot);
+    },
+    status(candidateRoot) {
+      return adapters.git(['status', '--porcelain=v1', '--untracked-files=all'], candidateRoot);
+    },
   };
 }
 
@@ -423,32 +384,16 @@ export function runDeployRelease(
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error('Candidate root must be one exact directory.');
   }
-  const manifest = loadCandidateManifest(request.manifestPath);
-  if (manifest.status !== 'passed' || manifest.candidate === null
-    || manifest.artifacts === null || manifest.bindings === null) {
-    throw new Error('Only a complete passed candidate manifest may deploy.');
-  }
-  if (manifest.candidate.approvedBaseSha !== APPROVED_BASE_SHA
-    || manifest.candidate.gitSha !== request.sha) {
-    throw new Error('Candidate manifest identity does not match the reviewed release.');
-  }
-
-  const resolvedCommit = exactGitObject(
-    adapters.git(['rev-parse', '--verify', `${request.sha}^{commit}`], candidateRoot),
-    'Reviewed commit',
-  );
-  if (resolvedCommit !== request.sha) throw new Error('Reviewed SHA did not resolve to itself as a commit.');
-  const initial = currentGitState(adapters, candidateRoot);
-  if (initial.head !== request.sha
-    || initial.tree !== manifest.candidate.gitTree
-    || initial.status !== '') {
-    throw new Error('Candidate checkout is not the exact reviewed clean Git state.');
-  }
-  const guestJourneyVersion = readGuestJourneyVersion(candidateRoot);
-  const migrations = collectMigrationManifest(candidateRoot);
-  if (manifest.candidate.guestJourneyVersion !== guestJourneyVersion
-    || manifest.candidate.migrationManifestSha256 !== migrations.sha256) {
-    throw new Error('Candidate journey or migration identity does not match the checkout.');
+  const initialCandidate = verifyExactReleaseCandidate({
+    candidateRoot,
+    sha: request.sha,
+    manifestPath: request.manifestPath,
+    approvedBaseSha: APPROVED_BASE_SHA,
+    expectedMigrationCount: 14,
+  }, releaseCandidateAdapters(adapters));
+  const manifest = initialCandidate.manifest;
+  if (manifest.bindings === null || manifest.artifacts === null) {
+    throw new Error('Verified candidate is missing deployment evidence.');
   }
 
   if (!isAbsolute(adapters.nodeExecPath)) throw new Error('Node executable path must be absolute.');
@@ -505,24 +450,14 @@ export function runDeployRelease(
   runCommand(plan[1]!, adapters);
   runCommand(plan[2]!, adapters);
 
+  verifyExactReleaseCandidate({
+    candidateRoot,
+    sha: request.sha,
+    manifestPath: request.manifestPath,
+    approvedBaseSha: APPROVED_BASE_SHA,
+    expectedMigrationCount: 14,
+  }, releaseCandidateAdapters(adapters));
   const rebuilt = collectDeployableArtifacts(candidateRoot);
-  if (rebuilt.treeSha256 !== manifest.artifacts.firstTreeSha256) {
-    throw new Error('Rebuilt deployable artifacts do not match candidate evidence.');
-  }
-  const generatedConfig = JSON.parse(
-    readFileSync(resolve(candidateRoot, 'dist/candidary/wrangler.json'), 'utf8'),
-  ) as unknown;
-  const rebuiltTopologySha = sha256(canonicalJson(normalizedBindingTopology(generatedConfig)));
-  if (rebuiltTopologySha !== manifest.bindings.sourceTopologySha256) {
-    throw new Error('Rebuilt binding topology does not match candidate evidence.');
-  }
-
-  const final = currentGitState(adapters, candidateRoot);
-  if (final.head !== request.sha
-    || final.tree !== manifest.candidate.gitTree
-    || final.status !== '') {
-    throw new Error('Candidate Git state drifted during deployment preparation.');
-  }
 
   const deployRoot = createVerifiedDeploySnapshot(candidateRoot, rebuilt);
   try {

@@ -12,6 +12,7 @@
     "verify:pwa-build": "node scripts/verify-pwa-build.mjs",
     "deploy": "node --experimental-strip-types scripts/deploy-release.ts",
     "release:staging": "node --experimental-strip-types scripts/staging-release.ts",
+    "release:migrate": "node --experimental-strip-types scripts/migrate-release.ts",
     "typecheck": "tsc -b --pretty false",
     "typecheck:e2e": "tsc -p tsconfig.e2e.json --pretty false",
     "lint": "eslint . --max-warnings=0",
