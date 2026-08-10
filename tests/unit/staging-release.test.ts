@@ -627,13 +627,31 @@ describe('staging finalization and independent verification', () => {
 });
 
 describe('repository-pinned Wrangler path resolution', () => {
-  it('resolves main/assets/migrations and atomically applies real 0013 then 0014 locally', { timeout: 120_000 }, () => {
+  it('resolves isolated main/assets plus real migrations and atomically applies 0013 then 0014 locally', { timeout: 120_000 }, () => {
     const repositoryRoot = resolve(import.meta.dirname, '../..');
-    const artifacts = collectDeployableArtifacts(repositoryRoot);
-    const migrationManifest = collectMigrationManifest(repositoryRoot);
+    // `npm test` must work in a clean checkout, before `npm run build` creates
+    // repository `dist/`. Keep the deployable tree owned by this test while
+    // copying the real migration bytes and using the repository-pinned CLI.
+    const candidateRoot = tempRoot();
+    put(candidateRoot, 'dist/candidary/index.js', [
+      'export default {};',
+      'export class ExportWorkflow {}',
+      'export class CoverRenderWorkflow {}',
+      'export class CoverBackfillWorkflow {}',
+      '',
+    ].join('\n'));
+    put(candidateRoot, 'dist/candidary/wrangler.json', `${canonicalJson(generatedConfig())}\n`);
+    put(candidateRoot, 'dist/client/index.html', '<!doctype html>\n');
+    const repositoryMigrations = collectMigrationManifest(repositoryRoot);
+    for (const migration of repositoryMigrations.files) {
+      put(candidateRoot, migration.path, readFileSync(resolve(repositoryRoot, migration.path)));
+    }
+    const artifacts = collectDeployableArtifacts(candidateRoot);
+    const migrationManifest = collectMigrationManifest(candidateRoot);
+    expect(migrationManifest).toEqual(repositoryMigrations);
     const candidate = {
-      candidateRoot: repositoryRoot, sha: PHASE_3_SHA, tree: TREE, approvedBaseSha: BASE,
-      manifestPath: resolve(repositoryRoot, 'output/unused-manifest.json'),
+      candidateRoot, sha: PHASE_3_SHA, tree: TREE, approvedBaseSha: BASE,
+      manifestPath: resolve(candidateRoot, 'output/unused-manifest.json'),
       manifestSha256: '1'.repeat(64),
       manifest: {
         artifacts: {
@@ -647,7 +665,7 @@ describe('repository-pinned Wrangler path resolution', () => {
       artifactTreeSha256: artifacts.treeSha256, wranglerVersion: '4.113.0',
       wranglerCliPath: resolve(repositoryRoot, 'node_modules/wrangler/bin/wrangler.js'),
     } satisfies VerifiedReleaseCandidate;
-    const ownedBase = resolve(repositoryRoot, 'output/staging', PHASE_3_SHA, RUN_ID, 'local-path-proof');
+    const ownedBase = resolve(candidateRoot, 'output/staging', PHASE_3_SHA, RUN_ID, 'local-path-proof');
     rmSync(ownedBase, { force: true, recursive: true });
     try {
       const owned = createOwnedStagingDeployRoot(candidate, target('cutover'), ownedBase, []);
