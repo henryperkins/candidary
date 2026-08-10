@@ -184,7 +184,7 @@ export function writePhaseReceipt<Result>(
 }
 
 function parseSidecar(path: string, bytes: string): string {
-  const match = /^([0-9a-f]{64})  ([^\r\n]+)\r?\n$/u.exec(bytes);
+  const match = /^([0-9a-f]{64}) {2}([^\r\n]+)\r?\n$/u.exec(bytes);
   if (!match || match[2] !== basename(path)) {
     throw new Error('Evidence sidecar has an invalid format or filename.');
   }
