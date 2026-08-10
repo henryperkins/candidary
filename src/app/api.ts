@@ -1,4 +1,5 @@
 import type { ApiErrorBody, ApiErrorCode, ApiErrorDetails } from '../../shared/errors';
+import type { EventCoverAssetSlot } from '../../shared/event-cover-assets';
 
 interface Envelope<T> { data: T; requestId: string }
 
@@ -135,6 +136,31 @@ export function guestEventCoverPath(slug: string): string {
 
 export function managerEventCoverPath(eventId: string): string {
   return `/api/manage/events/${encodeURIComponent(eventId)}/cover`;
+}
+
+export interface EventCoverSlotPathOptions extends EventCoverAssetSlot {
+  revision: number;
+}
+
+function eventCoverSlotSuffix(options: EventCoverSlotPathOptions): string {
+  if (!Number.isSafeInteger(options.revision) || options.revision < 0) {
+    throw new RangeError('A cover slot revision must be a non-negative safe integer.');
+  }
+  return `${options.revision}/${options.profile}/${options.density}.${options.format}`;
+}
+
+export function guestEventCoverSlotPath(
+  slug: string,
+  options: EventCoverSlotPathOptions,
+): string {
+  return `${guestEventCoverPath(slug)}/${eventCoverSlotSuffix(options)}`;
+}
+
+export function managerEventCoverSlotPath(
+  eventId: string,
+  options: EventCoverSlotPathOptions,
+): string {
+  return `${managerEventCoverPath(eventId)}/${eventCoverSlotSuffix(options)}`;
 }
 
 export const mediaContent = mediaPreview;

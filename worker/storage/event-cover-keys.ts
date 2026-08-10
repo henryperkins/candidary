@@ -2,7 +2,6 @@ import type {
   EventCoverDensity,
   EventCoverEffectId,
   EventCoverFormat,
-  EventCoverPresetId,
   EventCoverProfileId,
 } from '../../shared/event-cover';
 
@@ -47,24 +46,6 @@ export function coverRenderKey(
   format: EventCoverFormat,
 ): string {
   return `${coverPrefix(eventId)}/rendered/${renderSetId}/${profile}-${density}.${format}`;
-}
-
-/**
- * A global release asset, not an event-owned object.
- *
- * Contains no event ID or slug, and the version is part of the path so a later
- * visual refresh ships beside the old bytes rather than replacing them under an
- * event that has not published again.
- */
-export function presetAssetPath(
-  assetVersion: number,
-  presetId: EventCoverPresetId,
-  effect: EventCoverEffectId,
-  profile: EventCoverProfileId,
-  density: EventCoverDensity,
-  format: EventCoverFormat,
-): string {
-  return `/assets/event-covers/v${assetVersion}/${presetId}/${effect}/${profile}-${density}.${format}`;
 }
 
 /**

@@ -12,7 +12,12 @@ import {
   EVENT_THEME_PRESETS,
   resolveEventTheme,
 } from '../../shared/event-theme';
-import { guestEventCoverPath, managerEventCoverPath } from '../../src/app/api';
+import {
+  guestEventCoverPath,
+  guestEventCoverSlotPath,
+  managerEventCoverPath,
+  managerEventCoverSlotPath,
+} from '../../src/app/api';
 import { EVENT_THEME_CSS_PROPERTIES } from '../../src/app/event-theme-style';
 import { useEventCover } from '../../src/app/use-event-cover';
 import { EventAppearancePreview } from '../../src/components/EventAppearancePreview';
@@ -246,6 +251,16 @@ describe('event theme primitives', () => {
   it('encodes guest and manager cover identifiers into only their authorized paths', () => {
     expect(guestEventCoverPath('maya/theo?')).toBe('/api/event/maya%2Ftheo%3F/cover');
     expect(managerEventCoverPath('event/a?')).toBe('/api/manage/events/event%2Fa%3F/cover');
+    const slot = {
+      revision: 7,
+      profile: 'compact-expanded' as const,
+      density: '2x' as const,
+      format: 'webp' as const,
+    };
+    expect(guestEventCoverSlotPath('maya/theo?', slot))
+      .toBe('/api/event/maya%2Ftheo%3F/cover/7/compact-expanded/2x.webp');
+    expect(managerEventCoverSlotPath('event/a?', slot))
+      .toBe('/api/manage/events/event%2Fa%3F/cover/7/compact-expanded/2x.webp');
   });
 });
 
