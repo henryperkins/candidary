@@ -16,6 +16,7 @@ import {
 } from '../../shared/event-cover';
 import {
   normalizeCoverMaster,
+  readCoverSourceInfo,
   renderCoverPreview,
   renderCoverProfileObject,
   verifyCoverManifest,
@@ -45,6 +46,25 @@ function fixedSize(byteLength: number) {
     };
   };
 }
+
+describe('cover source inspection', () => {
+  it('maps an Images decoder rejection to the safe unsupported-source error', async () => {
+    const { env } = withRecordingImages();
+    const rejectingEnv = {
+      ...env,
+      IMAGES: Object.create(env.IMAGES, {
+        info: {
+          value: async () => {
+            throw new Error('private Images decoder detail');
+          },
+        },
+      }),
+    } as typeof env;
+
+    await expect(readCoverSourceInfo(rejectingEnv, new Uint8Array([1, 2, 3, 4]).buffer))
+      .rejects.toMatchObject({ code: 'COVER_SOURCE_UNSUPPORTED', status: 422 });
+  });
+});
 
 describe('cover master normalization', () => {
   beforeEach(async () => {

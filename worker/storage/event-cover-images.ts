@@ -152,7 +152,17 @@ async function hexDigest(bytes: ArrayBuffer): Promise<string> {
 }
 
 export async function readCoverSourceInfo(env: AppEnv, bytes: ArrayBuffer): Promise<CoverSourceInfo> {
-  const info = await requireImages(env).info(new Response(bytes).body!);
+  const images = requireImages(env);
+  let info: Awaited<ReturnType<ImagesBinding['info']>>;
+  try {
+    info = await images.info(new Response(bytes).body!);
+  } catch {
+    throw new ApiError(
+      'COVER_SOURCE_UNSUPPORTED',
+      'That file could not be read as a photo. Choose a JPEG, PNG, WebP, or HEIC image.',
+      422,
+    );
+  }
   const width = 'width' in info ? info.width : 0;
   const height = 'height' in info ? info.height : 0;
   const format = 'format' in info ? String(info.format) : '';

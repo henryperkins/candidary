@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import * as stagingLive from '../../scripts/staging-release-live';
 
 type FreshnessContract = {
+  readonly LOCAL_CALLER_HEADERS?: Readonly<Record<string, string>>;
   readonly STAGING_DATABASE_FRESHNESS_SQL?: string;
   readonly assertFreshStagingDatabase?: (
     rows: readonly Readonly<Record<string, unknown>>[],
@@ -10,6 +11,14 @@ type FreshnessContract = {
 };
 
 describe('Task 11 live staging preflight', () => {
+  it('does not reuse Wrangler remote-preview proxy connections between RPCs', () => {
+    const contract = stagingLive as FreshnessContract;
+    expect(contract.LOCAL_CALLER_HEADERS).toEqual({
+      connection: 'close',
+      'content-type': 'application/json',
+    });
+  });
+
   it('uses D1-supported quick_check and refuses any non-clean staging database', () => {
     const contract = stagingLive as FreshnessContract;
     expect(contract.STAGING_DATABASE_FRESHNESS_SQL).toBeDefined();

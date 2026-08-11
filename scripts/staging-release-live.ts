@@ -475,6 +475,11 @@ interface DevCaller {
   readonly stop: () => Promise<void>;
 }
 
+export const LOCAL_CALLER_HEADERS = {
+  connection: 'close',
+  'content-type': 'application/json',
+} as const;
+
 async function waitForCaller(child: ChildProcessWithoutNullStreams, port: number): Promise<void> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
@@ -539,7 +544,7 @@ async function startCaller(
     async call(method, input) {
       const response = await fetch(`http://127.0.0.1:${port}/rpc`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: LOCAL_CALLER_HEADERS,
         body: JSON.stringify({ method, input }),
         signal: AbortSignal.timeout(60_000),
       });
