@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   canonicalJson,
@@ -73,7 +73,13 @@ const migrations = [
   '0012_event_cover_storage.sql', PHASE_2_MIGRATION, PHASE_3_MIGRATION,
 ] as const;
 
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(NOW));
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   for (const root of roots) rmSync(root, { force: true, recursive: true });
   roots.clear();
 });

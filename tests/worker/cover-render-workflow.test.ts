@@ -247,7 +247,8 @@ it('restores the hold when a terminal render receipt is claimed for retry', asyn
   await testEnv.DB.batch([
     testEnv.DB.prepare(`
       UPDATE event_cover_publish_receipts
-      SET status = 'failed', retryable = 1, updated_at = ?
+      SET status = 'failed', retryable = 1, updated_at = ?,
+          expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 day')
       WHERE event_id = ? AND operation_id = ?
     `).bind(new Date(now.getTime() - 60_000).toISOString(), access.event.id, OPERATION),
     testEnv.DB.prepare(`
