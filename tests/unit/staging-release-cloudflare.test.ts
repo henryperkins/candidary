@@ -23,6 +23,21 @@ describe('Task 11 pinned Cloudflare command plan', () => {
     expect(assertSafeCloudflareCommand(command, root)).toEqual(command);
   });
 
+  it('uses read-only command execution when the caller needs returned D1 rows', () => {
+    const sql = 'SELECT count(*) AS observed_count FROM events;';
+    const command = buildCloudflareCommand({
+      id: 'd1-observe', root, wrangler, config, sql,
+    });
+    expect(command.args).toEqual([
+      wrangler, 'd1', 'execute', 'candidary-core-staging', '--remote',
+      '--config', config, '--json', '--command', sql,
+    ]);
+    expect(assertSafeCloudflareCommand(command, root)).toEqual(command);
+    expect(() => buildCloudflareCommand({
+      id: 'd1-observe', root, wrangler, config, sql: 'DELETE FROM events;',
+    })).toThrow(/read-only/u);
+  });
+
   it('builds only pinned deploy, R2, Worker, Workflow, and inventory operations', () => {
     for (const input of [
       { id: 'deploy' as const, root, wrangler, config, candidateSha: '1'.repeat(40) },

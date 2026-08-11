@@ -291,9 +291,9 @@ class Task11OperationExecutor {
       inputPath: mutationPath,
     }));
     const observed = d1Rows(jsonOutput(runPlanned(buildCloudflareCommand({
-      id: 'd1-execute', root: this.context.runRoot,
+      id: 'd1-observe', root: this.context.runRoot,
       wrangler: exactWranglerJs(this.context.projectRoot), config: this.configPath,
-      inputPath: observationPath,
+      sql: unit.observationSql,
     })).stdout, 'D1_OBSERVATION'));
     if (observed.length !== 1
       || Number(observed[0]!.observed_count) !== expectedObservedCount) {

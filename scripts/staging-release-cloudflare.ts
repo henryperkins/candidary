@@ -10,6 +10,7 @@ type CommonInput = {
 
 export type CloudflareCommandInput = CommonInput & (
   | { readonly id: 'd1-execute'; readonly inputPath: string }
+  | { readonly id: 'd1-observe'; readonly sql: string }
   | { readonly id: 'deploy'; readonly candidateSha: string }
   | { readonly id: 'r2-put'; readonly objectSuffix: string; readonly inputPath: string }
   | { readonly id: 'r2-get'; readonly objectSuffix: string; readonly outputPath: string }
@@ -42,6 +43,18 @@ function configArgs(config: string): string[] {
   return ['--config', config];
 }
 
+function readOnlyObservationSql(value: string): string {
+  const sql = value.trim();
+  const body = sql.endsWith(';') ? sql.slice(0, -1) : sql;
+  if (sql.length === 0 || sql.length > 32_768 || !/^SELECT\b/iu.test(sql)
+    || !/\bobserved_count\b/iu.test(sql) || body.includes(';')
+    || /(?:--|\/\*)/u.test(sql)
+    || /\b(?:ATTACH|CREATE|DELETE|DETACH|DROP|INSERT|PRAGMA|REINDEX|REPLACE|UPDATE|VACUUM)\b/iu.test(sql)) {
+    throw new Error('Task 11 D1 observation must be one read-only SELECT.');
+  }
+  return value;
+}
+
 export function buildCloudflareCommand(input: CloudflareCommandInput): Task11CloudflareCommand {
   const prefix = [input.wrangler];
   let args: string[];
@@ -50,6 +63,12 @@ export function buildCloudflareCommand(input: CloudflareCommandInput): Task11Clo
       args = [
         ...prefix, 'd1', 'execute', STAGING_TARGET.databaseName, '--remote',
         ...configArgs(input.config), '--json', '--file', input.inputPath,
+      ];
+      break;
+    case 'd1-observe':
+      args = [
+        ...prefix, 'd1', 'execute', STAGING_TARGET.databaseName, '--remote',
+        ...configArgs(input.config), '--json', '--command', readOnlyObservationSql(input.sql),
       ];
       break;
     case 'deploy':
@@ -149,6 +168,13 @@ export function assertSafeCloudflareCommand(
   const joined = value.args.join(' ');
   if (/\bd1\s+migrations\s+apply\b/iu.test(joined)) {
     throw new Error('Task 11 command cannot use migrations apply.');
+  }
+  if (value.id === 'd1-observe') {
+    const commandIndex = value.args.indexOf('--command');
+    if (commandIndex < 0 || commandIndex !== value.args.length - 2) {
+      throw new Error('Task 11 D1 observation command is missing.');
+    }
+    readOnlyObservationSql(value.args[commandIndex + 1]!);
   }
   const configIndex = value.args.indexOf('--config');
   if (configIndex < 0 || typeof value.args[configIndex + 1] !== 'string'
