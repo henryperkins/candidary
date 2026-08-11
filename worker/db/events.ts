@@ -111,12 +111,13 @@ export interface CoverPointerMove {
    * displaces are the ones the compatibility reader was still serving.
    */
   reason?: 'replaced' | 'removed' | 'backfilled';
-  /**
-   * Optional exact synchronous-removal owner. When present, the event pointer
-   * moves only while that accepted receipt is still the original nonterminal
-   * generation; a deletion settlement cannot be overwritten by the batch.
-   */
-  publicationGuard?: { operationId: string; requestSha256: string };
+  /** Exact owner for a synchronous preset or removal pointer move. */
+  semanticPublicationGuard?: {
+    action: 'publish' | 'remove';
+    operationId: string;
+    requestSha256: string;
+    expectedRevision: number;
+  };
   /** Exact durable owner for an uploaded-cover Workflow pointer move. */
   renderPublicationGuard?: {
     operationId: string;
@@ -136,6 +137,8 @@ export interface CoverPointerMove {
     renderSetId: string;
     legacyKeyFingerprint: string;
   };
+  /** Require the immediately preceding guarded owner transition to have won. */
+  onlyIfPriorStatementChanged?: boolean;
 }
 
 /**
@@ -176,7 +179,7 @@ export function coverPointerStatements(
           FROM event_cover_publish_receipts r
           JOIN event_cover_render_sets s
             ON s.id = r.render_set_id AND s.event_id = r.event_id
-              AND s.draft_id = r.draft_id AND s.state IN ('staging', 'ready')
+              AND s.draft_id = r.draft_id AND s.state = 'ready'
           JOIN event_cover_drafts d
             ON d.id = r.draft_id AND d.event_id = r.event_id AND d.state = 'publishing'
           JOIN event_cover_workflow_fences f
@@ -187,7 +190,7 @@ export function coverPointerStatements(
           WHERE r.event_id = events.id AND r.operation_id = ?
             AND r.request_sha256 = ? AND r.workflow_instance_id = ?
             AND r.dispatch_generation = ? AND r.render_set_id = ? AND r.draft_id = ?
-            AND r.status IN ('rendering', 'finalizing')
+            AND r.status = 'applied'
         )
   ` : '';
   const backfillGuardSql = input.backfillGuard ? `
@@ -197,7 +200,7 @@ export function coverPointerStatements(
           JOIN event_cover_render_sets s
             ON s.id = j.render_set_id AND s.event_id = j.event_id
               AND s.master_id = j.master_id AND s.draft_id IS NULL
-              AND s.state IN ('staging', 'ready')
+              AND s.state = 'ready'
           JOIN event_cover_workflow_fences f
             ON f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
               AND f.workflow_instance_id = j.workflow_instance_id
@@ -207,7 +210,7 @@ export function coverPointerStatements(
             AND j.workflow_instance_id = ? AND j.dispatch_generation = ?
             AND j.master_id = ? AND j.render_set_id = ?
             AND j.legacy_key_fingerprint = ?
-            AND j.status IN ('rendering', 'finalizing')
+            AND j.status = 'applied'
         )
   ` : '';
   const ownerBindings: unknown[] = [];
@@ -232,6 +235,7 @@ export function coverPointerStatements(
       input.backfillGuard.legacyKeyFingerprint,
     );
   }
+  const priorChangeGuard = input.onlyIfPriorStatementChanged ? ' AND changes() = 1' : '';
   return [
     db.prepare(`
       UPDATE events SET
@@ -248,14 +252,16 @@ export function coverPointerStatements(
           ? IS NULL OR EXISTS (
             SELECT 1 FROM event_cover_publish_receipts r
             WHERE r.event_id = events.id AND r.operation_id = ?
-              AND r.request_sha256 = ? AND r.action = 'remove'
-              AND r.expected_revision = ? AND r.status = 'queued' AND r.retryable = 0
-              AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL
-              AND r.dispatch_state = 'pending' AND r.dispatch_generation = 0
+              AND r.request_sha256 = ? AND r.action = ?
+              AND r.expected_revision = ? AND r.status = 'applied'
+              AND r.applied_revision = ? AND r.result_cover_json = ? AND r.retryable = 0
+              AND r.workflow_instance_id IS NULL AND r.render_set_id IS NULL AND r.draft_id IS NULL
+              AND r.dispatch_state = 'confirmed' AND r.dispatch_generation = 0
           )
         )
         ${renderGuardSql}
         ${backfillGuardSql}
+        ${priorChangeGuard}
     `).bind(
       input.nextConfig,
       input.nextObjectKey,
@@ -264,10 +270,13 @@ export function coverPointerStatements(
       input.expectedRevision,
       input.expectedCurrentKey,
       input.expectedCurrentRenderSetId,
-      input.publicationGuard?.operationId ?? null,
-      input.publicationGuard?.operationId ?? null,
-      input.publicationGuard?.requestSha256 ?? null,
-      input.expectedRevision,
+      input.semanticPublicationGuard?.operationId ?? null,
+      input.semanticPublicationGuard?.operationId ?? null,
+      input.semanticPublicationGuard?.requestSha256 ?? null,
+      input.semanticPublicationGuard?.action ?? null,
+      input.semanticPublicationGuard?.expectedRevision ?? null,
+      input.semanticPublicationGuard ? input.semanticPublicationGuard.expectedRevision + 1 : null,
+      input.semanticPublicationGuard ? input.nextConfig : null,
       ...ownerBindings,
     ),
     db.prepare(`

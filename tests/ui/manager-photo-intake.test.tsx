@@ -21,9 +21,11 @@ function json(data: unknown, status = 200) {
 // on its own, with no host action on the day of the event.
 const SCHEDULED: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', coverObjectKey: null,
-  coverPreparation: null,
-  coverRevision: 0,
+  welcomeMessage: 'Welcome.',
+  cover: {
+    config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
+    available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
+  },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',

@@ -421,6 +421,7 @@ describe('public Candidary experience', () => {
 const GUEST_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
+  cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   galleryVisible: false, moderationRequired: true, phase: 'photos-primary',
   rsvpState: 'disabled', rsvpAccess: 'unavailable', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
   eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
@@ -664,7 +665,11 @@ describe('guest event experience', () => {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', coverObjectKey: null,
+  welcomeMessage: 'Welcome.',
+  cover: {
+    config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
+    available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
+  },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
@@ -812,7 +817,7 @@ describe('manager experience', () => {
     // One PATCH, and no five-request manager refresh behind it.
     expect(after - before).toBe(1);
     // The stale theme in that response must not travel with the settings it owns.
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#4a2415' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#4a2415' });
   });
 
   it('drops a whole-event read that a later write overtook', async () => {
@@ -850,15 +855,15 @@ describe('manager experience', () => {
     await waitFor(() => expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some(([input, init]) => (
       String(input).endsWith('/theme') && String(init?.method).toUpperCase() === 'PUT'
     ))).toBe(true));
-    await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
+    await waitFor(() => expect(screen.getByTestId('event-appearance-canvas'))
       .toHaveStyle({ '--event-primary': '#245c46' }));
 
     releaseRead!();
     // The overtaken read carries the pre-write theme. Adopting it would put the
     // old appearance back and then feed it into the next complete write.
-    await waitFor(() => expect(screen.getByTestId('event-appearance-preview'))
+    await waitFor(() => expect(screen.getByTestId('event-appearance-canvas'))
       .toHaveStyle({ '--event-primary': '#245c46' }));
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
   });
 
   it('appends the next media page and keeps every row unique', async () => {
@@ -2367,7 +2372,7 @@ describe('guest event phase composition', () => {
     name: 'Maya & Theo',
     eventDate: '2026-09-19',
     welcomeMessage: 'Come celebrate with us.',
-    coverObjectKey: null,
+    cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
     uploadsEnabled: true,
     galleryVisible: false,
     moderationRequired: true,
@@ -2391,16 +2396,38 @@ describe('guest event phase composition', () => {
   }
 
   it('puts RSVP first for the rsvp-primary phase without mounting photo controls', async () => {
+    class TestResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{
+          target,
+          contentRect: { width: 360 } as DOMRectReadOnly,
+        } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    window.innerWidth = 360;
+    window.innerHeight = 600;
+    const lookupEvent = {
+      ...guestEvent,
+      uploadsEnabled: false,
+      phase: 'rsvp-primary' as const,
+      cover: { ...guestEvent.cover, revision: 7, hasCover: true },
+    };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.endsWith('/api/event/maya-theo')) return json({ event: { ...guestEvent, uploadsEnabled: false, phase: 'rsvp-primary' }, role: 'guest' });
+      if (path.endsWith('/api/event/maya-theo')) return json({ event: lookupEvent, role: 'guest' });
       if (path.endsWith('/rsvp/household')) return errorJson({ code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'r' }, 401);
       throw new Error(`Unexpected request ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    renderEvent({ ...guestEvent, uploadsEnabled: false, phase: 'rsvp-primary' });
+    const { container } = renderEvent(lookupEvent);
     await screen.findByRole('button', { name: 'Find my invitation' });
+    await waitFor(() => expect(container.querySelector('.responsive-cover'))
+      .toHaveAttribute('data-cover-profile', 'short-lookup'));
     expect(screen.queryByRole('button', { name: 'Take a photo' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Your name')).not.toBeInTheDocument();
   });
@@ -2423,6 +2450,54 @@ describe('guest event phase composition', () => {
     await user.click(screen.getByText('View or change RSVP'));
     await screen.findByRole('button', { name: 'Find my invitation' });
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('/api/event/maya-theo/rsvp/household');
+  });
+
+  it('installs a cover-only ticketed refresh after final guest delivery failure', async () => {
+    class TestResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{
+          target,
+          contentRect: { width: 390 } as DOMRectReadOnly,
+        } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    window.innerWidth = 390;
+    window.innerHeight = 844;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const initial = {
+      ...guestEvent,
+      cover: { ...guestEvent.cover, revision: 41, hasCover: true },
+    };
+    const refreshed = {
+      ...initial,
+      cover: { ...initial.cover, revision: 42 },
+    };
+    let eventReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) {
+        eventReads += 1;
+        return json({ event: eventReads === 1 ? initial : refreshed, role: 'guest' });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+
+    const { container } = renderEvent(initial);
+    await waitFor(() => expect(container.querySelector('.responsive-cover__image')).not.toBeNull());
+    const first = container.querySelector<HTMLImageElement>('.responsive-cover__image')!;
+    expect(first.getAttribute('src')).toContain('/41/compact-default/');
+
+    fireEvent.error(first);
+    fireEvent.error(container.querySelector<HTMLImageElement>('.responsive-cover__image')!);
+
+    await waitFor(() => expect(
+      container.querySelector<HTMLImageElement>('.responsive-cover__image')?.getAttribute('src'),
+    ).toContain('/42/compact-default/'));
+    expect(eventReads).toBe(2);
   });
 
   it.each(['closed', 'paused'] as const)('offers a secondary saved-response view for %s RSVP without delaying photo controls', async (rsvpState) => {

@@ -13,7 +13,7 @@ const event: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We cannot wait to celebrate with you.',
-  coverObjectKey: null,
+  cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: false,
   moderationRequired: true,

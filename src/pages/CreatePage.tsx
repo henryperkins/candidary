@@ -133,9 +133,10 @@ export function CreatePage() {
       setSaved(result.savedToAccount === true);
       if (cover) {
         try {
-          // The same bounded pipeline the manager control uses: automatic
-          // composition, the faithful style, one durable receipt. A new event is
-          // at revision 0, and creation returns before the renderings are ready.
+          // CreatePage deliberately keeps the thin automatic wrapper: unlike
+          // Manager Studio it has no editable draft session. The wrapper still
+          // performs the same replay-safe primitives in order, publishes the
+          // faithful style once, and starts at the new event's revision 0.
           await publishCoverUpload({ eventId: result.event.id, file: cover, expectedRevision: 0 });
         } catch { setCoverError('Your event was created, but the cover did not finish uploading. Add it again from event settings.'); }
       }

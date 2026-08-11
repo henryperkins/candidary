@@ -35,6 +35,7 @@ import {
 
 const ACCOUNT = 'cover-backfill-local-rehearsal';
 const NOW = '2026-08-08T12:00:00.000Z';
+const PHASE_2_MIGRATION = '0013_guest_message_hardening.sql';
 const artifactRoots = new Set<string>();
 
 interface ArtifactStep {
@@ -90,13 +91,22 @@ function eventId(index: number): string {
   return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 }
 
+function phase2MigrationNames(migrationRoot: string): string[] {
+  const migrations = readdirSync(migrationRoot)
+    .filter((entry) => entry.endsWith('.sql'))
+    .sort();
+  const boundary = migrations.indexOf(PHASE_2_MIGRATION);
+  expect(boundary).toBe(12);
+  return migrations.slice(0, boundary + 1);
+}
+
 function migratedDatabase(): DatabaseSync {
   const database = new DatabaseSync(':memory:');
   database.exec('PRAGMA foreign_keys = ON;');
   const migrationRoot = resolve(process.cwd(), 'migrations');
-  const migrations = readdirSync(migrationRoot)
-    .filter((entry) => entry.endsWith('.sql'))
-    .sort();
+  // The operator loop certifies the pre-invariant compatibility boundary.
+  // Phase 3 correctly rejects the legacy rows seeded below.
+  const migrations = phase2MigrationNames(migrationRoot);
   expect(migrations).toHaveLength(13);
   for (const migration of migrations) {
     database.exec(readFileSync(resolve(migrationRoot, migration), 'utf8'));
@@ -705,9 +715,7 @@ describe('the generated cover-backfill operator loop', () => {
       expect(version.stdout.trim()).toBe('4.113.0');
 
       const migrationRoot = resolve(process.cwd(), 'migrations');
-      const migrations = readdirSync(migrationRoot)
-        .filter((entry) => entry.endsWith('.sql'))
-        .sort();
+      const migrations = phase2MigrationNames(migrationRoot);
       expect(migrations).toEqual([
         '0001_core.sql',
         '0002_wedding_photo_drop.sql',

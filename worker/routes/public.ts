@@ -15,7 +15,7 @@ import type { AppBindings } from '../env';
 import { getSessionCookie, setSessionCookies } from '../http/cookies';
 import { assertRequestOrigin } from '../http/csrf';
 import { DEFAULT_EVENT_START_TIME, resolveEventSchedule } from '../http/event-schedule';
-import { eventView } from '../http/event-view';
+import { selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { requestOrigin } from '../origins';
 import { EventService } from '../services/events';
@@ -85,7 +85,7 @@ publicRoutes.post('/events', async (context) => {
   setSessionCookies(context, 'event', created.managementSession, created.csrfToken, maxAge);
   return context.json({
     data: {
-      event: eventView(created.event),
+      event: await selectManagerEventView(context.env, created.event),
       eventLink: created.eventLink,
       managementLink: created.managementLink,
       csrfToken: created.csrfToken,

@@ -22,7 +22,11 @@ function errorJson(body: Record<string, unknown>, status: number) {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', coverObjectKey: null,
+  welcomeMessage: 'Welcome.',
+  cover: {
+    config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
+    available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
+  },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   storedMediaCount: 3, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
@@ -712,7 +716,7 @@ describe('manager settings autosave guards', () => {
 
     await waitFor(() => expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked());
     // The settings response carried the pre-change theme; it must not travel.
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
     // And the theme response carried the pre-change switch; that must not travel either.
     expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
   });
@@ -783,8 +787,18 @@ describe('manager settings autosave guards', () => {
     // a whole event, so it is what can carry stale neighbours back.
     const covered = {
       ...MANAGED_EVENT,
-      coverObjectKey: 'cover-present',
-      coverRevision: 1,
+      cover: {
+        config: {
+          version: 1,
+          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+          effect: 'natural',
+        },
+        revision: 1,
+        hasCover: true,
+        available2xProfiles: [],
+        surfaceTreatment: 'none',
+        preparation: null,
+      },
     };
     let releaseCover: (() => void) | null = null;
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } }, covered);
@@ -792,16 +806,31 @@ describe('manager settings autosave guards', () => {
       const url = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/cover/publications') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { operationId: string };
         await new Promise<void>((resolve) => { releaseCover = resolve; });
         // Built from a row read before either later write.
         return json({
           applied: true,
           appliedRevision: 2,
-          operation: null,
+          operation: {
+            operationId: body.operationId,
+            status: 'applied',
+            completedSteps: 0,
+            requiredSteps: 0,
+            retryable: false,
+            safeFailureCode: null,
+            updatedAt: '2026-08-10T00:00:00.000Z',
+          },
           event: {
             ...covered,
-            coverObjectKey: null,
-            coverRevision: 2,
+            cover: {
+              config: { version: 1, source: { kind: 'none' } },
+              revision: 2,
+              hasCover: false,
+              available2xProfiles: [],
+              surfaceTreatment: 'none',
+              preparation: null,
+            },
             moderationRequired: true,
             theme: MANAGED_EVENT.theme,
           },
@@ -819,7 +848,9 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
+    await user.click(screen.getByRole('button', { name: 'Change cover' }));
     await user.click(screen.getByRole('button', { name: 'Remove cover' }));
+    await user.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(releaseCover).not.toBeNull());
 
     await user.click(screen.getByLabelText('Review notes before sharing'));
@@ -829,8 +860,9 @@ describe('manager settings autosave guards', () => {
     releaseCover!();
 
     // The cover response owns the cover and nothing else.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Cover Studio' })).not.toBeInTheDocument());
+    expect(screen.getByText(/No cover is currently shown/u)).toBeVisible();
     expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
-    expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
+    expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
   });
 });

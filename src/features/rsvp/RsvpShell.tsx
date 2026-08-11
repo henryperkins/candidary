@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
 import type { GuestEventView } from '../../../shared/contracts';
+import { guestEventCoverSlotPath } from '../../app/api';
 import { GuestEventHero } from '../../components/GuestEventHero';
 
 type Presentation = 'primary' | 'secondary' | 'embedded';
@@ -9,6 +10,7 @@ interface RsvpShellProps {
   event: GuestEventView;
   presentation: Presentation;
   className?: string;
+  lookup?: boolean;
   children: ReactNode;
 }
 
@@ -16,7 +18,7 @@ interface RsvpShellProps {
    full-page RSVP surface and owns the hero the photo drop uses. Secondary sits inside the
    photos-primary disclosure, and embedded sits inside the before-start page, which already drew
    that hero and owns the level-one heading; neither may draw a second one. */
-export function RsvpShell({ event, presentation, className, children }: RsvpShellProps) {
+export function RsvpShell({ event, presentation, className, lookup = false, children }: RsvpShellProps) {
   const withHero = presentation === 'primary';
   const classes = [
     'rsvp-flow',
@@ -27,11 +29,9 @@ export function RsvpShell({ event, presentation, className, children }: RsvpShel
 
   return <section className={classes}>
     {withHero && <GuestEventHero
-      name={event.name}
-      eventDate={event.eventDate}
-      welcomeMessage={event.welcomeMessage}
-      coverObjectKey={event.coverObjectKey}
-      slug={event.slug}
+      event={event}
+      sourceFor={(slot) => guestEventCoverSlotPath(event.slug, slot)}
+      lookup={lookup}
       welcomeIsHeading={false}
     />}
     {withHero ? <div className="rsvp-flow__body">{children}</div> : children}

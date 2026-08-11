@@ -12,6 +12,7 @@ import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
 import { GuestBeforeStart } from '../features/guest/GuestBeforeStart';
+import { GuestEventRefreshProvider } from '../features/guest/GuestEventRefreshContext';
 import { GuestWaiting } from '../features/guest/GuestWaiting';
 import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRecheck';
 import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
@@ -73,6 +74,10 @@ function guestLifecycleKey(event: GuestEventView): string {
     event.eventTimezone,
     event.rsvpDeadlineDate,
     event.lifecycleRecheckAfterMs !== null,
+    event.cover.revision,
+    event.cover.hasCover,
+    event.cover.available2xProfiles,
+    event.cover.surfaceTreatment,
   ]);
 }
 
@@ -278,7 +283,8 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       : <p>No shared photos yet.</p>}
   </main>;
 
-  return <div className="guest-shell guest-shell--drop" style={themeStyle}>
+  return <GuestEventRefreshProvider refreshEvent={recheckEvent}>
+    <div className="guest-shell guest-shell--drop" style={themeStyle}>
     <main className="guest-drop-main">
       {event.phase === 'rsvp-primary' && <GuestRsvpFlow
         event={event}
@@ -437,5 +443,6 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       </section>}
     </main>
     {!terminal && <footer><Brand compact /><p>Private moments, held together.</p></footer>}
-  </div>;
+    </div>
+  </GuestEventRefreshProvider>;
 }

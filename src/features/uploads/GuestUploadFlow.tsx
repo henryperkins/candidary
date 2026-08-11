@@ -2,6 +2,8 @@ import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, P
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { MAX_IMAGE_BYTES } from '../../../shared/constants';
+import type { GuestEventCoverView } from '../../../shared/event-cover';
+import { guestEventCoverSlotPath } from '../../app/api';
 import { readGuestName, rememberGuestName } from '../../app/guest-name-storage';
 import { GuestEventHero } from '../../components/GuestEventHero';
 import { createBrowserTransport } from './browser-upload-transport';
@@ -38,7 +40,7 @@ interface GuestUploadEvent {
   eventDate: string;
   welcomeMessage: string;
   uploadsEnabled: boolean;
-  coverObjectKey?: string | null;
+  cover: GuestEventCoverView;
 }
 
 interface GuestUploadFlowProps {
@@ -199,11 +201,9 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
 
   return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
     {!reviewMode && <GuestEventHero
-      name={event.name}
-      eventDate={event.eventDate}
-      welcomeMessage={event.welcomeMessage}
-      coverObjectKey={event.coverObjectKey}
-      slug={slug}
+      event={event}
+      sourceFor={(slot) => guestEventCoverSlotPath(slug, slot)}
+      lookup={false}
     />}
 
     <div className="photo-drop__card">

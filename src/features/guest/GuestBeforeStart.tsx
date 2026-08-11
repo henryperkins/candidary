@@ -1,4 +1,5 @@
 import type { GuestEventView } from '../../../shared/contracts';
+import { guestEventCoverSlotPath } from '../../app/api';
 import { GuestEventHero } from '../../components/GuestEventHero';
 import { GuestRsvpFlow } from '../rsvp/GuestRsvpFlow';
 
@@ -32,11 +33,9 @@ function startTime(value: string, timeZone: string) {
 export function GuestBeforeStart({ event }: { event: GuestEventView }) {
   return <section className="rsvp-flow rsvp-flow--with-hero guest-before-start">
     <GuestEventHero
-      name={event.name}
-      eventDate={event.eventDate}
-      welcomeMessage={event.welcomeMessage}
-      coverObjectKey={event.coverObjectKey}
-      slug={event.slug}
+      event={event}
+      sourceFor={(slot) => guestEventCoverSlotPath(event.slug, slot)}
+      lookup={false}
       welcomeIsHeading={false}
     />
     <div className="rsvp-flow__body">

@@ -9,6 +9,7 @@ import {
   MAX_COVER_PURGE_FENCES_PER_PASS,
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
 } from '../../shared/constants';
+import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import {
   cleanupAuthScratch,
   cleanupEventCovers,
@@ -1396,6 +1397,7 @@ describe('bounded cover storage sweep', () => {
     draftId?: string | null;
     cleanupAfter?: string | null;
   }) {
+    const frozen = options.state === 'ready' || options.state === 'active';
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_render_sets (
         id, event_id, master_id, draft_id, recipe_json, recipe_sha256, state,
@@ -1403,8 +1405,59 @@ describe('bounded cover storage sweep', () => {
       ) VALUES (?, ?, ?, ?, '{"effect":"natural"}', ?, ?, 12, ?, ?)
     `).bind(
       id, access.event.id, options.masterId, options.draftId ?? null,
-      HEX, options.state, PAST,
+      HEX, frozen ? 'staging' : options.state, PAST,
       options.cleanupAfter ?? null,
+    ).run();
+    if (!frozen) return;
+    await testEnv.DB.batch(EVENT_COVER_PROFILES.flatMap((profile) => (
+      ['webp', 'jpeg'] as const
+    ).map((format) => testEnv.DB.prepare(`
+      INSERT INTO event_cover_render_objects (
+        id, render_set_id, event_id, profile_id, density, format, object_key,
+        content_type, byte_size, width, height, quality_rung, sha256, created_at
+      ) VALUES (?, ?, ?, ?, '1x', ?, ?, ?, 100, ?, ?, 1, ?, ?)
+    `).bind(
+      `${id}-${profile.id}-${format}`,
+      id,
+      access.event.id,
+      profile.id,
+      format,
+      `${prefix()}/rendered/${id}/${profile.id}-1x.${format}`,
+      format === 'webp' ? 'image/webp' : 'image/jpeg',
+      profile.width,
+      profile.height,
+      HEX,
+      PAST,
+    ))));
+    await testEnv.DB.prepare(`
+      UPDATE event_cover_render_sets
+      SET state = ?, manifest_sha256 = ?, ready_at = ?,
+          published_revision = ?, published_at = ?
+      WHERE id = ?
+    `).bind(
+      options.state,
+      HEX,
+      PAST,
+      options.state === 'active' ? 1 : null,
+      options.state === 'active' ? PAST : null,
+      id,
+    ).run();
+  }
+
+  async function pointEventToUpload(setId: string, masterId: string): Promise<void> {
+    const master = await testEnv.DB.prepare(`
+      SELECT object_key FROM event_cover_masters WHERE id = ? AND event_id = ?
+    `).bind(masterId, access.event.id).first<{ object_key: string }>();
+    if (!master) throw new Error('Expected cover master fixture.');
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
+      WHERE id = ?
+    `).bind(
+      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+      master.object_key,
+      setId,
+      access.event.id,
     ).run();
   }
 
@@ -1847,8 +1900,15 @@ describe('bounded cover storage sweep', () => {
     await insertFence('COVER_RENDER_WORKFLOW', 'instance-op-retry-expiry-conflict', {
       expiresAt: COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
     });
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL,
+          cover_revision = 1
+      WHERE id = ?
+    `).bind(
+      '{"version":1,"source":{"kind":"preset","presetId":"warm-linen","assetVersion":1},"effect":"natural"}',
+      access.event.id,
+    ).run();
 
     let platformStatus: 'paused' | 'terminated' = 'paused';
     const calls: string[] = [];
@@ -3027,9 +3087,8 @@ describe('bounded cover storage sweep', () => {
   it('abandons an orphaned staging set but never the one the event points at', async () => {
     await insertMaster('master-orphan');
     await insertSet('set-orphan', { state: 'staging', masterId: 'master-orphan' });
-    await insertSet('set-current', { state: 'ready', masterId: 'master-orphan' });
-    await testEnv.DB.prepare('UPDATE events SET cover_render_set_id = ? WHERE id = ?')
-      .bind('set-current', access.event.id).run();
+    await insertSet('set-current', { state: 'active', masterId: 'master-orphan' });
+    await pointEventToUpload('set-current', 'master-orphan');
 
     const summary = await cleanupEventCovers(testEnv, NOW);
 
@@ -3041,7 +3100,7 @@ describe('bounded cover storage sweep', () => {
     expect(await testEnv.DB.prepare('SELECT state FROM event_cover_render_sets WHERE id = ?')
       .bind('set-orphan').first()).toEqual({ state: 'abandoned' });
     expect(await testEnv.DB.prepare('SELECT state FROM event_cover_render_sets WHERE id = ?')
-      .bind('set-current').first()).toEqual({ state: 'ready' });
+      .bind('set-current').first()).toEqual({ state: 'active' });
   });
 
   it('leaves a staging set alone while a receipt or a job still owns it', async () => {
@@ -3080,11 +3139,33 @@ describe('bounded cover storage sweep', () => {
     expect(await countRows('event_cover_render_objects', access.event.id)).toBe(0);
   });
 
+  it('keeps a displaced normalized set and master in R2 until their shared retention deadline', async () => {
+    const masterKey = await insertMaster('master-retained', { cleanupAfter: FUTURE });
+    await insertSet('set-retained', {
+      state: 'retired', masterId: 'master-retained', cleanupAfter: FUTURE,
+    });
+    const renderedKey = await insertRenderObject(
+      'object-retained', 'set-retained', 'wide-expanded',
+    );
+
+    const early = await cleanupEventCovers(testEnv, NOW);
+    expect(early).toMatchObject({ renderObjectsDeleted: 0, setsDeleted: 0, mastersDeleted: 0 });
+    expect(await exists(renderedKey)).toBe(true);
+    expect(await exists(masterKey)).toBe(true);
+
+    const due = await cleanupEventCovers(testEnv, new Date(FUTURE));
+    expect(due).toMatchObject({ renderObjectsDeleted: 1, setsDeleted: 1, mastersDeleted: 1 });
+    expect(await exists(renderedKey)).toBe(false);
+    expect(await exists(masterKey)).toBe(false);
+    expect(await countRows('event_cover_render_sets', access.event.id)).toBe(0);
+    expect(await countRows('event_cover_masters', access.event.id)).toBe(0);
+  });
+
   it('deletes a retired legacy original but never the key the event still serves', async () => {
     const displaced = await put(`${prefix()}/legacy-old.jpg`);
-    const current = await put(`${prefix()}/legacy-current.jpg`);
-    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-      .bind(current, access.event.id).run();
+    const current = await insertMaster('master-current');
+    await insertSet('set-current', { state: 'active', masterId: 'master-current' });
+    await pointEventToUpload('set-current', 'master-current');
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_retired_legacy_objects (
         id, event_id, object_key, key_fingerprint, reason, retired_at, cleanup_after
@@ -3139,8 +3220,8 @@ describe('bounded cover storage sweep', () => {
 
   it('keeps the master the event still points at, however old its cleanup deadline', async () => {
     const key = await insertMaster('master-active', { cleanupAfter: PAST });
-    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-      .bind(key, access.event.id).run();
+    await insertSet('set-active', { state: 'active', masterId: 'master-active' });
+    await pointEventToUpload('set-active', 'master-active');
 
     expect((await cleanupEventCovers(testEnv, NOW)).mastersDeleted).toBe(0);
     expect(await exists(key)).toBe(true);

@@ -6,10 +6,8 @@ import {
 } from '../../shared/constants';
 import { COVER_PIPELINE_VERSIONS, canonicalCoverRequest } from '../../shared/event-cover';
 import { createApp } from '../../worker/app';
-import { EventsRepository } from '../../worker/db/events';
 import type { AppEnv } from '../../worker/env';
 import {
-  acceptCoverPublication,
   coverRequestDigest,
 } from '../../worker/services/event-cover-publication';
 import {
@@ -27,6 +25,8 @@ type Access = Awaited<ReturnType<typeof eventAccess>>;
 type Body = Record<string, any>;
 
 const RAW_BYTES = 4_000;
+const COMPETING_PRESET_ONE = '{"version":1,"source":{"kind":"preset","presetId":"warm-linen","assetVersion":1},"effect":"natural"}';
+const COMPETING_PRESET_TWO = '{"version":1,"source":{"kind":"preset","presetId":"pressed-paper","assetVersion":1},"effect":"natural"}';
 
 // `draftIntentId` and `operationId` are opaque UUIDs by schema, so a readable
 // fixture string is rejected before any handler sees it. Fixed values keep the
@@ -605,8 +605,8 @@ describe('cover publication', () => {
     const data = (await response.json<any>()).data;
     expect(data.applied).toBe(true);
     expect(data.appliedRevision).toBe(1);
-    expect(data.event.coverRevision).toBe(1);
-    expect(data.event.coverObjectKey).toBeNull();
+    expect(data.event.cover.revision).toBe(1);
+    expect(data.event.cover.hasCover).toBe(false);
   });
 
   it('replays an applied removal without publishing twice', async () => {
@@ -631,12 +631,23 @@ describe('cover publication', () => {
       expectedRevision: 0,
       source: { kind: 'none' as const },
     };
-    await acceptCoverPublication(testEnv, {
-      event: (await new EventsRepository(testEnv.DB).getById(access.event.id))!,
-      request,
-      requestDigest: await coverRequestDigest(canonicalCoverRequest(request)),
-      now: new Date(),
-    });
+    const requestDigest = await coverRequestDigest(canonicalCoverRequest(request));
+    const timestamp = new Date().toISOString();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, request_sha256, action, expected_revision, status,
+        dependency_versions_json, completed_profiles, required_profiles, retryable,
+        dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, 'remove', 0, 'queued', '{}', 0, 0, 0,
+        'pending', 0, ?, ?, ?)
+    `).bind(
+      access.event.id,
+      operationId,
+      requestDigest,
+      timestamp,
+      timestamp,
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    ).run();
 
     let receiptReads = 0;
     const wrapStatement = (
@@ -704,7 +715,7 @@ describe('cover publication', () => {
       code: 'COVER_PUBLICATION_CONFLICT',
       data: {
         operation: { operationId, status: 'applied' },
-        event: { coverRevision: 1 },
+        event: { cover: { revision: 1 } },
       },
     });
   });
@@ -1156,8 +1167,9 @@ describe('cover publication', () => {
           if (settled) return;
           settled = true;
           await testEnv.DB.batch([
-            testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-              .bind(access.event.id),
+            testEnv.DB.prepare(`
+              UPDATE events SET cover_config = ?, cover_revision = 1 WHERE id = ?
+            `).bind(COMPETING_PRESET_ONE, access.event.id),
             testEnv.DB.prepare(`
               UPDATE event_cover_publish_receipts
               SET status = ?, retryable = 0,
@@ -1184,9 +1196,12 @@ describe('cover publication', () => {
         operation: { operationId, status: expectedProductStatus },
       });
       if (storedStatus === 'applied') {
-        expect(body.data).toMatchObject({ appliedRevision: 1, event: { coverRevision: 1 } });
+        expect(body.data).toMatchObject({
+          appliedRevision: 1,
+          event: { cover: { revision: 1 } },
+        });
       } else if (storedStatus === 'conflict') {
-        expect(body.data.event).toMatchObject({ coverRevision: 1 });
+        expect(body.data.event).toMatchObject({ cover: { revision: 1 } });
       }
     },
   );
@@ -1261,8 +1276,9 @@ describe('cover publication', () => {
     const workflow = withCoverRenderWorkflow(env, {
       async onCreate() {
         await testEnv.DB.batch([
-          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE events SET cover_config = ?, cover_revision = 1 WHERE id = ?
+          `).bind(COMPETING_PRESET_ONE, access.event.id),
           testEnv.DB.prepare(`
             UPDATE event_cover_publish_receipts
             SET status = 'applied', applied_revision = 1, retryable = 0, updated_at = ?
@@ -1311,8 +1327,12 @@ describe('cover publication', () => {
     const workflow = withCoverRenderWorkflow(env, {
       async onCreate() {
         await testEnv.DB.batch([
-          testEnv.DB.prepare('UPDATE events SET cover_revision = 2 WHERE id = ?')
-            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE events SET cover_config = ?, cover_revision = 1 WHERE id = ?
+          `).bind(COMPETING_PRESET_ONE, access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE events SET cover_config = ?, cover_revision = 2 WHERE id = ?
+          `).bind(COMPETING_PRESET_TWO, access.event.id),
           testEnv.DB.prepare(`
             UPDATE event_cover_publish_receipts
             SET status = 'applied', applied_revision = 1, retryable = 0
@@ -1348,8 +1368,9 @@ describe('cover publication', () => {
     const workflow = withCoverRenderWorkflow(env, {
       async onCreate() {
         await testEnv.DB.batch([
-          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE events SET cover_config = ?, cover_revision = 1 WHERE id = ?
+          `).bind(COMPETING_PRESET_ONE, access.event.id),
           testEnv.DB.prepare(`
             UPDATE event_cover_publish_receipts
             SET status = 'conflict', retryable = 0
@@ -1508,15 +1529,32 @@ describe('cover publication', () => {
     expect(second.status).toBe(409);
   });
 
-  it('refuses a preset publication in this release', async () => {
+  it('applies a preset publication synchronously with its pinned semantic config', async () => {
     const access = await eventAccess();
     const response = await publish(access, {
       operationId: crypto.randomUUID(),
       expectedRevision: 0,
       source: { kind: 'preset', presetId: 'warm-linen' },
-      effect: 'natural',
+      effect: 'film',
     });
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data).toMatchObject({
+      applied: true,
+      appliedRevision: 1,
+      event: { cover: { revision: 1, hasCover: true } },
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT cover_config, cover_object_key, cover_render_set_id
+      FROM events WHERE id = ?
+    `).bind(access.event.id).first()).toEqual({
+      cover_config: JSON.stringify({
+        version: 1,
+        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+        effect: 'film',
+      }),
+      cover_object_key: null,
+      cover_render_set_id: null,
+    });
   });
 
   it('refuses an unknown preset, effect, or focus value', async () => {
@@ -1675,7 +1713,7 @@ describe('cover publication status and restart', () => {
       data: {
         operation: { operationId, status: 'applied' },
         appliedRevision: 1,
-        event: { coverRevision: 1 },
+        event: { cover: { revision: 1 } },
       },
     });
   });
@@ -1691,8 +1729,9 @@ describe('cover publication status and restart', () => {
         if (!allowApply || applied) return;
         applied = true;
         await testEnv.DB.batch([
-          testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-            .bind(access.event.id),
+          testEnv.DB.prepare(`
+            UPDATE events SET cover_config = ?, cover_revision = 1 WHERE id = ?
+          `).bind(COMPETING_PRESET_ONE, access.event.id),
           testEnv.DB.prepare(`
             UPDATE event_cover_publish_receipts
             SET status = 'applied', applied_revision = 1, retryable = 0
@@ -1721,7 +1760,7 @@ describe('cover publication status and restart', () => {
       data: {
         operation: { operationId, status: 'applied' },
         appliedRevision: 1,
-        event: { coverRevision: 1 },
+        event: { cover: { revision: 1 } },
       },
     });
   });
@@ -1795,8 +1834,9 @@ describe('cover publication status and restart', () => {
 
   it('returns 409 when restart replays a stored conflict', async () => {
     const access = await eventAccess();
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await testEnv.DB.prepare(`
+      UPDATE events SET cover_config = ?, cover_revision = 1 WHERE id = ?
+    `).bind(COMPETING_PRESET_ONE, access.event.id).run();
     const operationId = crypto.randomUUID();
     expect((await publish(access, {
       operationId, expectedRevision: 0, source: { kind: 'none' },

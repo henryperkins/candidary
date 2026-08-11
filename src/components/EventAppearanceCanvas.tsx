@@ -1,36 +1,42 @@
 import type { CSSProperties, ReactNode } from 'react';
 
-import type { ResolvedEventTheme } from '../../shared/contracts';
+import {
+  allCover2xProfiles,
+  coverSurfaceTreatment,
+  type EventCoverEffectId,
+  type EventCoverPresetId,
+} from '../../shared/event-cover';
+import { presetCoverAssetPath } from '../../shared/event-cover-assets';
+import type { EventView, ResolvedEventTheme } from '../../shared/contracts';
+import { eventThemeStyle } from '../app/event-theme-style';
+import type { CoverFocusValue } from '../features/cover/CoverComposer';
 import {
   ResponsiveEventCover,
   type ResponsiveEventCoverProps,
 } from './ResponsiveEventCover';
 
-/**
- * The live event canvas: the host sees the result where they make the choice.
- *
- * Two concerns stay separate on purpose. The guest-like layer below responds to
- * the event theme; every Manager control placed in it keeps the familiar global
- * Candidary treatment, because a legible error or a focus ring must not inherit
- * a host's chosen colors. Theme overlays and the text scrim are runtime CSS on
- * this layer and are never baked into a rendered derivative, so changing a theme
- * updates presentation without re-rendering a single image file.
- *
- * Unwired in this release. `EventAppearancePreview` stays mounted, which is why
- * the theme-overlay scope list in `design/design-system.md` is unchanged.
- */
+export type EventAppearanceCanvasPreview =
+  | { kind: 'authoritative' }
+  | { kind: 'none' }
+  | {
+      kind: 'preset';
+      presetId: EventCoverPresetId;
+      effect: EventCoverEffectId;
+      assetVersion: 1;
+    }
+  | { kind: 'draft'; url: string; focus: CoverFocusValue };
 
-interface EventAppearanceCanvasProps {
-  name: string;
-  eventDate: string;
-  welcomeMessage: string;
+export interface EventAppearanceCanvasProps {
+  event: Pick<EventView, 'id' | 'name' | 'eventDate' | 'welcomeMessage' | 'cover'>;
   theme: ResolvedEventTheme;
-  cover: ResponsiveEventCoverProps['cover'];
   sourceFor: ResponsiveEventCoverProps['sourceFor'];
-  /** Neutral Manager chrome, rendered over the themed layer. */
+  preview?: EventAppearanceCanvasPreview;
+  /** Neutral Manager chrome, rendered outside the themed layer. */
   controls?: ReactNode;
-  /** The cover summary, its `Change cover` action, and any status beside it. */
+  /** The cover summary, Change cover action, and current preparation state. */
   summary?: ReactNode;
+  onCoverUnavailable?: ResponsiveEventCoverProps['onUnavailable'];
+  onRefreshCoverEvent?: ResponsiveEventCoverProps['onRefreshEvent'];
 }
 
 function eventDateLabel(eventDate: string): string {
@@ -39,34 +45,79 @@ function eventDateLabel(eventDate: string): string {
 }
 
 export function EventAppearanceCanvas({
-  name,
-  eventDate,
-  welcomeMessage,
+  event,
   theme,
-  cover,
   sourceFor,
+  preview = { kind: 'authoritative' },
   controls,
   summary,
+  onCoverUnavailable,
+  onRefreshCoverEvent,
 }: EventAppearanceCanvasProps) {
-  const themeStyle = {
-    '--event-primary': theme.tokens.primary,
-    '--event-accent': theme.tokens.accent,
-  } as CSSProperties;
+  const coverLayer = preview.kind === 'draft'
+    ? <div className="responsive-cover responsive-cover--image event-appearance-canvas__local-cover">
+        <img
+          alt=""
+          className="responsive-cover__image"
+          src={preview.url}
+          style={{
+            objectPosition: `${preview.focus.x * 100}% ${preview.focus.y * 100}%`,
+            transform: `scale(${preview.focus.zoom})`,
+            transformOrigin: `${preview.focus.x * 100}% ${preview.focus.y * 100}%`,
+          }}
+        />
+        <div className="responsive-cover__treatment" aria-hidden="true" />
+        <div className="responsive-cover__scrim" aria-hidden="true" />
+      </div>
+    : preview.kind === 'preset'
+      ? <ResponsiveEventCover
+          cover={{
+            revision: event.cover.revision,
+            hasCover: true,
+            available2xProfiles: allCover2xProfiles(),
+            surfaceTreatment: coverSurfaceTreatment({
+              version: 1,
+              source: {
+                kind: 'preset',
+                presetId: preview.presetId,
+                assetVersion: preview.assetVersion,
+              },
+              effect: preview.effect,
+            }),
+          }}
+          sourceFor={({ profile, density, format }) => presetCoverAssetPath(
+            preview.assetVersion,
+            preview.presetId,
+            preview.effect,
+            profile,
+            density,
+            format,
+          )}
+        />
+      : <ResponsiveEventCover
+          cover={preview.kind === 'none'
+            ? { ...event.cover, hasCover: false }
+            : event.cover}
+          sourceFor={sourceFor}
+          onUnavailable={preview.kind === 'authoritative' ? onCoverUnavailable : undefined}
+          onRefreshEvent={preview.kind === 'authoritative' ? onRefreshCoverEvent : undefined}
+        />;
 
   return <div className="event-appearance-canvas">
-    <div className="event-appearance-canvas__guest" style={themeStyle} data-testid="event-appearance-canvas">
-      <ResponsiveEventCover cover={cover} sourceFor={sourceFor} />
+    <div
+      className="event-appearance-canvas__guest"
+      style={eventThemeStyle(theme.tokens) as CSSProperties}
+      data-testid="event-appearance-canvas"
+    >
+      {coverLayer}
       <div className="event-appearance-canvas__copy">
         <p className="event-appearance-canvas__event">
-          {name} <span aria-hidden="true">·</span> {eventDateLabel(eventDate)}
+          {event.name} <span aria-hidden="true">·</span> {eventDateLabel(event.eventDate)}
         </p>
         <p className="event-appearance-canvas__welcome">
-          {welcomeMessage || 'Help us remember tonight.'}
+          {event.welcomeMessage || 'Help us remember tonight.'}
         </p>
       </div>
-      {/* Inert visual samples, not nested buttons or links. They stay out of the
-          tab order because no guest workflow can be run from Settings, and a
-          real control here would say otherwise. */}
       <div className="event-appearance-canvas__actions" aria-hidden="true">
         <span className="event-appearance-canvas__action event-appearance-canvas__action--primary">
           Add photos
@@ -75,8 +126,6 @@ export function EventAppearanceCanvas({
       </div>
     </div>
 
-    {/* Outside the themed layer: labels, status, validation, and retry keep the
-        global Manager treatment and never inherit guest colors or radii. */}
     {summary && <div className="event-appearance-canvas__summary">{summary}</div>}
     {controls && <div className="event-appearance-canvas__controls">{controls}</div>}
   </div>;

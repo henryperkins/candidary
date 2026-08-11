@@ -1,16 +1,17 @@
 import type { EventCoverPreparationView } from '../../../shared/event-cover';
-import { readCoverOperation, restartCoverOperation } from './cover-draft-client';
+import {
+  coverOperationReceiptPath,
+  readCoverOperation,
+  restartCoverOperation,
+  type CoverOperationAnswer,
+} from './cover-draft-client';
 
 /**
- * What happens after `Done` is pressed.
+ * Framework-free ownership of one accepted cover publication.
  *
- * The rule this exists to enforce: once dispatch begins, the outcome is
- * ambiguous until the server says otherwise. It does not matter whether the
- * client saw `202`, `503`, a network error, or nothing at all — Cancel becomes
- * Close, closing only detaches polling, and nothing local may discard a draft
- * that an accepted receipt may still need.
- *
- * Framework-free on purpose, so the rule is testable without a sheet.
+ * Dispatch is ambiguous from the instant the request is sent. The controller
+ * therefore keeps the receipt alive through lost responses and Studio closes;
+ * only a server terminal answer can release it.
  */
 
 export type CoverOperationPhase =
@@ -26,25 +27,29 @@ export interface CoverOperationState {
   phase: CoverOperationPhase;
   operationId: string | null;
   view: EventCoverPreparationView | null;
-  /** True from the moment dispatch begins, whatever the client observed. */
+  answer: CoverOperationAnswer | null;
+  receiptPath: string | null;
+  retryAfterMs: number | null;
+  /** True from the moment a publication may have reached the server. */
   dispatched: boolean;
-  /** The 60-second copy change. Never a failure, and never a step count. */
+  /** Copy-only threshold; elapsed time never manufactures a failure. */
   slow: boolean;
 }
 
 export interface CoverOperationControllerOptions {
   eventId: string;
-  /** Called once with a terminal result, so the canvas can rebase on it. */
-  onSettled?(view: EventCoverPreparationView): void;
+  onAnswer?(answer: CoverOperationAnswer): void;
+  onSettled?(answer: CoverOperationAnswer): void;
+  onReadError?(error: unknown): void;
   now?(): number;
   schedule?(callback: () => void, delayMs: number): () => void;
   isHidden?(): boolean;
 }
 
-const POLL_STEPS = [2_000, 4_000, 8_000, 10_000];
+const POLL_STEPS = [2_000, 4_000, 8_000, 10_000] as const;
 const SLOW_AFTER_MS = 60_000;
 
-const TERMINAL: Record<string, CoverOperationPhase> = {
+const TERMINAL_PHASE: Partial<Record<EventCoverPreparationView['status'], CoverOperationPhase>> = {
   applied: 'applied',
   conflict: 'conflict',
   'permanent-failed': 'permanent-failed',
@@ -53,6 +58,14 @@ const TERMINAL: Record<string, CoverOperationPhase> = {
 function defaultSchedule(callback: () => void, delayMs: number): () => void {
   const timer = setTimeout(callback, delayMs);
   return () => clearTimeout(timer);
+}
+
+function phaseFor(view: EventCoverPreparationView): CoverOperationPhase {
+  if (view.status === 'preparing') return 'preparing';
+  if (view.status === 'retryable-failed') {
+    return view.retryable ? 'retryable-failed' : 'permanent-failed';
+  }
+  return TERMINAL_PHASE[view.status] ?? 'preparing';
 }
 
 export function createCoverOperationController(options: CoverOperationControllerOptions) {
@@ -65,35 +78,23 @@ export function createCoverOperationController(options: CoverOperationController
     phase: 'idle',
     operationId: null,
     view: null,
+    answer: null,
+    receiptPath: null,
+    retryAfterMs: null,
     dispatched: false,
     slow: false,
   };
   const listeners = new Set<(next: CoverOperationState) => void>();
   let cancelPoll: (() => void) | null = null;
-  let attached = false;
+  let attachmentCount = 0;
   let attempt = 0;
   let dispatchedAt = 0;
+  let settledKey: string | null = null;
+  let suspended = false;
 
   function emit(patch: Partial<CoverOperationState>) {
     state = { ...state, ...patch };
     for (const listener of listeners) listener(state);
-  }
-
-  function phaseFor(view: EventCoverPreparationView): CoverOperationPhase {
-    if (view.status === 'preparing') return 'preparing';
-    if (view.status === 'retryable-failed') {
-      return view.retryable ? 'retryable-failed' : 'permanent-failed';
-    }
-    return TERMINAL[view.status] ?? 'preparing';
-  }
-
-  function adopt(view: EventCoverPreparationView) {
-    const phase = phaseFor(view);
-    emit({ view, phase, slow: phase === 'preparing' && now() - dispatchedAt >= SLOW_AFTER_MS });
-    if (phase !== 'preparing') {
-      stopPolling();
-      options.onSettled?.(view);
-    }
   }
 
   function stopPolling() {
@@ -101,31 +102,78 @@ export function createCoverOperationController(options: CoverOperationController
     cancelPoll = null;
   }
 
-  function queueNext(delayMs?: number) {
-    if (!attached || !state.operationId || state.phase !== 'preparing') return;
-    const wait = delayMs ?? POLL_STEPS[Math.min(attempt, POLL_STEPS.length - 1)]!;
+  function isPollingPhase(): boolean {
+    return state.phase === 'preparing' || state.phase === 'dispatching';
+  }
+
+  function queueNext(localDelay?: number) {
+    if (suspended || attachmentCount === 0 || !state.operationId || !isPollingPhase()) return;
+    stopPolling();
+    const cadence = localDelay ?? POLL_STEPS[Math.min(attempt, POLL_STEPS.length - 1)]!;
+    const wait = Math.max(cadence, state.retryAfterMs ?? 0);
     attempt += 1;
     cancelPoll = schedule(() => { void tick(); }, wait);
   }
 
+  function adopt(answer: CoverOperationAnswer) {
+    if (state.operationId && answer.operation.operationId !== state.operationId) return;
+    const phase = phaseFor(answer.operation);
+    const slow = phase === 'preparing' && now() - dispatchedAt >= SLOW_AFTER_MS;
+    emit({
+      phase,
+      operationId: answer.operation.operationId,
+      view: answer.operation,
+      answer,
+      receiptPath: answer.receiptPath,
+      retryAfterMs: answer.retryAfterMs,
+      dispatched: true,
+      slow,
+    });
+    options.onAnswer?.(answer);
+    if (phase !== 'preparing') stopPolling();
+    if (phase === 'applied' || phase === 'conflict' || phase === 'permanent-failed') {
+      const key = `${answer.operation.operationId}:${phase}`;
+      if (settledKey !== key) {
+        settledKey = key;
+        options.onSettled?.(answer);
+      }
+    }
+  }
+
   async function tick() {
-    if (!attached || !state.operationId) return;
-    // Paused while the document is hidden, resumed by `attach()` on visibility.
+    if (suspended || attachmentCount === 0 || !state.operationId || !isPollingPhase()) return;
     if (isHidden()) {
       queueNext(POLL_STEPS[POLL_STEPS.length - 1]);
       return;
     }
-    if (state.phase === 'preparing' && now() - dispatchedAt >= SLOW_AFTER_MS && !state.slow) {
-      emit({ slow: true });
-    }
+    if (now() - dispatchedAt >= SLOW_AFTER_MS && !state.slow) emit({ slow: true });
     try {
-      const view = await readCoverOperation(options.eventId, state.operationId);
-      if (view) adopt(view);
-    } catch {
-      // A lost poll is not a failure and never becomes one. Elapsed time alone
-      // never turns into a terminal result.
+      const answer = await readCoverOperation(options.eventId, state.operationId);
+      if (answer) adopt(answer);
+    } catch (error) {
+      // A lost read leaves the durable receipt authoritative and retryable.
+      options.onReadError?.(error);
     }
     queueNext();
+  }
+
+  function wake() {
+    if (suspended || attachmentCount === 0 || !isPollingPhase()) return;
+    attempt = 0;
+    stopPolling();
+    // Recovery is allowed an immediate read; subsequent reads obey cadence and
+    // any server Retry-After value.
+    cancelPoll = schedule(() => { void tick(); }, 0);
+  }
+
+  function addRecoveryListeners() {
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', wake);
+    if (typeof window !== 'undefined') window.addEventListener('online', wake);
+  }
+
+  function removeRecoveryListeners() {
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', wake);
+    if (typeof window !== 'undefined') window.removeEventListener('online', wake);
   }
 
   return {
@@ -136,57 +184,138 @@ export function createCoverOperationController(options: CoverOperationController
       return () => listeners.delete(listener);
     },
 
-    /**
-     * Marks the operation dispatched *before* the request is made.
-     *
-     * This is the whole point: a client that never sees a response has still
-     * dispatched, and must not be allowed to discard the draft behind it.
-     */
+    /** Marks ambiguity before the publication request is made. */
     beginDispatch(operationId: string) {
+      suspended = false;
       dispatchedAt = now();
       attempt = 0;
-      emit({ phase: 'dispatching', operationId, dispatched: true, slow: false, view: null });
+      settledKey = null;
+      emit({
+        phase: 'dispatching',
+        operationId,
+        view: null,
+        answer: null,
+        receiptPath: coverOperationReceiptPath(options.eventId, operationId),
+        retryAfterMs: null,
+        dispatched: true,
+        slow: false,
+      });
     },
 
-    /** Whatever came back — `202`, `503`, or nothing — polling takes over. */
-    dispatchSettled(view: EventCoverPreparationView | null) {
-      if (view) adopt(view);
+    /** Seeds the server-selected receipt after a Manager event read or reload. */
+    resume(operationId: string, view?: EventCoverPreparationView | null) {
+      suspended = false;
+      dispatchedAt = now();
+      attempt = 0;
+      settledKey = null;
+      if (view) {
+        adopt({
+          status: 200,
+          operation: view,
+          receiptPath: coverOperationReceiptPath(options.eventId, operationId),
+          retryAfterMs: null,
+        });
+      } else {
+        emit({
+          phase: 'preparing',
+          operationId,
+          view: null,
+          answer: null,
+          receiptPath: coverOperationReceiptPath(options.eventId, operationId),
+          retryAfterMs: null,
+          dispatched: true,
+          slow: false,
+        });
+      }
+      queueNext(POLL_STEPS[0]);
+    },
+
+    /** Whatever came back—typed envelope or nothing—reconciliation owns next. */
+    dispatchSettled(answer: CoverOperationAnswer | null) {
+      suspended = false;
+      if (answer) adopt(answer);
       else emit({ phase: 'preparing' });
       queueNext(POLL_STEPS[0]);
     },
 
-    attach() {
-      attached = true;
-      if (state.phase === 'preparing' || state.phase === 'dispatching') {
-        attempt = 0;
-        stopPolling();
-        queueNext(0);
-      }
-    },
-
-    /** Closing the sheet detaches polling. It cancels and discards nothing. */
-    detach() {
-      attached = false;
+    /** Only valid when access failed before the publication request was sent. */
+    dispatchRejectedBeforeAcceptance() {
       stopPolling();
+      attempt = 0;
+      settledKey = null;
+      emit({
+        phase: 'idle',
+        operationId: null,
+        view: null,
+        answer: null,
+        receiptPath: null,
+        retryAfterMs: null,
+        dispatched: false,
+        slow: false,
+      });
     },
 
-    /** Only for a receipt the server itself called retryable. */
+    /** Starts a later publication only after the previous receipt is terminal. */
+    releaseTerminal() {
+      if (state.phase !== 'applied'
+        && state.phase !== 'conflict'
+        && state.phase !== 'permanent-failed') return;
+      stopPolling();
+      attempt = 0;
+      settledKey = null;
+      emit({
+        phase: 'idle',
+        operationId: null,
+        view: null,
+        answer: null,
+        receiptPath: null,
+        retryAfterMs: null,
+        dispatched: false,
+        slow: false,
+      });
+    },
+
+    attach() {
+      attachmentCount += 1;
+      if (attachmentCount !== 1) return;
+      addRecoveryListeners();
+      if (isPollingPhase()) wake();
+    },
+
+    /** Reference-counted so closing Studio cannot detach Manager ownership. */
+    detach() {
+      attachmentCount = Math.max(0, attachmentCount - 1);
+      if (attachmentCount !== 0) return;
+      stopPolling();
+      removeRecoveryListeners();
+    },
+
+    /** Sends only the existing receipt ID and adopts its complete answer. */
     async retry(): Promise<void> {
       if (!state.operationId || state.phase !== 'retryable-failed') return;
-      const view = await restartCoverOperation(options.eventId, state.operationId);
+      suspended = false;
       dispatchedAt = now();
       attempt = 0;
-      if (view) adopt(view);
+      const answer = await restartCoverOperation(options.eventId, state.operationId);
+      if (answer) adopt(answer);
       else emit({ phase: 'preparing', slow: false });
       queueNext(POLL_STEPS[0]);
     },
 
-    /**
-     * Whether a draft may still be discarded locally.
-     *
-     * False from dispatch onward, and true again only once the server has
-     * confirmed a terminal, non-retryable outcome that released the draft.
-     */
+    wake,
+
+    /** Stops authorization-dependent reads while preserving the receipt. */
+    suspend() {
+      suspended = true;
+      stopPolling();
+    },
+
+    /** Restarts the same receipt only after Manager access is confirmed. */
+    resumePolling() {
+      suspended = false;
+      wake();
+    },
+
     canDiscardDraft(): boolean {
       if (!state.dispatched) return true;
       return state.phase === 'conflict' || state.phase === 'permanent-failed';

@@ -1,14 +1,19 @@
-import { type CSSProperties, useState } from 'react';
+import { useState } from 'react';
 
-import { guestEventCoverPath } from '../app/api';
-import { useEventCover } from '../app/use-event-cover';
+import type { GuestEventCoverView } from '../../shared/event-cover';
+import { emitCoverUnavailable } from '../app/cover-observability';
+import { useGuestEventRefresh } from '../features/guest/GuestEventRefreshContext';
+import { ResponsiveEventCover, type ResponsiveEventCoverProps } from './ResponsiveEventCover';
 
 export interface GuestEventHeroProps {
-  name: string;
-  eventDate: string;
-  welcomeMessage: string;
-  coverObjectKey?: string | null;
-  slug: string;
+  event: {
+    name: string;
+    eventDate: string;
+    welcomeMessage: string;
+    cover: GuestEventCoverView;
+  };
+  sourceFor: ResponsiveEventCoverProps['sourceFor'];
+  lookup: boolean;
   /* Photo drop owns the page heading here. RSVP keeps its task heading, so the
      welcome is painted the same size without claiming another level-one. */
   welcomeIsHeading?: boolean;
@@ -20,31 +25,35 @@ function eventDateLabel(eventDate: string) {
 }
 
 export function GuestEventHero({
-  name,
-  eventDate,
-  welcomeMessage,
-  coverObjectKey,
-  slug,
+  event,
+  sourceFor,
+  lookup,
   welcomeIsHeading = true,
 }: GuestEventHeroProps) {
-  const cover = useEventCover(coverObjectKey ? guestEventCoverPath(slug) : null);
+  const refreshEvent = useGuestEventRefresh();
   const [welcomeExpanded, setWelcomeExpanded] = useState(false);
-  const message = welcomeMessage || 'Help us remember tonight.';
+  const message = event.welcomeMessage || 'Help us remember tonight.';
   const welcomeNeedsDisclosure = message.length > 180;
-  const heroStyle = cover
-    ? ({ '--event-cover': `url("${cover}")` } as CSSProperties)
-    : undefined;
   const welcomeClass = welcomeNeedsDisclosure && !welcomeExpanded
     ? 'photo-drop__welcome--clamped'
     : undefined;
   const WelcomeTag = welcomeIsHeading ? 'h1' : 'p';
 
-  return <div
-    className={`photo-drop__hero${cover ? ' photo-drop__hero--cover' : ''}${welcomeExpanded ? ' photo-drop__hero--welcome-expanded' : ''}`}
-    style={heroStyle}
-  >
+  return <div className={`photo-drop__hero${welcomeExpanded ? ' photo-drop__hero--welcome-expanded' : ''}`}>
+    <ResponsiveEventCover
+      cover={event.cover}
+      sourceFor={sourceFor}
+      welcomeExpanded={welcomeExpanded}
+      lookup={lookup}
+      onUnavailable={({ profile, revision }) => {
+        emitCoverUnavailable({ audience: 'guest', profile, revision });
+      }}
+      onRefreshEvent={() => {
+        if (refreshEvent) void refreshEvent().catch(() => undefined);
+      }}
+    />
     <div className="photo-drop__hero-copy">
-      <p className="photo-drop__event">{name} <span aria-hidden="true">·</span> {eventDateLabel(eventDate)}</p>
+      <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDateLabel(event.eventDate)}</p>
       <WelcomeTag id="guest-welcome" className={welcomeIsHeading ? welcomeClass : `photo-drop__welcome${welcomeClass ? ` ${welcomeClass}` : ''}`}>
         {message}
       </WelcomeTag>

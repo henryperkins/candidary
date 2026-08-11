@@ -38,17 +38,9 @@ const PHOTO_INTAKE_AND_SCHEDULE_OWNED = [
 ] as const satisfies readonly (keyof EventView)[];
 
 const THEME_OWNED = ['theme'] as const satisfies readonly (keyof EventView)[];
-// All three, not just presence. `mergeOwned` copies only what is listed, so an
-// unlisted `coverRevision` would leave client state holding the pre-publication
-// number after a publication answered with the new one — and the next
-// publication would send a stale `expectedRevision` and take a 409 no host
-// action caused. `coverPreparation` is on the same response and has the same
-// owner, so it is listed beside it rather than merged by a second path.
-const COVER_OWNED = [
-  'coverObjectKey',
-  'coverPreparation',
-  'coverRevision',
-] as const satisfies readonly (keyof EventView)[];
+// The nested cover projection has one response owner. Copying the whole value
+// keeps its semantic config, revision, capability, and preparation coherent.
+const COVER_OWNED = ['cover'] as const satisfies readonly (keyof EventView)[];
 
 function mergeOwned(
   current: EventView,
@@ -116,5 +108,11 @@ export function mergeThemeResponse(current: EventView, response: EventView): Eve
 }
 
 export function mergeCoverResponse(current: EventView, response: EventView): EventView {
+  // A whole-event read or unrelated write may have started before a newer
+  // publication settled. Cover revision is monotonic, so that delayed graph is
+  // never allowed to restore an older semantic config or pointer projection.
+  // Same-revision responses remain useful: preparation can advance or settle
+  // without incrementing the published cover revision.
+  if (response.cover.revision < current.cover.revision) return current;
   return mergeOwned(current, response, COVER_OWNED);
 }

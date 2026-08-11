@@ -1,8 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { guestEventCoverPath } from '../../src/app/api';
 import { GuestUploadFlow } from '../../src/features/uploads/GuestUploadFlow';
 import type { UploadQueueItem, UploadTransport } from '../../src/features/uploads/upload-queue';
 
@@ -11,6 +10,9 @@ const event = {
   eventDate: '2026-09-14',
   welcomeMessage: 'Help us remember tonight.',
   uploadsEnabled: true,
+  cover: {
+    revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' as const,
+  },
 };
 
 function transport(): UploadTransport {
@@ -34,7 +36,22 @@ function deferredTransport(): UploadTransport {
   };
 }
 
-beforeEach(() => localStorage.clear());
+class TestResizeObserver {
+  constructor(private readonly callback: ResizeObserverCallback) {}
+  observe(target: Element) {
+    this.callback([{
+      target,
+      contentRect: { width: 390 } as DOMRectReadOnly,
+    } as ResizeObserverEntry], this as unknown as ResizeObserver);
+  }
+  disconnect() {}
+  unobserve() {}
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -42,56 +59,34 @@ afterEach(() => {
 });
 
 describe('mobile guest photo delivery', () => {
-  it('shows a private cover only after its authenticated read succeeds', async () => {
-    let resolveCover!: (response: Response) => void;
-    const createObjectURL = vi.fn().mockReturnValue('blob:guest-cover');
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
-    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
-      resolveCover = resolve;
-    }));
-    vi.stubGlobal('fetch', fetchMock);
+  it('renders the nested cover through a current-revision same-origin slot', () => {
+    window.innerWidth = 390;
+    window.innerHeight = 844;
     const { container } = render(<GuestUploadFlow
-      event={{ ...event, coverObjectKey: 'events/event-a/cover/private.jpg' }}
+      event={{ ...event, cover: { ...event.cover, revision: 7, hasCover: true } }}
       slug="alex/jordan?"
       transport={transport()}
     />);
 
     const hero = container.querySelector('.photo-drop__hero') as HTMLElement;
-    expect(hero).not.toHaveClass('photo-drop__hero--cover');
-    expect(hero.style.getPropertyValue('--event-cover')).toBe('');
     expect(hero.querySelector('.photo-drop__hero-copy')).not.toBeNull();
-    expect(fetchMock).toHaveBeenCalledWith(guestEventCoverPath('alex/jordan?'), expect.objectContaining({
-      credentials: 'same-origin',
-      signal: expect.any(AbortSignal),
-    }));
-
-    await act(async () => resolveCover(new Response(new Blob(['cover']), { status: 200 })));
-
-    await waitFor(() => expect(hero).toHaveClass('photo-drop__hero--cover'));
-    expect(hero.style.getPropertyValue('--event-cover')).toContain('blob:guest-cover');
-    expect(createObjectURL).toHaveBeenCalledOnce();
+    const image = hero.querySelector('img')!;
+    expect(image.getAttribute('src'))
+      .toBe('/api/event/alex%2Fjordan%3F/cover/7/compact-default/1x.jpeg');
+    expect(image.getAttribute('src')).not.toContain('blob:');
   });
 
-  it.each([
-    ['missing', () => Promise.resolve(new Response(null, { status: 404 }))],
-    ['refused', () => Promise.resolve(new Response(null, { status: 403 }))],
-    ['failed', () => Promise.reject(new TypeError('network failed'))],
-  ])('keeps the exact no-cover path when the private cover read is %s', async (_case, coverRead) => {
-    const createObjectURL = vi.fn();
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
-    vi.stubGlobal('fetch', vi.fn(coverRead));
+  it('keeps the exact gradient-only path when the nested view has no cover', () => {
     const { container } = render(<GuestUploadFlow
-      event={{ ...event, coverObjectKey: 'events/event-a/cover/private.jpg' }}
+      event={event}
       slug="alex-jordan"
       transport={transport()}
     />);
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
     const hero = container.querySelector('.photo-drop__hero') as HTMLElement;
-    expect(hero).not.toHaveClass('photo-drop__hero--cover');
-    expect(hero.style.getPropertyValue('--event-cover')).toBe('');
+    expect(hero.querySelector('picture')).toBeNull();
+    expect(hero.querySelector('.responsive-cover--gradient')).not.toBeNull();
     expect(hero.querySelector('.photo-drop__hero-copy')).not.toBeNull();
-    expect(createObjectURL).not.toHaveBeenCalled();
   });
 
   it('requires and remembers a name before opening either photo source', async () => {

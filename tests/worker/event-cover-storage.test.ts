@@ -6,6 +6,7 @@ import {
   MAX_LIVE_COVER_DRAFTS_PER_EVENT,
 } from '../../shared/constants';
 import { COVER_PIPELINE_VERSIONS } from '../../shared/event-cover';
+import { presetCoverAssetPath } from '../../shared/event-cover-assets';
 import {
   adoptCoverPreview,
   chargeCoverRateEvent,
@@ -26,9 +27,8 @@ import {
   coverRawKey,
   coverRenderKey,
   isEventCoverKey,
-  presetAssetPath,
 } from '../../worker/storage/event-cover-keys';
-import { eventAccess, resetDatabase, testEnv } from './helpers';
+import { eventAccess, resetDatabase, seedEventCoverGraph, testEnv } from './helpers';
 
 const HEX_64 = 'a'.repeat(64);
 const OTHER_HEX = 'b'.repeat(64);
@@ -73,7 +73,7 @@ describe('event cover object keys', () => {
     expect(coverPreviewKey('e1', 'd1', 'film', 1)).toBe('events/e1/cover/previews/d1/film-1.webp');
     expect(coverRenderKey('e1', 's1', 'wide-expanded', '2x', 'jpeg'))
       .toBe('events/e1/cover/rendered/s1/wide-expanded-2x.jpeg');
-    expect(presetAssetPath(1, 'warm-linen', 'natural', 'short-lookup', '1x', 'webp'))
+    expect(presetCoverAssetPath(1, 'warm-linen', 'natural', 'short-lookup', '1x', 'webp'))
       .toBe('/assets/event-covers/v1/warm-linen/natural/short-lookup-1x.webp');
 
     for (const key of [
@@ -204,9 +204,18 @@ describe('guarded draft discard', () => {
   });
 
   it('never makes the event’s active master cleanup-eligible', async () => {
-    const masterId = await seedMaster(access.event.id, 'master-active');
-    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-      .bind(coverMasterKey(access.event.id, masterId), access.event.id).run();
+    const graph = await seedEventCoverGraph(testEnv.DB, access.event.id, now.toISOString());
+    const masterId = graph.masterId;
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
+      WHERE id = ?
+    `).bind(
+      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+      coverMasterKey(access.event.id, masterId),
+      graph.renderSetId,
+      access.event.id,
+    ).run();
     const edit = await createCoverDraft(testEnv.DB, draftInput(access, {
       draftIntentId: 'edit', source: 'existing_upload', masterId,
       filename: null, mimeType: null, byteSize: null,
@@ -456,6 +465,11 @@ describe('coverPointerStatements', () => {
   beforeEach(async () => {
     await resetDatabase();
     access = await eventAccess();
+    // These are statement-builder unit tests. Their deliberately incomplete
+    // old/next pointer fixtures predate 0014 and isolate the guarded update plus
+    // conditional retirement SQL. Migration tests and publication-service
+    // tests exercise the final trigger layer with complete relational graphs.
+    await testEnv.DB.exec('DROP TRIGGER event_cover_source_pointer_update');
   });
 
   const move = (patch: Record<string, unknown> = {}) => coverPointerStatements(testEnv.DB, {

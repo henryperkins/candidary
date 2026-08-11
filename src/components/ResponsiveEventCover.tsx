@@ -11,10 +11,6 @@ import {
 /**
  * The shared guest/Manager responsive image contract.
  *
- * Not wired to any shipped surface in this release. The guest hero still
- * installs a fetched blob as a CSS background, and phase 3 is where the
- * revision/profile/density routes are registered and this replaces it.
- *
  * The profile comes from measuring the actual container and hero state, never
  * from a user agent, a phone model, or a query string. Density selection is then
  * the browser's own resource-selection algorithm over the candidates advertised

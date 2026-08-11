@@ -1,21 +1,19 @@
 import {
   COVER_UPLOAD_MIME_TYPES,
   MAX_COVER_UPLOAD_BYTES,
+  type CoverUploadMimeType,
 } from '../../../shared/constants';
-import type { EventCoverPreparationView } from '../../../shared/event-cover';
+import type {
+  EventCoverDraftCreateRequestV1,
+  EventCoverEffectId,
+  EventCoverFocusV1,
+  EventCoverPreparationView,
+  EventCoverPresetId,
+} from '../../../shared/event-cover';
 import type { EventView } from '../../../shared/contracts';
 import { api, apiBinary, apiBytes, apiEnvelope, ClientApiError } from '../../app/api';
 
-/**
- * The sequence both upload controls share.
- *
- * Reserve, transfer, inspect, compose, publish — with the two identifiers that
- * make a lost response recoverable persisted *before* the request that uses
- * them. A draft intent that is only in a local variable turns a dropped
- * reservation response into a second live draft slot; an operation ID that is
- * only in a local variable turns a dropped `202` into a second publication.
- */
-
+/** The safe draft projection returned by every draft route. */
 export interface CoverDraftView {
   id: string;
   source: 'new-upload' | 'existing-upload';
@@ -39,16 +37,23 @@ export interface CoverDraftView {
   } | null;
 }
 
-export interface CoverPublicationResult {
-  /** 200 applied, 202 preparing, 409 conflict, 503 retryable dispatch failure. */
-  status: number;
-  applied: boolean;
-  appliedRevision?: number | null;
-  operation: EventCoverPreparationView | null;
-  event?: EventView;
+export interface CoverDraftReservation {
+  draft: CoverDraftView;
+  ingress: { method: 'PUT'; path: string } | null;
+  replayed: boolean;
+  draftIntentId: string;
 }
 
-/** Injected in tests for the same reason `GuestUploadFlow` takes a transport. */
+export interface CoverOperationAnswer {
+  status: number;
+  operation: EventCoverPreparationView;
+  appliedRevision?: number;
+  event?: EventView;
+  receiptPath: string;
+  retryAfterMs: number | null;
+}
+
+/** Injected in tests because jsdom has no image-decoding Worker. */
 export interface CoverCompositionRunner {
   (previewBytes: ArrayBuffer): Promise<{ x: number; y: number } | null>;
 }
@@ -61,6 +66,18 @@ export interface PublishCoverUploadOptions {
   onProgress?(stage: 'reserving' | 'transferring' | 'inspecting' | 'composing' | 'publishing'): void;
 }
 
+export type CoverPublishIntent =
+  | { source: { kind: 'none' } }
+  | {
+      source: { kind: 'preset'; presetId: EventCoverPresetId };
+      effect: EventCoverEffectId;
+    }
+  | {
+      source: { kind: 'upload'; draftId: string };
+      focus: EventCoverFocusV1;
+      effect: EventCoverEffectId;
+    };
+
 const COVER_INTENT_PREFIX = 'candidary.cover.intent';
 const COVER_OPERATION_PREFIX = 'candidary.cover.operation';
 
@@ -68,13 +85,15 @@ function coverBase(eventId: string): string {
   return `/api/manage/events/${encodeURIComponent(eventId)}/cover`;
 }
 
-/**
- * Session storage, guarded.
- *
- * Private modes and storage-partitioned embeds can throw on access rather than
- * return null, and a photo upload must not fail because a browser refused a key
- * — it only loses the replay guarantee that key was protecting.
- */
+function draftPath(eventId: string, draftId: string): string {
+  return `${coverBase(eventId)}/drafts/${encodeURIComponent(draftId)}`;
+}
+
+export function coverOperationReceiptPath(eventId: string, operationId: string): string {
+  return `${coverBase(eventId)}/publications/${encodeURIComponent(operationId)}`;
+}
+
+/** Guarded because private/partitioned browser storage can throw. */
 function readStored(key: string): string | null {
   try {
     return sessionStorage.getItem(key);
@@ -99,21 +118,45 @@ function clearStored(key: string): void {
   }
 }
 
-/** Stable for one photo, so re-choosing the same file resumes its own draft. */
-function intentKey(eventId: string, file: File): string {
-  return `${COVER_INTENT_PREFIX}.${eventId}.${file.name}.${file.size}.${file.lastModified}`;
+function persistedId(key: string): string {
+  const existing = readStored(key);
+  if (existing) return existing;
+  const created = crypto.randomUUID();
+  // Written before the request that uses it.
+  writeStored(key, created);
+  return created;
+}
+
+function draftIntentStorageKey(eventId: string, intentKey: string): string {
+  return `${COVER_INTENT_PREFIX}.${eventId}.${intentKey}`;
+}
+
+function fileIntentKey(file: File): string {
+  return `${file.name}.${file.size}.${file.lastModified}`;
 }
 
 export function coverOperationKey(eventId: string): string {
   return `${COVER_OPERATION_PREFIX}.${eventId}`;
 }
 
-function persistedId(key: string): string {
-  const existing = readStored(key);
-  if (existing) return existing;
-  const created = crypto.randomUUID();
-  writeStored(key, created);
-  return created;
+export function readPersistedCoverOperation(eventId: string): string | null {
+  return readStored(coverOperationKey(eventId));
+}
+
+export function persistCoverOperation(eventId: string, operationId: string): void {
+  writeStored(coverOperationKey(eventId), operationId);
+}
+
+export function ensureCoverOperation(eventId: string): string {
+  return persistedId(coverOperationKey(eventId));
+}
+
+export function forgetCoverOperation(eventId: string): void {
+  clearStored(coverOperationKey(eventId));
+}
+
+export function forgetCoverDraftIntent(eventId: string, intentKey: string): void {
+  clearStored(draftIntentStorageKey(eventId, intentKey));
 }
 
 export class CoverUploadRejected extends Error {
@@ -123,7 +166,14 @@ export class CoverUploadRejected extends Error {
   }
 }
 
-/** The client half of the same limits the server enforces. Never a duplicate. */
+export class CoverDraftPrimitiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CoverDraftPrimitiveError';
+  }
+}
+
+/** The client half of the same limits the server enforces. */
 export function validateCoverFile(file: File): void {
   if (!(COVER_UPLOAD_MIME_TYPES as readonly string[]).includes(file.type)) {
     throw new CoverUploadRejected('Choose a JPEG, PNG, WebP, or HEIC photo.');
@@ -135,185 +185,334 @@ export function validateCoverFile(file: File): void {
   }
 }
 
-export async function publishCoverUpload(
-  options: PublishCoverUploadOptions,
-): Promise<CoverPublicationResult> {
-  const { eventId, file, expectedRevision } = options;
-  validateCoverFile(file);
-  const base = coverBase(eventId);
+export type CreateCoverDraftOptions = {
+  eventId: string;
+  /** Stable for this local edit attempt; the UUID itself is persisted internally. */
+  intentKey: string;
+} & (
+  | { source: { kind: 'new-upload'; file: File } }
+  | { source: { kind: 'existing-upload'; expectedCoverRevision: number } }
+);
 
-  options.onProgress?.('reserving');
-  // Persisted before the first request, so a dropped reservation response
-  // replays into the same draft instead of consuming a second live slot.
-  const draftIntentId = persistedId(intentKey(eventId, file));
-  const reservation = await api<{ draft: CoverDraftView; ingress: { path: string } | null }>(
-    `${base}/drafts`,
+/** Reserves or replays one draft without accepting an object key from the client. */
+export async function createCoverDraft(options: CreateCoverDraftOptions): Promise<CoverDraftReservation> {
+  const draftIntentId = persistedId(draftIntentStorageKey(options.eventId, options.intentKey));
+  let request: EventCoverDraftCreateRequestV1;
+  if (options.source.kind === 'new-upload') {
+    const { file } = options.source;
+    validateCoverFile(file);
+    request = {
+      draftIntentId,
+      source: { kind: 'new-upload' },
+      filename: file.name,
+      mimeType: file.type as CoverUploadMimeType,
+      byteSize: file.size,
+    } as EventCoverDraftCreateRequestV1;
+  } else {
+    request = {
+      draftIntentId,
+      source: { kind: 'existing-upload' },
+      expectedCoverRevision: options.source.expectedCoverRevision,
+    };
+  }
+  const result = await api<{
+    draft: CoverDraftView;
+    ingress: { method: 'PUT'; path: string } | null;
+    replayed?: boolean;
+  }>(`${coverBase(options.eventId)}/drafts`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+  return {
+    draft: result.draft,
+    ingress: result.ingress,
+    replayed: result.replayed === true,
+    draftIntentId,
+  };
+}
+
+export async function transferCoverDraft(options: {
+  eventId: string;
+  draft: CoverDraftView;
+  file: File;
+}): Promise<CoverDraftView> {
+  if (options.draft.state !== 'reserved') {
+    throw new CoverDraftPrimitiveError('Only a reserved cover draft can receive source bytes.');
+  }
+  const result = await apiBinary<{ draft: CoverDraftView }>(
+    `${draftPath(options.eventId, options.draft.id)}/raw`,
     {
-      method: 'POST',
-      body: JSON.stringify({
-        draftIntentId,
-        source: { kind: 'new-upload' },
-        filename: file.name,
-        mimeType: file.type,
-        byteSize: file.size,
-      }),
+      method: 'PUT',
+      headers: {
+        'content-type': options.file.type,
+        'if-match': `"${options.draft.revision}"`,
+      },
+      body: options.file,
     },
   );
+  return result.draft;
+}
 
-  let draft = reservation.draft;
-  if (draft.state === 'reserved' && reservation.ingress) {
-    options.onProgress?.('transferring');
-    const transferred = await apiBinary<{ draft: CoverDraftView }>(reservation.ingress.path, {
-      method: 'PUT',
-      headers: { 'content-type': file.type, 'if-match': `"${draft.revision}"` },
-      body: file,
-    });
-    draft = transferred.draft;
+export async function inspectCoverDraft(
+  eventId: string,
+  draft: CoverDraftView,
+): Promise<CoverDraftView> {
+  if (draft.state !== 'transferred') {
+    throw new CoverDraftPrimitiveError('Only a transferred cover draft can be inspected.');
   }
+  return (await api<{ draft: CoverDraftView }>(`${draftPath(eventId, draft.id)}/inspect`, {
+    method: 'POST',
+  })).draft;
+}
 
-  if (draft.state === 'transferred') {
-    options.onProgress?.('inspecting');
-    draft = (await api<{ draft: CoverDraftView }>(`${base}/drafts/${draft.id}/inspect`, {
-      method: 'POST',
-    })).draft;
+export async function writeCoverComposition(options: {
+  eventId: string;
+  draft: CoverDraftView;
+  focus: { x: number; y: number };
+}): Promise<CoverDraftView> {
+  if (options.draft.state !== 'inspected') {
+    throw new CoverDraftPrimitiveError('Only an inspected cover draft can store a composition.');
   }
-
-  if (draft.state === 'inspected') {
-    options.onProgress?.('composing');
-    const focus = await resolveComposition(base, draft, options.runComposition);
-    draft = (await api<{ draft: CoverDraftView }>(`${base}/drafts/${draft.id}/composition`, {
+  return (await api<{ draft: CoverDraftView }>(
+    `${draftPath(options.eventId, options.draft.id)}/composition`,
+    {
       method: 'PATCH',
       body: JSON.stringify({
-        expectedDraftRevision: draft.revision,
-        modelVersion: draft.compositionModelVersion,
-        x: focus.x,
-        y: focus.y,
-      }),
-    })).draft;
-  }
-
-  options.onProgress?.('publishing');
-  // Persisted before dispatch. Once this is sent the outcome is ambiguous until
-  // the receipt is read, and reusing the same ID is what keeps a lost response
-  // from becoming a second publication.
-  const operationKey = coverOperationKey(eventId);
-  const operationId = persistedId(operationKey);
-  const answered = await apiEnvelope<Omit<CoverPublicationResult, 'status'>>(
-    `${base}/publications`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        operationId,
-        expectedRevision,
-        source: { kind: 'upload', draftId: draft.id },
-        // Phase 1 publishes the automatic composition and the faithful style. The
-        // manual focus, the six designs, and the other four styles arrive with
-        // Cover Studio; nothing shipped can select them.
-        focus: { mode: 'auto' },
-        effect: 'natural',
+        expectedDraftRevision: options.draft.revision,
+        modelVersion: options.draft.compositionModelVersion,
+        x: options.focus.x,
+        y: options.focus.y,
       }),
     },
-  );
-  return settle(eventId, { status: answered.status, ...answered.data });
+  )).draft;
 }
 
-/**
- * Releases the operation once its outcome is settled.
- *
- * A single per-event key is what makes a lost `202` replay into its own receipt
- * rather than a second publication — but only while that operation is still
- * unresolved. Held past a terminal outcome it becomes the opposite: the next
- * cover change reuses the ID with different bytes and takes a permanent 409.
- * A retryable failure is deliberately not settled, because the same operation
- * is what restarts.
- */
-function settle(eventId: string, result: CoverPublicationResult): CoverPublicationResult {
-  const status = result.operation?.status;
-  const terminal = result.applied
-    || status === 'applied'
-    || status === 'conflict'
-    || (status === 'permanent-failed')
-    || (status === 'retryable-failed' && result.operation?.retryable === false)
-    || result.status === 409;
-  if (terminal) clearStored(coverOperationKey(eventId));
-  return result;
+export async function readCoverDraft(eventId: string, draftId: string): Promise<CoverDraftView> {
+  return (await api<{ draft: CoverDraftView }>(draftPath(eventId, draftId))).draft;
 }
 
-export async function publishCoverRemoval(
+export async function discardCoverDraft(eventId: string, draft: CoverDraftView): Promise<CoverDraftView> {
+  return (await api<{ draft: CoverDraftView }>(draftPath(eventId, draft.id), {
+    method: 'DELETE',
+    headers: { 'if-match': `"${draft.revision}"` },
+  })).draft;
+}
+
+export async function readCoverEffectPreview(
   eventId: string,
-  expectedRevision: number,
-): Promise<CoverPublicationResult> {
-  const operationId = persistedId(coverOperationKey(eventId));
-  const answered = await apiEnvelope<Omit<CoverPublicationResult, 'status'>>(
-    `${coverBase(eventId)}/publications`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ operationId, expectedRevision, source: { kind: 'none' } }),
-    },
-  );
-  // Removal applies synchronously, so its operation is resolved the moment it
-  // answers — including when it answers `409`, which the envelope now carries.
-  return settle(eventId, { status: answered.status, ...answered.data });
+  draftId: string,
+  effect: EventCoverEffectId,
+  signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+  return apiBytes(`${draftPath(eventId, draftId)}/previews/${effect}`, {
+    method: 'POST',
+    signal,
+  });
 }
 
-export function forgetCoverOperation(eventId: string): void {
-  clearStored(coverOperationKey(eventId));
+interface CoverOperationPayload {
+  operation: EventCoverPreparationView | null;
+  appliedRevision?: number | null;
+  event?: EventView;
+}
+
+function requestOrigin(): string {
+  if (typeof location !== 'undefined' && location.origin && location.origin !== 'null') {
+    return location.origin;
+  }
+  return 'http://localhost';
+}
+
+/** Accepts only the exact same-origin status resource for this event/operation. */
+function authorizedReceiptPath(
+  locationValue: string | null,
+  eventId: string,
+  operationId: string,
+): string {
+  const expected = coverOperationReceiptPath(eventId, operationId);
+  if (!locationValue) return expected;
+  try {
+    const origin = requestOrigin();
+    const parsed = new URL(locationValue, origin);
+    if (parsed.origin !== origin
+      || parsed.username
+      || parsed.password
+      || parsed.pathname !== expected
+      || parsed.search
+      || parsed.hash) {
+      return expected;
+    }
+    return parsed.pathname;
+  } catch {
+    return expected;
+  }
+}
+
+function coverOperationAnswer(
+  eventId: string,
+  operationId: string,
+  response: {
+    status: number;
+    data: CoverOperationPayload;
+    location: string | null;
+    retryAfterMs: number | null;
+  },
+): CoverOperationAnswer {
+  const operation = response.data.operation;
+  if (!operation || operation.operationId !== operationId) {
+    throw new Error('The cover operation response did not match the requested operation.');
+  }
+  return {
+    status: response.status,
+    operation,
+    ...(typeof response.data.appliedRevision === 'number'
+      ? { appliedRevision: response.data.appliedRevision }
+      : {}),
+    ...(response.data.event ? { event: response.data.event } : {}),
+    receiptPath: authorizedReceiptPath(response.location, eventId, operationId),
+    retryAfterMs: response.retryAfterMs,
+  };
+}
+
+export async function publishCoverIntent(options: {
+  eventId: string;
+  expectedRevision: number;
+  intent: CoverPublishIntent;
+  /** Supplied by the reconciler after it persists and marks dispatch ambiguous. */
+  operationId?: string;
+}): Promise<CoverOperationAnswer> {
+  const operationId = options.operationId ?? ensureCoverOperation(options.eventId);
+  persistCoverOperation(options.eventId, operationId);
+  const response = await apiEnvelope<CoverOperationPayload>(`${coverBase(options.eventId)}/publications`, {
+    method: 'POST',
+    body: JSON.stringify({
+      operationId,
+      expectedRevision: options.expectedRevision,
+      ...options.intent,
+    }),
+  });
+  return coverOperationAnswer(options.eventId, operationId, response);
 }
 
 export async function readCoverOperation(
   eventId: string,
   operationId: string,
-): Promise<EventCoverPreparationView | null> {
+): Promise<CoverOperationAnswer | null> {
   try {
-    const result = await api<{ operation: EventCoverPreparationView }>(
-      `${coverBase(eventId)}/publications/${encodeURIComponent(operationId)}`,
+    const response = await apiEnvelope<CoverOperationPayload>(
+      coverOperationReceiptPath(eventId, operationId),
     );
-    return result.operation;
+    return coverOperationAnswer(eventId, operationId, response);
   } catch (error) {
     if (error instanceof ClientApiError && error.code === 'EVENT_NOT_FOUND') return null;
     throw error;
   }
 }
 
-/** Sends only the operation ID: the recipe is pinned on the receipt. */
+/** Sends only the operation ID; the server-pinned recipe is never reconstructed. */
 export async function restartCoverOperation(
   eventId: string,
   operationId: string,
-): Promise<EventCoverPreparationView | null> {
-  const result = await api<{ operation: EventCoverPreparationView | null }>(
-    `${coverBase(eventId)}/publications/${encodeURIComponent(operationId)}/restart`,
+): Promise<CoverOperationAnswer | null> {
+  const response = await apiEnvelope<CoverOperationPayload>(
+    `${coverOperationReceiptPath(eventId, operationId)}/restart`,
     { method: 'POST', body: JSON.stringify({}) },
   );
-  return result.operation;
+  if (!response.data.operation) return null;
+  return coverOperationAnswer(eventId, operationId, response);
 }
 
-async function resolveComposition(
-  base: string,
-  draft: CoverDraftView,
-  runComposition: CoverCompositionRunner | undefined,
-): Promise<{ x: number; y: number }> {
-  try {
-    const previewBytes = await apiBytes(`${base}/drafts/${draft.id}/previews/natural`, {
-      method: 'POST',
-    });
-    const runner = runComposition ?? defaultCompositionRunner;
-    const focus = await runner(previewBytes);
-    if (focus) return { x: focus.x, y: focus.y };
-  } catch {
-    /* Falls through to center. */
-  }
-  // A low-confidence or failed analysis uses center focus and keeps the same
-  // manual correction path, rather than blocking a publication on a guess.
-  return { x: 0.5, y: 0.5 };
+export async function publishCoverRemoval(
+  eventId: string,
+  expectedRevision: number,
+): Promise<CoverOperationAnswer> {
+  return publishCoverIntent({
+    eventId,
+    expectedRevision,
+    intent: { source: { kind: 'none' } },
+  });
 }
 
 /**
- * Loaded only when it is actually used.
- *
- * A module-level `?worker` import would pull a `Worker` constructor into every
- * jsdom suite that touches this file, and the composition step is the only
- * caller.
+ * Retained CreatePage wrapper: same reserve/transfer/inspect/compose/publish
+ * sequence and progress semantics, now composed from independently testable
+ * primitives.
  */
+export async function publishCoverUpload(
+  options: PublishCoverUploadOptions,
+): Promise<CoverOperationAnswer> {
+  const { eventId, file, expectedRevision } = options;
+  validateCoverFile(file);
+
+  options.onProgress?.('reserving');
+  const reservation = await createCoverDraft({
+    eventId,
+    intentKey: fileIntentKey(file),
+    source: { kind: 'new-upload', file },
+  });
+  let draft = reservation.draft;
+
+  if (draft.state === 'reserved') {
+    options.onProgress?.('transferring');
+    draft = await transferCoverDraft({ eventId, draft, file });
+  }
+  if (draft.state === 'transferred') {
+    options.onProgress?.('inspecting');
+    draft = await inspectCoverDraft(eventId, draft);
+  }
+  if (draft.state === 'inspected') {
+    options.onProgress?.('composing');
+    const focus = await resolveComposition(eventId, draft, options.runComposition);
+    draft = await writeCoverComposition({ eventId, draft, focus });
+  }
+  if (draft.state !== 'ready') {
+    throw new CoverDraftPrimitiveError('The cover draft did not become ready to publish.');
+  }
+
+  options.onProgress?.('publishing');
+  return publishCoverIntent({
+    eventId,
+    expectedRevision,
+    intent: {
+      source: { kind: 'upload', draftId: draft.id },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    },
+  });
+}
+
+export async function resolveComposition(
+  eventId: string,
+  draft: CoverDraftView,
+  runComposition: CoverCompositionRunner | undefined,
+  signal?: AbortSignal,
+): Promise<{ x: number; y: number }> {
+  try {
+    const previewBytes = await readCoverEffectPreview(eventId, draft.id, 'natural', signal);
+    return resolveCompositionFromPreview(previewBytes, runComposition);
+  } catch {
+    /* A failed or aborted analysis falls through to the neutral center. */
+  }
+  return { x: 0.5, y: 0.5 };
+}
+
+/** Runs composition over already-read natural bytes so Studio can reuse them. */
+export async function resolveCompositionFromPreview(
+  previewBytes: ArrayBuffer,
+  runComposition?: CoverCompositionRunner,
+): Promise<{ x: number; y: number }> {
+  try {
+    const runner = runComposition ?? defaultCompositionRunner;
+    // The default Worker transfers its buffer. Keep the caller's bytes intact
+    // so the same authorized natural preview can become the canvas URL.
+    const focus = await runner(previewBytes.slice(0));
+    if (focus) return { x: focus.x, y: focus.y };
+  } catch {
+    /* A failed analysis uses the neutral center, never a client guess. */
+  }
+  return { x: 0.5, y: 0.5 };
+}
+
 const defaultCompositionRunner: CoverCompositionRunner = async (previewBytes) => {
   if (typeof Worker !== 'function') return null;
   const { default: CoverCompositionWorker } = await import('./cover-composition.worker?worker');

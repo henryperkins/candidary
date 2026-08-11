@@ -23,6 +23,12 @@ import type {
   RsvpSubmissionResponse,
   RsvpSummary,
 } from '../../../shared/contracts';
+import {
+  EVENT_COVER_EFFECTS,
+  type EventCoverEffectId,
+  type EventCoverFocusV1,
+  type EventCoverPreparationView,
+} from '../../../shared/event-cover';
 import { resolveEventTheme } from '../../../shared/event-theme';
 import { PHOTOGRAPHIC_COVER } from './cover-images';
 import { makeMedia } from './ui-data';
@@ -40,7 +46,7 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.',
-  coverObjectKey: null,
+  cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
@@ -63,9 +69,15 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
 
 export const EVENT_FIXTURE: EventView = {
   ...GUEST_EVENT_FIXTURE,
-  // Manager-only. The guest fixture it spreads deliberately has neither.
-  coverPreparation: null,
-  coverRevision: 0,
+  // Manager-only semantic configuration and preparation never reach the guest.
+  cover: {
+    config: { version: 1, source: { kind: 'none' } },
+    revision: 0,
+    hasCover: false,
+    available2xProfiles: [],
+    surfaceTreatment: 'none',
+    preparation: null,
+  },
   eventStartTime: '17:00',
   // Permitted and past its start, which is the state every manager fixture is in.
   photosOpen: true,
@@ -202,10 +214,12 @@ interface GuestMessage {
 
 interface GuestRouteOptions {
   event?: Partial<GuestEventView>;
+  eventReplies?: readonly GuestEventView[];
   gallery?: ReturnType<typeof makeMedia>;
   contributions?: ReturnType<typeof makeMedia>;
   messages?: GuestMessage[];
   cover?: Buffer;
+  coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
   household?: RsvpHouseholdView | null;
   lookup?: RsvpLookupResponse;
   submission?: RsvpSubmissionResponse;
@@ -215,6 +229,61 @@ interface GuestRouteOptions {
   rsvpSession?: boolean;
 }
 
+export type CoverRouteKind =
+  | 'slot'
+  | 'draft'
+  | 'transform'
+  | 'preview'
+  | 'publication'
+  | 'status'
+  | 'restart'
+  | 'event-refresh';
+
+export interface CoverRouteObservation {
+  kind: CoverRouteKind;
+  method: string;
+  path: string;
+  timestamp: number;
+  requestBody: unknown;
+  responseStatus: number;
+  responseHeaders: Record<string, string>;
+}
+
+export interface CoverFixtureAudit {
+  records: CoverRouteObservation[];
+}
+
+export type CoverOperationScenarioReply =
+  | { kind: 'drop' }
+  | {
+      kind: 'error';
+      status: number;
+      code: string;
+      message: string;
+    }
+  | {
+      kind?: 'operation';
+      status?: number;
+      operationStatus?: EventCoverPreparationView['status'];
+      completedSteps?: number;
+      requiredSteps?: number;
+      retryable?: boolean;
+      safeFailureCode?: EventCoverPreparationView['safeFailureCode'];
+      retryAfter?: string;
+      location?: string;
+      includeEvent?: boolean;
+    };
+
+export interface CoverStudioRouteScenario {
+  publicationReplies?: readonly CoverOperationScenarioReply[];
+  statusReplies?: readonly CoverOperationScenarioReply[];
+  restartReplies?: readonly CoverOperationScenarioReply[];
+  eventReplies?: readonly EventView[];
+  previewFailures?: Partial<Record<EventCoverEffectId, number>>;
+  previewDelaysMs?: Partial<Record<EventCoverEffectId, number>>;
+  slotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
+}
+
 interface ManagerRouteOptions {
   event?: Partial<EventView>;
   // Keyed by the cursor the client sends back; `first` answers a request that carries no cursor.
@@ -222,6 +291,8 @@ interface ManagerRouteOptions {
   messages?: GuestMessage[];
   exports?: unknown[];
   cover?: Buffer;
+  coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
+  coverScenario?: CoverStudioRouteScenario;
   entry?: { eventLink: string | null; disabledAt: string | null };
   rsvp?: {
     summary?: RsvpSummary;
@@ -229,6 +300,47 @@ interface ManagerRouteOptions {
     detail?: RsvpHouseholdDetail;
     preview?: RsvpImportPreview;
   };
+}
+
+function coverAudit(): CoverFixtureAudit {
+  return { records: [] };
+}
+
+function requestBody(route: Route): unknown {
+  try {
+    return route.request().postDataJSON();
+  } catch {
+    return route.request().postData() ?? null;
+  }
+}
+
+function recordCoverRoute(
+  audit: CoverFixtureAudit,
+  route: Route,
+  kind: CoverRouteKind,
+  responseStatus: number,
+  responseHeaders: Record<string, string> = {},
+) {
+  audit.records.push({
+    kind,
+    method: route.request().method(),
+    path: new URL(route.request().url()).pathname,
+    timestamp: Date.now(),
+    requestBody: requestBody(route),
+    responseStatus,
+    responseHeaders,
+  });
+}
+
+const COVER_PROFILE_PATTERN = '(?:short-lookup|compact-default|standard-default|framed-default|compact-expanded|wide-expanded)';
+
+function selectedReply(
+  replies: readonly CoverOperationScenarioReply[] | undefined,
+  index: number,
+  fallback: CoverOperationScenarioReply,
+): CoverOperationScenarioReply {
+  if (!replies?.length) return fallback;
+  return replies[Math.min(index, replies.length - 1)]!;
 }
 
 export interface RsvpRosterBatchRouteError {
@@ -292,11 +404,13 @@ const PHOTO_INTAKE_TRANSITIONS: Record<string, PhotoIntakeState> = {
 };
 
 export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {}) {
-  const event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
+  const audit = coverAudit();
+  let event: GuestEventView = { ...GUEST_EVENT_FIXTURE, ...options.event };
   const gallery = options.gallery ?? makeMedia(1);
   const contributions = options.contributions ?? gallery;
   const messages = [...(options.messages ?? [])];
   const submittedMessages = new Map<string, GuestMessage>();
+  const coverSlotAttempts = new Map<'webp' | 'jpeg', number>();
   const base = `**/api/event/${event.slug}`;
 
   await page.route('**/api/media/*/preview', (route) => route.fulfill({
@@ -304,16 +418,35 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
     contentType: 'image/png',
     body: PHOTOGRAPHIC_COVER,
   }));
-  if (event.coverObjectKey) {
-    await page.route(`${base}/cover`, (route) => route.fulfill({
-      status: 200,
-      contentType: 'image/png',
-      body: options.cover ?? PHOTOGRAPHIC_COVER,
-    }));
-  }
-  await page.route(base, (route) => route.fulfill({
-    json: { data: { event, role: 'guest' }, requestId: 'request-a' },
-  }));
+  await page.route(new RegExp(
+    `/api/event/${event.slug}/cover/([0-9]+)/${COVER_PROFILE_PATTERN}/(?:1x|2x)\\.(?:webp|jpeg)$`,
+    'u',
+  ), (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const requestedRevision = Number(path.split('/cover/')[1]?.split('/')[0]);
+    const format = path.endsWith('.webp') ? 'webp' : 'jpeg';
+    const attempt = (coverSlotAttempts.get(format) ?? 0) + 1;
+    coverSlotAttempts.set(format, attempt);
+    const forcedFailure = attempt <= (options.coverSlotFailures?.[format] ?? 0);
+    const status = !forcedFailure && event.cover.hasCover && requestedRevision === event.cover.revision
+      ? 200
+      : 404;
+    const headers: Record<string, string> = status === 200
+      ? { 'cache-control': 'private, no-store', 'content-type': 'image/png' }
+      : { 'cache-control': 'private, no-store' };
+    recordCoverRoute(audit, route, 'slot', status, headers);
+    return route.fulfill(status === 200
+      ? { status, headers, body: options.cover ?? PHOTOGRAPHIC_COVER }
+      : { status, headers, json: { code: 'EVENT_NOT_FOUND', message: 'No current cover.' } });
+  });
+  let eventReadIndex = 0;
+  await page.route(base, (route) => {
+    const replies = options.eventReplies;
+    if (replies?.length) event = replies[Math.min(eventReadIndex, replies.length - 1)]!;
+    eventReadIndex += 1;
+    recordCoverRoute(audit, route, 'event-refresh', 200, { 'content-type': 'application/json' });
+    return route.fulfill({ json: { data: { event, role: 'guest' }, requestId: 'request-a' } });
+  });
   await page.route(`${base}/gallery`, (route) => route.fulfill({
     json: { data: { media: gallery }, requestId: 'request-a' },
   }));
@@ -417,6 +550,7 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
       ? route.fulfill({ json: { data: { household }, requestId: 'request-a' } })
       : sessionRequired(route);
   });
+  return audit;
 }
 
 // The printed credential never travels in a URL the Worker sees, so the browser
@@ -671,86 +805,262 @@ export async function stubRsvpRosterBatchRoutes(
 }
 
 export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions) {
-  const event = { ...EVENT_FIXTURE, ...options.event };
+  const audit = coverAudit();
+  let event = { ...EVENT_FIXTURE, ...options.event };
   const base = `**/api/manage/events/${event.id}`;
+  const scenario = options.coverScenario;
+  const coverSlotAttempts = new Map<'webp' | 'jpeg', number>();
 
   await page.route('**/api/media/*/preview', (route) => route.fulfill({
     status: 200,
     contentType: 'image/png',
     body: PHOTOGRAPHIC_COVER,
   }));
-  if (event.coverObjectKey) {
-    await page.route(`${base}/cover`, (route) => route.fulfill({
-      status: 200,
-      contentType: 'image/png',
-      body: options.cover ?? PHOTOGRAPHIC_COVER,
-    }));
-  }
-  // Playwright's `*` does not cross `/`, so the bare `${base}/cover` stub above
-  // leaves every draft and publication sub-path unrouted — and an unrouted API
-  // call in this suite reaches the static preview server, which answers with
-  // index.html and produces a JSON parse error a long way from its cause.
-  //
-  // The Worker returns `202` for a new upload publication and `200` for a
-  // preset or removal, so the envelope carries the status the client branches on.
+  await page.route(new RegExp(
+    `/api/manage/events/${event.id}/cover/([0-9]+)/${COVER_PROFILE_PATTERN}/(?:1x|2x)\\.(?:webp|jpeg)$`,
+    'u',
+  ), (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const requestedRevision = Number(path.split('/cover/')[1]?.split('/')[0]);
+    const format = path.endsWith('.webp') ? 'webp' : 'jpeg';
+    const attempt = (coverSlotAttempts.get(format) ?? 0) + 1;
+    coverSlotAttempts.set(format, attempt);
+    const forcedFailure = attempt <= (
+      scenario?.slotFailures?.[format]
+      ?? options.coverSlotFailures?.[format]
+      ?? 0
+    );
+    const status = !forcedFailure && event.cover.hasCover && requestedRevision === event.cover.revision
+      ? 200
+      : 404;
+    const headers: Record<string, string> = status === 200
+      ? { 'cache-control': 'private, no-store', 'content-type': 'image/png' }
+      : { 'cache-control': 'private, no-store' };
+    recordCoverRoute(audit, route, 'slot', status, headers);
+    return route.fulfill(status === 200
+      ? { status, headers, body: options.cover ?? PHOTOGRAPHIC_COVER }
+      : { status, headers, json: { code: 'EVENT_NOT_FOUND', message: 'No current cover.' } });
+  });
+  let publicationIndex = 0;
+  let statusIndex = 0;
+  let restartIndex = 0;
+  let draftSource: 'new-upload' | 'existing-upload' = 'new-upload';
+  let lastPublication: Record<string, unknown> | null = null;
+  const appliedOperations = new Set<string>();
+  const previewAttempts = new Map<EventCoverEffectId, number>();
+
+  const draftView = (state: string) => ({
+    id: 'draft-e2e',
+    source: draftSource,
+    state,
+    revision: 1,
+    expiresAt: '2026-08-17T00:00:00.000Z',
+    compositionModelVersion: 1,
+    master: { width: 2400, height: 1600, safeZoomMaximum: 2, available2xProfiles: [] },
+    focus: state === 'reserved' || state === 'transferred'
+      ? null
+      : { x: 0.5, y: 0.5, modelVersion: 1 },
+    preview: null,
+  });
+
+  const coverAfterPublication = (payload: Record<string, unknown>) => {
+    const source = payload.source as { kind?: string; presetId?: string; draftId?: string } | undefined;
+    const effect = typeof payload.effect === 'string' ? payload.effect : 'natural';
+    if (source?.kind === 'none') {
+      return {
+        ...event.cover,
+        config: { version: 1 as const, source: { kind: 'none' as const } },
+        revision: event.cover.revision + 1,
+        hasCover: false,
+        available2xProfiles: [],
+        surfaceTreatment: 'none' as const,
+        preparation: null,
+      };
+    }
+    if (source?.kind === 'preset') {
+      return {
+        ...event.cover,
+        config: {
+          version: 1 as const,
+          source: { kind: 'preset' as const, presetId: source.presetId!, assetVersion: 1 as const },
+          effect: effect as EventCoverEffectId,
+        },
+        revision: event.cover.revision + 1,
+        hasCover: true,
+        available2xProfiles: [],
+        surfaceTreatment: effect === 'film' ? 'film-grain-v1' as const : 'none' as const,
+        preparation: null,
+      };
+    }
+    return {
+      ...event.cover,
+      config: {
+        version: 1 as const,
+        source: { kind: 'upload' as const },
+        focus: (payload.focus ?? { mode: 'auto' }) as EventCoverFocusV1,
+        effect: effect as EventCoverEffectId,
+      },
+      revision: event.cover.revision + 1,
+      hasCover: true,
+      available2xProfiles: [],
+      surfaceTreatment: effect === 'film' ? 'film-grain-v1' as const : 'none' as const,
+      preparation: null,
+    };
+  };
+
+  const fulfillOperation = async (
+    route: Route,
+    kind: 'publication' | 'status' | 'restart',
+    reply: CoverOperationScenarioReply,
+    operationId: string,
+  ) => {
+    if (reply.kind === 'drop') {
+      recordCoverRoute(audit, route, kind, 0);
+      await route.abort('connectionclosed');
+      return;
+    }
+    if (reply.kind === 'error') {
+      recordCoverRoute(audit, route, kind, reply.status);
+      await route.fulfill({
+        status: reply.status,
+        json: { code: reply.code, message: reply.message, requestId: 'request-a' },
+      });
+      return;
+    }
+    const operationStatus = reply.operationStatus ?? 'applied';
+    const status = reply.status ?? (operationStatus === 'preparing' ? 202 : 200);
+    const location = reply.location
+      ?? `/api/manage/events/${event.id}/cover/publications/${operationId}`;
+    const headers: Record<string, string> = {
+      location,
+      ...(reply.retryAfter ? { 'retry-after': reply.retryAfter } : {}),
+    };
+    const includeEvent = reply.includeEvent ?? operationStatus === 'applied';
+    if (operationStatus === 'applied' && !appliedOperations.has(operationId)) {
+      event = lastPublication
+        ? { ...event, cover: coverAfterPublication(lastPublication) } as EventView
+        : { ...event, cover: { ...event.cover, preparation: null } } as EventView;
+      appliedOperations.add(operationId);
+    }
+    const operation: EventCoverPreparationView = {
+      operationId,
+      status: operationStatus,
+      completedSteps: reply.completedSteps ?? (operationStatus === 'applied' ? 6 : 2),
+      requiredSteps: reply.requiredSteps ?? 6,
+      retryable: reply.retryable ?? operationStatus === 'retryable-failed',
+      safeFailureCode: reply.safeFailureCode ?? null,
+      updatedAt: new Date(1_775_000_000_000 + audit.records.length * 1000).toISOString(),
+    };
+    recordCoverRoute(audit, route, kind, status, headers);
+    await route.fulfill({
+      status,
+      headers,
+      json: {
+        data: {
+          operation,
+          ...(operationStatus === 'applied' ? { appliedRevision: event.cover.revision } : {}),
+          ...(includeEvent ? { event } : {}),
+        },
+        requestId: 'request-a',
+      },
+    });
+  };
+
+  // One stateful route covers drafts, bounded previews, publication dispatch,
+  // polling, and same-operation restart. Its audit is the browser proof source.
   await page.route(
     new RegExp(`/api/manage/events/${event.id}/cover/(drafts|publications)`, 'u'),
-    (route) => {
+    async (route) => {
       const path = new URL(route.request().url()).pathname;
-      const draft = {
-        id: 'draft-e2e',
-        source: 'new-upload',
-        revision: 1,
-        expiresAt: '2026-08-07T00:00:00.000Z',
-        compositionModelVersion: 1,
-        master: { width: 2400, height: 1600, safeZoomMaximum: 2, available2xProfiles: [] },
-        focus: null,
-        preview: null,
-      };
-      if (path.endsWith('/raw')) {
+      const method = route.request().method();
+      if (path.endsWith('/drafts')) {
+        const payload = requestBody(route) as { source?: { kind?: string }; draftIntentId?: string };
+        draftSource = payload.source?.kind === 'existing-upload' ? 'existing-upload' : 'new-upload';
+        const state = draftSource === 'existing-upload' ? 'inspected' : 'reserved';
+        recordCoverRoute(audit, route, 'draft', 200);
         return route.fulfill({
-          json: { data: { draft: { ...draft, state: 'transferred' } }, requestId: 'request-a' },
-        });
-      }
-      if (path.endsWith('/inspect')) {
-        return route.fulfill({
-          json: { data: { draft: { ...draft, state: 'inspected' } }, requestId: 'request-a' },
-        });
-      }
-      if (path.endsWith('/composition')) {
-        return route.fulfill({
-          json: { data: { draft: { ...draft, state: 'ready' } }, requestId: 'request-a' },
-        });
-      }
-      if (path.includes('/publications')) {
-        return route.fulfill({
-          status: route.request().method() === 'POST' ? 202 : 200,
           json: {
             data: {
-              operation: {
-                operationId: 'operation-e2e',
-                status: 'applied',
-                completedSteps: 6,
-                requiredSteps: 6,
-                retryable: false,
-                safeFailureCode: null,
-                updatedAt: '2026-08-06T00:00:00.000Z',
-              },
-              event: { ...event, coverRevision: event.coverRevision + 1 },
+              draft: draftView(state),
+              ingress: draftSource === 'new-upload'
+                ? { method: 'PUT', path: `/api/manage/events/${event.id}/cover/drafts/draft-e2e/raw` }
+                : null,
+              replayed: false,
+              draftIntentId: payload.draftIntentId,
             },
             requestId: 'request-a',
           },
         });
       }
-      return route.fulfill({
-        json: {
-          data: {
-            draft: { ...draft, state: 'reserved' },
-            ingress: { path: `/api/manage/events/${event.id}/cover/drafts/draft-e2e/raw` },
-          },
-          requestId: 'request-a',
-        },
-      });
+      if (path.endsWith('/raw')) {
+        recordCoverRoute(audit, route, 'transform', 200);
+        return route.fulfill({
+          json: { data: { draft: draftView('transferred') }, requestId: 'request-a' },
+        });
+      }
+      if (path.endsWith('/inspect')) {
+        recordCoverRoute(audit, route, 'transform', 200);
+        return route.fulfill({
+          json: { data: { draft: draftView('inspected') }, requestId: 'request-a' },
+        });
+      }
+      if (path.endsWith('/composition')) {
+        recordCoverRoute(audit, route, 'transform', 200);
+        return route.fulfill({
+          json: { data: { draft: draftView('ready') }, requestId: 'request-a' },
+        });
+      }
+      const previewMatch = /\/previews\/([^/]+)$/u.exec(path);
+      if (previewMatch) {
+        const effect = previewMatch[1] as EventCoverEffectId;
+        if (!(EVENT_COVER_EFFECTS as readonly string[]).includes(effect)) {
+          recordCoverRoute(audit, route, 'preview', 404);
+          return route.fulfill({ status: 404, json: { code: 'EVENT_NOT_FOUND', message: 'Unknown preview.' } });
+        }
+        const attempt = (previewAttempts.get(effect) ?? 0) + 1;
+        previewAttempts.set(effect, attempt);
+        const delay = scenario?.previewDelaysMs?.[effect] ?? 0;
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        const failThrough = scenario?.previewFailures?.[effect] ?? 0;
+        const status = attempt <= failThrough ? 503 : 200;
+        recordCoverRoute(audit, route, 'preview', status, { 'content-type': 'image/png' });
+        return route.fulfill(status === 200
+          ? { status, contentType: 'image/png', body: options.cover ?? PHOTOGRAPHIC_COVER }
+          : { status, json: { code: 'COVER_PREVIEW_FAILED', message: 'Preview unavailable.' } });
+      }
+      if (path.endsWith('/restart')) {
+        const operationId = path.split('/').at(-2)!;
+        const reply = selectedReply(scenario?.restartReplies, restartIndex, {
+          operationStatus: 'preparing', status: 202, retryAfter: '1',
+        });
+        restartIndex += 1;
+        return fulfillOperation(route, 'restart', reply, operationId);
+      }
+      if (path.endsWith('/publications') && method === 'POST') {
+        lastPublication = requestBody(route) as Record<string, unknown>;
+        const operationId = String(lastPublication.operationId ?? 'operation-e2e');
+        const reply = selectedReply(scenario?.publicationReplies, publicationIndex, {
+          operationStatus: 'applied', status: 200, includeEvent: true,
+        });
+        publicationIndex += 1;
+        return fulfillOperation(route, 'publication', reply, operationId);
+      }
+      if (path.includes('/publications/')) {
+        const operationId = path.split('/').at(-1)!;
+        const reply = selectedReply(scenario?.statusReplies, statusIndex, {
+          operationStatus: 'applied', status: 200, includeEvent: true,
+        });
+        statusIndex += 1;
+        return fulfillOperation(route, 'status', reply, operationId);
+      }
+      if (method === 'DELETE') {
+        recordCoverRoute(audit, route, 'draft', 200);
+        return route.fulfill({
+          json: { data: { draft: draftView('discarded') }, requestId: 'request-a' },
+        });
+      }
+      recordCoverRoute(audit, route, 'draft', 200);
+      return route.fulfill({ json: { data: { draft: draftView('ready') }, requestId: 'request-a' } });
     },
   );
   await page.route(`${base}/media*`, (route) => {
@@ -759,9 +1069,16 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     const mediaPage = options.mediaPages[cursor] ?? { media: [], nextCursor: null };
     return route.fulfill({ json: { data: mediaPage, requestId: 'request-a' } });
   });
-  await page.route(new RegExp(`/api/manage/events/${event.id}$`, 'u'), (route) => route.fulfill({
-    json: { data: { event }, requestId: 'request-a' },
-  }));
+  let eventReadIndex = 0;
+  await page.route(new RegExp(`/api/manage/events/${event.id}$`, 'u'), (route) => {
+    const replies = scenario?.eventReplies;
+    if (replies?.length) {
+      event = replies[Math.min(eventReadIndex, replies.length - 1)]!;
+    }
+    eventReadIndex += 1;
+    recordCoverRoute(audit, route, 'event-refresh', 200, { 'content-type': 'application/json' });
+    return route.fulfill({ json: { data: { event }, requestId: 'request-a' } });
+  });
   await page.route(`${base}/settings`, (route) => route.fulfill({
     json: {
       data: { event: { ...event, ...route.request().postDataJSON() as Partial<EventView> } },
@@ -888,4 +1205,5 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       },
     });
   });
+  return audit;
 }

@@ -15,7 +15,7 @@ import {
 } from '../../shared/event-cover';
 import { ApiError } from '../../shared/errors';
 import { chargeCoverRateEvent } from '../db/event-covers';
-import { coverPointerStatements } from '../db/events';
+import { coverPointerStatements, EventsRepository } from '../db/events';
 import type {
   CoverDispatchState,
   CoverDraftRow,
@@ -98,6 +98,7 @@ export interface CoverPublicationOutcome {
   appliedRevision: number | null;
   receipt: CoverPublishReceiptRow;
   view: EventCoverPreparationView;
+  event: EventRecord;
 }
 
 export interface CoverPublicationRestartResult {
@@ -473,6 +474,15 @@ export async function acceptCoverPublication(
   input: AcceptContext,
 ): Promise<CoverPublicationAcceptance> {
   const { event, request, requestDigest, now } = input;
+  if (!('focus' in request)) {
+    const prior = await loadReceipt(env, event.id, request.operationId);
+    const outcome = await applySemanticCoverPublication(env, input);
+    return {
+      receipt: outcome.receipt,
+      accepted: prior === null,
+      view: outcome.view,
+    };
+  }
   const existing = await loadReceipt(env, event.id, request.operationId);
   if (existing) {
     if (existing.request_sha256 !== requestDigest) {
@@ -498,12 +508,9 @@ export async function acceptCoverPublication(
   await assertStorageCaps(env, event.id);
 
   const timestamp = now.toISOString();
-  const isUpload = 'focus' in request;
-  const draft = isUpload ? await requireReadyDraft(env, event.id, request.source.draftId) : null;
-  const workflowInstanceId = isUpload
-    ? await coverWorkflowInstanceId(event.id, request.operationId)
-    : null;
-  const renderSetId = isUpload ? crypto.randomUUID() : null;
+  const draft = await requireReadyDraft(env, event.id, request.source.draftId);
+  const workflowInstanceId = await coverWorkflowInstanceId(event.id, request.operationId);
+  const renderSetId = crypto.randomUUID();
 
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(`
@@ -542,22 +549,22 @@ export async function acceptCoverPublication(
     `).bind(
       event.id, request.operationId, draft?.id ?? null,
       requestDigest,
-      request.source.kind === 'none' ? 'remove' : 'publish',
+       'publish',
       request.expectedRevision,
       request.expectedRevision,
       request.expectedRevision, workflowInstanceId,
       JSON.stringify(COVER_PIPELINE_VERSIONS),
-      isUpload ? EVENT_COVER_PROFILES.length : 0,
+       EVENT_COVER_PROFILES.length,
       timestamp, timestamp,
       request.expectedRevision,
       new Date(now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
       new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
       event.id,
       request.expectedRevision,
-      isUpload ? 1 : 0,
-      draft?.id ?? null,
-      draft?.master_id ?? null,
-      isUpload ? 1 : 0,
+       1,
+       draft.id,
+       draft.master_id,
+       1,
       request.expectedRevision,
       event.coverObjectKey,
       event.coverRenderSetId,
@@ -571,8 +578,7 @@ export async function acceptCoverPublication(
   // so a receipt that named a set created further down the same batch would fail
   // outright — and moving the set first would break the guard-first convention
   // and leave an orphan staging set behind whenever the guard was lost.
-  if (isUpload && draft && renderSetId && workflowInstanceId) {
-    statements.push(
+  statements.push(
       // Freeze the draft. `publishing` is what makes it non-discardable until
       // the receipt is terminal.
       env.DB.prepare(`
@@ -619,15 +625,6 @@ export async function acceptCoverPublication(
         COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
       ),
     );
-  } else {
-    statements.push(...await removalPublicationStatements(env.DB, {
-      event,
-      operationId: request.operationId,
-      requestDigest,
-      expectedRevision: request.expectedRevision,
-      now,
-    }));
-  }
 
   let results: D1Result[];
   try {
@@ -708,87 +705,747 @@ async function requireReadyDraft(
   return draft;
 }
 
-async function removalPublicationStatements(
+interface PublicationRetentionOwner {
+  eventId: string;
+  operationId: string;
+  requestSha256: string;
+  expectedRevision: number;
+  expectedCurrentKey: string | null;
+  expectedCurrentRenderSetId: string | null;
+  displacedMasterId: string | null;
+  retiredAt: string;
+  cleanupFloor: string;
+  retiredKeyFingerprint: string;
+}
+
+interface SemanticPublicationOwner extends PublicationRetentionOwner {
+  kind: 'semantic';
+  action: 'publish' | 'remove';
+  nextConfig: string;
+}
+
+export interface RenderPublicationOwner extends PublicationRetentionOwner {
+  kind: 'render';
+  action: 'publish';
+  workflowInstanceId: string;
+  dispatchGeneration: number;
+  renderSetId: string;
+  draftId: string;
+  nextMasterId: string;
+  nextObjectKey: string;
+  nextConfig: string;
+  manifestSha256: string;
+  readyAt: string;
+  publishedAt: string;
+  receiptExpiresAt: string;
+  conflictReceiptExpiresAt: string;
+  fenceExpiresAt: string;
+  completedProfiles: number;
+}
+
+export interface BackfillPublicationOwner {
+  kind: 'backfill';
+  eventId: string;
+  runId: string;
+  jobId: string;
+  workflowInstanceId: string;
+  dispatchGeneration: number;
+  expectedRevision: number;
+  expectedCurrentKey: string;
+  nextConfig: string;
+  nextMasterId: string;
+  nextObjectKey: string;
+  renderSetId: string;
+  manifestSha256: string;
+  readyAt: string;
+  publishedAt: string;
+  terminalAt: string;
+  referenceReleaseAt: string;
+  expiresAt: string;
+  fenceExpiresAt: string;
+  legacyKeyFingerprint: string;
+  retiredAt: string;
+  cleanupFloor: string;
+}
+
+type CoverReceiptPublicationOwner = SemanticPublicationOwner | RenderPublicationOwner;
+type CoverPublicationOwner = CoverReceiptPublicationOwner | BackfillPublicationOwner;
+
+function retainedMasterDeadlineSql(): string {
+  return `max(?, COALESCE((
+    SELECT max(r.expires_at)
+    FROM event_cover_publish_receipts r
+    LEFT JOIN event_cover_render_sets referenced_set ON referenced_set.id = r.render_set_id
+    LEFT JOIN event_cover_drafts referenced_draft ON referenced_draft.id = r.draft_id
+    WHERE r.event_id = ?
+      AND (referenced_set.master_id = ? OR referenced_draft.master_id = ?)
+  ), ?))`;
+}
+
+/**
+ * Retires one displaced normalized set and pins both it and its immutable master
+ * through the longer of the recovery window and every receipt reference.
+ */
+export function coverDisplacedUploadRetentionStatements(
   db: D1Database,
-  input: {
-    event: EventRecord;
-    operationId: string;
-    requestDigest: string;
-    expectedRevision: number;
-    now: Date;
-  },
-): Promise<D1PreparedStatement[]> {
-  const timestamp = input.now.toISOString();
-  const cleanupAfter = new Date(input.now.getTime() + RETIRED_RECOVERY_MS).toISOString();
-  const pointerStatements = coverPointerStatements(db, {
-    eventId: input.event.id,
-    expectedRevision: input.expectedRevision,
-    expectedCurrentKey: input.event.coverObjectKey,
-    expectedCurrentRenderSetId: input.event.coverRenderSetId,
-    nextConfig: canonicalCoverConfig(CANONICAL_NONE_COVER_CONFIG),
-    nextObjectKey: null,
-    nextRenderSetId: null,
-    retiredAt: timestamp,
-    cleanupAfter,
-    retiredKeyFingerprint: input.event.coverObjectKey
-      ? await coverKeyFingerprint(input.event.coverObjectKey)
-      : '0'.repeat(64),
-    publicationGuard: {
-      operationId: input.operationId,
-      requestSha256: input.requestDigest,
-    },
-  });
-  const movePointer = pointerStatements[0]!;
-  const retireLegacyObject = pointerStatements[1]!;
+  owner: CoverReceiptPublicationOwner,
+): D1PreparedStatement[] {
+  if (!owner.expectedCurrentRenderSetId || !owner.displacedMasterId || !owner.expectedCurrentKey) {
+    return [];
+  }
+  const deadlineSql = retainedMasterDeadlineSql();
+  const deadlineBindings = [
+    owner.cleanupFloor,
+    owner.eventId,
+    owner.displacedMasterId,
+    owner.displacedMasterId,
+    owner.cleanupFloor,
+  ] as const;
+  const receiptOwnerSql = owner.kind === 'semantic'
+    ? 'r.workflow_instance_id IS NULL AND r.render_set_id IS NULL AND r.draft_id IS NULL'
+    : `r.workflow_instance_id = ? AND r.dispatch_generation = ?
+        AND r.render_set_id = ? AND r.draft_id = ?`;
+  const receiptOwnerBindings = owner.kind === 'semantic'
+    ? []
+    : [owner.workflowInstanceId, owner.dispatchGeneration, owner.renderSetId, owner.draftId];
   return [
-    movePointer,
-    // The receipt can claim the resulting revision only when this batch's
-    // immediately preceding pointer move changed one exact row.
-    db.prepare(`
-      UPDATE event_cover_publish_receipts
-      SET status = 'applied', applied_revision = ?, result_cover_json = ?, updated_at = ?,
-          dispatch_state = 'confirmed', expires_at = ?
-      WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
-        AND action = 'remove' AND status = 'queued' AND retryable = 0
-        AND workflow_instance_id IS NULL AND render_set_id IS NULL
-        AND dispatch_state = 'pending' AND dispatch_generation = 0
-        AND changes() = 1
-    `).bind(
-      input.expectedRevision + 1,
-      canonicalCoverConfig(CANONICAL_NONE_COVER_CONFIG),
-      timestamp,
-      new Date(input.now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
-      input.event.id, input.operationId, input.requestDigest,
-    ),
-    // `coverPointerStatements` already supplies the guarded retirement insert;
-    // following the exact receipt transition keeps its `changes() = 1` chain.
-    retireLegacyObject,
     db.prepare(`
       UPDATE event_cover_render_sets
-      SET state = 'retired', retired_at = ?, cleanup_after = ?
-      WHERE id = ? AND state = 'active'
-        AND EXISTS (SELECT 1 FROM events WHERE id = ? AND cover_revision = ?)
+      SET state = 'retired', retired_at = ?, cleanup_after = ${deadlineSql}
+      WHERE id = ? AND event_id = ? AND master_id = ? AND state = 'active'
         AND EXISTS (
           SELECT 1 FROM event_cover_publish_receipts r
           WHERE r.event_id = ? AND r.operation_id = ? AND r.request_sha256 = ?
+            AND r.action = ? AND r.expected_revision = ?
             AND r.status = 'applied' AND r.applied_revision = ?
+            AND ${receiptOwnerSql}
         )
     `).bind(
-      timestamp, cleanupAfter,
-      input.event.coverRenderSetId, input.event.id, input.expectedRevision + 1,
-      input.event.id, input.operationId, input.requestDigest,
-      input.expectedRevision + 1,
+      owner.retiredAt,
+      ...deadlineBindings,
+      owner.expectedCurrentRenderSetId,
+      owner.eventId,
+      owner.displacedMasterId,
+      owner.eventId,
+      owner.operationId,
+      owner.requestSha256,
+      owner.action,
+      owner.expectedRevision,
+      owner.expectedRevision + 1,
+      ...receiptOwnerBindings,
+    ),
+    db.prepare(`
+      UPDATE event_cover_masters
+      SET cleanup_after = ${deadlineSql}
+      WHERE id = ? AND event_id = ? AND object_key IS ? AND changes() = 1
+    `).bind(
+      ...deadlineBindings,
+      owner.displacedMasterId,
+      owner.eventId,
+      owner.expectedCurrentKey,
     ),
   ];
 }
 
+function backfillPublicationTerminalAssertionStatement(
+  db: D1Database,
+  owner: BackfillPublicationOwner,
+): D1PreparedStatement {
+  return db.prepare(`
+    UPDATE event_cover_backfill_jobs
+    SET status = 'backfill-terminal-assertion-failed'
+    WHERE id = ? AND run_id = ? AND event_id = ?
+      AND workflow_instance_id = ? AND dispatch_generation = ?
+      AND NOT (
+        status = 'applied' AND expected_revision = ?
+          AND master_id = ? AND render_set_id = ? AND manifest_sha256 = ?
+          AND failure_code IS NULL AND retryable = 0
+          AND terminal_at = ? AND reference_release_at = ? AND expires_at = ?
+          AND EXISTS (
+            SELECT 1 FROM events e
+            WHERE e.id = event_cover_backfill_jobs.event_id AND e.deleted_at IS NULL
+              AND e.cover_revision = ? AND e.cover_config = ?
+              AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM event_cover_render_sets s
+            WHERE s.id = event_cover_backfill_jobs.render_set_id
+              AND s.event_id = event_cover_backfill_jobs.event_id
+              AND s.master_id = event_cover_backfill_jobs.master_id AND s.draft_id IS NULL
+              AND s.state = 'active' AND s.manifest_sha256 = ?
+              AND s.published_revision = ? AND s.ready_at = ? AND s.published_at = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM event_cover_retired_legacy_objects legacy
+            WHERE legacy.event_id = event_cover_backfill_jobs.event_id
+              AND legacy.object_key = ? AND legacy.key_fingerprint = ?
+              AND legacy.reason = 'backfilled' AND legacy.retired_at = ?
+              AND legacy.cleanup_after = ? AND legacy.deleted_at IS NULL
+          )
+          AND EXISTS (
+            SELECT 1 FROM event_cover_workflow_fences f
+            WHERE f.workflow_binding = 'COVER_BACKFILL_WORKFLOW'
+              AND f.workflow_instance_id = ? AND f.event_id = ?
+              AND f.dispatch_generation = ? AND f.state = 'open' AND f.expires_at = ?
+          )
+      )
+  `).bind(
+    owner.jobId,
+    owner.runId,
+    owner.eventId,
+    owner.workflowInstanceId,
+    owner.dispatchGeneration,
+    owner.expectedRevision,
+    owner.nextMasterId,
+    owner.renderSetId,
+    owner.manifestSha256,
+    owner.terminalAt,
+    owner.referenceReleaseAt,
+    owner.expiresAt,
+    owner.expectedRevision + 1,
+    owner.nextConfig,
+    owner.nextObjectKey,
+    owner.renderSetId,
+    owner.manifestSha256,
+    owner.expectedRevision + 1,
+    owner.readyAt,
+    owner.publishedAt,
+    owner.expectedCurrentKey,
+    owner.legacyKeyFingerprint,
+    owner.retiredAt,
+    owner.cleanupFloor,
+    owner.workflowInstanceId,
+    owner.eventId,
+    owner.dispatchGeneration,
+    owner.fenceExpiresAt,
+  );
+}
+
+function renderPublicationTerminalAssertionStatement(
+  db: D1Database,
+  owner: RenderPublicationOwner,
+): D1PreparedStatement {
+  const deadlineSql = retainedMasterDeadlineSql();
+  const hasDisplacedUpload = owner.expectedCurrentRenderSetId !== null
+    && owner.displacedMasterId !== null
+    && owner.expectedCurrentKey !== null;
+  return db.prepare(`
+    UPDATE event_cover_publish_receipts
+    SET status = 'render-publication-terminal-assertion-failed'
+    WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
+      AND workflow_instance_id = ? AND dispatch_generation = ?
+      AND render_set_id = ? AND draft_id = ?
+      AND NOT (
+        (
+          status = 'conflict' AND action = 'publish' AND expected_revision = ?
+            AND applied_revision IS NULL AND result_cover_json IS NULL
+            AND failure_code IS NULL AND retryable = 0 AND expires_at = ?
+            AND EXISTS (
+              SELECT 1 FROM event_cover_render_sets s
+              WHERE s.id = ? AND s.event_id = event_cover_publish_receipts.event_id
+                AND s.master_id = ? AND s.draft_id = event_cover_publish_receipts.draft_id
+                AND s.state = 'abandoned' AND s.manifest_sha256 = ? AND s.ready_at = ?
+                AND s.published_revision IS NULL AND s.published_at IS NULL
+                AND s.abandoned_reason = 'revision-conflict'
+                AND s.abandoned_at = ? AND s.cleanup_after = ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM event_cover_drafts d
+              WHERE d.id = ? AND d.event_id = event_cover_publish_receipts.event_id
+                AND d.state = 'ready'
+            )
+            AND EXISTS (
+              SELECT 1 FROM event_cover_workflow_fences f
+              WHERE f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+                AND f.workflow_instance_id = ? AND f.event_id = ?
+                AND f.dispatch_generation = ? AND f.state = 'open' AND f.expires_at = ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM events e
+              WHERE e.id = ? AND e.cover_revision = ?
+                AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM event_cover_retired_legacy_objects legacy
+              WHERE legacy.event_id = ? AND legacy.object_key IS ? AND legacy.retired_at = ?
+            )
+        )
+        OR (
+          status = 'applied' AND action = 'publish' AND expected_revision = ?
+            AND applied_revision = ? AND result_cover_json = ?
+            AND completed_profiles = ? AND required_profiles = ?
+            AND failure_code IS NULL AND retryable = 0
+            AND expires_at = ?
+            AND workflow_instance_id = ? AND dispatch_generation = ?
+            AND render_set_id = ? AND draft_id = ?
+            AND EXISTS (
+              SELECT 1 FROM events e
+              WHERE e.id = ? AND e.deleted_at IS NULL AND e.cover_revision = ?
+                AND e.cover_config = ? AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM event_cover_render_sets s
+              WHERE s.id = ? AND s.event_id = event_cover_publish_receipts.event_id
+                AND s.master_id = ? AND s.draft_id = event_cover_publish_receipts.draft_id
+                AND s.state = 'active' AND s.manifest_sha256 = ?
+                AND s.published_revision = ? AND s.ready_at = ? AND s.published_at = ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM event_cover_drafts d
+              WHERE d.id = ? AND d.event_id = event_cover_publish_receipts.event_id
+                AND d.state = 'published'
+            )
+            AND EXISTS (
+              SELECT 1 FROM event_cover_workflow_fences f
+              WHERE f.workflow_binding = 'COVER_RENDER_WORKFLOW'
+                AND f.workflow_instance_id = ? AND f.event_id = ?
+                AND f.dispatch_generation = ? AND f.state = 'open' AND f.expires_at = ?
+            )
+            AND (
+              ? = 0 OR (
+                EXISTS (
+                  SELECT 1 FROM event_cover_render_sets displaced
+                  WHERE displaced.id = ? AND displaced.event_id = event_cover_publish_receipts.event_id
+                    AND displaced.master_id = ? AND displaced.state = 'retired'
+                    AND displaced.retired_at = ? AND displaced.cleanup_after = ${deadlineSql}
+                )
+                AND EXISTS (
+                  SELECT 1 FROM event_cover_masters m
+                  WHERE m.id = ? AND m.event_id = event_cover_publish_receipts.event_id
+                    AND m.object_key IS ? AND m.cleanup_after = ${deadlineSql}
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM event_cover_retired_legacy_objects legacy
+                  WHERE legacy.event_id = event_cover_publish_receipts.event_id
+                    AND legacy.object_key IS ?
+                )
+              )
+            )
+            AND (
+              ? IS NULL OR ? IS NOT NULL OR EXISTS (
+                SELECT 1 FROM event_cover_retired_legacy_objects legacy
+                WHERE legacy.event_id = ? AND legacy.object_key IS ?
+                  AND legacy.key_fingerprint = ? AND legacy.reason = 'replaced'
+                  AND legacy.retired_at = ? AND legacy.cleanup_after = ?
+              )
+            )
+        )
+      )
+  `).bind(
+    owner.eventId,
+    owner.operationId,
+    owner.requestSha256,
+    owner.workflowInstanceId,
+    owner.dispatchGeneration,
+    owner.renderSetId,
+    owner.draftId,
+    owner.expectedRevision,
+    owner.conflictReceiptExpiresAt,
+    owner.renderSetId,
+    owner.nextMasterId,
+    owner.manifestSha256,
+    owner.readyAt,
+    owner.retiredAt,
+    owner.cleanupFloor,
+    owner.draftId,
+    owner.workflowInstanceId,
+    owner.eventId,
+    owner.dispatchGeneration,
+    owner.fenceExpiresAt,
+    owner.eventId,
+    owner.expectedRevision + 1,
+    owner.nextObjectKey,
+    owner.renderSetId,
+    owner.eventId,
+    owner.expectedCurrentKey,
+    owner.retiredAt,
+    owner.expectedRevision,
+    owner.expectedRevision + 1,
+    owner.nextConfig,
+    owner.completedProfiles,
+    owner.completedProfiles,
+    owner.receiptExpiresAt,
+    owner.workflowInstanceId,
+    owner.dispatchGeneration,
+    owner.renderSetId,
+    owner.draftId,
+    owner.eventId,
+    owner.expectedRevision + 1,
+    owner.nextConfig,
+    owner.nextObjectKey,
+    owner.renderSetId,
+    owner.renderSetId,
+    owner.nextMasterId,
+    owner.manifestSha256,
+    owner.expectedRevision + 1,
+    owner.readyAt,
+    owner.publishedAt,
+    owner.draftId,
+    owner.workflowInstanceId,
+    owner.eventId,
+    owner.dispatchGeneration,
+    owner.fenceExpiresAt,
+    hasDisplacedUpload ? 1 : 0,
+    owner.expectedCurrentRenderSetId,
+    owner.displacedMasterId,
+    owner.retiredAt,
+    owner.cleanupFloor,
+    owner.eventId,
+    owner.displacedMasterId,
+    owner.displacedMasterId,
+    owner.cleanupFloor,
+    owner.displacedMasterId,
+    owner.expectedCurrentKey,
+    owner.cleanupFloor,
+    owner.eventId,
+    owner.displacedMasterId,
+    owner.displacedMasterId,
+    owner.cleanupFloor,
+    owner.expectedCurrentKey,
+    owner.expectedCurrentKey,
+    owner.expectedCurrentRenderSetId,
+    owner.eventId,
+    owner.expectedCurrentKey,
+    owner.retiredKeyFingerprint,
+    owner.retiredAt,
+    owner.cleanupFloor,
+  );
+}
+
 /**
- * The synchronous `none` publication.
- *
- * Lives here rather than in a route so removal and the Workflow's finalize
- * share exactly one writer for the event pointers; both compose
- * `coverPointerStatements` into their own batch.
+ * Makes an incomplete publication terminal graph violate the existing receipt
+ * status CHECK, which is the D1 error that rolls every earlier batch statement
+ * back. The invalid value can never commit.
  */
+export function coverPublicationTerminalAssertionStatement(
+  db: D1Database,
+  owner: CoverPublicationOwner,
+): D1PreparedStatement {
+  if (owner.kind === 'backfill') return backfillPublicationTerminalAssertionStatement(db, owner);
+  if (owner.kind === 'render') return renderPublicationTerminalAssertionStatement(db, owner);
+  const deadlineSql = retainedMasterDeadlineSql();
+  const hasDisplacedUpload = owner.expectedCurrentRenderSetId !== null
+    && owner.displacedMasterId !== null
+    && owner.expectedCurrentKey !== null;
+  return db.prepare(`
+    UPDATE event_cover_publish_receipts
+    SET status = 'semantic-publication-terminal-assertion-failed'
+    WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
+      AND NOT (
+        (
+          status = 'conflict' AND action = ? AND expected_revision = ?
+            AND applied_revision IS NULL AND result_cover_json IS NULL
+            AND workflow_instance_id IS NULL AND render_set_id IS NULL AND draft_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM events e
+              WHERE e.id = event_cover_publish_receipts.event_id
+                AND e.deleted_at IS NULL AND e.cover_revision = ?
+                AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+            )
+        )
+        OR (
+          status = 'applied' AND action = ? AND expected_revision = ?
+            AND applied_revision = ? AND result_cover_json = ?
+            AND workflow_instance_id IS NULL AND render_set_id IS NULL AND draft_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM events e
+              WHERE e.id = event_cover_publish_receipts.event_id
+                AND e.deleted_at IS NULL AND e.cover_revision = ?
+                AND e.cover_config = ? AND e.cover_object_key IS NULL
+                AND e.cover_render_set_id IS NULL
+            )
+            AND (
+              ? = 0 OR (
+                EXISTS (
+                  SELECT 1 FROM event_cover_render_sets s
+                  WHERE s.id = ? AND s.event_id = event_cover_publish_receipts.event_id
+                    AND s.master_id = ? AND s.state = 'retired'
+                    AND s.retired_at = ? AND s.cleanup_after = ${deadlineSql}
+                )
+                AND EXISTS (
+                  SELECT 1 FROM event_cover_masters m
+                  WHERE m.id = ? AND m.event_id = event_cover_publish_receipts.event_id
+                    AND m.object_key IS ? AND m.cleanup_after = ${deadlineSql}
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM event_cover_retired_legacy_objects legacy
+                  WHERE legacy.event_id = event_cover_publish_receipts.event_id
+                    AND legacy.object_key IS ?
+                )
+              )
+            )
+            AND (
+              ? IS NULL OR ? IS NOT NULL OR EXISTS (
+                SELECT 1 FROM event_cover_retired_legacy_objects legacy
+                WHERE legacy.event_id = event_cover_publish_receipts.event_id
+                  AND legacy.object_key IS ? AND legacy.key_fingerprint = ?
+                  AND legacy.reason = ? AND legacy.retired_at = ?
+                  AND legacy.cleanup_after = ?
+              )
+            )
+        )
+      )
+  `).bind(
+    owner.eventId,
+    owner.operationId,
+    owner.requestSha256,
+    owner.action,
+    owner.expectedRevision,
+    owner.expectedRevision,
+    owner.expectedCurrentKey,
+    owner.expectedCurrentRenderSetId,
+    owner.action,
+    owner.expectedRevision,
+    owner.expectedRevision + 1,
+    owner.nextConfig,
+    owner.expectedRevision + 1,
+    owner.nextConfig,
+    hasDisplacedUpload ? 1 : 0,
+    owner.expectedCurrentRenderSetId,
+    owner.displacedMasterId,
+    owner.retiredAt,
+    owner.cleanupFloor,
+    owner.eventId,
+    owner.displacedMasterId,
+    owner.displacedMasterId,
+    owner.cleanupFloor,
+    owner.displacedMasterId,
+    owner.expectedCurrentKey,
+    owner.cleanupFloor,
+    owner.eventId,
+    owner.displacedMasterId,
+    owner.displacedMasterId,
+    owner.cleanupFloor,
+    owner.expectedCurrentKey,
+    owner.expectedCurrentKey,
+    owner.expectedCurrentRenderSetId,
+    owner.expectedCurrentKey,
+    owner.retiredKeyFingerprint,
+    owner.action === 'remove' ? 'removed' : 'replaced',
+    owner.retiredAt,
+    owner.cleanupFloor,
+  );
+}
+
+async function loadCurrentEvent(env: AppEnv, eventId: string): Promise<EventRecord> {
+  const event = await new EventsRepository(env.DB).getById(eventId);
+  if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
+  return event;
+}
+
+function semanticOutcome(receipt: CoverPublishReceiptRow, event: EventRecord): CoverPublicationOutcome {
+  return {
+    applied: receipt.status === 'applied',
+    appliedRevision: receipt.applied_revision,
+    receipt,
+    view: preparationView(receipt),
+    event,
+  };
+}
+
+/** Applies a preset or removal, including its receipt, in one strict D1 batch. */
+export async function applySemanticCoverPublication(
+  env: AppEnv,
+  input: AcceptContext,
+): Promise<CoverPublicationOutcome> {
+  const { event, request, requestDigest, now } = input;
+  if ('focus' in request) {
+    throw new Error('Uploaded covers require CoverRenderWorkflow publication.');
+  }
+  const action = request.source.kind === 'none' ? 'remove' : 'publish';
+  const nextConfig = canonicalCoverConfig(publishedConfig(request));
+  const existing = await loadReceipt(env, event.id, request.operationId);
+  if (existing) {
+    if (existing.request_sha256 !== requestDigest || existing.action !== action
+      || existing.expected_revision !== request.expectedRevision) {
+      throw new ApiError(
+        'COVER_PUBLICATION_CONFLICT',
+        'That publish was already used with different details. Reload and try again.',
+        409,
+      );
+    }
+    if (terminalReceiptStatus(existing)) {
+      return semanticOutcome(existing, await loadCurrentEvent(env, event.id));
+    }
+  } else {
+    await chargeCoverRateEvent(env.DB, {
+      eventId: event.id,
+      action: 'publication',
+      replayKey: request.operationId,
+      requestDigest,
+      limit: MAX_COVER_PUBLICATIONS_PER_HOUR,
+      now,
+    });
+    await assertStorageCaps(env, event.id);
+  }
+
+  const displaced = event.coverRenderSetId
+    ? await env.DB.prepare(`
+        SELECT s.master_id, m.object_key
+        FROM event_cover_render_sets s
+        JOIN event_cover_masters m ON m.id = s.master_id AND m.event_id = s.event_id
+        WHERE s.id = ? AND s.event_id = ? AND m.object_key IS ?
+      `).bind(event.coverRenderSetId, event.id, event.coverObjectKey)
+        .first<{ master_id: string; object_key: string }>()
+    : null;
+  if (event.coverRenderSetId && !displaced) {
+    throw new Error('The active uploaded cover graph is incomplete.');
+  }
+  const timestamp = now.toISOString();
+  const cleanupFloor = new Date(now.getTime() + RETIRED_RECOVERY_MS).toISOString();
+  const owner: SemanticPublicationOwner = {
+    kind: 'semantic',
+    eventId: event.id,
+    operationId: request.operationId,
+    requestSha256: requestDigest,
+    action,
+    expectedRevision: request.expectedRevision,
+    expectedCurrentKey: event.coverObjectKey,
+    expectedCurrentRenderSetId: event.coverRenderSetId,
+    displacedMasterId: displaced?.master_id ?? null,
+    nextConfig,
+    retiredAt: timestamp,
+    cleanupFloor,
+    retiredKeyFingerprint: event.coverObjectKey
+      ? await coverKeyFingerprint(event.coverObjectKey)
+      : '0'.repeat(64),
+  };
+  const [movePointer, retireLegacy] = coverPointerStatements(env.DB, {
+    eventId: event.id,
+    expectedRevision: request.expectedRevision,
+    expectedCurrentKey: event.coverObjectKey,
+    expectedCurrentRenderSetId: event.coverRenderSetId,
+    nextConfig,
+    nextObjectKey: null,
+    nextRenderSetId: null,
+    retiredAt: timestamp,
+    cleanupAfter: cleanupFloor,
+    retiredKeyFingerprint: owner.retiredKeyFingerprint,
+    semanticPublicationGuard: {
+      action,
+      operationId: request.operationId,
+      requestSha256: requestDigest,
+      expectedRevision: request.expectedRevision,
+    },
+    onlyIfPriorStatementChanged: true,
+  });
+  const statements: D1PreparedStatement[] = [];
+  if (!existing) {
+    statements.push(env.DB.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, draft_id, render_set_id, request_sha256, action,
+        expected_revision, status, workflow_instance_id, dependency_versions_json,
+        completed_profiles, required_profiles, failure_code, retryable,
+        dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+      )
+      SELECT ?, ?, NULL, NULL, ?, ?, ?, 'queued', NULL, ?, 0, 0, NULL, 0,
+        'pending', 0, ?, ?, ?
+      FROM events e WHERE e.id = ? AND e.deleted_at IS NULL
+        AND (SELECT count(*) FROM event_cover_publish_receipts r WHERE r.event_id = e.id) < ?
+        AND (SELECT count(*) FROM event_cover_render_sets s
+          WHERE s.event_id = e.id AND s.state <> 'active') < ?
+    `).bind(
+      event.id,
+      request.operationId,
+      requestDigest,
+      action,
+      request.expectedRevision,
+      JSON.stringify(COVER_PIPELINE_VERSIONS),
+      timestamp,
+      timestamp,
+      new Date(now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
+      event.id,
+      MAX_RETAINED_COVER_RECEIPTS_PER_EVENT,
+      MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT,
+    ));
+  }
+  statements.push(
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'applied', applied_revision = ?, result_cover_json = ?, updated_at = ?,
+          dispatch_state = 'confirmed', expires_at = ?
+      WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
+        AND action = ? AND expected_revision = ? AND status = 'queued' AND retryable = 0
+        AND workflow_instance_id IS NULL AND render_set_id IS NULL AND draft_id IS NULL
+        AND dispatch_state = 'pending' AND dispatch_generation = 0
+        AND EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id AND e.deleted_at IS NULL
+            AND e.cover_revision = ? AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+        )
+        ${existing ? '' : 'AND changes() = 1'}
+    `).bind(
+      request.expectedRevision + 1,
+      nextConfig,
+      timestamp,
+      new Date(now.getTime() + RECEIPT_APPLIED_TTL_MS).toISOString(),
+      event.id,
+      request.operationId,
+      requestDigest,
+      action,
+      request.expectedRevision,
+      request.expectedRevision,
+      event.coverObjectKey,
+      event.coverRenderSetId,
+    ),
+    movePointer!,
+    retireLegacy!,
+    ...coverDisplacedUploadRetentionStatements(env.DB, owner),
+    env.DB.prepare(`
+      UPDATE event_cover_publish_receipts
+      SET status = 'conflict', retryable = 0, updated_at = ?, expires_at = ?
+      WHERE event_id = ? AND operation_id = ? AND request_sha256 = ?
+        AND action = ? AND expected_revision = ? AND status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM events e
+          WHERE e.id = event_cover_publish_receipts.event_id
+            AND e.deleted_at IS NULL AND e.cover_revision = ?
+            AND e.cover_object_key IS ? AND e.cover_render_set_id IS ?
+        )
+    `).bind(
+      timestamp,
+      new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
+      event.id,
+      request.operationId,
+      requestDigest,
+      action,
+      request.expectedRevision,
+      request.expectedRevision,
+      event.coverObjectKey,
+      event.coverRenderSetId,
+    ),
+    coverPublicationTerminalAssertionStatement(env.DB, owner),
+  );
+
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    const raced = await loadReceipt(env, event.id, request.operationId);
+    if (raced && raced.request_sha256 === requestDigest && terminalReceiptStatus(raced)) {
+      return semanticOutcome(raced, await loadCurrentEvent(env, event.id));
+    }
+    if (String(error).includes('UNIQUE')) {
+      throw new ApiError(
+        'COVER_PUBLICATION_CONFLICT',
+        'Another cover change is already being prepared for this event. Wait for it to finish.',
+        409,
+      );
+    }
+    throw error;
+  }
+  const receipt = await loadReceipt(env, event.id, request.operationId);
+  if (!receipt) {
+    await assertStorageCaps(env, event.id);
+    throw new ApiError(
+      'COVER_PUBLICATION_CONFLICT',
+      'Another cover change is already being prepared for this event. Wait for it to finish.',
+      409,
+    );
+  }
+  return semanticOutcome(receipt, await loadCurrentEvent(env, event.id));
+}
+
+/** Compatibility wrapper for callers that already accepted a `none` request. */
 export async function applyRemovalPublication(
   env: AppEnv,
   input: {
@@ -799,69 +1456,16 @@ export async function applyRemovalPublication(
     now: Date;
   },
 ): Promise<CoverPublicationOutcome> {
-  const receipt = await loadReceipt(env, input.event.id, input.operationId);
-  if (!receipt) throw new Error('Removal publication requires an accepted receipt.');
-  if (terminalReceiptStatus(receipt)) {
-    return {
-      applied: receipt.status === 'applied',
-      appliedRevision: receipt.applied_revision,
-      receipt,
-      view: preparationView(receipt),
-    };
-  }
-
-  const results = await env.DB.batch(await removalPublicationStatements(env.DB, input));
-
-  if ((results[0]?.meta.changes ?? 0) !== 1) {
-    // The house shape for a lost optimistic guard. A new code would say the
-    // cover pipeline failed; it did not — the manager's page is simply stale.
-    const recordedConflict = await recordConflict(
-      env, input.event.id, input.operationId, input.now,
-    );
-    if (!recordedConflict) {
-      const current = await loadReceipt(env, input.event.id, input.operationId);
-      if (current && terminalReceiptStatus(current)) {
-        return {
-          applied: current.status === 'applied',
-          appliedRevision: current.applied_revision,
-          receipt: current,
-          view: preparationView(current),
-        };
-      }
-    }
-    throw new ApiError(
-      'VALIDATION_FAILED',
-      'This cover has moved on since this page loaded. Reload and try again.',
-      409,
-    );
-  }
-
-  const updated = (await loadReceipt(env, input.event.id, input.operationId))!;
-  return {
-    applied: true,
-    appliedRevision: input.expectedRevision + 1,
-    receipt: updated,
-    view: preparationView(updated),
-  };
-}
-
-async function recordConflict(
-  env: AppEnv,
-  eventId: string,
-  operationId: string,
-  now: Date,
-): Promise<boolean> {
-  const result = await env.DB.prepare(`
-    UPDATE event_cover_publish_receipts
-    SET status = 'conflict', retryable = 0, updated_at = ?, expires_at = ?
-    WHERE event_id = ? AND operation_id = ? AND status NOT IN ('applied', 'conflict')
-      AND (status <> 'failed' OR retryable = 1)
-  `).bind(
-    now.toISOString(),
-    new Date(now.getTime() + RECEIPT_TERMINAL_TTL_MS).toISOString(),
-    eventId, operationId,
-  ).run();
-  return (result.meta.changes ?? 0) === 1;
+  return applySemanticCoverPublication(env, {
+    event: input.event,
+    request: {
+      operationId: input.operationId,
+      expectedRevision: input.expectedRevision,
+      source: { kind: 'none' },
+    },
+    requestDigest: input.requestDigest,
+    now: input.now,
+  });
 }
 
 /**

@@ -77,11 +77,23 @@ const JOB = '22222222-2222-4222-8222-222222222222';
 const EVENT = '33333333-3333-4333-8333-333333333333';
 const OTHER_EVENT = '44444444-4444-4444-8444-444444444444';
 const NOW = '2026-08-05T10:00:00.000Z';
+const PHASE_2_MIGRATION = '0013_guest_message_hardening.sql';
+
+function phase2MigrationNames(migrationRoot: string): string[] {
+  const migrations = readdirSync(migrationRoot)
+    .filter((entry) => entry.endsWith('.sql'))
+    .sort();
+  const boundary = migrations.indexOf(PHASE_2_MIGRATION);
+  expect(boundary).toBe(12);
+  return migrations.slice(0, boundary + 1);
+}
 
 function migratedDatabase(): DatabaseSync {
   const database = new DatabaseSync(':memory:');
   const migrationRoot = resolve(process.cwd(), 'migrations');
-  for (const name of readdirSync(migrationRoot).filter((entry) => entry.endsWith('.sql')).sort()) {
+  // Backfill operates on the compatibility schema. Installing Phase 3 here
+  // correctly prevents the legacy fixtures this harness is meant to exercise.
+  for (const name of phase2MigrationNames(migrationRoot)) {
     database.exec(readFileSync(resolve(migrationRoot, name), 'utf8'));
   }
   return database;

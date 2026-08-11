@@ -9,6 +9,7 @@ import {
 } from './fixtures/cover-images';
 import {
   EVENT_FIXTURE,
+  GUEST_EVENT_FIXTURE,
   RSVP_HOUSEHOLD_FIXTURE,
   eventTheme,
   stubGuestRoutes,
@@ -142,10 +143,13 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
   } else if (state === 'cover entry') {
     await stubGuestRoutes(page, {
       ...baseOptions,
-      event: { ...baseOptions.event, coverObjectKey: 'events/event-a/cover.png' },
+      event: {
+        ...baseOptions.event,
+        cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
+      },
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await expect(page.locator('.photo-drop__hero')).toHaveClass(/photo-drop__hero--cover/u);
+    await expect(page.locator('.photo-drop__hero .responsive-cover--image')).toBeVisible();
     await expectTargets([
       page.getByRole('button', { name: 'Take a photo', exact: true }),
       page.getByRole('button', { name: 'Choose recent photos', exact: true }),
@@ -478,7 +482,7 @@ test('manager appearance autosaves the canonical config and adopts the normalize
     overrides: {},
   });
   await expect(page.locator('.event-appearance-editor__status .autosave-status__chip')).toHaveText('Saved');
-  await expectTheme(page.locator('.event-appearance-preview'), eventTheme('coastal-light'));
+  await expectTheme(page.getByTestId('event-appearance-canvas'), eventTheme('coastal-light'));
 });
 
 test('manager Settings saves without a Save button and stays contained at 320 and 390', async ({ page }, testInfo) => {
@@ -714,12 +718,12 @@ for (const presetId of ['candidary-default', 'garden-party', 'midnight-film', 'c
       await stubGuestRoutes(page, {
         event: {
           theme: eventTheme(presetId),
-          coverObjectKey: `events/event-a/${name.replace(' ', '-')}.png`,
+          cover: { ...GUEST_EVENT_FIXTURE.cover, hasCover: true },
         },
         cover,
       });
       await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-      const hero = page.locator('.photo-drop__hero--cover');
+      const hero = page.locator('.photo-drop__hero:has(.responsive-cover--image)');
       const result = await minimumWhiteContrastUnderText(page, hero, hero.locator('.photo-drop__hero-copy'));
       expect(result.rectangles.length, `${presetId} ${name} rendered text bounds`).toBeGreaterThan(0);
       expect(result.minimum, `${presetId} ${name} cover-text contrast`).toBeGreaterThanOrEqual(4.5);

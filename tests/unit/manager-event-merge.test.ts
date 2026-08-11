@@ -11,12 +11,30 @@ import {
 
 const candidary = resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} });
 const garden = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
+const noCover = {
+  config: { version: 1, source: { kind: 'none' } } as const,
+  revision: 1,
+  hasCover: false,
+  available2xProfiles: [],
+  surfaceTreatment: 'none' as const,
+  preparation: null,
+};
+const covered = {
+  config: {
+    version: 1,
+    source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+    effect: 'natural',
+  } as const,
+  revision: 0,
+  hasCover: true,
+  available2xProfiles: [],
+  surfaceTreatment: 'none' as const,
+  preparation: null,
+};
 
 const current: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', coverObjectKey: 'events/event-a/cover/new.jpg',
-  coverPreparation: null,
-  coverRevision: 0,
+  welcomeMessage: 'Welcome.', cover: covered,
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
@@ -37,7 +55,7 @@ const staleElsewhere: EventView = {
   eventStartAt: '2026-09-19T23:00:00.000Z', eventStartTime: '18:00',
   rsvpDeadlineAt: '2026-09-05T04:59:59.999Z', rsvpDeadlineDate: '2026-09-04',
   photosOpen: false, photoIntakeState: 'scheduled', photoIntakeRecheckAfterMs: 7_200_000,
-  theme: candidary, coverObjectKey: null,
+  theme: candidary, cover: noCover,
 };
 
 // What the photo-intake action, or the quiet refetch that follows it across the
@@ -54,7 +72,7 @@ describe('manager event merges', () => {
     expect(merged.rsvpEnabled).toBe(true);
     expect(merged.rsvpRosterVersion).toBe(8);
     expect(merged.theme).toBe(garden);
-    expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+    expect(merged.cover).toBe(covered);
   });
 
   it('takes both schedule instants together, because one edit decides both', () => {
@@ -104,7 +122,7 @@ describe('manager event merges', () => {
     expect(merged.rsvpEnabled).toBe(false);
     expect(merged.rsvpRosterVersion).toBe(7);
     expect(merged.theme).toBe(garden);
-    expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+    expect(merged.cover).toBe(covered);
   });
 
   it('takes the complete schedule tuple with intake only for a lifecycle read', () => {
@@ -118,7 +136,7 @@ describe('manager event merges', () => {
       rsvpDeadlineDate: '2026-09-05',
       rsvpEnabled: true,
       theme: candidary,
-      coverObjectKey: null,
+      cover: noCover,
     };
 
     const merged = mergePhotoIntakeResponse(current, lifecycleAnswer, { ownsSchedule: true });
@@ -136,7 +154,7 @@ describe('manager event merges', () => {
     expect(merged.name).toBe('Maya & Theo');
     expect(merged.rsvpEnabled).toBe(false);
     expect(merged.theme).toBe(garden);
-    expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+    expect(merged.cover).toBe(covered);
   });
 
   it('carries a pause the action itself decided', () => {
@@ -166,12 +184,12 @@ describe('manager event merges', () => {
     expect(merged.theme).toBe(candidary);
     expect(merged.name).toBe('Maya & Theo');
     expect(merged.rsvpRosterVersion).toBe(7);
-    expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+    expect(merged.cover).toBe(covered);
   });
 
   it('takes only the cover a cover response owns', () => {
     const merged = mergeCoverResponse(current, staleElsewhere);
-    expect(merged.coverObjectKey).toBeNull();
+    expect(merged.cover).toBe(noCover);
     expect(merged.theme).toBe(garden);
     expect(merged.name).toBe('Maya & Theo');
   });
@@ -188,20 +206,51 @@ describe('manager event merges', () => {
     };
     const merged = mergeCoverResponse(current, {
       ...staleElsewhere,
-      coverRevision: 4,
-      coverPreparation: preparation,
+      cover: { ...noCover, revision: 4, preparation },
     });
     // Without the revision, the next publication sends `expectedRevision: 0`
     // against a server at 4 and takes a 409 no host action caused.
-    expect(merged.coverRevision).toBe(4);
-    expect(merged.coverPreparation).toEqual(preparation);
+    expect(merged.cover.revision).toBe(4);
+    expect(merged.cover.preparation).toEqual(preparation);
+  });
+
+  it('never lets a delayed lower cover revision replace the current graph', () => {
+    const currentAtNine: EventView = {
+      ...current,
+      cover: { ...covered, revision: 9 },
+    };
+    const delayed = {
+      ...staleElsewhere,
+      cover: { ...noCover, revision: 8 },
+    };
+    expect(mergeCoverResponse(currentAtNine, delayed).cover).toBe(currentAtNine.cover);
+  });
+
+  it('allows same-revision reconciliation to update preparation', () => {
+    const currentAtNine: EventView = {
+      ...current,
+      cover: { ...covered, revision: 9, preparation: null },
+    };
+    const preparing = {
+      operationId: 'operation-b',
+      status: 'preparing' as const,
+      completedSteps: 3,
+      requiredSteps: 6,
+      retryable: false,
+      safeFailureCode: null,
+      updatedAt: '2026-08-04T00:00:00.000Z',
+    };
+    const sameRevision = {
+      ...staleElsewhere,
+      cover: { ...covered, revision: 9, preparation: preparing },
+    };
+    expect(mergeCoverResponse(currentAtNine, sameRevision).cover.preparation).toEqual(preparing);
   });
 
   it('keeps settings, theme, and photo-intake responses out of the cover domain', () => {
     const coverMoved: EventView = {
       ...staleElsewhere,
-      coverRevision: 9,
-      coverPreparation: {
+      cover: { ...noCover, revision: 9, preparation: {
         operationId: 'operation-b',
         status: 'applied',
         completedSteps: 6,
@@ -209,16 +258,16 @@ describe('manager event merges', () => {
         retryable: false,
         safeFailureCode: null,
         updatedAt: '2026-08-04T00:00:00.000Z',
-      },
+      } },
     };
     for (const merged of [
       mergeSettingsResponse(current, coverMoved),
       mergeThemeResponse(current, coverMoved),
       mergePhotoIntakeResponse(current, coverMoved),
     ]) {
-      expect(merged.coverRevision).toBe(0);
-      expect(merged.coverPreparation).toBeNull();
-      expect(merged.coverObjectKey).toBe('events/event-a/cover/new.jpg');
+      expect(merged.cover.revision).toBe(0);
+      expect(merged.cover.preparation).toBeNull();
+      expect(merged.cover).toBe(covered);
     }
   });
 });

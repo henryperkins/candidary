@@ -1,6 +1,7 @@
 import {
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -10,7 +11,10 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { canonicalJson, sha256 } from './release-evidence.ts';
+import { PHASE_2_MIGRATION, PHASE_3_MIGRATION } from './release-candidate.ts';
+import { PRODUCTION_TRIGGER_NAMES } from './migrate-release.ts';
 import {
+  RUN_ID_PATTERN,
   SHA256_PATTERN,
   assertCandidateSha,
   assertCanonicalRunId,
@@ -258,4 +262,450 @@ export function writeFinalArtifact(
     rmSync(tempSidecarPath, { force: true });
   }
   return { path, sha256: digest };
+}
+
+export const STAGING_IMAGES_CASE_IDS = [
+  'jpeg',
+  'opaque-png',
+  'transparent-png',
+  'webp',
+  'iphone-heic',
+  'heif-sequence-rejected',
+  'upload-limit',
+  'master-quality-ladder',
+  'preview-quality-ladder',
+  'output-quality-ladder',
+  'complete-2x',
+  'partial-2x',
+  'orientation',
+  'metadata-gps-removal',
+  'crop-profiles',
+  'effect-natural',
+  'effect-warm',
+  'effect-film',
+  'effect-soft',
+  'effect-monochrome',
+  'matte-parity',
+  'mime-dimensions-checksums',
+  'no-upscaling',
+  'byte-ceilings',
+] as const;
+
+export const STAGING_WORKFLOW_CASE_IDS = [
+  'creation',
+  'initial-confirmation',
+  'automatic-step-retry',
+  'retained-id-replay',
+  'deterministic-profile-replay',
+  'conditional-object-adoption',
+  'early-revision-conflict',
+  'final-revision-conflict',
+  'status-reconciliation',
+  'missing-reconciliation',
+  'unknown-reconciliation',
+  'same-instance-restart',
+  'termination',
+  'purge-fencing',
+  'zero-post-fence-writes',
+  'complete-terminal-graph',
+] as const;
+
+export const STAGING_ROUTE_CASE_IDS = [
+  'nested-manager-projection',
+  'nested-guest-projection',
+  'current-revision-webp',
+  'current-revision-jpeg',
+  'stale-revision-rejected',
+  'preset-immutable-redirect',
+  'preset-static-headers',
+  'upload-no-store',
+  'missing-webp-recovery',
+  'missing-jpeg-recovery',
+  'private-master-denied',
+  'delivery-does-not-call-images',
+] as const;
+
+export const STAGING_BROWSER_CASE_IDS = [
+  'desktop-manager-studio',
+  'mobile-manager-studio',
+  'desktop-guest-hero',
+  'mobile-guest-hero',
+  'interruption-recovery',
+  'same-operation-retry',
+  'access-recovery',
+  'single-polling-owner',
+  'cover-only-event-refresh',
+] as const;
+
+export interface StagingMatrixResult {
+  caseId: string;
+  status: 'passed';
+  observationCode: string;
+}
+
+export interface StagingResourceDestruction {
+  fixturesAbsent: boolean;
+  workerAbsent: boolean;
+  databaseAbsent: boolean;
+  r2Absent: boolean;
+  imagesAbsent: boolean;
+  emailAbsent: boolean;
+  rateLimitsAbsent: boolean;
+  workflowsAbsent: boolean;
+  assetsAbsent: boolean;
+}
+
+export interface StagingConformanceArtifactV1 {
+  kind: 'candidary.staging-conformance';
+  schemaVersion: 1;
+  status: 'passed';
+  candidateSha: string;
+  runId: string;
+  approvedMainSha: string;
+  sources: {
+    phase2: { sha: string; manifestSha256: string; migrationManifestSha256: string };
+    phase3: { sha: string; manifestSha256: string; migrationManifestSha256: string };
+  };
+  authorizations: { reviewSha256: string; stagingSha256: string };
+  targets: { workflowConformanceSha256: string; cutoverSha256: string };
+  migrations: {
+    phase2Ledger: string[];
+    phase3Ledger: string[];
+    bootstrapSha256: string;
+    phase3MigrationSha256: string;
+    phase3BundleSha256: string;
+    triggerNames: string[];
+    zeroCounts: {
+      legacyRows: number;
+      blockingJobs: number;
+      incompleteActiveSets: number;
+      uploadsWithoutActiveSet: number;
+    };
+    integrity: 'ok';
+    foreignKeyRows: 0;
+  };
+  deployments: {
+    workflowConformance: StagingDeploymentEvidence;
+    phase2Cutover: StagingDeploymentEvidence;
+    phase3Cutover: StagingDeploymentEvidence;
+  };
+  matrices: {
+    images: StagingMatrixResult[];
+    backfillWorkflow: StagingMatrixResult[];
+    renderWorkflow: StagingMatrixResult[];
+    routes: StagingMatrixResult[];
+    browser: StagingMatrixResult[];
+  };
+  cleanup: {
+    workflowConformance: StagingResourceDestruction;
+    cutover: StagingResourceDestruction;
+  };
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface StagingDeploymentEvidence {
+  versionId: string;
+  tagSha: string;
+  metadataSha: string;
+  trafficPercent: number;
+}
+
+export interface StagingArtifactBindings {
+  candidateSha: string;
+  phase2Sha: string;
+  approvedMainSha: string;
+  phase2ManifestSha256: string;
+  candidateManifestSha256: string;
+  phase2MigrationManifestSha256: string;
+  phase3MigrationManifestSha256: string;
+  reviewAuthorizationSha256: string;
+  stagingAuthorizationSha256: string;
+  workflowTargetSha256: string;
+  cutoverTargetSha256: string;
+  bootstrapSha256: string;
+  phase3MigrationSha256: string;
+  phase3BundleSha256: string;
+}
+
+const PHASE_2_LEDGER = [
+  '0001_core.sql',
+  '0002_wedding_photo_drop.sql',
+  '0003_partitioned_exports.sql',
+  '0004_manager_media_pagination.sql',
+  '0005_media_stored_at.sql',
+  '0006_host_accounts.sql',
+  '0007_event_theme.sql',
+  '0008_event_rsvp.sql',
+  '0009_rsvp_roster_batches.sql',
+  '0010_event_start.sql',
+  '0011_release_certifications.sql',
+  '0012_event_cover_storage.sql',
+  PHASE_2_MIGRATION,
+] as const;
+
+function exactString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
+    throw new Error(`${label} must be a nonempty string.`);
+  }
+  return value;
+}
+
+function exactStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error(`${label} must be a string array.`);
+  }
+  return [...value];
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+function assertMatrix(
+  value: unknown,
+  expectedCaseIds: readonly string[],
+  label: string,
+): StagingMatrixResult[] {
+  if (!Array.isArray(value) || value.length !== expectedCaseIds.length) {
+    throw new Error(`${label} is incomplete.`);
+  }
+  const results = value.map((entry, index) => {
+    const result = assertPlainRecord(entry, `${label}[${index}]`);
+    assertExactKeys(result, ['caseId', 'status', 'observationCode'], `${label}[${index}]`);
+    if (result.caseId !== expectedCaseIds[index] || result.status !== 'passed') {
+      throw new Error(`${label} case order or status is incomplete.`);
+    }
+    return {
+      caseId: exactString(result.caseId, `${label}.caseId`),
+      status: 'passed' as const,
+      observationCode: exactString(result.observationCode, `${label}.observationCode`),
+    };
+  });
+  return results;
+}
+
+const DESTRUCTION_FIELDS = [
+  'fixturesAbsent',
+  'workerAbsent',
+  'databaseAbsent',
+  'r2Absent',
+  'imagesAbsent',
+  'emailAbsent',
+  'rateLimitsAbsent',
+  'workflowsAbsent',
+  'assetsAbsent',
+] as const satisfies readonly (keyof StagingResourceDestruction)[];
+
+function assertDestroyed(value: unknown, label: string): StagingResourceDestruction {
+  const result = assertPlainRecord(value, label);
+  assertExactKeys(result, DESTRUCTION_FIELDS, label);
+  for (const field of DESTRUCTION_FIELDS) {
+    if (result[field] !== true) throw new Error(`${label}.${field} must be verified true.`);
+  }
+  return value as StagingResourceDestruction;
+}
+
+function assertSource(value: unknown, label: string): StagingConformanceArtifactV1['sources']['phase2'] {
+  const source = assertPlainRecord(value, label);
+  assertExactKeys(source, ['sha', 'manifestSha256', 'migrationManifestSha256'], label);
+  return {
+    sha: assertCandidateSha(source.sha),
+    manifestSha256: assertSha256(source.manifestSha256, `${label}.manifestSha256`),
+    migrationManifestSha256: assertSha256(source.migrationManifestSha256, `${label}.migrationManifestSha256`),
+  };
+}
+
+function assertDeployment(value: unknown, label: string): StagingDeploymentEvidence {
+  const deployment = assertPlainRecord(value, label);
+  assertExactKeys(deployment, ['versionId', 'tagSha', 'metadataSha', 'trafficPercent'], label);
+  if (typeof deployment.versionId !== 'string' || !RUN_ID_PATTERN.test(deployment.versionId)) {
+    throw new Error(`${label}.versionId is invalid.`);
+  }
+  if (deployment.trafficPercent !== 100) throw new Error(`${label} must be at 100 percent traffic.`);
+  return {
+    versionId: deployment.versionId,
+    tagSha: assertCandidateSha(deployment.tagSha),
+    metadataSha: assertCandidateSha(deployment.metadataSha),
+    trafficPercent: 100,
+  };
+}
+
+function assertZeroProof(value: unknown): StagingConformanceArtifactV1['migrations']['zeroCounts'] {
+  const counts = assertPlainRecord(value, 'Staging zero counts');
+  assertExactKeys(counts, [
+    'legacyRows', 'blockingJobs', 'incompleteActiveSets', 'uploadsWithoutActiveSet',
+  ], 'Staging zero counts');
+  for (const [name, count] of Object.entries(counts)) {
+    if (count !== 0) throw new Error(`Staging zero count ${name} must be exactly zero.`);
+  }
+  return value as StagingConformanceArtifactV1['migrations']['zeroCounts'];
+}
+
+export function assertStagingConformanceArtifact(value: unknown): StagingConformanceArtifactV1 {
+  const artifact = assertPlainRecord(value, 'Staging conformance artifact');
+  assertExactKeys(artifact, [
+    'kind', 'schemaVersion', 'status', 'candidateSha', 'runId', 'approvedMainSha',
+    'sources', 'authorizations', 'targets', 'migrations', 'deployments', 'matrices',
+    'cleanup', 'startedAt', 'finishedAt',
+  ], 'Staging conformance artifact');
+  if (artifact.kind !== 'candidary.staging-conformance'
+    || artifact.schemaVersion !== 1 || artifact.status !== 'passed') {
+    throw new Error('Staging conformance artifact is not one passing v1 artifact.');
+  }
+  const candidateSha = assertCandidateSha(artifact.candidateSha);
+  const runId = assertCanonicalRunId(artifact.runId);
+  const approvedMainSha = assertCandidateSha(artifact.approvedMainSha);
+  const sources = assertPlainRecord(artifact.sources, 'Staging sources');
+  assertExactKeys(sources, ['phase2', 'phase3'], 'Staging sources');
+  const phase2 = assertSource(sources.phase2, 'Phase-2 source');
+  const phase3 = assertSource(sources.phase3, 'Phase-3 source');
+  if (phase3.sha !== candidateSha) throw new Error('Staging artifact candidate does not match its Phase-3 source.');
+
+  const authorizations = assertPlainRecord(artifact.authorizations, 'Staging authorizations');
+  assertExactKeys(authorizations, ['reviewSha256', 'stagingSha256'], 'Staging authorizations');
+  const parsedAuthorizations = {
+    reviewSha256: assertSha256(authorizations.reviewSha256, 'reviewSha256'),
+    stagingSha256: assertSha256(authorizations.stagingSha256, 'stagingSha256'),
+  };
+  const targets = assertPlainRecord(artifact.targets, 'Staging targets');
+  assertExactKeys(targets, ['workflowConformanceSha256', 'cutoverSha256'], 'Staging targets');
+  const parsedTargets = {
+    workflowConformanceSha256: assertSha256(targets.workflowConformanceSha256, 'workflow target digest'),
+    cutoverSha256: assertSha256(targets.cutoverSha256, 'cutover target digest'),
+  };
+
+  const migrations = assertPlainRecord(artifact.migrations, 'Staging migrations');
+  assertExactKeys(migrations, [
+    'phase2Ledger', 'phase3Ledger', 'bootstrapSha256', 'phase3MigrationSha256',
+    'phase3BundleSha256', 'triggerNames', 'zeroCounts', 'integrity', 'foreignKeyRows',
+  ], 'Staging migrations');
+  const phase2Ledger = exactStringArray(migrations.phase2Ledger, 'Phase-2 ledger');
+  const phase3Ledger = exactStringArray(migrations.phase3Ledger, 'Phase-3 ledger');
+  if (!sameStrings(phase2Ledger, PHASE_2_LEDGER)
+    || !sameStrings(phase3Ledger, [...PHASE_2_LEDGER, PHASE_3_MIGRATION])) {
+    throw new Error('Staging migration ledgers are incomplete or out of order.');
+  }
+  const triggerNames = exactStringArray(migrations.triggerNames, 'Phase-3 trigger names');
+  if (!sameStrings(triggerNames, [...PRODUCTION_TRIGGER_NAMES])) {
+    throw new Error('Staging Phase-3 trigger evidence is incomplete or unexpected.');
+  }
+  if (migrations.integrity !== 'ok' || migrations.foreignKeyRows !== 0) {
+    throw new Error('Staging migration integrity evidence is not green.');
+  }
+  const parsedMigrations = {
+    phase2Ledger,
+    phase3Ledger,
+    bootstrapSha256: assertSha256(migrations.bootstrapSha256, 'bootstrapSha256'),
+    phase3MigrationSha256: assertSha256(migrations.phase3MigrationSha256, 'phase3MigrationSha256'),
+    phase3BundleSha256: assertSha256(migrations.phase3BundleSha256, 'phase3BundleSha256'),
+    triggerNames,
+    zeroCounts: assertZeroProof(migrations.zeroCounts),
+    integrity: 'ok' as const,
+    foreignKeyRows: 0 as const,
+  };
+
+  const deployments = assertPlainRecord(artifact.deployments, 'Staging deployments');
+  assertExactKeys(deployments, [
+    'workflowConformance', 'phase2Cutover', 'phase3Cutover',
+  ], 'Staging deployments');
+  const parsedDeployments = {
+    workflowConformance: assertDeployment(deployments.workflowConformance, 'Workflow-conformance deployment'),
+    phase2Cutover: assertDeployment(deployments.phase2Cutover, 'Phase-2 cutover deployment'),
+    phase3Cutover: assertDeployment(deployments.phase3Cutover, 'Phase-3 cutover deployment'),
+  };
+  if (parsedDeployments.workflowConformance.tagSha !== candidateSha
+    || parsedDeployments.workflowConformance.metadataSha !== candidateSha
+    || parsedDeployments.phase2Cutover.tagSha !== phase2.sha
+    || parsedDeployments.phase2Cutover.metadataSha !== phase2.sha
+    || parsedDeployments.phase3Cutover.tagSha !== candidateSha
+    || parsedDeployments.phase3Cutover.metadataSha !== candidateSha) {
+    throw new Error('Staging deployment tags or CF_VERSION_METADATA do not bind the source candidates.');
+  }
+
+  const matrices = assertPlainRecord(artifact.matrices, 'Staging matrices');
+  assertExactKeys(matrices, [
+    'images', 'backfillWorkflow', 'renderWorkflow', 'routes', 'browser',
+  ], 'Staging matrices');
+  const parsedMatrices = {
+    images: assertMatrix(matrices.images, STAGING_IMAGES_CASE_IDS, 'Images matrix'),
+    backfillWorkflow: assertMatrix(matrices.backfillWorkflow, STAGING_WORKFLOW_CASE_IDS, 'Backfill Workflow matrix'),
+    renderWorkflow: assertMatrix(matrices.renderWorkflow, STAGING_WORKFLOW_CASE_IDS, 'Render Workflow matrix'),
+    routes: assertMatrix(matrices.routes, STAGING_ROUTE_CASE_IDS, 'Route matrix'),
+    browser: assertMatrix(matrices.browser, STAGING_BROWSER_CASE_IDS, 'Browser matrix'),
+  };
+  const cleanup = assertPlainRecord(artifact.cleanup, 'Staging cleanup');
+  assertExactKeys(cleanup, ['workflowConformance', 'cutover'], 'Staging cleanup');
+  const parsedCleanup = {
+    workflowConformance: assertDestroyed(cleanup.workflowConformance, 'Workflow-conformance destruction'),
+    cutover: assertDestroyed(cleanup.cutover, 'Cutover destruction'),
+  };
+  const startedAt = assertRecordedAt(artifact.startedAt);
+  const finishedAt = assertRecordedAt(artifact.finishedAt);
+  if (finishedAt < startedAt) throw new Error('Staging artifact finishes before it starts.');
+  assertSanitizedValue(artifact);
+  return {
+    kind: 'candidary.staging-conformance', schemaVersion: 1, status: 'passed',
+    candidateSha, runId, approvedMainSha,
+    sources: { phase2, phase3 }, authorizations: parsedAuthorizations, targets: parsedTargets,
+    migrations: parsedMigrations, deployments: parsedDeployments, matrices: parsedMatrices,
+    cleanup: parsedCleanup, startedAt, finishedAt,
+  };
+}
+
+export function writeStagingConformanceArtifact(
+  path: string,
+  value: unknown,
+): WrittenEvidence {
+  const artifact = assertStagingConformanceArtifact(value);
+  return { path, sha256: writeExclusiveCanonical(path, artifact) };
+}
+
+function assertRegularEvidenceFile(path: string, label: string): string {
+  const absolute = resolve(path);
+  const stat = lstatSync(absolute);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular nonsymlinked file.`);
+  return absolute;
+}
+
+function assertArtifactBindings(
+  artifact: StagingConformanceArtifactV1,
+  expected: StagingArtifactBindings,
+): void {
+  const actual: StagingArtifactBindings = {
+    candidateSha: artifact.candidateSha,
+    phase2Sha: artifact.sources.phase2.sha,
+    approvedMainSha: artifact.approvedMainSha,
+    phase2ManifestSha256: artifact.sources.phase2.manifestSha256,
+    candidateManifestSha256: artifact.sources.phase3.manifestSha256,
+    phase2MigrationManifestSha256: artifact.sources.phase2.migrationManifestSha256,
+    phase3MigrationManifestSha256: artifact.sources.phase3.migrationManifestSha256,
+    reviewAuthorizationSha256: artifact.authorizations.reviewSha256,
+    stagingAuthorizationSha256: artifact.authorizations.stagingSha256,
+    workflowTargetSha256: artifact.targets.workflowConformanceSha256,
+    cutoverTargetSha256: artifact.targets.cutoverSha256,
+    bootstrapSha256: artifact.migrations.bootstrapSha256,
+    phase3MigrationSha256: artifact.migrations.phase3MigrationSha256,
+    phase3BundleSha256: artifact.migrations.phase3BundleSha256,
+  };
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    throw new Error('Staging artifact does not bind the independently verified source digests.');
+  }
+}
+
+export function verifyStagingConformanceArtifactFile(
+  path: string,
+  expected: StagingArtifactBindings,
+): { artifact: StagingConformanceArtifactV1; sha256: string } {
+  const artifactPath = assertRegularEvidenceFile(path, 'Staging artifact');
+  const sidecarPath = assertRegularEvidenceFile(`${artifactPath}.sha256`, 'Staging artifact sidecar');
+  const bytes = readFileSync(artifactPath, 'utf8');
+  const digest = sha256(bytes);
+  const sidecarDigest = parseSidecar(artifactPath, readFileSync(sidecarPath, 'utf8'));
+  if (digest !== sidecarDigest) throw new Error('Staging artifact sidecar digest does not match.');
+  const parsed = JSON.parse(bytes) as unknown;
+  const artifact = assertStagingConformanceArtifact(parsed);
+  if (bytes !== `${canonicalJson(artifact)}\n`) throw new Error('Staging artifact bytes are not canonical.');
+  assertArtifactBindings(artifact, expected);
+  return { artifact, sha256: digest };
 }

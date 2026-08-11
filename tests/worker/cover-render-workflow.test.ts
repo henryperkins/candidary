@@ -24,6 +24,7 @@ import type { AppEnv } from '../../worker/env';
 
 const now = new Date('2026-08-04T12:00:00.000Z');
 const HEX_64 = 'a'.repeat(64);
+const OTHER_HEX = 'b'.repeat(64);
 const OPERATION = '5f3a2b18-6c2d-4f0e-9a71-0c2d1e8b4a55';
 const FENCE_HOLD = '9999-12-31T23:59:59.999Z';
 const SMALL_MANIFEST_JSON = JSON.stringify({
@@ -42,8 +43,22 @@ const SMALL_MANIFEST_JSON = JSON.stringify({
     { profile: 'wide-expanded', density: '1x', format: 'jpeg' },
   ],
 });
+const COMPETING_PRESET_CONFIG = JSON.stringify({
+  version: 1,
+  source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+  effect: 'natural',
+});
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+async function moveEventToCompetingPreset(eventId: string, revision: number): Promise<void> {
+  await testEnv.DB.prepare(`
+    UPDATE events
+    SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL,
+        cover_revision = ?
+    WHERE id = ?
+  `).bind(COMPETING_PRESET_CONFIG, revision, eventId).run();
+}
 
 /**
  * A platform that can tell the coordinator nothing.
@@ -101,6 +116,76 @@ async function publication(access: Access, master: { width: number; height: numb
     now,
   });
   return { draft, receipt: accepted.receipt };
+}
+
+async function seedActiveUploadCover(access: Access, receiptExpiry: string) {
+  const masterId = 'master-active';
+  const setId = 'set-active';
+  const objectKey = coverMasterKey(access.event.id, masterId);
+  const timestamp = now.toISOString();
+  await insertCoverMaster(testEnv.DB, {
+    id: masterId, eventId: access.event.id, objectKey,
+    byteSize: 900_000, width: 2480, height: 1680, sha256: OTHER_HEX,
+    normalizationVersion: 1, normalizationRung: 1, now,
+  });
+  await testEnv.MEDIA_BUCKET.put(objectKey, new Uint8Array([4, 5, 6]));
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_sets (
+      id, event_id, master_id, recipe_json, recipe_sha256, state,
+      required_slots, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'staging', 12, ?)
+  `).bind(
+    setId, access.event.id, masterId,
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    OTHER_HEX, timestamp,
+  ).run();
+  await testEnv.DB.batch(EVENT_COVER_PROFILES.flatMap((profile) => (
+    ['webp', 'jpeg'] as const
+  ).map((format) => testEnv.DB.prepare(`
+    INSERT INTO event_cover_render_objects (
+      id, render_set_id, event_id, profile_id, density, format, object_key,
+      content_type, byte_size, width, height, quality_rung, sha256, created_at
+    ) VALUES (?, ?, ?, ?, '1x', ?, ?, ?, 100, ?, ?, 1, ?, ?)
+  `).bind(
+    `${setId}-${profile.id}-${format}`,
+    setId,
+    access.event.id,
+    profile.id,
+    format,
+    `events/${access.event.id}/cover/rendered/${setId}/${profile.id}-1x.${format}`,
+    format === 'webp' ? 'image/webp' : 'image/jpeg',
+    profile.width,
+    profile.height,
+    HEX_64,
+    timestamp,
+  ))));
+  await testEnv.DB.prepare(`
+    UPDATE event_cover_render_sets
+    SET state = 'active', manifest_sha256 = ?, published_revision = 1,
+        ready_at = ?, published_at = ?
+    WHERE id = ?
+  `).bind(HEX_64, timestamp, timestamp, setId).run();
+  await testEnv.DB.prepare(`
+    UPDATE events SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?,
+      cover_revision = 1 WHERE id = ?
+  `).bind(
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    objectKey, setId, access.event.id,
+  ).run();
+  await testEnv.DB.prepare(`
+    INSERT INTO event_cover_publish_receipts (
+      event_id, operation_id, render_set_id, request_sha256, action,
+      expected_revision, status, dependency_versions_json, completed_profiles,
+      required_profiles, applied_revision, result_cover_json, retryable,
+      dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+    ) VALUES (?, 'old-upload-operation', ?, ?, 'publish', 0, 'applied', '{}',
+      6, 6, 1, ?, 0, 'confirmed', 0, ?, ?, ?)
+  `).bind(
+    access.event.id, setId, OTHER_HEX,
+    '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
+    timestamp, timestamp, receiptExpiry,
+  ).run();
+  return { masterId, setId, objectKey };
 }
 
 it('keeps a legacy-expired active render fence so a later profile write remains fenced', async () => {
@@ -222,6 +307,58 @@ function envBeforeFirstBatch(action: () => Promise<void>): AppEnv {
   return { ...testEnv, DB: db };
 }
 
+function envAfterFirstBatch(action: () => Promise<void>): AppEnv {
+  let batches = 0;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          const result = await target.batch(statements);
+          batches += 1;
+          if (batches === 1) await action();
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
+}
+
+function zeroRenderTailEnv(fragment: string): { env: AppEnv; wasInjected: () => boolean } {
+  let injected = false;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (sql: string) => {
+          if (!injected && sql.includes(fragment)) {
+            injected = true;
+            return target.prepare(`${sql}\nAND 0`);
+          }
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { env: { ...testEnv, DB: db }, wasInjected: () => injected };
+}
+
+function envRejectingManifestReads(): AppEnv {
+  const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
+    get(target, property) {
+      if (property === 'get') {
+        return async () => { throw new Error('ready checkpoint must be reused'); };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, MEDIA_BUCKET: bucket };
+}
+
 function envOnFirstObjectRead(action: () => Promise<void>): AppEnv {
   let acted = false;
   const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
@@ -329,8 +466,7 @@ describe('cover render preflight', () => {
     const beforeReceipt = await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
     const beforeSet = await row('SELECT * FROM event_cover_render_sets WHERE event_id = ?', access.event.id);
     const raced = envBeforeFirstBatch(async () => {
-      await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-        .bind(access.event.id).run();
+      await moveEventToCompetingPreset(access.event.id, 1);
     });
 
     const preflight = await coverRenderPreflight(raced, {
@@ -403,8 +539,7 @@ describe('cover render preflight', () => {
     const { draft } = await row<{ draft: string }>(
       'SELECT draft_id AS draft FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION,
     );
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 9 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id, 1);
 
     const recording = withRecordingImages();
     const preflight = await coverRenderPreflight(recording.env, {
@@ -590,22 +725,16 @@ describe('cover render profile steps', () => {
 
 describe('cover render finalize', () => {
   let access: Access;
-  const legacy = (id: string) => `events/${id}/cover/9f1c-porch.jpg`;
-
   beforeEach(async () => {
     await resetDatabase();
     access = await eventAccess();
   });
 
   async function prepared(
-    withLegacyCover = false,
+    _withLegacyCover = false,
     master: { width: number; height: number } = { width: 2480, height: 1680 },
   ) {
-    if (withLegacyCover) {
-      await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-        .bind(legacy(access.event.id), access.event.id).run();
-      await testEnv.MEDIA_BUCKET.put(legacy(access.event.id), new Uint8Array([1, 2, 3]));
-    }
+    void _withLegacyCover;
     const result = await publication(access, master);
     const env = renderEnv();
     await coverRenderPreflight(env, { eventId: access.event.id, operationId: OPERATION }, now);
@@ -613,8 +742,8 @@ describe('cover render finalize', () => {
     return result;
   }
 
-  it('commits the pointer, the retirement, both set transitions, and both terminal flips together', async () => {
-    const { draft } = await prepared(true);
+  it('commits the pointer, set transition, draft, receipt, and fence together', async () => {
+    const { draft } = await prepared(false);
     const finalizedAt = new Date('2026-08-11T12:00:00.000Z');
     const outcome = await coverRenderFinalize(testEnv, {
       eventId: access.event.id, operationId: OPERATION,
@@ -636,11 +765,8 @@ describe('cover render finalize', () => {
     expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE event_id = ?', access.event.id))
       .toEqual({ expires_at: '2026-09-11T12:00:00.000Z' });
 
-    // The displaced legacy original is inventoried by the same statements that
-    // moved the pointer, and is still in R2.
-    expect(await row('SELECT object_key, reason FROM event_cover_retired_legacy_objects WHERE event_id = ?', access.event.id))
-      .toEqual({ object_key: legacy(access.event.id), reason: 'replaced' });
-    expect(await testEnv.MEDIA_BUCKET.head(legacy(access.event.id))).not.toBeNull();
+    expect(await row('SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?', access.event.id))
+      .toEqual({ count: 0 });
   });
 
   it('stores the SHA-256 of the exact derived manifest rather than the recipe', async () => {
@@ -656,6 +782,180 @@ describe('cover render finalize', () => {
     `, access.event.id);
     expect(set.manifest_sha256).toBe(await testSha256(SMALL_MANIFEST_JSON));
     expect(set.manifest_sha256).not.toBe(set.recipe_sha256);
+  });
+
+  it('persists and reuses the ready/finalizing checkpoint before the pointer swap', async () => {
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    const paused = envAfterFirstBatch(async () => {
+      throw new Error('pause after ready checkpoint');
+    });
+
+    await expect(coverRenderFinalize(paused, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).rejects.toThrow('pause after ready checkpoint');
+
+    expect(await row(`
+      SELECT state, manifest_sha256, ready_at, published_revision, published_at
+      FROM event_cover_render_sets WHERE id = ?
+    `, receipt.render_set_id)).toEqual({
+      state: 'ready',
+      manifest_sha256: await testSha256(SMALL_MANIFEST_JSON),
+      ready_at: now.toISOString(),
+      published_revision: null,
+      published_at: null,
+    });
+    expect(await row(`
+      SELECT status, applied_revision, result_cover_json
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `, OPERATION)).toEqual({
+      status: 'finalizing', applied_revision: null, result_cover_json: null,
+    });
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'publishing' });
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual({
+      cover_revision: 0, cover_object_key: null, cover_render_set_id: null,
+    });
+
+    await expect(coverRenderFinalize(envRejectingManifestReads(), {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).resolves.toMatchObject({ status: 'applied', appliedRevision: 1 });
+  });
+
+  it('settles one atomic conflict when the revision changes after the ready checkpoint', async () => {
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    const raced = envAfterFirstBatch(async () => {
+      await moveEventToCompetingPreset(access.event.id, 1);
+    });
+
+    await expect(coverRenderFinalize(raced, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).resolves.toMatchObject({ status: 'conflict', appliedRevision: null });
+
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual({
+      cover_revision: 1,
+      cover_object_key: null,
+      cover_render_set_id: null,
+    });
+    expect(await row(`
+      SELECT status, applied_revision, result_cover_json FROM event_cover_publish_receipts
+      WHERE operation_id = ?
+    `, OPERATION)).toEqual({
+      status: 'conflict', applied_revision: null, result_cover_json: null,
+    });
+    expect(await row(`
+      SELECT state, manifest_sha256, ready_at, abandoned_reason
+      FROM event_cover_render_sets WHERE id = ?
+    `, receipt.render_set_id)).toEqual({
+      state: 'abandoned',
+      manifest_sha256: await testSha256(SMALL_MANIFEST_JSON),
+      ready_at: now.toISOString(),
+      abandoned_reason: 'revision-conflict',
+    });
+    expect(await row('SELECT state FROM event_cover_drafts WHERE id = ?', draft.id))
+      .toEqual({ state: 'ready' });
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `, access.event.id)).toEqual({ count: 0 });
+    expect(await row('SELECT expires_at FROM event_cover_workflow_fences WHERE event_id = ?', access.event.id))
+      .toEqual({ expires_at: '2026-09-04T12:00:00.000Z' });
+  });
+
+  it.each([
+    ['applied receipt', "SET status = 'applied', applied_revision"],
+    ['conflict receipt', "SET status = 'conflict'"],
+  ])('rolls the complete final graph back when the %s tail changes zero rows', async (
+    _name,
+    fragment,
+  ) => {
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    await expect(coverRenderFinalize(envAfterFirstBatch(async () => {
+      throw new Error('checkpoint only');
+    }), { eventId: access.event.id, operationId: OPERATION }, now))
+      .rejects.toThrow('checkpoint only');
+    if (fragment.includes('conflict')) {
+      await moveEventToCompetingPreset(access.event.id, 1);
+    }
+    const beforeEvent = await row('SELECT * FROM events WHERE id = ?', access.event.id);
+    const beforeSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id);
+    const beforeDraft = await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id);
+    const beforeReceipt = await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
+    const fault = zeroRenderTailEnv(fragment);
+
+    await expect(coverRenderFinalize(fault.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await row('SELECT * FROM events WHERE id = ?', access.event.id)).toEqual(beforeEvent);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id))
+      .toEqual(beforeSet);
+    expect(await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id)).toEqual(beforeDraft);
+    expect(await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
+      .toEqual(beforeReceipt);
+  });
+
+  it('retains a displaced normalized upload through the longest referencing receipt', async () => {
+    const retainedUntil = '2026-08-20T12:00:00.000Z';
+    const active = await seedActiveUploadCover(access, retainedUntil);
+    await prepared(false, { width: 620, height: 420 });
+
+    await expect(coverRenderFinalize(testEnv, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).resolves.toMatchObject({ status: 'applied', appliedRevision: 2 });
+
+    expect(await row(`
+      SELECT state, retired_at, cleanup_after FROM event_cover_render_sets WHERE id = ?
+    `, active.setId)).toEqual({
+      state: 'retired', retired_at: now.toISOString(), cleanup_after: retainedUntil,
+    });
+    expect(await row('SELECT cleanup_after FROM event_cover_masters WHERE id = ?', active.masterId))
+      .toEqual({ cleanup_after: retainedUntil });
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `, access.event.id)).toEqual({ count: 0 });
+    expect(await testEnv.MEDIA_BUCKET.head(active.objectKey)).not.toBeNull();
+  });
+
+  it.each([
+    ['displaced set', "SET state = 'retired', retired_at"],
+    ['displaced master', 'UPDATE event_cover_masters'],
+  ])('rolls the upload-over-upload graph back when the %s tail changes zero rows', async (
+    _name,
+    fragment,
+  ) => {
+    const active = await seedActiveUploadCover(access, '2026-08-20T12:00:00.000Z');
+    const { draft, receipt } = await prepared(false, { width: 620, height: 420 });
+    await expect(coverRenderFinalize(envAfterFirstBatch(async () => {
+      throw new Error('checkpoint only');
+    }), { eventId: access.event.id, operationId: OPERATION }, now))
+      .rejects.toThrow('checkpoint only');
+    const beforeEvent = await row('SELECT * FROM events WHERE id = ?', access.event.id);
+    const beforeOldSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', active.setId);
+    const beforeOldMaster = await row('SELECT * FROM event_cover_masters WHERE id = ?', active.masterId);
+    const beforeNewSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id);
+    const beforeDraft = await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id);
+    const beforeReceipt = await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION);
+    const fault = zeroRenderTailEnv(fragment);
+
+    await expect(coverRenderFinalize(fault.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, now)).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await row('SELECT * FROM events WHERE id = ?', access.event.id)).toEqual(beforeEvent);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', active.setId))
+      .toEqual(beforeOldSet);
+    expect(await row('SELECT * FROM event_cover_masters WHERE id = ?', active.masterId))
+      .toEqual(beforeOldMaster);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', receipt.render_set_id))
+      .toEqual(beforeNewSet);
+    expect(await row('SELECT * FROM event_cover_drafts WHERE id = ?', draft.id)).toEqual(beforeDraft);
+    expect(await row('SELECT * FROM event_cover_publish_receipts WHERE operation_id = ?', OPERATION))
+      .toEqual(beforeReceipt);
   });
 
   it('refuses a count-preserving substitution outside the derived tuple set', async () => {
@@ -689,9 +989,8 @@ describe('cover render finalize', () => {
   });
 
   it('records a conflict and touches no active pointer when the final guard loses', async () => {
-    const { draft } = await prepared(true);
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
-      .bind(access.event.id).run();
+    const { draft } = await prepared(false);
+    await moveEventToCompetingPreset(access.event.id, 1);
 
     const outcome = await coverRenderFinalize(testEnv, {
       eventId: access.event.id, operationId: OPERATION,
@@ -699,9 +998,9 @@ describe('cover render finalize', () => {
 
     expect(outcome.status).toBe('conflict');
     const event = (await new EventsRepository(testEnv.DB).getById(access.event.id))!;
-    expect(event.coverRevision).toBe(7);
+    expect(event.coverRevision).toBe(1);
     // The winning cover is untouched, and no retirement row was written.
-    expect(event.coverObjectKey).toBe(legacy(access.event.id));
+    expect(event.coverObjectKey).toBeNull();
     expect(event.coverRenderSetId).toBeNull();
     expect(await row('SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?', access.event.id))
       .toEqual({ count: 0 });
@@ -774,8 +1073,7 @@ describe('cover render finalize', () => {
     expect((await coverRenderPreflight(
       renderEnv(), { eventId: access.event.id, operationId: OPERATION }, now,
     )).shouldRender).toBe(true);
-    await testEnv.DB.prepare('UPDATE events SET cover_revision = 1 WHERE id = ?')
-      .bind(access.event.id).run();
+    await moveEventToCompetingPreset(access.event.id, 1);
     const recording = withRecordingImages({ encode: () => ({
       bytes: new Uint8Array(20_000).fill(2), width: 0, height: 0, contentType: 'image/webp',
     }) });
@@ -788,14 +1086,10 @@ describe('cover render finalize', () => {
     expect(recording.calls).toHaveLength(0);
   });
 
-  it('cannot adopt a competing removal that reached the same next revision', async () => {
-    const { draft } = await prepared(true);
+  it('cannot adopt a competing semantic publication that reached the same next revision', async () => {
+    const { draft } = await prepared(false);
     const raced = envBeforeFirstBatch(async () => {
-      await testEnv.DB.prepare(`
-        UPDATE events
-        SET cover_revision = 1, cover_object_key = NULL, cover_render_set_id = NULL
-        WHERE id = ?
-      `).bind(access.event.id).run();
+      await moveEventToCompetingPreset(access.event.id, 1);
     });
 
     const outcome = await coverRenderFinalize(raced, {
@@ -862,11 +1156,15 @@ describe('cover render finalize', () => {
   });
 
   it('does not let a lost-guard conflict writer overwrite a permanent deletion result', async () => {
-    const { draft } = await prepared(true);
+    const { draft } = await prepared(false);
     const raced = envBeforeFirstBatch(async () => {
       await testEnv.DB.batch([
-        testEnv.DB.prepare('UPDATE events SET cover_revision = 7 WHERE id = ?')
-          .bind(access.event.id),
+        testEnv.DB.prepare(`
+          UPDATE events
+          SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL,
+              cover_revision = 1
+          WHERE id = ?
+        `).bind(COMPETING_PRESET_CONFIG, access.event.id),
         testEnv.DB.prepare(`
           UPDATE event_cover_publish_receipts
           SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED'

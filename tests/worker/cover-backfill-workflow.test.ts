@@ -38,7 +38,7 @@ import {
 } from '../../worker/workflows/cleanup';
 import {
   eventAccess,
-  resetDatabase,
+  resetDatabaseToPhase2CoverSchema as resetDatabase,
   seedEventCoverGraph,
   testEnv,
   withRecordingImages,
@@ -401,6 +401,58 @@ function envBeforeFirstBatch(action: () => Promise<void>): AppEnv {
     },
   });
   return { ...testEnv, DB: db };
+}
+
+function envAfterFirstBatch(action: () => Promise<void>): AppEnv {
+  let batches = 0;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          const result = await target.batch(statements);
+          batches += 1;
+          if (batches === 1) await action();
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, DB: db };
+}
+
+function zeroBackfillTailEnv(fragment: string): { env: AppEnv; wasInjected: () => boolean } {
+  let injected = false;
+  const db = new Proxy(testEnv.DB, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (sql: string) => {
+          if (!injected && sql.includes(fragment)) {
+            injected = true;
+            return target.prepare(`${sql}\nAND 0`);
+          }
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { env: { ...testEnv, DB: db }, wasInjected: () => injected };
+}
+
+function backfillEnvRejectingManifestReads(): AppEnv {
+  const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
+    get(target, property) {
+      if (property === 'get') {
+        return async () => { throw new Error('backfill ready checkpoint must be reused'); };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { ...testEnv, MEDIA_BUCKET: bucket };
 }
 
 /** Injects a classification-to-write race while every read still uses real D1. */
@@ -1137,6 +1189,68 @@ describe('backfill finalize', () => {
       .toEqual({ expires_at: '2026-09-05T12:00:00.000Z' });
     expect(await row('SELECT applied_count, queued_count FROM event_cover_backfill_runs WHERE id = ?', RUN))
       .toEqual({ applied_count: 1, queued_count: 0 });
+  });
+
+  it('persists and reuses the backfill ready/finalizing checkpoint before the pointer swap', async () => {
+    const pinned = await row<{ render_set_id: string; manifest_sha256: string }>(`
+      SELECT render_set_id, manifest_sha256 FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB);
+    const beforeEvent = await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id);
+
+    await expect(coverBackfillFinalize(envAfterFirstBatch(async () => {
+      throw new Error('pause after backfill ready checkpoint');
+    }), payload, now)).rejects.toThrow('pause after backfill ready checkpoint');
+
+    expect(await row(`
+      SELECT status, manifest_sha256, terminal_at FROM event_cover_backfill_jobs WHERE id = ?
+    `, JOB)).toEqual({
+      status: 'finalizing', manifest_sha256: pinned.manifest_sha256, terminal_at: null,
+    });
+    expect(await row(`
+      SELECT state, manifest_sha256, ready_at, published_revision, published_at
+      FROM event_cover_render_sets WHERE id = ?
+    `, pinned.render_set_id)).toEqual({
+      state: 'ready', manifest_sha256: pinned.manifest_sha256, ready_at: now.toISOString(),
+      published_revision: null, published_at: null,
+    });
+    expect(await row(`
+      SELECT cover_revision, cover_object_key, cover_render_set_id FROM events WHERE id = ?
+    `, access.event.id)).toEqual(beforeEvent);
+
+    await expect(coverBackfillFinalize(backfillEnvRejectingManifestReads(), payload, now))
+      .resolves.toMatchObject({ status: 'applied', appliedRevision: 1 });
+  });
+
+  it.each([
+    ['applied job', "SET status = 'applied'"],
+    ['set activation', "SET state = 'active'"],
+  ])('rolls the complete backfill graph back when the %s tail changes zero rows', async (
+    _name,
+    fragment,
+  ) => {
+    await expect(coverBackfillFinalize(envAfterFirstBatch(async () => {
+      throw new Error('checkpoint only');
+    }), payload, now)).rejects.toThrow('checkpoint only');
+    const job = await row<{ render_set_id: string }>(
+      'SELECT render_set_id FROM event_cover_backfill_jobs WHERE id = ?', JOB,
+    );
+    const beforeEvent = await row('SELECT * FROM events WHERE id = ?', access.event.id);
+    const beforeJob = await row('SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB);
+    const beforeSet = await row('SELECT * FROM event_cover_render_sets WHERE id = ?', job.render_set_id);
+    const fault = zeroBackfillTailEnv(fragment);
+
+    await expect(coverBackfillFinalize(fault.env, payload, now)).rejects.toThrow();
+
+    expect(fault.wasInjected()).toBe(true);
+    expect(await row('SELECT * FROM events WHERE id = ?', access.event.id)).toEqual(beforeEvent);
+    expect(await row('SELECT * FROM event_cover_backfill_jobs WHERE id = ?', JOB)).toEqual(beforeJob);
+    expect(await row('SELECT * FROM event_cover_render_sets WHERE id = ?', job.render_set_id))
+      .toEqual(beforeSet);
+    expect(await row(`
+      SELECT count(*) AS count FROM event_cover_retired_legacy_objects WHERE event_id = ?
+    `, access.event.id)).toEqual({ count: 0 });
   });
 
   it('moves the revision exactly once across a replay', async () => {

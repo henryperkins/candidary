@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { dirname, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { presetCoverAssetPath } from '../shared/event-cover-assets.ts';
 import type * as BuildCoverPresetsModule from './build-cover-presets';
 
 /**
@@ -158,6 +159,17 @@ export async function verifyCoverPresets(options: {
   let totalBytes = 0;
   let worstCeilingUse = { path: '', ratio: 0 };
   for (const slot of slots) {
+    const sharedPath = presetCoverAssetPath(
+      build.PRESET_ASSET_VERSION,
+      slot.presetId,
+      slot.effect,
+      slot.profile,
+      slot.density,
+      slot.format,
+    );
+    if (slot.path !== sharedPath) {
+      failures.push(`${slot.path} does not match the shared preset asset path ${sharedPath}.`);
+    }
     const file = claimed.get(slot.path);
     if (!file) {
       failures.push(`Missing manifest entry for ${slot.path}.`);

@@ -4,11 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventCoverProfileId } from '../../shared/event-cover';
 import { ResponsiveEventCover } from '../../src/components/ResponsiveEventCover';
 
-/**
- * The reader ships complete and wired to nothing. `tests/e2e/security.spec.ts`
- * still asserts the guest hero's `background-image` matches `/blob:/`, which is
- * the standing proof that phase 1 left it unwired.
- */
+/** The shared reader is the only guest and Manager cover renderer. */
 
 let observedWidth = 390;
 
@@ -80,6 +76,30 @@ afterEach(() => {
 });
 
 describe('responsive event cover', () => {
+  it('does not construct a slot before the container has been measured', () => {
+    class DeferredResizeObserver {
+      constructor(callback: ResizeObserverCallback) { void callback; }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', DeferredResizeObserver);
+    const observedSource = vi.fn(sourceFor);
+
+    const { container } = render(<ResponsiveEventCover
+      cover={{
+        revision: 3,
+        hasCover: true,
+        available2xProfiles: [],
+        surfaceTreatment: 'none',
+      }}
+      sourceFor={observedSource}
+    />);
+
+    expect(container.querySelector('picture')).toBeNull();
+    expect(observedSource).not.toHaveBeenCalled();
+  });
+
   it('installs one profile only after the container is measured', () => {
     renderCover({ containerWidth: 390 });
     expect(frame().dataset.coverProfile).toBe('compact-default');
@@ -181,6 +201,19 @@ describe('responsive event cover', () => {
     const retried = container.querySelector('img')!;
     expect(retried.getAttribute('src')).toContain('/4/');
     expect(onRefreshEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes the picture when a refreshed event removes the cover', () => {
+    const { container, rerender } = renderCover({ revision: 3 });
+    expect(container.querySelector('picture')).not.toBeNull();
+
+    rerender(<ResponsiveEventCover
+      cover={{ revision: 4, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' }}
+      sourceFor={sourceFor}
+    />);
+
+    expect(container.querySelector('picture')).toBeNull();
+    expect(frame()).toHaveClass('responsive-cover--gradient');
   });
 
   it('renders the theme gradient and no picture when there is no cover', () => {

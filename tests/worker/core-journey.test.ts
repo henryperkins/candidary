@@ -17,6 +17,13 @@ import {
   writeHeaders,
 } from './helpers';
 
+const EMPTY_GUEST_COVER = {
+  revision: 0,
+  hasCover: false,
+  available2xProfiles: [],
+  surfaceTreatment: 'none',
+} as const;
+
 describe('complete private event journey', () => {
   beforeEach(resetDatabase);
 
@@ -191,11 +198,11 @@ describe('server-owned event configuration and phase', () => {
       themeConfig: DEFAULT_EVENT_THEME_CONFIG,
     } as never;
 
-    expect(guestEventView(record, new Date('2026-09-06T04:59:59.999Z')))
+    expect(guestEventView(record, EMPTY_GUEST_COVER, new Date('2026-09-06T04:59:59.999Z')))
       .toMatchObject({ phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable' });
     // A shut RSVP before the start is its own surface now, not the leftover the
     // old two-boolean model called `waiting`.
-    expect(guestEventView(record, new Date('2026-09-06T05:00:00.000Z')))
+    expect(guestEventView(record, EMPTY_GUEST_COVER, new Date('2026-09-06T05:00:00.000Z')))
       .toMatchObject({ phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only' });
   });
 
@@ -211,9 +218,9 @@ describe('server-owned event configuration and phase', () => {
       themeConfig: DEFAULT_EVENT_THEME_CONFIG,
     } as never;
 
-    expect(guestEventView(record, new Date('2026-09-19T04:59:59.999Z')))
+    expect(guestEventView(record, EMPTY_GUEST_COVER, new Date('2026-09-19T04:59:59.999Z')))
       .toMatchObject({ phase: 'before-start', rsvpAccess: 'read-only' });
-    expect(guestEventView(record, new Date('2026-09-19T05:00:00.000Z')))
+    expect(guestEventView(record, EMPTY_GUEST_COVER, new Date('2026-09-19T05:00:00.000Z')))
       .toMatchObject({ phase: 'photos-primary', rsvpAccess: 'unavailable' });
   });
 
@@ -231,6 +238,7 @@ describe('server-owned event configuration and phase', () => {
 
     const unconfigured = guestEventView(
       record as never,
+      EMPTY_GUEST_COVER,
       new Date('2026-09-05T12:00:00.000Z'),
     );
     expect(unconfigured).toMatchObject({
@@ -242,6 +250,7 @@ describe('server-owned event configuration and phase', () => {
 
     expect(guestEventView(
       { ...record, rsvpRosterVersion: 1 } as never,
+      EMPTY_GUEST_COVER,
       new Date('2026-09-05T12:00:00.000Z'),
     )).toMatchObject({
       phase: 'before-start',

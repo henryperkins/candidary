@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { presetCoverAssetPath } from '../shared/event-cover-assets.ts';
+
 /**
  * Generates the complete bounded preset matrix: six art-directed masters, five
  * tonal effects, six layout profiles, two densities, two formats — 720 versioned
@@ -64,10 +66,18 @@ export type CoverDensity = (typeof COVER_DENSITIES)[number];
 export const COVER_FORMATS = ['webp', 'jpeg'] as const;
 export type CoverFormat = (typeof COVER_FORMATS)[number];
 
+export type CoverProfileId =
+  | 'short-lookup'
+  | 'compact-default'
+  | 'standard-default'
+  | 'framed-default'
+  | 'compact-expanded'
+  | 'wide-expanded';
+
 const KIB = 1024;
 
 export interface CoverPresetProfile {
-  id: string;
+  id: CoverProfileId;
   width: number;
   height: number;
   webpByteCeiling: Record<CoverDensity, number>;
@@ -183,24 +193,6 @@ export const COVER_PRESET_MANIFEST_KIND = 'candidary-cover-preset-manifest';
  * Paths and slots
  * ------------------------------------------------------------------ */
 
-/**
- * The same template `presetAssetPath` in `worker/storage/event-cover-keys.ts`
- * builds. `tests/worker/event-cover-storage.test.ts` pins one exact string
- * against that copy and `tests/unit/cover-presets.test.ts` pins the same string
- * against this one, so the build and the route cannot disagree about where a
- * preset lives.
- */
-export function presetAssetPath(
-  assetVersion: number,
-  presetId: CoverPresetId,
-  effect: CoverEffectId,
-  profile: string,
-  density: CoverDensity,
-  format: CoverFormat,
-): string {
-  return `/assets/event-covers/v${assetVersion}/${presetId}/${effect}/${profile}-${density}.${format}`;
-}
-
 export function presetGrainTilePath(assetVersion: number): string {
   return `/assets/event-covers/v${assetVersion}/${COVER_SURFACE_TREATMENT_ID}.png`;
 }
@@ -213,7 +205,7 @@ export interface CoverPresetSlot {
   path: string;
   presetId: CoverPresetId;
   effect: CoverEffectId;
-  profile: string;
+  profile: CoverProfileId;
   density: CoverDensity;
   format: CoverFormat;
   width: number;
@@ -235,7 +227,7 @@ export function coverPresetSlots(): CoverPresetSlot[] {
           const scale = density === '2x' ? 2 : 1;
           for (const format of COVER_FORMATS) {
             slots.push({
-              path: presetAssetPath(PRESET_ASSET_VERSION, presetId, effect, profile.id, density, format),
+              path: presetCoverAssetPath(PRESET_ASSET_VERSION, presetId, effect, profile.id, density, format),
               presetId,
               effect,
               profile: profile.id,

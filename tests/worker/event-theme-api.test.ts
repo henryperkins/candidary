@@ -10,7 +10,6 @@ import {
   hostAccess,
   hostWriteHeaders,
   origin,
-  png,
   resetDatabase,
   testEnv,
   uploadPending,
@@ -23,7 +22,7 @@ const EVENT_VIEW_KEYS = [
   'name',
   'eventDate',
   'welcomeMessage',
-  'coverObjectKey',
+  'cover',
   'uploadsEnabled',
   'galleryVisible',
   'moderationRequired',
@@ -47,10 +46,6 @@ const EVENT_VIEW_KEYS = [
   'rsvpDeadlineDate',
   'rsvpRosterVersion',
   'theme',
-  // Manager-only. The guest list below is deliberately untouched, and is the
-  // guard proving neither field reaches a guest.
-  'coverPreparation',
-  'coverRevision',
 ] as const;
 
 const GUEST_EVENT_VIEW_KEYS = [
@@ -59,7 +54,7 @@ const GUEST_EVENT_VIEW_KEYS = [
   'name',
   'eventDate',
   'welcomeMessage',
-  'coverObjectKey',
+  'cover',
   'uploadsEnabled',
   'galleryVisible',
   'moderationRequired',
@@ -654,71 +649,5 @@ describe('authorized event theme updates', () => {
 
     const themed = await putTheme(access.event.id, garden, writeHeaders(access.manager));
     expect(Object.keys((await themed.json<any>()).data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
-  });
-});
-
-describe('manager-authorized event cover reads', () => {
-  async function coveredEvent() {
-    const access = await eventAccess();
-    const objectKey = `events/${access.event.id}/cover/test.png`;
-    await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
-      .bind(objectKey, access.event.id)
-      .run();
-    await testEnv.MEDIA_BUCKET.put(objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
-    return { access, objectKey };
-  }
-
-  it('serves the same private binary cover to a matching link without CSRF and an owning account', async () => {
-    const { access } = await coveredEvent();
-    const linkRead = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: access.manager.cookie },
-    }, testEnv);
-    expect(linkRead.status).toBe(200);
-    expect(linkRead.headers.get('content-type')).toBe('image/png');
-    expect(linkRead.headers.get('cache-control')).toBe('private, no-store');
-
-    const host = await hostAccess([access]);
-    const accountRead = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: host.cookie },
-    }, testEnv);
-    expect(accountRead.status).toBe(200);
-    expect(accountRead.headers.get('content-length')).toBe(String(png().byteLength));
-  });
-
-  it('rejects missing, unrelated-account, guest, and cross-event credentials', async () => {
-    const { access } = await coveredEvent();
-    const other = await eventAccess('Other');
-    const stranger = await hostAccess();
-    const cases = [
-      ['missing', '', 401, 'SESSION_REQUIRED'],
-      ['unrelated account', stranger.cookie, 403, 'ROLE_FORBIDDEN'],
-      ['guest', access.guest.cookie, 403, 'ROLE_FORBIDDEN'],
-      ['cross-event', other.manager.cookie, 403, 'ROLE_FORBIDDEN'],
-    ] as const;
-
-    for (const [label, cookie, status, code] of cases) {
-      const response = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-        headers: cookie ? { cookie } : {},
-      }, testEnv);
-      expect([label, response.status]).toEqual([label, status]);
-      expect((await response.json<any>()).code).toBe(code);
-    }
-  });
-
-  it('preserves stable JSON errors for no cover and a missing R2 object', async () => {
-    const noCover = await eventAccess();
-    const absent = await createApp().request(`/api/manage/events/${noCover.event.id}/cover`, {
-      headers: { cookie: noCover.manager.cookie },
-    }, testEnv);
-    expect(absent.status).toBe(404);
-    expect((await absent.json<any>()).code).toBe('EVENT_NOT_FOUND');
-
-    const { access, objectKey } = await coveredEvent();
-    await testEnv.MEDIA_BUCKET.delete(objectKey);
-    const missing = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      headers: { cookie: access.manager.cookie },
-    }, testEnv);
-    expect(missing.status).toBe(404);
-    expect((await missing.json<any>()).code).toBe('UPLOAD_OBJECT_MISSING');
   });
 });

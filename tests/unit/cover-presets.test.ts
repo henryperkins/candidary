@@ -11,6 +11,7 @@ import {
   EVENT_COVER_PROFILES,
   coverByteCeiling,
 } from '../../shared/event-cover';
+import { presetCoverAssetPath } from '../../shared/event-cover-assets';
 import {
   COVER_EFFECT_IDS,
   COVER_OUTPUT_QUALITIES,
@@ -20,7 +21,6 @@ import {
   PRESET_ASSET_VERSION,
   centerCropRegion,
   coverPresetSlots,
-  presetAssetPath,
   presetGrainTilePath,
   presetManifestPath,
   sha256Hex,
@@ -73,7 +73,7 @@ describe('the preset generator and the shared cover registry agree', () => {
   it('builds the same asset path the Worker resolves a published preset to', () => {
     // The identical literal is pinned against the Worker's own copy in
     // tests/worker/event-cover-storage.test.ts. Neither may move alone.
-    expect(presetAssetPath(1, 'warm-linen', 'natural', 'short-lookup', '1x', 'webp'))
+    expect(presetCoverAssetPath(1, 'warm-linen', 'natural', 'short-lookup', '1x', 'webp'))
       .toBe('/assets/event-covers/v1/warm-linen/natural/short-lookup-1x.webp');
     expect(presetGrainTilePath(1)).toBe('/assets/event-covers/v1/film-grain-v1.png');
     expect(presetManifestPath(1)).toBe('/assets/event-covers/v1/manifest.json');

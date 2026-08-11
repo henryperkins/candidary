@@ -31,9 +31,10 @@ const event: EventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
-  coverObjectKey: null,
-  coverPreparation: null,
-  coverRevision: 0,
+  cover: {
+    config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
+    available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
+  },
   uploadsEnabled: false,
   galleryVisible: false,
   moderationRequired: true,

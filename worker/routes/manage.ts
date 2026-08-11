@@ -28,7 +28,7 @@ import {
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
 import { resolveEventSchedule } from '../http/event-schedule';
-import { eventView } from '../http/event-view';
+import { eventStartTime, selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { deleteEventData } from '../workflows/cleanup';
 
@@ -173,7 +173,7 @@ manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
     serializeEventThemeConfig(resolved.config),
   );
   return context.json({
-    data: { event: eventView(updated) },
+    data: { event: await selectManagerEventView(context.env, updated) },
     requestId: context.get('requestId'),
   });
 });
@@ -213,11 +213,16 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
   // A pre-release settings bundle does not send eventStartTime. Preserve the
   // host's existing wall-clock choice, including across a time-zone edit,
   // instead of interpreting omission as a destructive reset to midnight.
-  const eventStartTime = parsed.data.eventStartTime ?? eventView(auth.event).eventStartTime;
+  const resolvedEventStartTime = parsed.data.eventStartTime ?? eventStartTime(auth.event);
   // Any edit to the start time, the deadline date, or the zone recomputes both
   // absolute instants from the same tuple, and they are written together below.
   const schedule = resolveEventSchedule(
-    { ...parsed.data, eventDate: auth.event.eventDate, eventTimezone, eventStartTime },
+    {
+      ...parsed.data,
+      eventDate: auth.event.eventDate,
+      eventTimezone,
+      eventStartTime: resolvedEventStartTime,
+    },
     'Check the event settings.',
   );
 
@@ -257,7 +262,10 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
       { rsvpEnabled: 'The guest list changed while these settings were saving.' },
     );
   }
-  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
+  return context.json({
+    data: { event: await selectManagerEventView(context.env, event) },
+    requestId: context.get('requestId'),
+  });
 });
 
 /**
@@ -292,7 +300,10 @@ manageRoutes.post('/manage/events/:eventId/photo-intake', async (context) => {
       409,
     );
   }
-  return context.json({ data: { event: eventView(event) }, requestId: context.get('requestId') });
+  return context.json({
+    data: { event: await selectManagerEventView(context.env, event) },
+    requestId: context.get('requestId'),
+  });
 });
 
 manageRoutes.get('/manage/events/:eventId/media', async (context) => {
