@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /event/
+Disallow: /manage/
+Disallow: /join
+Disallow: /recover/
+Disallow: /host/
+
+Sitemap: https://candidary.app/sitemap.xml

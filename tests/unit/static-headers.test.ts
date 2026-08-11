@@ -7,6 +7,10 @@ const headersPath = resolve(process.cwd(), 'public/_headers');
 const headers = existsSync(headersPath) ? readFileSync(headersPath, 'utf8') : '';
 const manifestContentTypeRule =
   /^\/manifest\.webmanifest[ \t]*\r?\n[ \t]+Content-Type: application\/manifest\+json[ \t]*\r?$/mu;
+const robotsContentTypeRule =
+  /^\/robots\.txt[ \t]*\r?\n[ \t]+Content-Type: text\/plain; charset=utf-8[ \t]*\r?$/mu;
+const sitemapContentTypeRule =
+  /^\/sitemap\.xml[ \t]*\r?\n[ \t]+Content-Type: application\/xml; charset=utf-8[ \t]*\r?$/mu;
 // Parsed as strict JSON on purpose: `wrangler.jsonc` may legally carry comments, but
 // this manifest is read by tooling that does not strip them, so it is kept comment-free
 // and that is asserted by this file failing loudly if it ever is not.
@@ -32,6 +36,11 @@ describe('static asset security headers', () => {
 
   it('serves the manifest with an explicit content type under nosniff', () => {
     expect(headers).toMatch(manifestContentTypeRule);
+  });
+
+  it('serves crawler discovery files with explicit UTF-8 content types under nosniff', () => {
+    expect(headers).toMatch(robotsContentTypeRule);
+    expect(headers).toMatch(sitemapContentTypeRule);
   });
 
   it('does not borrow the manifest content type from beyond its header block', () => {

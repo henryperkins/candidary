@@ -9,6 +9,12 @@
 /manifest.webmanifest
   Content-Type: application/manifest+json
 
+/robots.txt
+  Content-Type: text/plain; charset=utf-8
+
+/sitemap.xml
+  Content-Type: application/xml; charset=utf-8
+
 # Global release artwork, not event data: the six built-in covers contain no
 # event ID or slug, and the version is part of the path, so a later visual
 # refresh ships beside these bytes rather than replacing them. Scoped to the
