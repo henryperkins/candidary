@@ -573,6 +573,7 @@ export function EventAppearanceEditor({
       focusMode={coverSession.selection.focusMode}
       effect={coverSession.selection.effect}
       accessFailure={coverSession.accessFailure}
+      error={coverError}
       canRemove={event.cover.hasCover}
       presetThumbnail={(presetId) => presetCoverAssetPath(
         1,
@@ -583,7 +584,10 @@ export function EventAppearanceEditor({
         'webp',
       )}
       styleThumbnail={(effect) => coverSession.styleThumbnails[effect]}
-      onSourceChange={coverSession.chooseSource}
+      onSourceChange={(source) => {
+        setCoverError(null);
+        coverSession.chooseSource(source);
+      }}
       onUpload={(file) => {
         setCoverError(null);
         void coverSession.chooseFile(file).catch((caught: unknown) => {
@@ -592,12 +596,22 @@ export function EventAppearanceEditor({
             : 'That photo could not be prepared. Choose another photo.');
         });
       }}
-      onEnterCompose={() => { void coverSession.enterCompose().catch(() => undefined); }}
+      onEnterCompose={() => {
+        setCoverError(null);
+        void coverSession.enterCompose().catch((caught: unknown) => {
+          setCoverError(caught instanceof Error
+            ? caught.message
+            : 'That photo could not be prepared. Choose another photo.');
+        });
+      }}
       onFocusChange={coverSession.setFocus}
       onResetFocus={coverSession.resetFocus}
       onEffectChange={(effect) => { void coverSession.setEffect(effect).catch(() => undefined); }}
       onPublish={() => { void publishCover(); }}
-      onDiscardDraft={() => { void coverSession.discard().catch(() => undefined); }}
+      onDiscardDraft={async () => {
+        await coverSession.discard();
+        setCoverError(null);
+      }}
       onClose={coverSession.close}
     />
   </section>;

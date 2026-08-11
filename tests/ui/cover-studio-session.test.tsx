@@ -433,6 +433,761 @@ describe('useCoverStudioSession', () => {
     expect(session.result.current.canvasPreview.kind).toBe('draft');
   });
 
+  it('retries the exact new upload after preparation fails', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let reservations = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        if (reservations === 1) {
+          return new Response(JSON.stringify({
+            code: 'INTERNAL_ERROR',
+            message: 'Preparation unavailable.',
+          }), { status: 503, headers: { 'content-type': 'application/json' } });
+        }
+        return envelope({ draft: draft(), ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/raw')) {
+        return envelope({ draft: draft({ state: 'transferred', revision: 1 }) });
+      }
+      if (value.endsWith('/inspect')) {
+        return envelope({ draft: draft({
+          state: 'inspected',
+          revision: 2,
+          master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+          preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+        }) });
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/composition') && init?.method === 'PATCH') {
+        return envelope({ draft: draft({
+          state: 'ready',
+          revision: 3,
+          master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+          focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+          preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+        }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+      compositionRunner: async () => ({ x: 0.5, y: 0.5 }),
+    }));
+    const file = new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 });
+
+    act(() => session.result.current.openStudio());
+    await act(async () => {
+      await expect(session.result.current.chooseFile(file)).rejects.toThrow('Preparation unavailable.');
+    });
+    expect(session.result.current.draftState.status).toBe('error');
+
+    await act(async () => session.result.current.enterCompose());
+
+    expect(reservations).toBe(2);
+    expect(session.result.current.draftState.status).toBe('ready');
+    expect(session.result.current.selection.source).toEqual({ kind: 'upload' });
+  });
+
+  it('discards a reservation created while cancellation is in flight', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let releaseReservation!: () => void;
+    const reservationGate = new Promise<void>((resolve) => { releaseReservation = resolve; });
+    const calls: Array<[string, string]> = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      const method = init?.method ?? 'GET';
+      calls.push([value, method]);
+      if (value.endsWith('/cover/drafts')) {
+        await reservationGate;
+        return envelope({ draft: draft(), ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/draft-a') && method === 'GET') return envelope({ draft: draft() });
+      if (method === 'DELETE') return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      if (value.endsWith('/raw')) return envelope({ draft: draft({ state: 'transferred', revision: 1 }) });
+      if (value.endsWith('/inspect')) {
+        return envelope({ draft: draft({
+          state: 'inspected',
+          revision: 2,
+          master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+          preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+        }) });
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/composition')) {
+        return envelope({ draft: draft({
+          state: 'ready',
+          revision: 3,
+          master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+          focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+          preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+        }) });
+      }
+      throw new Error(`Unexpected request ${method} ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+      compositionRunner: async () => ({ x: 0.5, y: 0.5 }),
+    }));
+    const file = new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 });
+
+    act(() => session.result.current.openStudio());
+    let upload!: Promise<void>;
+    act(() => { upload = session.result.current.chooseFile(file); });
+    await waitFor(() => expect(calls.some(([path]) => path.endsWith('/cover/drafts'))).toBe(true));
+    const discard = session.result.current.discard();
+    releaseReservation();
+    await act(async () => { await Promise.allSettled([upload, discard]); });
+
+    expect(calls.filter(([, method]) => method === 'DELETE')).toHaveLength(1);
+    expect(session.result.current.open).toBe(false);
+    expect(session.result.current.draftState.status).toBe('idle');
+  });
+
+  it('makes a canceled in-flight attempt retryable when its deletion fails', async () => {
+    let releaseReservation!: () => void;
+    const reservationGate = new Promise<void>((resolve) => { releaseReservation = resolve; });
+    let reservations = 0;
+    const reserved = draft();
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        if (reservations === 1) await reservationGate;
+        return envelope({ draft: reserved, ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: reserved });
+      }
+      if (init?.method === 'DELETE') {
+        return new Response(JSON.stringify({
+          code: 'INTERNAL_ERROR',
+          message: 'Deletion unavailable.',
+        }), { status: 503, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    let upload!: Promise<void>;
+    act(() => {
+      upload = session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      );
+    });
+    await waitFor(() => expect(reservations).toBe(1));
+    const discard = session.result.current.discard();
+    releaseReservation();
+    await act(async () => {
+      await upload;
+      await expect(discard).rejects.toThrow('Deletion unavailable.');
+    });
+
+    expect(session.result.current.open).toBe(true);
+    expect(session.result.current.draftState.status).toBe('error');
+    expect(reservations).toBe(1);
+  });
+
+  it('rejects a new upload once discard has started', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    let deleteStarted = false;
+    let reservations = 0;
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        return envelope({ draft: ready, ingress: null }, 201);
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: ready });
+      }
+      if (init?.method === 'DELETE') {
+        deleteStarted = true;
+        await deleteGate;
+        return envelope({ draft: draft({ state: 'expired', revision: 4 }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, 7),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    let discard!: Promise<void>;
+    act(() => { discard = session.result.current.discard(); });
+    await waitFor(() => expect(deleteStarted).toBe(true));
+
+    await act(async () => {
+      await expect(session.result.current.chooseFile(
+        new File(['new'], 'new.jpg', { type: 'image/jpeg', lastModified: 11 }),
+      )).rejects.toThrow('discard is in progress');
+    });
+    // The acknowledged reservation is already owned. The blocked new file
+    // creates no second reservation.
+    expect(reservations).toBe(1);
+    expect(session.result.current.selection.focus).toEqual({ x: 0.5, y: 0.5, zoom: 1 });
+
+    releaseDelete();
+    await act(async () => discard);
+  });
+
+  it('refreshes an ambiguously advanced draft before discarding it', async () => {
+    let serverDraft = draft();
+    let deleteRevision: string | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        return envelope({ draft: serverDraft, ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/raw')) {
+        serverDraft = draft({ state: 'transferred', revision: 1 });
+        throw new TypeError('The transfer response was lost.');
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: serverDraft });
+      }
+      if (init?.method === 'DELETE') {
+        deleteRevision = new Headers(init.headers).get('if-match');
+        if (deleteRevision !== '"1"') {
+          return new Response(JSON.stringify({
+            code: 'COVER_DRAFT_STATE_CONFLICT',
+            message: 'The cover draft changed.',
+          }), { status: 409, headers: { 'content-type': 'application/json' } });
+        }
+        return envelope({ draft: draft({ state: 'expired', revision: 2 }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => {
+      await expect(session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      )).rejects.toThrow('transfer response was lost');
+    });
+    await act(async () => session.result.current.discard());
+
+    expect(deleteRevision).toBe('"1"');
+    expect(session.result.current.open).toBe(false);
+  });
+
+  it('replays a reservation whose committed response was lost before discarding', async () => {
+    let reservations = 0;
+    let deletes = 0;
+    const reserved = draft();
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        if (reservations === 1) throw new TypeError('The reservation response was lost.');
+        return envelope({ draft: reserved, ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: reserved });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => {
+      await expect(session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      )).rejects.toThrow('reservation response was lost');
+    });
+    await act(async () => session.result.current.discard());
+
+    expect(reservations).toBe(2);
+    expect(deletes).toBe(1);
+    expect(session.result.current.open).toBe(false);
+  });
+
+  it('replays a committed reservation that returned a structured server error', async () => {
+    let reservations = 0;
+    let deletes = 0;
+    const reserved = draft();
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        if (reservations === 1) {
+          return new Response(JSON.stringify({
+            code: 'INTERNAL_ERROR',
+            message: 'The reservation response could not be prepared.',
+          }), { status: 500, headers: { 'content-type': 'application/json' } });
+        }
+        return envelope({ draft: reserved, ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: reserved });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => {
+      await expect(session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      )).rejects.toThrow('reservation response could not be prepared');
+    });
+    await act(async () => session.result.current.discard());
+
+    expect(reservations).toBe(2);
+    expect(deletes).toBe(1);
+    expect(session.result.current.open).toBe(false);
+  });
+
+  it('replays a lost existing-upload response with its original cover revision', async () => {
+    let reservations = 0;
+    let deletes = 0;
+    const expectedRevisions: number[] = [];
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        expectedRevisions.push(JSON.parse(String(init?.body)).expectedCoverRevision as number);
+        if (reservations === 1) throw new TypeError('The reservation response was lost.');
+        return envelope({ draft: ready, ingress: null }, 201);
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: ready });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const heldReconciler = reconciler();
+    const initial = managerEvent({
+      version: 1,
+      source: { kind: 'upload' },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, 7);
+    const session = renderHook(
+      ({ event }: { event: EventView }) => useCoverStudioSession({ event, reconciler: heldReconciler }),
+      { initialProps: { event: initial } },
+    );
+
+    act(() => session.result.current.openStudio());
+    await act(async () => {
+      await expect(session.result.current.enterCompose()).rejects.toThrow('reservation response was lost');
+    });
+    session.rerender({ event: { ...initial, cover: { ...initial.cover, revision: 8 } } });
+    await act(async () => session.result.current.discard());
+
+    expect(reservations).toBe(2);
+    expect(expectedRevisions).toEqual([7, 7]);
+    expect(deletes).toBe(1);
+    expect(session.result.current.open).toBe(false);
+  });
+
+  it('does not replay a resolved existing-upload reservation after the cover revision changes', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let reservations = 0;
+    let deletes = 0;
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        if (reservations > 1) {
+          return new Response(JSON.stringify({
+            code: 'COVER_DRAFT_STATE_CONFLICT',
+            message: 'This cover has moved on since this page loaded.',
+          }), { status: 409, headers: { 'content-type': 'application/json' } });
+        }
+        return envelope({ draft: ready, ingress: null }, 201);
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: ready });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const heldReconciler = reconciler();
+    const initial = managerEvent({
+      version: 1,
+      source: { kind: 'upload' },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    }, 7);
+    const session = renderHook(
+      ({ event }: { event: EventView }) => useCoverStudioSession({ event, reconciler: heldReconciler }),
+      { initialProps: { event: initial } },
+    );
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    session.rerender({ event: { ...initial, cover: { ...initial.cover, revision: 8 } } });
+    await act(async () => session.result.current.discard());
+
+    expect(reservations).toBe(1);
+    expect(deletes).toBe(1);
+    expect(session.result.current.open).toBe(false);
+  });
+
+  it('treats an already-published draft as terminal without deleting it', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let deletes = 0;
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) return envelope({ draft: ready, ingress: null }, 201);
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: draft({ ...ready, state: 'published', revision: 4 }) });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        return new Response(JSON.stringify({
+          code: 'COVER_DRAFT_STATE_CONFLICT',
+          message: 'Published drafts cannot be discarded.',
+        }), { status: 409, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, 7),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => session.result.current.discard());
+
+    expect(deletes).toBe(0);
+    expect(session.result.current.open).toBe(false);
+  });
+
+  it('keeps a publishing draft in recovery instead of attempting deletion', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let deletes = 0;
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) return envelope({ draft: ready, ingress: null }, 201);
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: draft({ ...ready, state: 'publishing', revision: 4 }) });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        throw new Error('Publishing drafts must never reach DELETE.');
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, 7),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => {
+      await expect(session.result.current.discard()).rejects.toThrow('being published');
+    });
+
+    expect(deletes).toBe(0);
+    expect(session.result.current.open).toBe(true);
+  });
+
+  it('reconciles a deletion whose committed response was lost', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      revision: 3,
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    let serverDraft = ready;
+    let deletes = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) return envelope({ draft: serverDraft, ingress: null }, 201);
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: serverDraft });
+      }
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        serverDraft = draft({ state: 'expired', revision: 4 });
+        throw new TypeError('The deletion response was lost.');
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, 7),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => session.result.current.discard());
+
+    expect(deletes).toBe(1);
+    expect(session.result.current.open).toBe(false);
+    expect(session.result.current.draftState.status).toBe('idle');
+  });
+
+  it('retains draft ownership when deletion fails so discard can be retried', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    let deletes = 0;
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (init?.method === 'DELETE') {
+        deletes += 1;
+        if (deletes === 1) {
+          return new Response(JSON.stringify({
+            code: 'INTERNAL_ERROR',
+            message: 'Deletion unavailable.',
+          }), { status: 503, headers: { 'content-type': 'application/json' } });
+        }
+        return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-a') && (init?.method ?? 'GET') === 'GET') {
+        return envelope({ draft: ready });
+      }
+      if (value.endsWith('/cover/drafts')) return envelope({ draft: ready, ingress: null }, 201);
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, 7),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => {
+      await expect(session.result.current.discard()).rejects.toThrow('Deletion unavailable.');
+    });
+    expect(session.result.current.open).toBe(true);
+    expect(session.result.current.draft?.previewUrl).toBe('blob:ready');
+    expect(session.result.current.canvasPreview).toEqual({ kind: 'draft', url: 'blob:ready' });
+
+    await act(async () => session.result.current.discard());
+    expect(deletes).toBe(2);
+    expect(session.result.current.open).toBe(false);
+    expect(session.result.current.draftState.status).toBe('idle');
+  });
+
+  it('keeps the current draft editable when an older owned draft fails deletion', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: {
+        configurable: true,
+        value: vi.fn().mockReturnValueOnce('blob:old').mockReturnValueOnce('blob:new'),
+      },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    const readyView = (id: string, source: CoverDraftView['source']) => draft({
+      id,
+      source,
+      state: 'ready',
+      revision: 3,
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    const oldDraft = readyView('draft-old', 'existing-upload');
+    const newDraft = readyView('draft-new', 'new-upload');
+    const deleteOrder: string[] = [];
+    let oldDeleteAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      const method = init?.method ?? 'GET';
+      if (value.endsWith('/cover/drafts')) {
+        const body = JSON.parse(String(init?.body)) as { source: { kind: string } };
+        const selected = body.source.kind === 'existing-upload' ? oldDraft : newDraft;
+        return envelope({ draft: selected, ingress: null }, 201);
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (method === 'GET' && value.endsWith('/draft-old')) return envelope({ draft: oldDraft });
+      if (method === 'GET' && value.endsWith('/draft-new')) return envelope({ draft: newDraft });
+      if (method === 'DELETE') {
+        const id = value.endsWith('/draft-old') ? 'draft-old' : 'draft-new';
+        deleteOrder.push(id);
+        if (id === 'draft-old' && oldDeleteAttempts++ === 0) {
+          return new Response(JSON.stringify({
+            code: 'INTERNAL_ERROR',
+            message: 'Old deletion unavailable.',
+          }), { status: 503, headers: { 'content-type': 'application/json' } });
+        }
+        return envelope({ draft: draft({ id, state: 'expired', revision: 4 }) });
+      }
+      throw new Error(`Unexpected request ${method} ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }, 7),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => session.result.current.chooseFile(
+      new File(['new'], 'new.jpg', { type: 'image/jpeg', lastModified: 11 }),
+    ));
+    await act(async () => {
+      await expect(session.result.current.discard()).rejects.toThrow('Old deletion unavailable.');
+    });
+
+    expect(deleteOrder).toEqual(['draft-old']);
+    expect(session.result.current.draft).toMatchObject({ id: 'draft-new', previewUrl: 'blob:new' });
+
+    await act(async () => session.result.current.discard());
+    expect(deleteOrder).toEqual(['draft-old', 'draft-old', 'draft-new']);
+    expect(session.result.current.open).toBe(false);
+  });
+
   it('fetches each real effect at most once and revokes all URLs on close', async () => {
     const createObjectURL = vi.fn()
       .mockReturnValueOnce('blob:natural')

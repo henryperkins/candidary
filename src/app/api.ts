@@ -18,6 +18,7 @@ export class ClientApiError extends Error {
     message: string,
     public readonly fieldErrors?: Record<string, string>,
     public readonly details?: ApiErrorDetails,
+    public readonly status?: number,
   ) {
     super(message);
   }
@@ -49,6 +50,7 @@ async function unwrap<T>(response: Response): Promise<T> {
       payload.message ?? 'Something went wrong.',
       payload.fieldErrors,
       payload.details,
+      response.status,
     );
   }
   return payload.data;

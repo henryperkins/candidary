@@ -737,8 +737,9 @@ test('Cover Studio loading, error, edit, confirmation, and preparing states are 
   await expect(page.getByText('Preparing your photo…')).toBeVisible();
   await expectNoAxeViolations(page, 'Cover Studio loading');
 
-  const retry = page.getByRole('button', { name: 'Try preparing again' });
-  await expect(retry).toBeFocused({ timeout: 5_000 });
+  const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+  const retry = studio.getByRole('button', { name: 'Try preparing again' });
+  await expect(studio.getByRole('alert')).toBeFocused({ timeout: 5_000 });
   await expectNoAxeViolations(page, 'Cover Studio actionable error');
   await retry.click();
   await expect(page.getByRole('button', { name: 'Adjust focus' })).toBeVisible({ timeout: 5_000 });

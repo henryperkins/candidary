@@ -55,6 +55,7 @@ export interface CoverStudioProps {
   focusMode: 'auto' | 'manual';
   effect: EventCoverEffectId;
   accessFailure: CoverAccessFailure | null;
+  error?: string | null;
   canRemove: boolean;
   presetThumbnail(presetId: EventCoverPresetId): string;
   styleThumbnail(effect: EventCoverEffectId): CoverStyleThumbnailState;
@@ -69,7 +70,7 @@ export interface CoverStudioProps {
     focus: CoverFocusValue | null;
     effect: EventCoverEffectId;
   }): void;
-  onDiscardDraft(): void;
+  onDiscardDraft(): void | Promise<void>;
   onClose(): void;
 }
 
@@ -108,6 +109,7 @@ export function CoverStudio({
   focusMode,
   effect,
   accessFailure,
+  error = null,
   canRemove,
   presetThumbnail,
   styleThumbnail,
@@ -123,14 +125,19 @@ export function CoverStudio({
 }: CoverStudioProps) {
   const [step, setStep] = useState<CoverStudioStep>('choose');
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
   const confirmKeepRef = useRef<HTMLButtonElement>(null);
   const composeRetryRef = useRef<HTMLButtonElement>(null);
+  const coverErrorRef = useRef<HTMLParagraphElement>(null);
+  const discardErrorRef = useRef<HTMLParagraphElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const continueRef = useRef<HTMLButtonElement>(null);
   const pendingBackFocusRef = useRef(false);
+  const pendingConfirmFocusRef = useRef(false);
   const confirmOriginRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<Element | null>(null);
   const composeRequestedRef = useRef(false);
@@ -190,18 +197,36 @@ export function CoverStudio({
   closeRef.current = requestClose;
 
   const keepEditing = useCallback(() => {
+    if (discarding || discardError) return;
     // A real browser Back consumed the entry. Replace it before the alertdialog
     // closes, so a second Back has exactly the same meaning.
     if (sentinelRef.current === 'consumed') armSentinel();
+    pendingConfirmFocusRef.current = true;
     setConfirmingDiscard(false);
-    confirmOriginRef.current?.focus();
-  }, [armSentinel]);
+    setDiscardError(null);
+  }, [armSentinel, discardError, discarding]);
+
+  const discardDraft = useCallback(async () => {
+    setDiscarding(true);
+    setDiscardError(null);
+    try {
+      if (operation.canDiscardDraft()) await onDiscardDraft();
+      finishClose();
+    } catch {
+      setDiscardError('This draft could not be discarded. Check your connection and try again.');
+    } finally {
+      setDiscarding(false);
+    }
+  }, [finishClose, onDiscardDraft, operation]);
 
   useEffect(() => {
     if (!open) return;
     setStep('choose');
     setDirty(false);
     setConfirmingDiscard(false);
+    setDiscarding(false);
+    setDiscardError(null);
+    pendingConfirmFocusRef.current = false;
     composeRequestedRef.current = false;
     autoClosedRef.current = false;
   }, [open]);
@@ -293,8 +318,22 @@ export function CoverStudio({
   }, [confirmingDiscard]);
 
   useEffect(() => {
+    if (confirmingDiscard || !pendingConfirmFocusRef.current) return;
+    pendingConfirmFocusRef.current = false;
+    confirmOriginRef.current?.focus();
+  }, [confirmingDiscard]);
+
+  useEffect(() => {
     if (step === 'compose' && composeState.status === 'error') composeRetryRef.current?.focus();
   }, [composeState.status, step]);
+
+  useEffect(() => {
+    if (open && error) coverErrorRef.current?.focus();
+  }, [error, open]);
+
+  useEffect(() => {
+    if (discardError) discardErrorRef.current?.focus();
+  }, [discardError]);
 
   useEffect(() => {
     if (!open || operationState.phase !== 'applied' || autoClosedRef.current) return;
@@ -307,6 +346,7 @@ export function CoverStudio({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
+        if (discarding) return;
         if (confirmingDiscard) keepEditing();
         else requestClose();
         return;
@@ -327,7 +367,7 @@ export function CoverStudio({
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [confirmingDiscard, keepEditing, open, requestClose]);
+  }, [confirmingDiscard, discarding, keepEditing, open, requestClose]);
 
   if (!open || !hostRef.current) return null;
 
@@ -394,7 +434,7 @@ export function CoverStudio({
         : undefined}
       ref={dialogRef}
     >
-      <header className="cover-studio__header">
+      <header className="cover-studio__header" inert={confirmingDiscard}>
         <button type="button" className="cover-studio__close" onClick={requestClose}>
           {dispatched ? 'Close' : 'Cancel'}
         </button>
@@ -402,9 +442,18 @@ export function CoverStudio({
         <h2 tabIndex={-1} ref={headingRef}>{STEP_TITLES[step]}</h2>
       </header>
 
-      {canvas && <div className="cover-studio__canvas">{canvas}</div>}
+      {canvas && <div className="cover-studio__canvas" inert={confirmingDiscard}>{canvas}</div>}
 
-      <div className="cover-studio__controls">
+      <div className="cover-studio__controls" inert={confirmingDiscard}>
+        {error && <p
+          ref={coverErrorRef}
+          className="form-error cover-studio__error"
+          role="alert"
+          tabIndex={-1}
+        >
+          {error}
+        </p>}
+
         {step === 'choose' && <CoverSourcePicker
           value={source && source.kind !== 'none' ? source : null}
           onChoose={choose}
@@ -418,7 +467,7 @@ export function CoverStudio({
         {step === 'compose' && composeState.status !== 'ready' && <div className="cover-studio__compose-state">
           {composeState.status !== 'error'
             ? <p role="status">Preparing your photo…</p>
-            : <div role="alert">
+            : <div role={error ? undefined : 'alert'}>
                 <p>That photo could not be prepared. Your current cover is still live.</p>
                 <button
                   ref={composeRetryRef}
@@ -470,7 +519,7 @@ export function CoverStudio({
         </div>}
       </div>
 
-      <footer className="cover-studio__footer">
+      <footer className="cover-studio__footer" inert={confirmingDiscard}>
         {stepIndex > 0 && <button type="button" className="button button--secondary" onClick={back}>
           Back
         </button>}
@@ -500,12 +549,23 @@ export function CoverStudio({
         role="alertdialog"
         aria-modal="true"
         aria-label="Discard cover changes"
+        aria-busy={discarding}
       >
         <p>Discard this cover change?</p>
+        {discarding && <p role="status">Discarding draft…</p>}
+        {discardError && <p
+          ref={discardErrorRef}
+          className="form-error cover-studio__confirm-error"
+          role="alert"
+          tabIndex={-1}
+        >
+          {discardError}
+        </p>}
         <button
           ref={confirmKeepRef}
           type="button"
           className="button button--secondary"
+          aria-disabled={discarding || Boolean(discardError)}
           onClick={keepEditing}
         >
           Keep editing
@@ -513,12 +573,12 @@ export function CoverStudio({
         <button
           type="button"
           className="button button--primary"
+          aria-disabled={discarding}
           onClick={() => {
-            if (operation.canDiscardDraft()) onDiscardDraft();
-            finishClose();
+            if (!discarding) void discardDraft();
           }}
         >
-          Discard draft
+          {discarding ? 'Discarding draft' : 'Discard draft'}
         </button>
       </div>}
     </div>

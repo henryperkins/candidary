@@ -62,6 +62,9 @@ export function CoverSourcePicker({
             if (!file) return;
             onChoose({ kind: 'upload' });
             onUpload(file);
+            // The Studio retains the File for retry. Clearing the native
+            // control lets the same file produce another change event.
+            event.currentTarget.value = '';
           }}
         />
         <span className="cover-source-picker__note">

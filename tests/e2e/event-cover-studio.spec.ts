@@ -156,6 +156,24 @@ test('upload preparation is bounded, range-keyboard complete, and performs no tr
   });
 });
 
+test('upload validation stays inside the Studio and resets the native picker', async ({ page }) => {
+  const audit = await openManagerStudio(page);
+  const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+  const input = page.getByLabel('Choose photo');
+
+  await input.setInputFiles({
+    name: 'not-a-cover.gif',
+    mimeType: 'image/gif',
+    buffer: Buffer.from('GIF89a'),
+  });
+
+  const alert = studio.getByRole('alert');
+  await expect(alert).toContainText('JPEG, PNG, WebP, or HEIC');
+  await expect(alert).toBeFocused();
+  await expect(input).toHaveValue('');
+  expect(records(audit, 'draft')).toHaveLength(0);
+});
+
 test('an existing upload is inspected once, can be reset to automatic focus, and publishes without retransferring bytes', async ({ page }, testInfo) => {
   desktopOnly(testInfo);
   const audit = await openManagerStudio(page, {
@@ -199,7 +217,8 @@ test('a lost publication response reconciles the same operation while the Studio
   });
   await choosePreset(page);
   await finishPreset(page, 'Natural');
-  await expect(page.getByRole('alert')).toContainText('could not be saved');
+  await expect(page.getByRole('dialog', { name: 'Cover Studio' }).getByRole('alert'))
+    .toContainText('could not be saved');
   await expect(page.getByRole('dialog', { name: 'Cover Studio' })).toHaveCount(0);
 
   await expect.poll(() => records(audit, 'status').length, {
@@ -355,7 +374,8 @@ for (const terminal of [
     await choosePreset(page);
     await finishPreset(page);
 
-    await expect(page.getByRole('alert')).toContainText(terminal.message);
+    await expect(page.getByRole('dialog', { name: 'Cover Studio' }).getByRole('alert'))
+      .toContainText(terminal.message);
     await expect(page.getByRole('button', { name: 'Done' })).toBeDisabled();
     expect(records(audit, 'publication')).toHaveLength(1);
     expect(records(audit, 'status')).toHaveLength(0);

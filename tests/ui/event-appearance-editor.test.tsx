@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -680,9 +680,10 @@ describe('event appearance editor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toBeVisible());
+    const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toBeVisible());
     // Not "Something went wrong."
-    expect(screen.getByRole('alert')).toHaveTextContent(/changed somewhere else/u);
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/changed somewhere else/u);
     // And the page is rebased onto the winning revision, so the next change
     // sends an expectedRevision the server will accept.
     expect(screen.getAllByTestId('event-appearance-canvas')).not.toHaveLength(0);
@@ -698,7 +699,9 @@ describe('event appearance editor', () => {
     fireEvent.change(input, {
       target: { files: [new File([new Uint8Array([1])], 'clip.gif', { type: 'image/gif' })] },
     });
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/JPEG, PNG, WebP, or HEIC/u));
+    const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
+    await waitFor(() => expect(within(dialog).getByRole('alert'))
+      .toHaveTextContent(/JPEG, PNG, WebP, or HEIC/u));
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

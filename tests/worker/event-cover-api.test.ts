@@ -16,6 +16,7 @@ import {
   hostWriteHeaders,
   origin,
   resetDatabase,
+  seedEventCoverGraph,
   testEnv,
   withRecordingImages,
   writeHeaders,
@@ -229,6 +230,48 @@ describe('cover draft reservation', () => {
     const changed = await reserve(access, { filename: 'other.jpg' });
     expect(changed.status).toBe(409);
     expect((await changed.json<any>()).code).toBe('COVER_DRAFT_STATE_CONFLICT');
+  });
+
+  it('replays an existing-upload reservation after the active cover revision advances', async () => {
+    const access = await eventAccess();
+    const graph = await seedEventCoverGraph(testEnv.DB, access.event.id);
+    const uploadConfig = JSON.stringify({
+      version: 1,
+      source: { kind: 'upload' },
+      focus: { mode: 'auto' },
+      effect: 'natural',
+    });
+    const master = await testEnv.DB.prepare(
+      'SELECT object_key FROM event_cover_masters WHERE id = ?',
+    ).bind(graph.masterId).first<{ object_key: string }>();
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = ?, cover_render_set_id = ?, cover_revision = 1
+      WHERE id = ?
+    `).bind(uploadConfig, master!.object_key, graph.renderSetId, access.event.id).run();
+    const request = {
+      draftIntentId: INTENT_B,
+      source: { kind: 'existing-upload' },
+      expectedCoverRevision: 1,
+      filename: undefined,
+      mimeType: undefined,
+      byteSize: undefined,
+    };
+
+    const first = await reserve(access, request);
+    expect(first.status).toBe(201);
+    const firstDraft = (await first.json<any>()).data.draft;
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET cover_config = ?, cover_object_key = NULL, cover_render_set_id = NULL, cover_revision = 2
+      WHERE id = ?
+    `).bind(COMPETING_PRESET_ONE, access.event.id).run();
+
+    const replay = await reserve(access, request);
+    expect(replay.status).toBe(201);
+    const replayed = (await replay.json<any>()).data;
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.draft.id).toBe(firstDraft.id);
   });
 
   it.each([

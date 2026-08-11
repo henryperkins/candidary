@@ -126,21 +126,28 @@ export interface CoverDraftReservation {
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 const RESERVATION_TTL_MS = 60 * 60 * 1000;
 
+export async function replayCoverDraftReservation(
+  db: D1Database,
+  input: Pick<CreateCoverDraftInput, 'eventId' | 'draftIntentId' | 'requestDigest'>,
+): Promise<CoverDraftReservation | null> {
+  const existing = await db.prepare(
+    'SELECT * FROM event_cover_drafts WHERE event_id = ? AND draft_intent_id = ?',
+  ).bind(input.eventId, input.draftIntentId).first<CoverDraftRow>();
+  if (!existing) return null;
+  if (existing.request_sha256 !== input.requestDigest) {
+    throw draftConflict('That upload was already started with different details. Start a new one.');
+  }
+  return { draft: existing, replayed: true };
+}
+
 export async function createCoverDraft(
   db: D1Database,
   input: CreateCoverDraftInput,
 ): Promise<CoverDraftReservation> {
   // Read-then-classify. A lost reservation response must replay into the same
   // draft rather than consuming a second live slot or another rate event.
-  const existing = await db.prepare(
-    'SELECT * FROM event_cover_drafts WHERE event_id = ? AND draft_intent_id = ?',
-  ).bind(input.eventId, input.draftIntentId).first<CoverDraftRow>();
-  if (existing) {
-    if (existing.request_sha256 !== input.requestDigest) {
-      throw draftConflict('That upload was already started with different details. Start a new one.');
-    }
-    return { draft: existing, replayed: true };
-  }
+  const replay = await replayCoverDraftReservation(db, input);
+  if (replay) return replay;
 
   const id = crypto.randomUUID();
   const timestamp = input.now.toISOString();

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -73,6 +73,7 @@ function Harness({
   onClose = vi.fn(),
   onUpload = vi.fn(),
   onEnterCompose = vi.fn(),
+  error = null as string | null,
   initialEffect = 'natural' as EventCoverEffectId,
   initialSource = null as CoverSourceChoice | { kind: 'none' } | null,
   composeState,
@@ -86,10 +87,11 @@ function Harness({
   draft?: CoverStudioDraft | null;
   canRemove?: boolean;
   onPublish?: (intent: unknown) => void;
-  onDiscardDraft?: () => void;
+  onDiscardDraft?: () => void | Promise<void>;
   onClose?: () => void;
   onUpload?: (file: File) => void;
   onEnterCompose?: () => void;
+  error?: string | null;
   initialEffect?: EventCoverEffectId;
   initialSource?: CoverSourceChoice | { kind: 'none' } | null;
   composeState?: CoverDraftSessionState;
@@ -133,6 +135,7 @@ function Harness({
       ? { status: 'ready', error: null }
       : { status: 'idle', error: null })}
     accessFailure={accessFailure}
+    error={error}
     canRemove={canRemove}
     presetThumbnail={(presetId) => `/assets/event-covers/v1/${presetId}.webp`}
     styleThumbnail={styleThumbnail}
@@ -158,6 +161,15 @@ describe('cover studio', () => {
     render(<Harness />);
     const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
+  });
+
+  it('keeps cover errors inside the modal and moves focus to them', () => {
+    render(<Harness error="That photo could not be prepared." />);
+
+    const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
+    const alert = within(dialog).getByRole('alert');
+    expect(alert).toHaveTextContent('That photo could not be prepared.');
+    expect(alert).toHaveFocus();
   });
 
   it('offers exactly six built-in designs, each named and ready for every size', () => {
@@ -276,6 +288,19 @@ describe('cover studio', () => {
     expect(onEnterCompose).toHaveBeenCalledTimes(2);
   });
 
+  it('allows the same file to be chosen again', async () => {
+    const user = userEvent.setup();
+    const onUpload = vi.fn();
+    render(<Harness onUpload={onUpload} />);
+    const input = screen.getByLabelText<HTMLInputElement>('Choose photo');
+    const file = new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 });
+
+    await user.upload(input, file);
+    await user.upload(input, file);
+
+    expect(onUpload).toHaveBeenCalledTimes(2);
+  });
+
   it('publishes the chosen design and style', async () => {
     const user = userEvent.setup();
     const onPublish = vi.fn();
@@ -307,6 +332,57 @@ describe('cover studio', () => {
     await user.click(within(confirm).getByRole('button', { name: 'Discard draft' }));
     expect(onDiscardDraft).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for draft deletion before closing', async () => {
+    const user = userEvent.setup();
+    let finishDiscard!: () => void;
+    const discardGate = new Promise<void>((resolve) => { finishDiscard = resolve; });
+    const onDiscardDraft = vi.fn(() => discardGate);
+    const onClose = vi.fn();
+    render(<Harness onDiscardDraft={onDiscardDraft} onClose={onClose} />);
+    await user.click(screen.getByRole('radio', { name: /Pressed Paper/u }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    const confirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
+
+    await user.click(within(confirm).getByRole('button', { name: 'Discard draft' }));
+    expect(onClose).not.toHaveBeenCalled();
+    const discarding = within(confirm).getByRole('button', { name: 'Discarding draft' });
+    expect(discarding).toHaveFocus();
+    expect(discarding).toHaveAttribute('aria-disabled', 'true');
+    expect(within(confirm).getByRole('status')).toHaveTextContent('Discarding draft');
+    expect(screen.getByRole('dialog', { name: 'Cover Studio' })
+      .querySelector('.cover-studio__controls')).toHaveAttribute('inert');
+
+    finishDiscard();
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it('keeps a failed discard open and makes it retryable', async () => {
+    const user = userEvent.setup();
+    const onDiscardDraft = vi.fn()
+      .mockRejectedValueOnce(new Error('Network unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const onClose = vi.fn();
+    render(<Harness onDiscardDraft={onDiscardDraft} onClose={onClose} />);
+    await user.click(screen.getByRole('radio', { name: /Pressed Paper/u }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    const confirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
+
+    await user.click(within(confirm).getByRole('button', { name: 'Discard draft' }));
+
+    const alert = await within(confirm).findByRole('alert');
+    expect(alert).toHaveTextContent('could not be discarded');
+    expect(alert).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(within(confirm).getByRole('button', { name: 'Keep editing' }))
+      .toHaveAttribute('aria-disabled', 'true');
+    const retry = within(confirm).getByRole('button', { name: 'Discard draft' });
+    expect(retry).toBeEnabled();
+
+    await user.click(retry);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onDiscardDraft).toHaveBeenCalledTimes(2);
   });
 
   it('closes without confirmation when nothing has changed', async () => {

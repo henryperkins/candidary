@@ -29,6 +29,7 @@ import {
   insertCoverMaster,
   loadCoverDraft,
   recordVerifiedCoverRaw,
+  replayCoverDraftReservation,
 } from '../db/event-covers';
 import type { CoverDraftPreviewRow, CoverDraftRow, CoverMasterRow, EventRecord } from '../db/types';
 import type { AppEnv } from '../env';
@@ -154,6 +155,16 @@ export async function reserveCoverDraft(
     limit: MAX_COVER_RESERVATIONS_PER_HOUR,
     now,
   });
+
+  // Resolve an already-committed intent before consulting today's event
+  // pointers. A caller replaying a lost response owns the original request,
+  // even when another publication has advanced the active cover since then.
+  const replay = await replayCoverDraftReservation(env.DB, {
+    eventId: event.id,
+    draftIntentId: request.draftIntentId,
+    requestDigest,
+  });
+  if (replay) return replay;
 
   // `in` rather than `request.source.kind`: the union discriminates on a nested
   // key, which is exactly why `z.discriminatedUnion` could not express it either.

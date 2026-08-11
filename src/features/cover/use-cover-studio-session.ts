@@ -18,6 +18,7 @@ import {
   forgetCoverDraftIntent,
   inspectCoverDraft,
   publishCoverIntent,
+  readCoverDraft,
   readCoverEffectPreview,
   resolveCompositionFromPreview,
   transferCoverDraft,
@@ -130,6 +131,15 @@ function fileIntentKey(file: File): string {
   return `${file.name}.${file.size}.${file.lastModified}`;
 }
 
+type CoverDraftSource =
+  | { kind: 'existing-upload'; expectedCoverRevision: number }
+  | { kind: 'new-upload'; file: File };
+
+interface CoverDraftAttempt {
+  key: string;
+  source: CoverDraftSource;
+}
+
 const ACCESS_CODES = new Set([
   'SESSION_REQUIRED',
   'SESSION_EXPIRED',
@@ -140,9 +150,21 @@ const ACCESS_CODES = new Set([
   'CSRF_INVALID',
   'ORIGIN_FORBIDDEN',
 ]);
+const CONSUMED_DRAFT_STATES = new Set(['expired', 'published']);
+
+function publishingDraftError(): Error {
+  return new Error('That cover is being published. Wait for it to finish, then try discarding again.');
+}
 
 function isAccessError(error: unknown): boolean {
   return error instanceof ClientApiError && ACCESS_CODES.has(error.code);
+}
+
+function isDefinitiveReservationRejection(error: unknown): boolean {
+  return error instanceof ClientApiError
+    && error.status !== undefined
+    && error.status >= 400
+    && error.status < 500;
 }
 
 function createPreviewUrl(bytes: ArrayBuffer): string {
@@ -158,13 +180,19 @@ export function useCoverStudioSession({
   const [open, setOpen] = useState(false);
   const [selection, setSelectionState] = useState<CoverStudioSelection>(() => selectionFor(event));
   const [draft, setDraftStateValue] = useState<CoverSessionDraft | null>(null);
-  const [draftState, setDraftState] = useState<CoverDraftSessionState>({ status: 'idle', error: null });
+  const [draftState, setDraftSessionStateValue] = useState<CoverDraftSessionState>({ status: 'idle', error: null });
   const [styleThumbnails, setStyleThumbnails] = useState(idleThumbnails);
   const selectionRef = useRef(selection);
   const draftRef = useRef(draft);
+  const draftStateRef = useRef(draftState);
   const generationRef = useRef(0);
   const draftPromiseRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
-  const draftIntentKeyRef = useRef<string | null>(null);
+  const pendingDraftPromisesRef = useRef(new Set<Promise<void>>());
+  const draftAttemptRef = useRef<CoverDraftAttempt | null>(null);
+  const unresolvedDraftAttemptsRef = useRef(new Map<string, CoverDraftSource>());
+  const draftIntentKeysRef = useRef(new Set<string>());
+  const ownedDraftsRef = useRef(new Map<string, CoverDraftView>());
+  const discardingRef = useRef(false);
   const previewBytesRef = useRef(new Map<EventCoverEffectId, ArrayBuffer>());
   const previewAttemptedRef = useRef(new Set<EventCoverEffectId>());
   const previewUrlsRef = useRef(new Map<EventCoverEffectId, string>());
@@ -180,6 +208,11 @@ export function useCoverStudioSession({
   function updateDraft(next: CoverSessionDraft | null) {
     draftRef.current = next;
     setDraftStateValue(next);
+  }
+
+  function updateDraftState(next: CoverDraftSessionState) {
+    draftStateRef.current = next;
+    setDraftSessionStateValue(next);
   }
 
   const revokeUrls = useCallback((preserveBytes: boolean) => {
@@ -296,34 +329,59 @@ export function useCoverStudioSession({
     if (selectionRef.current.focus === null) {
       updateSelection({ ...selectionRef.current, focus: initialFocus });
     }
-    setDraftState({ status: 'ready', error: null });
+    updateDraftState({ status: 'ready', error: null });
   }, [setThumbnail]);
 
   const runDraft = useCallback((
     key: string,
-    source: { kind: 'existing-upload' } | { kind: 'new-upload'; file: File },
+    source: CoverDraftSource,
   ): Promise<void> => {
+    if (discardingRef.current) {
+      return Promise.reject(new Error('Cover draft discard is in progress.'));
+    }
     if (draftPromiseRef.current?.key === key) return draftPromiseRef.current.promise;
+    draftAttemptRef.current = { key, source };
+    unresolvedDraftAttemptsRef.current.set(key, source);
+    draftIntentKeysRef.current.add(key);
     const generation = ++generationRef.current;
     revokeUrls(false);
     updateDraft(null);
-    setDraftState({ status: 'loading', error: null });
-    draftIntentKeyRef.current = key;
+    updateDraftState({ status: 'loading', error: null });
 
     const request = (async () => {
       try {
-        const reservation = await createCoverDraft(source.kind === 'new-upload'
-          ? { eventId: event.id, intentKey: key, source: { kind: 'new-upload', file: source.file } }
-          : {
-              eventId: event.id,
-              intentKey: key,
-              source: { kind: 'existing-upload', expectedCoverRevision: event.cover.revision },
-            });
+        let reservation;
+        try {
+          reservation = await createCoverDraft(source.kind === 'new-upload'
+            ? { eventId: event.id, intentKey: key, source: { kind: 'new-upload', file: source.file } }
+            : {
+                eventId: event.id,
+                intentKey: key,
+                source: {
+                  kind: 'existing-upload',
+                  expectedCoverRevision: source.expectedCoverRevision,
+                },
+              });
+        } catch (error) {
+          if (isDefinitiveReservationRejection(error)) {
+            unresolvedDraftAttemptsRef.current.delete(key);
+          }
+          throw error;
+        }
         let view = reservation.draft;
+        ownedDraftsRef.current.set(view.id, view);
+        unresolvedDraftAttemptsRef.current.delete(key);
+        if (generation !== generationRef.current) return;
         if (source.kind === 'new-upload' && view.state === 'reserved') {
           view = await transferCoverDraft({ eventId: event.id, draft: view, file: source.file });
+          ownedDraftsRef.current.set(view.id, view);
+          if (generation !== generationRef.current) return;
         }
-        if (view.state === 'transferred') view = await inspectCoverDraft(event.id, view);
+        if (view.state === 'transferred') {
+          view = await inspectCoverDraft(event.id, view);
+          ownedDraftsRef.current.set(view.id, view);
+          if (generation !== generationRef.current) return;
+        }
         if (view.state !== 'inspected' && view.state !== 'ready') {
           throw new Error('The cover draft did not become available for composition.');
         }
@@ -331,16 +389,24 @@ export function useCoverStudioSession({
         const naturalController = new AbortController();
         previewControllersRef.current.set('natural', naturalController);
         previewAttemptedRef.current.add('natural');
-        const naturalBytes = await readCoverEffectPreview(
-          event.id,
-          view.id,
-          'natural',
-          naturalController.signal,
-        );
-        previewControllersRef.current.delete('natural');
+        let naturalBytes: ArrayBuffer;
+        try {
+          naturalBytes = await readCoverEffectPreview(
+            event.id,
+            view.id,
+            'natural',
+            naturalController.signal,
+          );
+        } finally {
+          previewControllersRef.current.delete('natural');
+        }
+        if (generation !== generationRef.current) return;
         if (view.state === 'inspected') {
           const focus = await resolveCompositionFromPreview(naturalBytes, compositionRunner);
+          if (generation !== generationRef.current) return;
           view = await writeCoverComposition({ eventId: event.id, draft: view, focus });
+          ownedDraftsRef.current.set(view.id, view);
+          if (generation !== generationRef.current) return;
           updateSelection({ ...selectionRef.current, focusMode: 'auto' });
         }
         if (view.state !== 'ready') throw new Error('The cover draft did not become ready.');
@@ -348,7 +414,7 @@ export function useCoverStudioSession({
         installReadyDraft(view, naturalBytes);
       } catch (error) {
         if (generation !== generationRef.current) return;
-        setDraftState({ status: 'error', error });
+        updateDraftState({ status: 'error', error });
         if (isAccessError(error)) reconciler.rejectBeforeDispatch(error);
         if (error instanceof ClientApiError && error.code === 'COVER_DRAFT_STATE_CONFLICT') {
           await reconciler.recoverAccess().catch(() => undefined);
@@ -359,6 +425,11 @@ export function useCoverStudioSession({
       }
     })();
     draftPromiseRef.current = { key, promise: request };
+    pendingDraftPromisesRef.current.add(request);
+    void request.then(
+      () => pendingDraftPromisesRef.current.delete(request),
+      () => pendingDraftPromisesRef.current.delete(request),
+    );
     return request;
   }, [compositionRunner, event.cover.revision, event.id, installReadyDraft, reconciler, revokeUrls]);
 
@@ -368,11 +439,12 @@ export function useCoverStudioSession({
       generationRef.current += 1;
       revokeUrls(false);
       updateDraft(null);
-      setDraftState({ status: 'idle', error: null });
-      if (draftIntentKeyRef.current) {
-        forgetCoverDraftIntent(event.id, draftIntentKeyRef.current);
-        draftIntentKeyRef.current = null;
-      }
+      updateDraftState({ status: 'idle', error: null });
+      for (const key of draftIntentKeysRef.current) forgetCoverDraftIntent(event.id, key);
+      draftIntentKeysRef.current.clear();
+      draftAttemptRef.current = null;
+      unresolvedDraftAttemptsRef.current.clear();
+      ownedDraftsRef.current.clear();
       updateSelection(selectionFor(event));
     }
     reconciler.controller.releaseTerminal();
@@ -381,6 +453,7 @@ export function useCoverStudioSession({
   }, [ensureEffectPreview, event, reconciler.controller, revokeUrls]);
 
   const chooseSource = useCallback((source: CoverSessionSource) => {
+    if (discardingRef.current) return;
     const keepUploadFocus = source?.kind === 'upload'
       && selectionRef.current.source?.kind === 'upload';
     updateSelection({
@@ -392,6 +465,7 @@ export function useCoverStudioSession({
   }, []);
 
   const chooseFile = useCallback(async (file: File) => {
+    if (discardingRef.current) throw new Error('Cover draft discard is in progress.');
     validateCoverFile(file);
     updateSelection({
       source: { kind: 'upload' },
@@ -403,12 +477,22 @@ export function useCoverStudioSession({
   }, [runDraft]);
 
   const enterCompose = useCallback(async () => {
+    if (discardingRef.current) throw new Error('Cover draft discard is in progress.');
     if (draftRef.current?.view.state === 'ready') return;
+    const attempt = draftAttemptRef.current;
+    if (attempt) {
+      await runDraft(attempt.key, attempt.source);
+      return;
+    }
     if (event.cover.config.source.kind !== 'upload') return;
-    await runDraft(`existing-upload.${event.cover.revision}`, { kind: 'existing-upload' });
+    await runDraft(`existing-upload.${event.cover.revision}`, {
+      kind: 'existing-upload',
+      expectedCoverRevision: event.cover.revision,
+    });
   }, [event.cover.config.source.kind, event.cover.revision, runDraft]);
 
   const setFocus = useCallback((focus: CoverFocusValue) => {
+    if (discardingRef.current) return;
     updateSelection({ ...selectionRef.current, focus, focusMode: 'manual' });
     const heldDraft = draftRef.current;
     if (heldDraft) {
@@ -420,6 +504,7 @@ export function useCoverStudioSession({
   }, []);
 
   const resetFocus = useCallback(() => {
+    if (discardingRef.current) return;
     const automatic = draftRef.current?.automaticFocus;
     if (!automatic) return;
     updateSelection({ ...selectionRef.current, focus: automatic, focusMode: 'auto' });
@@ -433,6 +518,7 @@ export function useCoverStudioSession({
   }, []);
 
   const setEffect = useCallback(async (effect: EventCoverEffectId) => {
+    if (discardingRef.current) throw new Error('Cover draft discard is in progress.');
     updateSelection({ ...selectionRef.current, effect });
     if (styleThumbnails[effect].status === 'error') {
       previewAttemptedRef.current.delete(effect);
@@ -490,18 +576,115 @@ export function useCoverStudioSession({
 
   const discard = useCallback(async () => {
     if (!reconciler.controller.canDiscardDraft()) return;
-    const heldDraft = draftRef.current;
-    if (heldDraft) await discardCoverDraft(event.id, heldDraft.view);
-    if (draftIntentKeyRef.current) {
-      forgetCoverDraftIntent(event.id, draftIntentKeyRef.current);
-      draftIntentKeyRef.current = null;
-    }
+    if (discardingRef.current) throw new Error('Cover draft discard is already in progress.');
+    discardingRef.current = true;
+    const canceledIncompleteAttempt = draftStateRef.current.status === 'loading';
     generationRef.current += 1;
-    revokeUrls(false);
-    updateDraft(null);
-    setDraftState({ status: 'idle', error: null });
-    updateSelection(selectionFor(event));
-    setOpen(false);
+    const pending = [...pendingDraftPromisesRef.current];
+    const pendingPreviews = [...previewPromisesRef.current.values()];
+    for (const [effect, controller] of previewControllersRef.current) {
+      controller.abort();
+      previewAttemptedRef.current.delete(effect);
+    }
+    previewControllersRef.current.clear();
+    previewPromisesRef.current.clear();
+    if (mountedRef.current) {
+      setStyleThumbnails((held) => Object.fromEntries(EVENT_COVER_EFFECTS.map((effect) => [
+        effect,
+        held[effect].status === 'loading'
+          ? { status: 'idle', url: null, error: null }
+          : held[effect],
+      ])) as Record<EventCoverEffectId, CoverStyleThumbnail>);
+    }
+
+    try {
+      await Promise.allSettled([...pending, ...pendingPreviews]);
+
+      // A reservation POST may have committed even when its response was
+      // lost. Replay only ambiguous attempts; acknowledged reservations are
+      // already owned and must not be revalidated against a newer cover.
+      for (const [key, source] of unresolvedDraftAttemptsRef.current) {
+        const reservation = await createCoverDraft(source.kind === 'new-upload'
+          ? { eventId: event.id, intentKey: key, source: { kind: 'new-upload', file: source.file } }
+          : {
+              eventId: event.id,
+              intentKey: key,
+              source: {
+                kind: 'existing-upload',
+                expectedCoverRevision: source.expectedCoverRevision,
+              },
+            });
+        ownedDraftsRef.current.set(reservation.draft.id, reservation.draft);
+        unresolvedDraftAttemptsRef.current.delete(key);
+      }
+
+      const currentDraftId = draftRef.current?.view.id ?? null;
+      const owned = [...ownedDraftsRef.current.entries()].sort(([left], [right]) => {
+        if (left === currentDraftId) return 1;
+        if (right === currentDraftId) return -1;
+        return 0;
+      });
+      for (const [id] of owned) {
+        let current: CoverDraftView;
+        try {
+          current = await readCoverDraft(event.id, id);
+        } catch (error) {
+          if (error instanceof ClientApiError && error.code === 'EVENT_NOT_FOUND') {
+            ownedDraftsRef.current.delete(id);
+            continue;
+          }
+          throw error;
+        }
+        ownedDraftsRef.current.set(id, current);
+
+        if (current.state === 'publishing') throw publishingDraftError();
+        let discarded = CONSUMED_DRAFT_STATES.has(current.state);
+        for (let attempt = 0; attempt < 2 && !discarded; attempt += 1) {
+          try {
+            await discardCoverDraft(event.id, current);
+            discarded = true;
+          } catch (error) {
+            if (!(error instanceof TypeError)) throw error;
+            try {
+              current = await readCoverDraft(event.id, id);
+            } catch (readError) {
+              if (readError instanceof ClientApiError && readError.code === 'EVENT_NOT_FOUND') {
+                discarded = true;
+                break;
+              }
+              throw readError;
+            }
+            ownedDraftsRef.current.set(id, current);
+            if (current.state === 'publishing') throw publishingDraftError();
+            if (CONSUMED_DRAFT_STATES.has(current.state)) discarded = true;
+          }
+        }
+        if (!discarded) {
+          throw new Error('The draft deletion could not be confirmed. Try discarding again.');
+        }
+        ownedDraftsRef.current.delete(id);
+      }
+
+      revokeUrls(false);
+      for (const key of draftIntentKeysRef.current) forgetCoverDraftIntent(event.id, key);
+      draftIntentKeysRef.current.clear();
+      draftAttemptRef.current = null;
+      unresolvedDraftAttemptsRef.current.clear();
+      updateDraft(null);
+      updateDraftState({ status: 'idle', error: null });
+      updateSelection(selectionFor(event));
+      setOpen(false);
+    } catch (error) {
+      if (canceledIncompleteAttempt && draftAttemptRef.current) {
+        updateDraftState({
+          status: 'error',
+          error: new Error('Photo preparation was canceled before the draft could be discarded.'),
+        });
+      }
+      throw error;
+    } finally {
+      discardingRef.current = false;
+    }
   }, [event, reconciler.controller, revokeUrls]);
 
   const close = useCallback(() => {
