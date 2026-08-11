@@ -604,7 +604,7 @@ async function probe(context: Task11RemoteContext) {
         await waitForCaller(child, probePort);
         const sampleOne = async (instanceId: string) => {
           const response = await fetch(`http://127.0.0.1:${probePort}/sample`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
+            method: 'POST', headers: LOCAL_CALLER_HEADERS,
             body: JSON.stringify({ instanceId }), signal: AbortSignal.timeout(30_000),
           });
           if (!response.ok) throw new Error('TASK11_PROBE_SAMPLE_FAILED');
