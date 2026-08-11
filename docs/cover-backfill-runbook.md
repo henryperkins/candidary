@@ -37,7 +37,7 @@ Before production execution, require all of the following:
 5. No other cover run is `inventorying` or `executing`, no event purge/fence backlog is unexplained,
    and a no-deploy window is owned for the later verification interval.
 6. Phase 3 remains closed. A green Phase-2 proof permits only a later request to open a Phase-3
-   candidate; it does not authorize `0013`, new cover routes, Cover Studio activation, or deployment.
+   candidate; it does not authorize `0014`, new cover routes, Cover Studio activation, or deployment.
 
 ## 2. Prove the target identities
 
@@ -185,7 +185,8 @@ $expectedMigrations = @(
   '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql',
   '0011_release_certifications.sql',
-  '0012_event_cover_storage.sql'
+  '0012_event_cover_storage.sql',
+  '0013_guest_message_hardening.sql'
 )
 $localMigrations = @(Get-ChildItem migrations -Filter '*.sql' -File |
   Sort-Object Name | Select-Object -ExpandProperty Name)
@@ -196,7 +197,7 @@ for ($index = 0; -not $localMigrationMismatch -and $index -lt $expectedMigration
   }
 }
 if ($localMigrationMismatch) {
-  throw 'The checked-in migration set is not exactly 0001 through 0012.'
+  throw 'The checked-in migration set is not exactly 0001 through 0013.'
 }
 
 $migrationSql = 'SELECT name FROM d1_migrations ORDER BY id;'
