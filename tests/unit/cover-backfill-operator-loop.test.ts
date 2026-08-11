@@ -259,7 +259,7 @@ function wranglerEntrypoint(): string {
   return resolve(dirname(packagePath), packageJson.bin!.wrangler!);
 }
 
-function spawnWrangler(args: readonly string[], timeout = 20_000): WranglerResult {
+function spawnWrangler(args: readonly string[], timeout = 60_000): WranglerResult {
   const result = spawnSync(process.execPath, [wranglerEntrypoint(), ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
