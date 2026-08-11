@@ -272,10 +272,10 @@ host whose upload was refused.
 - `COVER_SOURCE_TOO_SMALL` — after orientation the photo is under 620 × 420, which is the floor for
   producing every 1x layout without upscaling. It is refused at inspection, never at `Done`.
 - `COVER_MASTER_BUDGET_EXHAUSTED` — no rung of the five-attempt normalization ladder produced a valid
-  master inside 12,000,000 bytes. Usually a very large or very panoramic source; ask for a smaller or
+  master inside 9,000,000 bytes. Usually a very large or very panoramic source; ask for a smaller or
   less wide photo. The active cover is untouched.
 - `COVER_PREVIEW_BUDGET_EXHAUSTED` — the four-rung preview ladder could not fit a style preview inside
-  1,000,000 bytes. Recorded per draft, effect, and recipe version, so an identical request replays that
+  660,000 bytes. Recorded per draft, effect, and recipe version, so an identical request replays that
   result rather than re-encoding a dense image forever. The draft stays usable; another style or photo
   will work.
 - `COVER_OUTPUT_BUDGET_EXHAUSTED` — a required profile could not be encoded inside its byte ceiling, or

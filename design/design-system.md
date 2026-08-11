@@ -218,7 +218,7 @@ container and hero state do.
 | --- | --- | ---: | ---: | ---: |
 | `short-lookup` | ≤360 wide and ≤600 high lookup hero | 360×168 / 720×336 | 60 / 120 KiB | 90 / 180 KiB |
 | `compact-default` | ≤390 default hero | 390×205 / 780×410 | 70 / 140 KiB | 100 / 200 KiB |
-| `standard-default` | 391–699 unframed default, capped at 620 | 620×218 / 1240×436 | 120 / 250 KiB | 180 / 360 KiB |
+| `standard-default` | 391–699 unframed default, capped at 620 | 620×218 / 1240×436 | 78 / 250 KiB | 120 / 360 KiB |
 | `framed-default` | ≥700×760 viewport, 620 framed hero | 620×265 / 1240×530 | 140 / 300 KiB | 210 / 440 KiB |
 | `compact-expanded` | ≤390 expanded-welcome hero | 390×420 / 780×840 | 130 / 280 KiB | 190 / 410 KiB |
 | `wide-expanded` | 391–699 expanded welcome, capped at 620 | 620×420 / 1240×840 | 220 / 480 KiB | 330 / 700 KiB |

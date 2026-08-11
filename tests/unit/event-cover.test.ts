@@ -75,7 +75,7 @@ function publishBody(patch: Record<string, unknown> = {}): Record<string, unknow
 describe('cover constants', () => {
   it('pins every limit as the exact decimal the pipeline was sized for', () => {
     expect(MAX_COVER_UPLOAD_BYTES).toBe(19_000_000);
-    expect(MAX_COVER_MASTER_BYTES).toBe(12_000_000);
+    expect(MAX_COVER_MASTER_BYTES).toBe(9_000_000);
     expect(MIN_COVER_SOURCE_WIDTH).toBe(620);
     expect(MIN_COVER_SOURCE_HEIGHT).toBe(420);
     expect(MAX_COVER_MANUAL_ZOOM).toBe(2.0);
@@ -83,7 +83,7 @@ describe('cover constants', () => {
     expect(MAX_LIVE_COVER_DRAFTS_PER_EVENT).toBe(3);
     expect(MAX_LIVE_COVER_RAW_BYTES_PER_EVENT).toBe(57_000_000);
     expect(MAX_COVER_PREVIEW_FILES_PER_DRAFT).toBe(5);
-    expect(MAX_COVER_PREVIEW_BYTES).toBe(1_000_000);
+    expect(MAX_COVER_PREVIEW_BYTES).toBe(660_000);
     expect(MAX_COVER_PREVIEW_BYTES_PER_DRAFT).toBe(5_000_000);
     expect(MAX_PREPARING_COVER_PUBLICATIONS_PER_EVENT).toBe(1);
     expect(MAX_NONACTIVE_COVER_RENDER_SETS_PER_EVENT).toBe(32);
@@ -171,7 +171,7 @@ describe('cover registries', () => {
       // width, height, webp 1x, webp 2x, jpeg 1x, jpeg 2x
       'short-lookup': [360, 168, 60, 120, 90, 180],
       'compact-default': [390, 205, 70, 140, 100, 200],
-      'standard-default': [620, 218, 120, 250, 180, 360],
+      'standard-default': [620, 218, 78, 250, 120, 360],
       'framed-default': [620, 265, 140, 300, 210, 440],
       'compact-expanded': [390, 420, 130, 280, 190, 410],
       'wide-expanded': [620, 420, 220, 480, 330, 700],

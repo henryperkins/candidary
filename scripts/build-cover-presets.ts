@@ -94,8 +94,8 @@ export const COVER_PRESET_PROFILES: readonly CoverPresetProfile[] = [
     id: 'standard-default',
     width: 620,
     height: 218,
-    webpByteCeiling: { '1x': 120 * KIB, '2x': 250 * KIB },
-    jpegByteCeiling: { '1x': 180 * KIB, '2x': 360 * KIB },
+    webpByteCeiling: { '1x': 78 * KIB, '2x': 250 * KIB },
+    jpegByteCeiling: { '1x': 120 * KIB, '2x': 360 * KIB },
   },
   {
     id: 'framed-default',

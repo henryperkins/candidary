@@ -121,7 +121,7 @@ describe('cover master normalization', () => {
       source: { width: 4000, height: 3000 },
       encode: (call) => {
         attempt += 1;
-        // The first two rungs blow the 12,000,000-byte ceiling; the third fits.
+        // The first two rungs blow the 9,000,000-byte ceiling; the third fits.
         const byteLength = attempt <= 2 ? MAX_COVER_MASTER_BYTES + 1 : 5_000_000;
         return fixedSize(byteLength)(call);
       },

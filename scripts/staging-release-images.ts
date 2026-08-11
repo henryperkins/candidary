@@ -151,7 +151,7 @@ export function buildImageMatrix(
     for (const format of ['webp', 'jpeg'] as const) {
       cases.push(caseFor(
         `profile-${format}-ladder-rung-${rung}`,
-        `profile-rung-${rung}`,
+        `profile-${format}-rung-${rung}`,
         'profile',
         'materialized',
         [`profile-${format}-rung-${rung}`, `format-${format}`, 'mime', 'dimensions', 'byte-ceiling', 'checksum', 'inventory'],

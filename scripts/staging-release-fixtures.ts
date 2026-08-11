@@ -85,9 +85,9 @@ export type GeneratedFixtureRecipe =
   | 'oriented-gps-jpeg'
   | 'exact-19000000-jpeg'
   | 'over-19000001-jpeg'
-  | `dense-master-${1 | 2 | 3 | 4 | 5}`
-  | `dense-preview-${1 | 2 | 3 | 4}`
-  | `dense-profile-${1 | 2 | 3 | 4}`
+  | `calibrated-master-${1 | 2 | 3 | 4 | 5}`
+  | `calibrated-preview-${1 | 2 | 3 | 4}`
+  | `calibrated-profile-${'webp' | 'jpeg'}-${1 | 2 | 3 | 4}`
   | 'geometry-complete-2x'
   | 'geometry-partial-2x'
   | 'geometry-no-upscale';
@@ -172,27 +172,26 @@ const FIXTURE_PLAN: readonly Task11FixturePlanEntry[] = [
   ...([1, 2, 3, 4, 5] as const).map((rung) => ({
     caseId: `master-rung-${rung}`,
     source: 'generated' as const,
-    recipe: `dense-master-${rung}` as const,
-    declaredMimeType: 'image/jpeg',
+    recipe: `calibrated-master-${rung}` as const,
+    declaredMimeType: 'image/png',
     capabilities: [`master-rung-${rung}` as const],
   })),
   ...([1, 2, 3, 4] as const).map((rung) => ({
     caseId: `preview-rung-${rung}`,
     source: 'generated' as const,
-    recipe: `dense-preview-${rung}` as const,
-    declaredMimeType: 'image/jpeg',
+    recipe: `calibrated-preview-${rung}` as const,
+    declaredMimeType: 'image/png',
     capabilities: [`preview-rung-${rung}` as const],
   })),
-  ...([1, 2, 3, 4] as const).map((rung) => ({
-    caseId: `profile-rung-${rung}`,
-    source: 'generated' as const,
-    recipe: `dense-profile-${rung}` as const,
-    declaredMimeType: 'image/jpeg',
-    capabilities: [
-      `profile-webp-rung-${rung}` as const,
-      `profile-jpeg-rung-${rung}` as const,
-    ],
-  })),
+  ...(['webp', 'jpeg'] as const).flatMap((format) => (
+    ([1, 2, 3, 4] as const).map((rung) => ({
+      caseId: `profile-${format}-rung-${rung}`,
+      source: 'generated' as const,
+      recipe: `calibrated-profile-${format}-${rung}` as const,
+      declaredMimeType: 'image/png',
+      capabilities: [`profile-${format}-rung-${rung}` as const],
+    }))
+  )),
   {
     caseId: 'geometry-complete-2x', source: 'generated', recipe: 'geometry-complete-2x',
     declaredMimeType: 'image/jpeg',
@@ -387,6 +386,75 @@ async function geometryRaster(width: number, height: number): Promise<Buffer> {
     .toBuffer();
 }
 
+async function calibratedGradientPng(width: number, height: number): Promise<Buffer> {
+  const pixels = Buffer.allocUnsafe(width * height * 3);
+  const radius = Math.min(width, height) / 7;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 3;
+      const dx = x - width / 2;
+      const dy = y - height / 2;
+      const marker = dx * dx + dy * dy <= radius * radius;
+      pixels[index] = marker ? 232 : Math.round(40 + 150 * x / (width - 1));
+      pixels[index + 1] = marker ? 92 : Math.round(55 + 125 * y / (height - 1));
+      pixels[index + 2] = marker ? 58 : 128;
+    }
+  }
+  return sharp(pixels, { raw: { width, height, channels: 3 } })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
+function calibrationWord(state: number): number {
+  let value = state;
+  value = Math.imul(value ^ value >>> 15, value | 1);
+  value ^= value + Math.imul(value ^ value >>> 7, value | 61);
+  return value ^ value >>> 14;
+}
+
+async function calibratedCoveredGrayPng(
+  width: number,
+  height: number,
+  coveragePercent: number,
+): Promise<Buffer> {
+  const pixels = Buffer.allocUnsafe(width * height * 3);
+  const threshold = Math.round(coveragePercent * 2.55);
+  let state = 0x6d2b79f5;
+  for (let index = 0; index < pixels.length; index += 3) {
+    state += 0x6d2b79f5;
+    const value = calibrationWord(state);
+    const channel = value >>> 24 < threshold ? (value & 1) * 255 : 128;
+    pixels[index] = channel;
+    pixels[index + 1] = channel;
+    pixels[index + 2] = channel;
+  }
+  return sharp(pixels, { raw: { width, height, channels: 3 } })
+    .png({ compressionLevel: 9, palette: true })
+    .toBuffer();
+}
+
+async function calibratedMixedBinaryPng(
+  width: number,
+  height: number,
+  colorPercent: number,
+): Promise<Buffer> {
+  const pixels = Buffer.allocUnsafe(width * height * 3);
+  const threshold = Math.round(colorPercent * 2.55);
+  let state = 0x6d2b79f5;
+  for (let index = 0; index < pixels.length; index += 3) {
+    state += 0x6d2b79f5;
+    const value = calibrationWord(state);
+    const gray = (value & 1) * 255;
+    const color = value >>> 24 < threshold;
+    pixels[index] = color ? (value & 1) * 255 : gray;
+    pixels[index + 1] = color ? ((value >>> 8) & 1) * 255 : gray;
+    pixels[index + 2] = color ? ((value >>> 16) & 1) * 255 : gray;
+  }
+  return sharp(pixels, { raw: { width, height, channels: 3 } })
+    .png({ compressionLevel: 9, palette: true })
+    .toBuffer();
+}
+
 async function generatedFixture(recipe: GeneratedFixtureRecipe): Promise<Buffer> {
   if (recipe === 'opaque-png') return raster(1200, 900, 'png', 0x0a11ce);
   if (recipe === 'transparent-png') return raster(1200, 900, 'png', 0x7a11ce, true);
@@ -408,12 +476,33 @@ async function generatedFixture(recipe: GeneratedFixtureRecipe): Promise<Buffer>
     if (base.length >= target) fail(`boundary base unexpectedly exceeds ${target} bytes`);
     return Buffer.concat([base, Buffer.alloc(target - base.length)]);
   }
-  const master = /^dense-master-([1-5])$/u.exec(recipe);
-  if (master) return raster(4800, 3600, 'jpeg', 0x100000 + Number(master[1]) * 0x10101);
-  const preview = /^dense-preview-([1-4])$/u.exec(recipe);
-  if (preview) return raster(2400, 1800, 'jpeg', 0x200000 + Number(preview[1]) * 0x20202);
-  const profile = /^dense-profile-([1-4])$/u.exec(recipe);
-  if (profile) return raster(1800, 1260, 'jpeg', 0x300000 + Number(profile[1]) * 0x30303);
+  const master = /^calibrated-master-([1-5])$/u.exec(recipe);
+  if (master) {
+    const rung = Number(master[1]);
+    if (rung === 1) return calibratedGradientPng(4000, 4000);
+    if (rung === 2) return calibratedCoveredGrayPng(4000, 4000, 20);
+    if (rung === 3) return calibratedCoveredGrayPng(4000, 4000, 30);
+    return calibratedMixedBinaryPng(4000, 4000, rung === 4 ? 20 : 40);
+  }
+  const preview = /^calibrated-preview-([1-4])$/u.exec(recipe);
+  if (preview) {
+    const rung = Number(preview[1]);
+    if (rung === 1) return calibratedGradientPng(4000, 4000);
+    if (rung === 2) return calibratedCoveredGrayPng(4000, 4000, 20);
+    if (rung === 3) return calibratedCoveredGrayPng(4000, 4000, 30);
+    return calibratedMixedBinaryPng(4000, 4000, 20);
+  }
+  const profile = /^calibrated-profile-(webp|jpeg)-([1-4])$/u.exec(recipe);
+  if (profile) {
+    const format = profile[1];
+    const rung = Number(profile[2]);
+    if (rung === 1) return calibratedGradientPng(1800, 1260);
+    if (format === 'webp') {
+      if (rung === 2) return calibratedMixedBinaryPng(1800, 1260, 0);
+      return calibratedMixedBinaryPng(1800, 1260, rung === 3 ? 20 : 60);
+    }
+    return calibratedMixedBinaryPng(1800, 1260, rung === 2 ? 40 : rung === 3 ? 60 : 100);
+  }
   if (recipe === 'geometry-complete-2x') return geometryRaster(2400, 1800);
   if (recipe === 'geometry-partial-2x') return geometryRaster(1100, 850);
   if (recipe === 'geometry-no-upscale') return geometryRaster(500, 300);

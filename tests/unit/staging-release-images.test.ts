@@ -40,6 +40,12 @@ describe('Task 11 Images matrix', () => {
       provesPartial2x: true,
       provesAdoption: true,
     });
+    for (const rung of [1, 2, 3, 4] as const) {
+      for (const format of ['webp', 'jpeg'] as const) {
+        expect(matrix.find((entry) => entry.caseId === `profile-${format}-ladder-rung-${rung}`))
+          .toMatchObject({ fixtureCaseId: `profile-${format}-rung-${rung}` });
+      }
+    }
   });
 
   it('fails when any mandatory matrix case is absent or duplicated', () => {

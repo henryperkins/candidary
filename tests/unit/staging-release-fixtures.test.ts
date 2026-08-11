@@ -43,6 +43,29 @@ describe('Task 11 fixture corpus', () => {
       sourceRevision: '5332a9cf0220e9c6c93f88a187daa90808051e10',
       license: 'CC-BY-SA-4.0',
     });
+    for (const rung of [1, 2, 3, 4, 5] as const) {
+      expect(plan.find((fixture) => fixture.caseId === `master-rung-${rung}`)).toMatchObject({
+        source: 'generated',
+        recipe: `calibrated-master-${rung}`,
+        declaredMimeType: 'image/png',
+      });
+    }
+    for (const rung of [1, 2, 3, 4] as const) {
+      expect(plan.find((fixture) => fixture.caseId === `preview-rung-${rung}`)).toMatchObject({
+        source: 'generated',
+        recipe: `calibrated-preview-${rung}`,
+        declaredMimeType: 'image/png',
+      });
+      for (const format of ['webp', 'jpeg'] as const) {
+        expect(plan.find((fixture) => fixture.caseId === `profile-${format}-rung-${rung}`)).toMatchObject({
+          source: 'generated',
+          recipe: `calibrated-profile-${format}-${rung}`,
+          declaredMimeType: 'image/png',
+          capabilities: [`profile-${format}-rung-${rung}`],
+        });
+      }
+    }
+    expect(plan.some((fixture) => /^profile-rung-/u.test(fixture.caseId))).toBe(false);
   });
 
   it('verifies every fixture byte and refuses incomplete, duplicate, or escaping manifests', () => {

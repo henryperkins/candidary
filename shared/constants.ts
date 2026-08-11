@@ -71,7 +71,7 @@ export const COVER_UPLOAD_MIME_TYPES = [
 export type CoverUploadMimeType = (typeof COVER_UPLOAD_MIME_TYPES)[number];
 
 export const MAX_COVER_UPLOAD_BYTES = 19_000_000;
-export const MAX_COVER_MASTER_BYTES = 12_000_000;
+export const MAX_COVER_MASTER_BYTES = 9_000_000;
 // After orientation. Enough to produce every 1x profile without upscaling,
 // which is exactly the widest and tallest profile in the registry.
 export const MIN_COVER_SOURCE_WIDTH = 620;
@@ -85,7 +85,7 @@ export const COVER_PAPER_MATTE = '#fffaf3';
 export const MAX_LIVE_COVER_DRAFTS_PER_EVENT = 3;
 export const MAX_LIVE_COVER_RAW_BYTES_PER_EVENT = 57_000_000;
 export const MAX_COVER_PREVIEW_FILES_PER_DRAFT = 5;
-export const MAX_COVER_PREVIEW_BYTES = 1_000_000;
+export const MAX_COVER_PREVIEW_BYTES = 660_000;
 export const MAX_COVER_PREVIEW_BYTES_PER_DRAFT = 5_000_000;
 
 export const MAX_PREPARING_COVER_PUBLICATIONS_PER_EVENT = 1;
