@@ -627,7 +627,7 @@ master.
 `MAX_LIVE_COVER_RAW_BYTES_PER_EVENT = 57_000_000` declared or verified bytes,
 `MAX_COVER_PREVIEW_FILES_PER_DRAFT = 5`,
 `MAX_COVER_PREVIEW_BYTES = 660_000` per file, and
-`MAX_COVER_PREVIEW_BYTES_PER_DRAFT = 5_000_000`. The draft-create transaction
+`MAX_COVER_PREVIEW_BYTES_PER_DRAFT = 3_300_000`. The draft-create transaction
 enforces both live-draft and aggregate raw-byte caps before returning the
 authenticated ingress route; `409 COVER_DRAFT_LIMIT` or
 `COVER_RAW_STORAGE_LIMIT` identifies the drafts the host may resume or discard.

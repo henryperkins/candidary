@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { MAX_LIVE_COVER_DRAFTS_PER_EVENT } from '../../shared/constants';
+import {
+  MAX_COVER_PREVIEW_BYTES,
+  MAX_COVER_PREVIEW_BYTES_PER_DRAFT,
+  MAX_LIVE_COVER_DRAFTS_PER_EVENT,
+} from '../../shared/constants';
 import { COVER_PIPELINE_VERSIONS } from '../../shared/event-cover';
 import {
   adoptCoverPreview,
@@ -306,19 +310,21 @@ describe('draft preview inventory', () => {
   });
 
   it('holds the per-file budget, and the two bounds meet exactly at five files', async () => {
-    await expect(adoptCoverPreview(testEnv.DB, preview('natural', { byteSize: 1_000_001 })))
+    await expect(adoptCoverPreview(testEnv.DB, preview('natural', {
+      byteSize: MAX_COVER_PREVIEW_BYTES + 1,
+    })))
       .rejects.toMatchObject({ code: 'COVER_PREVIEW_BUDGET_EXHAUSTED' });
-    // Five files at the per-file ceiling is exactly the 5,000,000-byte aggregate,
+    // Five files at the per-file ceiling is exactly the 3,300,000-byte aggregate,
     // so the two constants meet rather than one shadowing the other. Both are
     // still enforced: the aggregate is what catches a future file-count change.
     for (const effect of ['natural', 'warm', 'film', 'soft', 'monochrome']) {
-      await adoptCoverPreview(testEnv.DB, preview(effect, { byteSize: 1_000_000 }));
+      await adoptCoverPreview(testEnv.DB, preview(effect, { byteSize: MAX_COVER_PREVIEW_BYTES }));
     }
     const totals = await testEnv.DB.prepare(`
       SELECT count(*) AS count, SUM(byte_size) AS bytes FROM event_cover_draft_previews
       WHERE draft_id = ? AND state = 'ready'
     `).bind(draftId).first<{ count: number; bytes: number }>();
-    expect(totals).toEqual({ count: 5, bytes: 5_000_000 });
+    expect(totals).toEqual({ count: 5, bytes: MAX_COVER_PREVIEW_BYTES_PER_DRAFT });
   });
 
   it('replays a terminal failure and lets only a retryable one re-enter rendering', async () => {
