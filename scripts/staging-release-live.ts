@@ -203,6 +203,22 @@ function d1Rows(value: unknown): Array<Record<string, unknown>> {
   });
 }
 
+export const STAGING_DATABASE_FRESHNESS_SQL = [
+  'SELECT name FROM d1_migrations ORDER BY id;',
+  'PRAGMA quick_check;',
+  'SELECT count(*) AS event_count FROM events;',
+].join(' ');
+
+export function assertFreshStagingDatabase(
+  rows: readonly Readonly<Record<string, unknown>>[],
+): void {
+  const quickCheck = rows.find((row) => 'quick_check' in row)?.quick_check;
+  const eventCount = rows.find((row) => 'event_count' in row)?.event_count;
+  if (quickCheck !== 'ok' || eventCount !== 0) {
+    throw new Error('TASK11_STAGING_DATABASE_NOT_FRESH');
+  }
+}
+
 function readD1(
   context: Task11RemoteContext,
   configPath: string,
@@ -651,17 +667,11 @@ function migrationLedger(
   configPath: string,
   candidate: VerifiedCandidate,
 ): { count: 13; digest: string } {
-  const rows = readD1(context, configPath, [
-    'SELECT name FROM d1_migrations ORDER BY id;',
-    'SELECT integrity_check AS integrity FROM pragma_integrity_check;',
-    'SELECT count(*) AS event_count FROM events;',
-  ].join(' '));
+  const rows = readD1(context, configPath, STAGING_DATABASE_FRESHNESS_SQL);
   const names = rows.filter((row) => typeof row.name === 'string').map((row) => row.name as string);
   const expected = candidate.manifest.migrations!.manifest.map((file) => file.path.split('/').at(-1)!);
   if (canonicalJson(names) !== canonicalJson(expected)) throw new Error('TASK11_STAGING_MIGRATION_LEDGER_MISMATCH');
-  const integrity = rows.find((row) => 'integrity' in row)?.integrity;
-  const eventCount = rows.find((row) => 'event_count' in row)?.event_count;
-  if (integrity !== 'ok' || eventCount !== 0) throw new Error('TASK11_STAGING_DATABASE_NOT_FRESH');
+  assertFreshStagingDatabase(rows);
   return { count: 13, digest: sha256(canonicalJson(names)) };
 }
 
