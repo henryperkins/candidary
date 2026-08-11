@@ -3,6 +3,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import {
   EVENT_COVER_EFFECTS,
   EVENT_COVER_PROFILES,
+  MAX_COVER_UPLOAD_BYTES,
   MAX_COVER_MANUAL_ZOOM,
   type CoverFocusPoint,
   type EventCoverDensity,
@@ -10,6 +11,7 @@ import {
   type EventCoverFormat,
   type EventCoverProfileId,
 } from '../shared/event-cover';
+import { ApiError } from '../shared/errors';
 import {
   STAGING_ORIGIN,
   assertConformanceCaseId,
@@ -31,9 +33,12 @@ import {
   type CoverRenderObjectResult,
   type CoverSourceInfo,
 } from './storage/event-cover-images';
+import { proveZeroLegacyCovers } from './workflows/cover-backfill';
 import { scheduledCleanup } from './workflows/cleanup';
 import {
+  classifyWorkflowLookupError,
   defaultCoverBackfillWorkflowAccessor,
+  dispositionForLookup,
   type CoverBackfillWorkflowAccessor,
   type CoverWorkflowLookup,
 } from './workflows/cover-platform';
@@ -69,6 +74,9 @@ export interface StagingProfileRequest extends StagingCaseRequest {
 
 export interface StagingBatchRequest extends StagingCaseRequest { readonly count: number }
 export interface StagingCleanupRequest extends StagingRuntimeRequest { readonly now: string }
+export interface StagingWorkflowControlRequest extends StagingRuntimeRequest {
+  readonly control: 'status-unknown' | 'failed-lookup';
+}
 
 export interface SanitizedImageResult {
   readonly caseId: string;
@@ -85,10 +93,11 @@ export interface SanitizedImageResult {
 }
 
 export interface ConformanceSummary {
-  readonly legacyCovers: number;
-  readonly unresolvedJobs: number;
-  readonly unresolvedFences: number;
-  readonly needsReplacement: number;
+  readonly legacyRows: number;
+  readonly blockingJobs: number;
+  readonly incompleteActiveSets: number;
+  readonly uploadsWithoutActiveSet: number;
+  readonly verifiedAt: string | null;
   readonly purgeRows: number;
 }
 
@@ -98,6 +107,7 @@ export interface StagingConformanceDependencies {
   readonly renderPreview: typeof renderCoverPreview;
   readonly renderProfile: typeof renderCoverProfileObject;
   readonly backfillWorkflow: (env: AppEnv) => CoverBackfillWorkflowAccessor;
+  readonly pauseBackfill: (env: AppEnv, instanceId: string) => Promise<void>;
   readonly scheduledCleanup: (env: AppEnv, now: Date) => Promise<void>;
   readonly readSummary: (env: AppEnv, runId: string) => Promise<ConformanceSummary>;
 }
@@ -337,22 +347,16 @@ async function count(env: AppEnv, sql: string, ...values: unknown[]): Promise<nu
 }
 
 async function readDefaultSummary(env: AppEnv, runId: string): Promise<ConformanceSummary> {
+  const proof = await proveZeroLegacyCovers(env);
+  const run = await env.DB.prepare(`
+    SELECT verified_at FROM event_cover_backfill_runs WHERE id = ?
+  `).bind(runId).first<{ verified_at: string | null }>();
   return {
-    legacyCovers: await count(env, `
-      SELECT COUNT(*) AS count FROM events
-      WHERE cover_object_key IS NOT NULL AND cover_render_set_id IS NULL
-    `),
-    unresolvedJobs: await count(env, `
-      SELECT COUNT(*) AS count FROM event_cover_backfill_jobs
-      WHERE run_id = ? AND status NOT IN ('applied', 'skipped', 'resolved', 'failed')
-    `, runId),
-    unresolvedFences: await count(env, `
-      SELECT COUNT(*) AS count FROM event_cover_workflow_fences
-    `),
-    needsReplacement: await count(env, `
-      SELECT COUNT(*) AS count FROM event_cover_backfill_jobs
-      WHERE run_id = ? AND status = 'needs_replacement'
-    `, runId),
+    legacyRows: proof.legacyRows,
+    blockingJobs: proof.blockingJobs,
+    incompleteActiveSets: proof.incompleteActiveSets,
+    uploadsWithoutActiveSet: proof.uploadsWithoutActiveSet,
+    verifiedAt: run?.verified_at ?? null,
     purgeRows: await count(env, `
       SELECT COUNT(*) AS count FROM event_cover_purge_progress
     `),
@@ -365,6 +369,9 @@ const DEFAULT_DEPENDENCIES: StagingConformanceDependencies = {
   renderPreview: renderCoverPreview,
   renderProfile: renderCoverProfileObject,
   backfillWorkflow: defaultCoverBackfillWorkflowAccessor,
+  async pauseBackfill(env, instanceId) {
+    await (await env.COVER_BACKFILL_WORKFLOW.get(instanceId)).pause();
+  },
   scheduledCleanup,
   readSummary: readDefaultSummary,
 };
@@ -396,10 +403,17 @@ export class StagingConformanceService {
       const object = await scoped.env.MEDIA_BUCKET.get(`fixtures/${scoped.caseId!}`);
       if (!object?.body) throw new Error('STAGING_CONFORMANCE_FIXTURE_MISSING');
       const bytes = await object.arrayBuffer();
+      if (bytes.byteLength > MAX_COVER_UPLOAD_BYTES) {
+        throw new ApiError('COVER_SOURCE_UNSUPPORTED', 'Task 11 source exceeds the product byte ceiling.', 422);
+      }
       const info = await this.dependencies.readSourceInfo(scoped.env, bytes);
+      const type = detectedType(info.format);
+      if (type === null) {
+        throw new ApiError('COVER_SOURCE_UNSUPPORTED', 'Task 11 source is outside the product type contract.', 422);
+      }
       return {
         caseId: scoped.caseId!, outcome: 'accepted', resultCode: null,
-        detectedType: detectedType(info.format), format: null,
+        detectedType: type, format: null,
         width: info.width, height: info.height, byteSize: bytes.byteLength,
         sha256: await digest(bytes), qualityRung: null, adopted: false,
       };
@@ -486,6 +500,23 @@ export class StagingConformanceService {
     return { caseId: scoped.caseId!, status: workflowStatus(lookup) };
   }
 
+  workflowControl(input: StagingWorkflowControlRequest) {
+    scope(this.env, input);
+    const lookup = input.control === 'status-unknown'
+      ? { kind: 'status' as const, status: 'unknown' }
+      : input.control === 'failed-lookup'
+        ? classifyWorkflowLookupError(new Error('staging control'))
+        : null;
+    if (lookup === null) throw new Error('STAGING_CONFORMANCE_INPUT_INVALID');
+    const disposition = dispositionForLookup(lookup);
+    return {
+      control: input.control,
+      disposition: disposition.kind,
+      recovery: disposition.recovery,
+      mutates: disposition.mutates,
+    };
+  }
+
   async createBackfillBatch(input: StagingBatchRequest) {
     const scoped = scope(this.env, input);
     const size = assertCount(input.count);
@@ -511,10 +542,36 @@ export class StagingConformanceService {
   restartBackfill(input: StagingCaseRequest) { return this.lifecycle(input, 'restart'); }
   terminateBackfill(input: StagingCaseRequest) { return this.lifecycle(input, 'terminate'); }
 
+  async pauseBackfill(input: StagingCaseRequest) {
+    const scoped = scope(this.env, input);
+    const identity = await conformanceBackfillIdentity(scoped.runId, scoped.caseId!);
+    await this.dependencies.pauseBackfill(scoped.env, identity.instanceId);
+    return { caseId: scoped.caseId!, outcome: 'accepted' as const };
+  }
+
   async runScheduledCleanup(input: StagingCleanupRequest): Promise<ConformanceSummary> {
     const scoped = scope(this.env, input);
-    await this.dependencies.scheduledCleanup(scoped.env, assertInstant(input.now));
-    return this.dependencies.readSummary(scoped.env, scoped.runId);
+    // The conformance target owns a fresh, dedicated staging D1 and R2 bucket.
+    // Product Workflows write their ordinary `events/{eventId}/...` keys through
+    // the unwrapped binding, so the production cleanup coordinator must observe
+    // that same binding. The route-less staging sentinel and target digest are
+    // the destructive boundary; the logical-prefix proxy remains for the image
+    // RPCs that deliberately share one bucket across cases.
+    await this.dependencies.scheduledCleanup(this.env, assertInstant(input.now));
+    return this.dependencies.readSummary(this.env, scoped.runId);
+  }
+
+  async emptyStagingBucket(input: StagingRuntimeRequest) {
+    scope(this.env, input);
+    let deletedObjects = 0;
+    for (;;) {
+      const listed = await this.env.MEDIA_BUCKET.list({ limit: 1_000 });
+      if (listed.objects.length === 0) {
+        return { deletedObjects, remainingObjects: 0 as const };
+      }
+      await this.env.MEDIA_BUCKET.delete(listed.objects.map((object) => object.key));
+      deletedObjects += listed.objects.length;
+    }
   }
 
   async readConformanceSummary(input: StagingRuntimeRequest): Promise<ConformanceSummary> {
@@ -542,11 +599,17 @@ export class StagingConformanceEntrypoint extends WorkerEntrypoint<AppEnv> {
   workflowLookup(input: StagingCaseRequest) {
     return new StagingConformanceService(this.env).workflowLookup(input);
   }
+  workflowControl(input: StagingWorkflowControlRequest) {
+    return new StagingConformanceService(this.env).workflowControl(input);
+  }
   createBackfillBatch(input: StagingBatchRequest) {
     return new StagingConformanceService(this.env).createBackfillBatch(input);
   }
   resumeBackfill(input: StagingCaseRequest) {
     return new StagingConformanceService(this.env).resumeBackfill(input);
+  }
+  pauseBackfill(input: StagingCaseRequest) {
+    return new StagingConformanceService(this.env).pauseBackfill(input);
   }
   restartBackfill(input: StagingCaseRequest) {
     return new StagingConformanceService(this.env).restartBackfill(input);
@@ -556,6 +619,9 @@ export class StagingConformanceEntrypoint extends WorkerEntrypoint<AppEnv> {
   }
   runScheduledCleanup(input: StagingCleanupRequest) {
     return new StagingConformanceService(this.env).runScheduledCleanup(input);
+  }
+  emptyStagingBucket(input: StagingRuntimeRequest) {
+    return new StagingConformanceService(this.env).emptyStagingBucket(input);
   }
   readConformanceSummary(input: StagingRuntimeRequest) {
     return new StagingConformanceService(this.env).readConformanceSummary(input);

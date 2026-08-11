@@ -879,6 +879,7 @@ const COVER_PURGE_FENCE_PROTOCOL_CURSOR_VALUES = [
 interface HeldFenceRow {
   workflow_binding: string;
   workflow_instance_id: string;
+  dispatch_generation: number;
   dispatch_state: string | null;
   claim_at: string | null;
 }
@@ -1275,7 +1276,7 @@ async function settleEventCoverFences(
   const cursorInstance = cursorBinding ? cursor?.workflow_instance_id ?? '' : '';
 
   const held = await env.DB.prepare(`
-    SELECT f.workflow_binding, f.workflow_instance_id,
+    SELECT f.workflow_binding, f.workflow_instance_id, f.dispatch_generation,
       CASE WHEN f.workflow_binding = 'COVER_RENDER_WORKFLOW'
         THEN r.dispatch_state ELSE j.dispatch_state END AS dispatch_state,
       CASE WHEN f.workflow_binding = 'COVER_RENDER_WORKFLOW'
@@ -1324,8 +1325,18 @@ async function settleEventCoverFences(
       ? accessors.backfill
       : accessors.render;
 
-    let lookup = await purgeLookup(accessor, fence.workflow_instance_id);
-    let action = purgeActionFor(lookup);
+    // Pending generation zero is the durable proof that no platform claim ever
+    // won. The first real create/resume/restart claim changes both fields in the
+    // same guarded D1 unit before contacting Workflows. Generation zero alone is
+    // insufficient: legacy confirmed rows can already own a live instance.
+    let action: 'terminate' | 'settle' | 'materialize' | 'wait';
+    if (fence.workflow_binding === COVER_BACKFILL_BINDING
+      && fence.dispatch_generation === 0 && fence.dispatch_state === 'pending') {
+      action = 'settle';
+    } else {
+      const lookup = await purgeLookup(accessor, fence.workflow_instance_id);
+      action = purgeActionFor(lookup);
+    }
     if (action === 'wait') {
       halted = true;
       break;
@@ -1360,8 +1371,8 @@ async function settleEventCoverFences(
       // Re-read rather than assume: terminate returning is not proof the
       // instance reached a terminal state, and the fence may only be released
       // against an observed one.
-      lookup = await purgeLookup(accessor, fence.workflow_instance_id);
-      action = purgeActionFor(lookup);
+      const postTerminate = await purgeLookup(accessor, fence.workflow_instance_id);
+      action = purgeActionFor(postTerminate);
     }
 
     if (action !== 'settle') {
@@ -1546,6 +1557,7 @@ export async function reconcileEventCoverPurge(
       UPDATE event_cover_backfill_jobs
       SET status = 'failed', retryable = 0, failure_code = 'EVENT_DELETED',
           dispatch_state = CASE
+            WHEN dispatch_state = 'pending' AND dispatch_generation = 0 THEN dispatch_state
             WHEN dispatch_state IN ('creating', 'resuming', 'restarting') THEN dispatch_state
             ELSE 'blocked'
           END,

@@ -217,6 +217,44 @@ describe('event cover purge coordinator', () => {
     });
   });
 
+  it('settles an undispatched generation-zero backfill fence without consulting the platform', async () => {
+    const access = await eventAccess();
+    const runId = '10000000-0000-4000-8000-000000000001';
+    const jobId = '20000000-0000-4000-8000-000000000002';
+    const instanceId = 'cb1-000000000000000000000000000000000000000000000001';
+    const timestamp = now.toISOString();
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+        VALUES (?, 'execute', 'executing', ?, ?)
+      `).bind(runId, timestamp, timestamp),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_backfill_jobs (
+          id, run_id, event_id, expected_revision, legacy_key_fingerprint,
+          workflow_instance_id, dispatch_state, dispatch_generation, status,
+          dependency_versions_json, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?, 'pending', 0, 'queued', '{}', ?, ?)
+      `).bind(jobId, runId, access.event.id, 'a'.repeat(64), instanceId, timestamp, timestamp),
+      testEnv.DB.prepare(`
+        INSERT INTO event_cover_workflow_fences (
+          workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+          state, created_at, updated_at, expires_at
+        ) VALUES ('COVER_BACKFILL_WORKFLOW', ?, ?, 0, 'open', ?, ?, ?)
+      `).bind(instanceId, access.event.id, timestamp, timestamp, COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT),
+    ]);
+    const platform = purgeAccessors({ [instanceId]: 'throw' });
+
+    const summary = await reconcileEventCoverPurge(testEnv, access.event.id, now, platform.accessors);
+
+    expect(platform.calls).toEqual([]);
+    expect(summary).toMatchObject({ phase: 'complete', remainder: false, platformMutations: 0 });
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+    expect(await fenceRow(instanceId)).toMatchObject({
+      state: 'deletion-blocked', dispatch_generation: 0,
+    });
+  });
+
   /**
    * `unknown` never settling is correct, but the hold sentinel also removes the
    * fence from the only sweep that would ever have deleted it — so "never

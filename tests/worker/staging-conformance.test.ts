@@ -60,11 +60,12 @@ function dependencies(overrides: Partial<StagingConformanceDependencies> = {}): 
         async terminate() {},
       };
     },
+    async pauseBackfill() {},
     async scheduledCleanup() {},
     async readSummary() {
       return {
-        legacyCovers: 0, unresolvedJobs: 0, unresolvedFences: 0,
-        needsReplacement: 0, purgeRows: 0,
+        legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0,
+        uploadsWithoutActiveSet: 0, verifiedAt: null, purgeRows: 0,
       };
     },
     ...overrides,
@@ -209,27 +210,61 @@ describe('staging conformance RPC service', () => {
     })).rejects.toThrow('STAGING_CONFORMANCE_CASE_FAILED');
   });
 
+  it('proves the exact upload ceiling and rejects decoded formats outside the product contract', async () => {
+    const readSourceInfo = vi.fn(async (_env: AppEnv, bytes: ArrayBuffer) => ({
+      format: bytes.byteLength === 4 ? 'heif' : 'jpeg', width: 2400, height: 1600,
+    }));
+    const service = new StagingConformanceService(env(), dependencies({ readSourceInfo }));
+    const bucket = scopedConformanceBucket(testEnv.MEDIA_BUCKET, RUN_ID);
+    await bucket.put('fixtures/boundary-exact', new Uint8Array(19_000_000));
+    await bucket.put('fixtures/boundary-over', new Uint8Array(19_000_001));
+    await bucket.put('fixtures/rejected-heif', new Uint8Array([1, 2, 3, 4]));
+
+    await expect(service.inspectImageCase({ runId: RUN_ID, caseId: 'boundary-exact' }))
+      .resolves.toMatchObject({ outcome: 'accepted', detectedType: 'image/jpeg', byteSize: 19_000_000 });
+    await expect(service.inspectImageCase({ runId: RUN_ID, caseId: 'boundary-over' }))
+      .resolves.toMatchObject({ outcome: 'rejected', resultCode: 'COVER_SOURCE_UNSUPPORTED' });
+    await expect(service.inspectImageCase({ runId: RUN_ID, caseId: 'rejected-heif' }))
+      .resolves.toMatchObject({ outcome: 'rejected', resultCode: 'COVER_SOURCE_UNSUPPORTED' });
+    expect(readSourceInfo).toHaveBeenCalledTimes(2);
+  });
+
   it('uses the shared Workflow accessor for closed lifecycle operations', async () => {
     const accessor = dependencies().backfillWorkflow(env());
     const createBatch = vi.spyOn(accessor, 'createBatch');
     const resume = vi.spyOn(accessor, 'resume');
     const restart = vi.spyOn(accessor, 'restart');
     const terminate = vi.spyOn(accessor, 'terminate');
+    const pauseBackfill = vi.fn(dependencies().pauseBackfill);
     const service = new StagingConformanceService(
-      env(), dependencies({ backfillWorkflow: () => accessor }),
+      env(), dependencies({ backfillWorkflow: () => accessor, pauseBackfill }),
     );
 
     await expect(service.workflowLookup({ runId: RUN_ID, caseId: 'lookup-active' }))
       .resolves.toEqual({ caseId: 'lookup-active', status: 'running' });
     await service.createBackfillBatch({ runId: RUN_ID, caseId: 'batch-recovery', count: 2 });
+    await service.pauseBackfill({ runId: RUN_ID, caseId: 'pause-resume' });
     await service.resumeBackfill({ runId: RUN_ID, caseId: 'pause-resume' });
     await service.restartBackfill({ runId: RUN_ID, caseId: 'restart-retained' });
     await service.terminateBackfill({ runId: RUN_ID, caseId: 'terminate-retained' });
     expect(createBatch).toHaveBeenCalledOnce();
     expect(createBatch.mock.calls[0]![0]).toHaveLength(2);
+    expect(pauseBackfill).toHaveBeenCalledOnce();
     expect(resume).toHaveBeenCalledOnce();
     expect(restart).toHaveBeenCalledOnce();
     expect(terminate).toHaveBeenCalledOnce();
+  });
+
+  it('exposes only closed, mutation-free controls for platform unknown and failed lookup', () => {
+    const service = new StagingConformanceService(env(), dependencies());
+    expect(service.workflowControl({ runId: RUN_ID, control: 'status-unknown' })).toEqual({
+      control: 'status-unknown', disposition: 'unknown', recovery: 'none', mutates: false,
+    });
+    expect(service.workflowControl({ runId: RUN_ID, control: 'failed-lookup' })).toEqual({
+      control: 'failed-lookup', disposition: 'unknown', recovery: 'none', mutates: false,
+    });
+    expect(() => service.workflowControl({ runId: RUN_ID, control: 'missing' as never }))
+      .toThrow('STAGING_CONFORMANCE_INPUT_INVALID');
   });
 
   it('invokes the shared scheduled cleanup path and returns aggregate counts only', async () => {
@@ -244,8 +279,24 @@ describe('staging conformance RPC service', () => {
     expect(scheduledCleanup).toHaveBeenCalledOnce();
     expect(readSummary).toHaveBeenCalledOnce();
     expect(result).toEqual({
-      legacyCovers: 0, unresolvedJobs: 0, unresolvedFences: 0,
-      needsReplacement: 0, purgeRows: 0,
+      legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0,
+      uploadsWithoutActiveSet: 0, verifiedAt: null, purgeRows: 0,
     });
+  });
+
+  it('empties the dedicated staging bucket before resource teardown', async () => {
+    await testEnv.MEDIA_BUCKET.put('events/staging-a/cover/master.webp', new Uint8Array([1]));
+    await testEnv.MEDIA_BUCKET.put(`conformance/${RUN_ID}/fixtures/source.png`, new Uint8Array([2]));
+    const before = await testEnv.MEDIA_BUCKET.list();
+    const service = new StagingConformanceService(env(), dependencies());
+
+    await expect(service.emptyStagingBucket({ runId: RUN_ID })).resolves.toEqual({
+      deletedObjects: before.objects.length,
+      remainingObjects: 0,
+    });
+    await expect(testEnv.MEDIA_BUCKET.list()).resolves.toMatchObject({ objects: [] });
+
+    await expect(new StagingConformanceService(env('https://candidary.app'), dependencies())
+      .emptyStagingBucket({ runId: RUN_ID })).rejects.toThrow('STAGING_CONFORMANCE_DISABLED');
   });
 });

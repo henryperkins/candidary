@@ -97,10 +97,10 @@ export interface WorkflowCaseResult {
 }
 
 export interface ZeroProofCounts {
-  readonly legacyCovers: number;
-  readonly unresolvedJobs: number;
-  readonly unresolvedFences: number;
-  readonly needsReplacement: number;
+  readonly legacyRows: number;
+  readonly blockingJobs: number;
+  readonly incompleteActiveSets: number;
+  readonly uploadsWithoutActiveSet: number;
 }
 
 export interface CleanupObservation {
