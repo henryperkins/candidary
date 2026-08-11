@@ -875,21 +875,22 @@ async function seededBackfillCase(
 export function workflowWaitDecision(
   status: string,
   expected: readonly string[],
+  refuseComplete = false,
 ): 'expected' | 'continue' {
   if (expected.includes(status)) return 'expected';
   if (status === 'errored') throw new Error('TASK11_WORKFLOW_ERRORED');
-  if (status === 'complete') {
+  if (refuseComplete && status === 'complete') {
     throw new Error('TASK11_WORKFLOW_COMPLETED_BEFORE_CONTROL');
   }
   return 'continue';
 }
 
 async function waitForWorkflow(
-  caller: Pick<DevCaller, 'call'>,
+  caller: DevCaller,
   runId: string,
   caseId: string,
   expected: readonly string[],
-  options: { readonly timeoutMs?: number } = {},
+  options: { readonly timeoutMs?: number; readonly refuseComplete?: boolean } = {},
 ): Promise<{ status: string; observed: string[] }> {
   const deadline = Date.now() + (options.timeoutMs ?? 15 * 60 * 1000);
   const observed = new Set<string>();
@@ -901,7 +902,7 @@ async function waitForWorkflow(
       );
       const status = String(result.status);
       observed.add(status);
-      if (workflowWaitDecision(status, expected) === 'expected') {
+      if (workflowWaitDecision(status, expected, options.refuseComplete) === 'expected') {
         return { status, observed: [...observed] };
       }
     } catch (error) {
@@ -919,7 +920,7 @@ async function waitForWorkflow(
 }
 
 async function retryRpc(
-  caller: Pick<DevCaller, 'call'>,
+  caller: DevCaller,
   method: StagingRpcMethod,
   input: Record<string, unknown>,
   timeoutMs = 60_000,
@@ -933,28 +934,6 @@ async function retryRpc(
     }
   }
   throw new Error('TASK11_WORKFLOW_CONTROL_TIMEOUT');
-}
-
-export async function controlWorkflowBeforeTerminal(
-  caller: Pick<DevCaller, 'call'>,
-  runId: string,
-  caseId: string,
-  method: 'pauseBackfill' | 'terminateBackfill',
-  controlledStatus: 'paused' | 'terminated',
-): Promise<{ status: string; observed: string[] }> {
-  const activeOrControlled = waitForWorkflow(caller, runId, caseId, [
-    'queued', 'running', 'waiting', 'waitingForPause', controlledStatus,
-  ]);
-  const [, first] = await Promise.all([
-    retryRpc(caller, method, { runId, caseId }),
-    activeOrControlled,
-  ]);
-  if (first.status === controlledStatus) return first;
-  const controlled = await waitForWorkflow(caller, runId, caseId, [controlledStatus]);
-  return {
-    status: controlled.status,
-    observed: [...new Set([...first.observed, ...controlled.observed])],
-  };
 }
 
 function workflowSnapshot(
@@ -1124,11 +1103,16 @@ function makeLiveWorkflowAdapter(
       await caller.call('createBackfillBatch', {
         runId, caseId: lifecycle.caseId, count: 1,
       });
-      const paused = await controlWorkflowBeforeTerminal(
-        caller, runId, lifecycle.caseId, 'pauseBackfill', 'paused',
+      const active = await waitForWorkflow(
+        caller, runId, lifecycle.caseId,
+        ['queued', 'running', 'waiting', 'waitingForPause'],
+        { refuseComplete: true },
       );
-      for (const status of paused.observed) platformStatuses.add(status);
+      for (const status of active.observed) platformStatuses.add(status);
       platformStatuses.add('running');
+      await retryRpc(caller, 'pauseBackfill', { runId, caseId: lifecycle.caseId });
+      const paused = await waitForWorkflow(caller, runId, lifecycle.caseId, ['paused']);
+      for (const status of paused.observed) platformStatuses.add(status);
       await caller.call('resumeBackfill', { runId, caseId: lifecycle.caseId });
       const completed = await waitForWorkflow(caller, runId, lifecycle.caseId, ['complete']);
       for (const status of completed.observed) platformStatuses.add(status);
@@ -1152,11 +1136,16 @@ function makeLiveWorkflowAdapter(
       );
       armFailOnce(context, configPath, restart);
       await caller.call('createBackfillBatch', { runId, caseId: restart.caseId, count: 1 });
-      const terminated = await controlWorkflowBeforeTerminal(
-        caller, runId, restart.caseId, 'terminateBackfill', 'terminated',
+      const restartActive = await waitForWorkflow(
+        caller, runId, restart.caseId,
+        ['queued', 'running', 'waiting', 'waitingForPause'],
+        { refuseComplete: true },
       );
-      for (const status of terminated.observed) platformStatuses.add(status);
+      for (const status of restartActive.observed) platformStatuses.add(status);
       platformStatuses.add('running');
+      await retryRpc(caller, 'terminateBackfill', { runId, caseId: restart.caseId });
+      const terminated = await waitForWorkflow(caller, runId, restart.caseId, ['terminated']);
+      for (const status of terminated.observed) platformStatuses.add(status);
       await caller.call('restartBackfill', { runId, caseId: restart.caseId });
       const restarted = await waitForWorkflow(caller, runId, restart.caseId, ['complete']);
       for (const status of restarted.observed) platformStatuses.add(status);
@@ -1364,11 +1353,12 @@ function makeLiveWorkflowAdapter(
       await caller.call('createBackfillBatch', {
         runId, caseId: afterDispatch.caseId, count: 1,
       });
-      await controlWorkflowBeforeTerminal(
-        caller, runId, afterDispatch.caseId, 'pauseBackfill', 'paused',
+      await waitForWorkflow(
+        caller, runId, afterDispatch.caseId,
+        ['queued', 'running', 'waiting', 'waitingForPause'],
+        { refuseComplete: true },
       );
       markDeleted('delete-after-dispatch', runId, afterDispatch);
-      await caller.call('resumeBackfill', { runId, caseId: afterDispatch.caseId });
       await cleanupUntilEventAbsent(runId, afterDispatch.eventId, 7);
       const afterDispatchPurged = provePurged(
         'delete-after-dispatch', runId, afterDispatch,
