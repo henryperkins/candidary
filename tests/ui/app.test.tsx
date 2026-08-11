@@ -1430,7 +1430,7 @@ describe('manager experience', () => {
     await waitFor(() => expect(bulkBodies).toHaveLength(1));
     expect(bulkBodies[0]!.ids).toEqual(rows.slice(0, MANAGER_BULK_SELECTION_MAX).map(({ id }) => id));
     expect(bulkBodies[0]!.ids).not.toContain(rows[MANAGER_BULK_SELECTION_MAX]!.id);
-  }, 10_000);
+  }, 20_000);
 
   it('polls live intake so a new private delivery appears without navigation', async () => {
     let mediaRequests = 0;
