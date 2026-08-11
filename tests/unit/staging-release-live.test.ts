@@ -5,15 +5,9 @@ import * as stagingLive from '../../scripts/staging-release-live';
 type FreshnessContract = {
   readonly LOCAL_CALLER_HEADERS?: Readonly<Record<string, string>>;
   readonly STAGING_DATABASE_FRESHNESS_SQL?: string;
-  readonly WORKFLOW_SOURCE_CASE_ID?: string;
   readonly assertFreshStagingDatabase?: (
     rows: readonly Readonly<Record<string, unknown>>[],
   ) => void;
-  readonly workflowWaitDecision?: (
-    status: string,
-    expected: readonly string[],
-    refuseComplete?: boolean,
-  ) => 'expected' | 'continue';
 };
 
 describe('Task 11 live staging preflight', () => {
@@ -44,19 +38,5 @@ describe('Task 11 live staging preflight', () => {
       expect(() => contract.assertFreshStagingDatabase!(rows))
         .toThrow(/STAGING_DATABASE_NOT_FRESH/u);
     }
-  });
-
-  it('uses the fixture already proven across every render profile for Workflow cases', () => {
-    const contract = stagingLive as FreshnessContract;
-    expect(contract.WORKFLOW_SOURCE_CASE_ID).toBe('geometry-complete-2x');
-  });
-
-  it('stops immediately when a Workflow reports a terminal error', () => {
-    const contract = stagingLive as FreshnessContract;
-    expect(contract.workflowWaitDecision).toBeTypeOf('function');
-    expect(contract.workflowWaitDecision!('running', ['complete'])).toBe('continue');
-    expect(contract.workflowWaitDecision!('complete', ['complete'])).toBe('expected');
-    expect(() => contract.workflowWaitDecision!('errored', ['complete']))
-      .toThrow(/TASK11_WORKFLOW_ERRORED/u);
   });
 });

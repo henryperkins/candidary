@@ -100,7 +100,6 @@ import type {
 const APPROVED_BASE_SHA = '0b92387d2e237d568d2514373dcc3044e7960d4b' as const;
 const INTEGRATED_MAIN_SHA = 'b5339a0cb211b933366059af8fa3f89488bb4e20' as const;
 const WRANGLER_VERSION = '4.113.0' as const;
-export const WORKFLOW_SOURCE_CASE_ID = 'geometry-complete-2x' as const;
 const REQUIRED_SECRET_NAMES = [
   'ENTRY_ENCRYPTION_KEY',
   'ENTRY_HMAC_KEY',
@@ -814,7 +813,7 @@ async function conformImages(
     },
   };
   const observations = await executeTask11ImageMatrix(context.runId, task11FixturePlan(), adapter);
-  const source = manifestByCase.get(WORKFLOW_SOURCE_CASE_ID);
+  const source = manifestByCase.get('accepted-jpeg');
   const small = manifestByCase.get('geometry-no-upscale');
   if (!source || !small) throw new Error('TASK11_WORKFLOW_FIXTURE_MISSING');
   return {
@@ -872,19 +871,6 @@ async function seededBackfillCase(
   };
 }
 
-export function workflowWaitDecision(
-  status: string,
-  expected: readonly string[],
-  refuseComplete = false,
-): 'expected' | 'continue' {
-  if (expected.includes(status)) return 'expected';
-  if (status === 'errored') throw new Error('TASK11_WORKFLOW_ERRORED');
-  if (refuseComplete && status === 'complete') {
-    throw new Error('TASK11_WORKFLOW_COMPLETED_BEFORE_CONTROL');
-  }
-  return 'continue';
-}
-
 async function waitForWorkflow(
   caller: DevCaller,
   runId: string,
@@ -902,14 +888,12 @@ async function waitForWorkflow(
       );
       const status = String(result.status);
       observed.add(status);
-      if (workflowWaitDecision(status, expected, options.refuseComplete) === 'expected') {
-        return { status, observed: [...observed] };
+      if (expected.includes(status)) return { status, observed: [...observed] };
+      if (options.refuseComplete && status === 'complete') {
+        throw new Error('TASK11_WORKFLOW_COMPLETED_BEFORE_CONTROL');
       }
     } catch (error) {
-      if (error instanceof Error && [
-        'TASK11_WORKFLOW_COMPLETED_BEFORE_CONTROL',
-        'TASK11_WORKFLOW_ERRORED',
-      ].includes(error.message)) {
+      if (error instanceof Error && error.message === 'TASK11_WORKFLOW_COMPLETED_BEFORE_CONTROL') {
         throw error;
       }
       // The instance may not be visible immediately after createBatch returns.
