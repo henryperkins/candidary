@@ -12,8 +12,14 @@ type FreshnessContract = {
   readonly workflowWaitDecision?: (
     status: string,
     expected: readonly string[],
-    refuseComplete?: boolean,
   ) => 'expected' | 'continue';
+  readonly controlWorkflowBeforeTerminal?: (
+    caller: { call(method: string, input: Record<string, unknown>): Promise<unknown> },
+    runId: string,
+    caseId: string,
+    method: 'pauseBackfill' | 'terminateBackfill',
+    controlledStatus: 'paused' | 'terminated',
+  ) => Promise<{ status: string; observed: string[] }>;
 };
 
 describe('Task 11 live staging preflight', () => {
@@ -58,5 +64,34 @@ describe('Task 11 live staging preflight', () => {
     expect(contract.workflowWaitDecision!('complete', ['complete'])).toBe('expected');
     expect(() => contract.workflowWaitDecision!('errored', ['complete']))
       .toThrow(/TASK11_WORKFLOW_ERRORED/u);
+    expect(() => contract.workflowWaitDecision!('complete', ['paused']))
+      .toThrow(/TASK11_WORKFLOW_COMPLETED_BEFORE_CONTROL/u);
+  });
+
+  it('issues Workflow control while active-state observation is still pending', async () => {
+    const contract = stagingLive as FreshnessContract;
+    expect(contract.controlWorkflowBeforeTerminal).toBeTypeOf('function');
+    let releaseLookup!: () => void;
+    const controlStarted = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const calls: string[] = [];
+    const caller = {
+      async call(method: string) {
+        calls.push(method);
+        if (method === 'workflowLookup') {
+          await controlStarted;
+          return { status: 'paused' };
+        }
+        if (method === 'pauseBackfill') {
+          releaseLookup();
+          return {};
+        }
+        throw new Error(`Unexpected method ${method}`);
+      },
+    };
+
+    await expect(contract.controlWorkflowBeforeTerminal!(
+      caller, 'run', 'case', 'pauseBackfill', 'paused',
+    )).resolves.toMatchObject({ status: 'paused', observed: ['paused'] });
+    expect(calls.slice(0, 2)).toEqual(['workflowLookup', 'pauseBackfill']);
   });
 });
