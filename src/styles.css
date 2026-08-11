@@ -194,9 +194,11 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
 .create-field > label { display: grid; gap: 8px; font-weight: 600; }
 input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: #fffdf8; color: var(--ink); }.create-form textarea { resize: vertical; }.create-field > small { color: var(--danger); font-weight: 500; }
 /* iOS WebKit miscalculates a padded native date or time control at width: 100%; grid stretch fills
-   each field without invoking that percentage-width path. */
+   each create or Settings field without invoking that percentage-width path. */
 .create-field input[type='date'],
-.create-field input[type='time'] { width: auto; min-width: 0; }
+.create-field input[type='time'],
+.settings-field input[type='date'],
+.settings-field input[type='time'] { width: auto; min-width: 0; }
 /* The time-zone field is an ordinary text input with a datalist, so it does not
    share the WebKit date-control problem above and takes the full field width. */
 .create-field input[list] { width: 100%; min-width: 0; }

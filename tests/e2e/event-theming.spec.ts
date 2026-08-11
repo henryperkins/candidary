@@ -510,8 +510,25 @@ test('manager Settings saves without a Save button and stays contained at 320 an
   // Status text arriving must not shift the page under the host's hands.
   expect(await page.evaluate(() => window.scrollY)).toBe(scrolledTo);
 
+  // iOS WebKit sizes padded native pickers through their content box. Keep the real controls and
+  // reproduce that calculation so a percentage width cannot push either one past its field.
+  await page.addStyleTag({
+    content: 'input[type="date"], input[type="time"] { box-sizing: content-box; }',
+  });
+
   for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });
+    for (const label of ['Event start time', 'RSVP deadline']) {
+      const field = page.getByLabel(label);
+      const fieldBounds = await field.boundingBox();
+      const wrapperBounds = await field.locator('..').boundingBox();
+      if (!fieldBounds || !wrapperBounds) throw new Error(`${label} and its field must be laid out`);
+
+      expect(fieldBounds.x, `${label} starts inside its field at ${width}`)
+        .toBeGreaterThanOrEqual(wrapperBounds.x);
+      expect(fieldBounds.x + fieldBounds.width, `${label} ends inside its field at ${width}`)
+        .toBeLessThanOrEqual(wrapperBounds.x + wrapperBounds.width + 1);
+    }
     await expectContained(page, `manager settings autosave at ${width}`);
   }
 });
