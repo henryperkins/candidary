@@ -147,16 +147,15 @@ export type CoverWorkflowLookup =
  * **Empty, and correctly so.** Cloudflare documents that `get()` "will throw an
  * exception if the ID doesn't exist *or is invalid*" and shows callers only
  * `e.message` — there is no documented code, name, or type separating the two.
- * Those two conditions must not classify alike: an absent instance may be
- * recreated under its fenced ID, while an invalid ID is a defect that
- * recreating would paper over.
+ * Those two conditions must not classify alike, so neither one is inferred
+ * here. Recovery that owns a canonical, deterministic ID can instead use the
+ * platform's documented idempotent `createBatch`: a retained ID is skipped and
+ * an absent ID is created, while an actually invalid ID is rejected.
  *
  * So this candidate certifies nothing, every lookup failure is `unknown`, and
- * confirmed-missing recreation is disabled by construction. Task 11 exercises
- * the deployed adapter against a deliberately absent valid ID and, only if it
- * finds a stable discriminator, appends exactly one matcher here. If it finds
- * none, recreation stays disabled and Task 11 cannot pass — which is the
- * intended outcome, not a gap to route around.
+ * confirmed-missing classification remains disabled by construction. Task 11
+ * proved that this is the deployed platform contract; guarded recovery no
+ * longer depends on inventing a discriminator the platform does not expose.
  *
  * Never match on `error.message`: the documented failure text embeds the
  * instance ID verbatim, so matching it would both be brittle and pull an
@@ -247,6 +246,10 @@ export interface CoverRenderDispatchPayload {
 }
 
 export interface CoverWorkflowAccessor {
+  /**
+   * Materializes this deterministic ID through idempotent batch creation.
+   * A retained ID is skipped, so replay is safe after an unobservable result.
+   */
   create(id: string, payload: CoverRenderDispatchPayload): Promise<void>;
   lookup(id: string): Promise<CoverWorkflowLookup>;
   resume(id: string): Promise<void>;
@@ -304,7 +307,7 @@ async function lookupInstance(
 export function defaultCoverWorkflowAccessor(env: AppEnv): CoverWorkflowAccessor {
   const workflow = env.COVER_RENDER_WORKFLOW;
   return {
-    async create(id, payload) { await workflow.create({ id, params: payload }); },
+    async create(id, payload) { await workflow.createBatch([{ id, params: payload }]); },
     async lookup(id) { return lookupInstance(workflow, id); },
     async resume(id) { await (await workflow.get(id)).resume(); },
     async restart(id) { await (await workflow.get(id)).restart(); },

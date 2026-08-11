@@ -476,11 +476,13 @@ closure, cover expiry, then event-purge coordination.
 A `creating` claim older than two minutes is replayed by `createBatch` with the same deterministic ID;
 the Worker confirms it whether the first create was lost or already materialized. Reconciliation may
 resume a paused instance or restart a retryable errored instance inside 24 hours, always through
-guarded D1 generation/fence claims. A certified-missing recreation edge exists, but the candidate's
-`CERTIFIED_NOT_FOUND_MATCHERS` is deliberately empty, so the default adapter cannot reach it: every
-lookup exception is `unknown` and changes nothing. Exact-candidate staging must prove a stable
-missing-instance discriminator; adding it creates a new candidate that must repeat candidate and
-staging gates. Every non-null platform observation emits only a structured
+guarded D1 generation/fence claims. `CERTIFIED_NOT_FOUND_MATCHERS` remains deliberately empty because
+the live Task 11 probe confirmed that absent and invalid IDs expose no stable non-message distinction.
+A lookup exception therefore remains `unknown`; after the exact recovery claim and all restoration
+guards succeed, the Worker replays only its stored deterministic ID with idempotent `createBatch`.
+The platform skips a retained ID, creates an absent ID, and rejects an invalid ID without allocating a
+competitor. A successful instance status of `unknown` or an unmapped future status still changes
+nothing. Every non-null platform observation emits only a structured
 `cover_platform_observation` with fixed `source` and low-cardinality `code` fields; raw status/error
 text, Workflow IDs, and object keys are never logged. This diagnostic event does not authorize a
 mutation. Operators may run a generated trigger or generated deletion-owned terminate unit; they may
@@ -661,15 +663,17 @@ true:
   100% traffic identity differs from section 2;
 - the passed exact-SHA candidate manifest or checksum sidecar is absent, invalid, or unreviewed; or
   the staging-conformance artifact is absent or unreviewed, does not name the exact candidate and
-  resources, or lacks real-platform evidence including a stable missing-instance discriminator;
+  resources, or lacks real-platform evidence for the no-discriminator contract, retained-ID replay,
+  failed-lookup idempotent materialization, and status-unknown preservation;
 - Wrangler is not 4.113.0; the candidate is dirty, changed, or not the deployed tag; migration names,
   contents, count, or remote ledger drift;
 - another run is active, a resumed cursor/digest/run ID disagrees, an artifact identity or ordered
   step differs, or a saved result is missing, duplicated, foreign, refused unexpectedly, or malformed;
 - a production D1 command lacks `--remote --config wrangler.jsonc --json`, or a Workflow command has
   `--remote`/`--local`, is not generated, or attempts raw resume/restart;
-- a shell leaves a Workflow trigger/terminate uncertain, the platform returns `unknown`, or an
-  instance cannot be classified as active, paused, errored, complete, or certified missing;
+- a shell leaves a Workflow trigger/terminate uncertain, a successful lookup returns `unknown`, or an
+  instance cannot be classified as active, paused, errored, or complete; a failed lookup is handled
+  only by the Worker-owned guarded idempotent-materialization path, never by an operator guess;
 - a present fence generation mismatches, a deletion-owned fence does not settle through the expected
   generated `EVENT_DELETED` unit, purge progress or a fence backlog remains unexplained across a
   scheduled pass, or dispatch is at an active-run/in-flight/minute bound;

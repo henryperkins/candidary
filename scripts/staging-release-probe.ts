@@ -75,27 +75,31 @@ export interface ProbeDiscoveryResult {
   readonly probeAbsent: true;
 }
 
-export interface ProbeDiscoveryBlockedResult {
-  readonly status: 'blocked';
-  readonly blockerCode:
-    | 'NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR'
-    | 'AMBIGUOUS_WORKFLOW_MISSING_DISCRIMINATOR';
+export interface ProbeDiscoveryFallbackResult {
+  readonly status: 'passed';
+  readonly recovery: 'idempotent-create-batch';
+  readonly discriminator: null;
+  readonly observationCode:
+    | 'no-distinct-workflow-missing-discriminator'
+    | 'ambiguous-workflow-missing-discriminator';
   readonly probeAbsent: true;
 }
 
 export async function runProbeDiscovery(
   adapter: ProbeDiscoveryAdapter,
-): Promise<ProbeDiscoveryResult | ProbeDiscoveryBlockedResult> {
+): Promise<ProbeDiscoveryResult | ProbeDiscoveryFallbackResult> {
   let primaryFailure: unknown;
   let discriminator: CertifiedWorkflowMissingDiscriminator | null = null;
-  let blockerCode: ProbeDiscoveryBlockedResult['blockerCode'] | null = null;
+  let fallbackCode: ProbeDiscoveryFallbackResult['observationCode'] | null = null;
   try {
     await adapter.deploy();
     try {
       discriminator = qualifyMissingFingerprint(await adapter.sample());
     } catch (error) {
       if (!(error instanceof WorkflowFingerprintQualificationError)) throw error;
-      blockerCode = error.blockerCode;
+      fallbackCode = error.blockerCode === 'NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR'
+        ? 'no-distinct-workflow-missing-discriminator'
+        : 'ambiguous-workflow-missing-discriminator';
     }
   } catch (error) {
     primaryFailure = error;
@@ -116,7 +120,12 @@ export async function runProbeDiscovery(
   }
   if (cleanupFailure !== undefined) throw cleanupFailure;
   if (primaryFailure !== undefined) throw primaryFailure;
-  if (blockerCode !== null) return { status: 'blocked', blockerCode, probeAbsent: true };
+  if (fallbackCode !== null) {
+    return {
+      status: 'passed', recovery: 'idempotent-create-batch', discriminator: null,
+      observationCode: fallbackCode, probeAbsent: true,
+    };
+  }
   if (discriminator === null) throw new Error('Probe produced no discriminator.');
   return { status: 'passed', discriminator, probeAbsent: true };
 }

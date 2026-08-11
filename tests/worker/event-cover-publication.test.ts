@@ -27,6 +27,7 @@ import {
   classifyInstanceStatus,
   classifyWorkflowLookupError,
   defaultCoverBackfillWorkflowAccessor,
+  defaultCoverWorkflowAccessor,
   dispositionForLookup,
   isCertifiedWorkflowNotFound,
   mapPlatformStatus,
@@ -235,10 +236,11 @@ describe('workflow lookup classification', () => {
     expect(classifyInstanceStatus({})).toEqual({ kind: 'status', status: 'unknown' });
   });
 
-  it('certifies nothing as missing, because no discriminator is proven yet', () => {
+  it('certifies nothing as missing because the platform exposes no discriminator', () => {
     // Cloudflare documents only `e.message` and throws the same way for an
-    // absent ID and an invalid one. Until Task 11 proves a stable
-    // discriminator against the deployed platform, recreation stays disabled.
+    // absent ID and an invalid one. Task 11 confirmed there is no stable
+    // structural discriminator, so the matcher stays empty; guarded recovery
+    // uses idempotent materialization without reclassifying either condition.
     const candidates: unknown[] = [
       new Error('failed to get instance cr1-abc: instance not found'),
       new Error('not found'),
@@ -274,8 +276,8 @@ describe('workflow lookup classification', () => {
   });
 
   it('gives a certified-missing lookup the create disposition', () => {
-    // Unreachable in this candidate by construction, but the disposition must
-    // exist and be exactly `create` for when Task 11 certifies a discriminator.
+    // Unreachable in the deployed adapter by construction, but retained for an
+    // injected adapter that can provide genuinely certified evidence.
     expect(dispositionForLookup({ kind: 'missing' })).toMatchObject({
       kind: 'missing', recovery: 'create', mutates: true, retryable: true,
     });
@@ -310,6 +312,28 @@ describe('backfill restart accessor', () => {
 
     expect(gets).toEqual([instanceId]);
     expect(restartArguments).toEqual([[]]);
+  });
+});
+
+describe('render materialization accessor', () => {
+  it('uses idempotent batch creation for a deterministic render ID', async () => {
+    const instanceId = 'cr1-0123456789abcdef';
+    const batches: unknown[][] = [];
+    const env = {
+      ...testEnv,
+      COVER_RENDER_WORKFLOW: {
+        async create() { throw new Error('single create is collision-prone'); },
+        async createBatch(input: unknown[]) { batches.push(input); },
+      },
+    } as unknown as AppEnv;
+
+    await defaultCoverWorkflowAccessor(env).create(instanceId, {
+      eventId: 'event-a', operationId: OPERATION,
+    });
+
+    expect(batches).toEqual([[
+      { id: instanceId, params: { eventId: 'event-a', operationId: OPERATION } },
+    ]]);
   });
 });
 
@@ -1125,7 +1149,42 @@ describe('operation restart', () => {
     expect(workflow.calls).toContain(`create:${instanceId}`);
   });
 
-  it('refuses to act on an unknown platform state', async () => {
+  it('materializes a failed lookup idempotently under the same fenced ID', async () => {
+    const workflow = fakeWorkflow({
+      kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
+    });
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+    expect(result.status).toBe('restarted');
+    expect(workflow.calls).toEqual(['lookup', `create:${instanceId}`]);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 1,
+    });
+  });
+
+  it('retains the exact creating claim when failed-lookup materialization is rejected', async () => {
+    const workflow = fakeWorkflow({
+      kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
+    }, { create: true });
+    const result = await restartCoverPublication(testEnv, {
+      eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,
+    });
+    expect(result).toMatchObject({ status: 'unavailable', retryAfterSeconds: 5 });
+    expect(workflow.calls).toEqual(['lookup', `create:${instanceId}`, 'lookup']);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, retryable, failure_code, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(OPERATION).first()).toEqual({
+      status: 'queued', retryable: 1, failure_code: null,
+      dispatch_state: 'creating', dispatch_generation: 1,
+    });
+  });
+
+  it('refuses to act when an existing instance reports an unknown platform state', async () => {
     const workflow = fakeWorkflow('unknown');
     const result = await restartCoverPublication(testEnv, {
       eventId: access.event.id, operationId: OPERATION, now, workflow: workflow.accessor,

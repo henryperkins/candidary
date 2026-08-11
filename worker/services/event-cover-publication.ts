@@ -66,7 +66,9 @@ export const COVER_RENDER_BINDING = 'COVER_RENDER_WORKFLOW';
  * The real adapter already classifies its own failures, so this guard exists for
  * an injected accessor that rejects. It resolves to `unknown` for the same
  * reason the adapter does: a lookup that established nothing must satisfy no
- * mutation predicate and must not be reported to a manager as a failure.
+ * mutation predicate by itself and must not be reported to a manager as a
+ * failure. The restart writer may still replay a fully guarded deterministic
+ * ID through idempotent batch creation without classifying it as absent.
  */
 async function lookupDisposition(
   accessor: CoverWorkflowAccessor,
@@ -1217,6 +1219,8 @@ export async function restartCoverPublication(
   // A failed lookup is `unknown`, not absence: it must not satisfy any
   // mutation predicate, and it must not be reported as a failure either.
   const disposition = await lookupDisposition(accessor, receipt.workflow_instance_id);
+  const materializeAfterFailedLookup = disposition.kind === 'unknown'
+    && disposition.telemetry === 'cover_platform_lookup_failed';
   // The lookup can overlap a Workflow or another recovery writer. Re-read once
   // before interpreting its platform evidence so every terminal D1 winner is
   // returned exactly and stale evidence never mutates a newer generation.
@@ -1267,7 +1271,7 @@ export async function restartCoverPublication(
       retryAfterSeconds: 5,
     };
   }
-  if (!disposition.mutates) {
+  if (!disposition.mutates && !materializeAfterFailedLookup) {
     // Active, unknown, and unrecognized states all preserve D1 and ask the
     // caller to poll. None is evidence that this operation has become
     // permanently ineligible.
@@ -1310,7 +1314,9 @@ export async function restartCoverPublication(
 
   const claimState: CoverDispatchClaimState = disposition.recovery === 'resume'
     ? 'resuming'
-    : disposition.recovery === 'create' ? 'creating' : 'restarting';
+    : disposition.recovery === 'create' || materializeAfterFailedLookup
+      ? 'creating'
+      : 'restarting';
   const previousGeneration = receipt.dispatch_generation;
   const dispatchGeneration = previousGeneration + 1;
   const claimed = await env.DB.batch([
@@ -1474,7 +1480,7 @@ export async function restartCoverPublication(
   };
   try {
     if (disposition.recovery === 'resume') await accessor.resume(receipt.workflow_instance_id);
-    else if (disposition.recovery === 'create') {
+    else if (disposition.recovery === 'create' || materializeAfterFailedLookup) {
       await accessor.create(receipt.workflow_instance_id, {
         eventId: input.eventId, operationId: input.operationId,
       });

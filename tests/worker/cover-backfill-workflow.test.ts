@@ -1344,11 +1344,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
     },
   );
 
-  /**
-   * Unknown information is never permission to mutate D1 or the platform. Its
-   * sole observable effect is one bounded operations event whose source and
-   * code come from fixed vocabularies rather than from platform-controlled text.
-   */
+  /** A live but unrecognized status never authorizes recovery. */
   it.each<[string, CoverWorkflowLookup | 'throw', string]>([
     [
       'an unmapped status',
@@ -1365,7 +1361,6 @@ describe('platform reconciliation and the guarded restart edge', () => {
       { kind: 'unknown', telemetry: SENSITIVE_PLATFORM_DETAIL },
       'cover_platform_unknown',
     ],
-    ['a thrown lookup', 'throw', 'cover_platform_lookup_failed'],
   ])('preserves state and emits only sanitized telemetry for %s', async (
     _name,
     entry,
@@ -1403,6 +1398,34 @@ describe('platform reconciliation and the guarded restart edge', () => {
         event: 'cover_platform_observation',
         source: 'backfill',
         code: expectedCode,
+      });
+      expect(serialized).not.toContain(SENSITIVE_PLATFORM_DETAIL);
+      expect(serialized).not.toContain(instanceId);
+    } finally {
+      reported.mockRestore();
+    }
+  });
+
+  it('materializes after a thrown lookup and emits only sanitized telemetry', async () => {
+    const { instanceId } = await inFlight();
+    const platform = scriptedBackfillAccessor({ [instanceId]: 'throw' });
+    const reported = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor))
+        .toMatchObject({ inspected: 1, recreated: 1, resumed: 0, restarted: 0, unchanged: 0 });
+      expect(platform.calls).toEqual([`lookup:${instanceId}`, `createBatch:${instanceId}`]);
+      expect(await currentJob()).toMatchObject({
+        status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      });
+      expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+
+      expect(reported).toHaveBeenCalledTimes(1);
+      const serialized = String(reported.mock.calls[0]![0]);
+      expect(JSON.parse(serialized) as Record<string, unknown>).toEqual({
+        event: 'cover_platform_observation',
+        source: 'backfill',
+        code: 'cover_platform_lookup_failed',
       });
       expect(serialized).not.toContain(SENSITIVE_PLATFORM_DETAIL);
       expect(serialized).not.toContain(instanceId);
@@ -1523,7 +1546,7 @@ describe('platform reconciliation and the guarded restart edge', () => {
 
   it.each([
     ['active', { kind: 'status', status: 'running' }],
-    ['unknown', { kind: 'unknown', telemetry: 'cover_backfill_lookup_failed' }],
+    ['status unknown', { kind: 'status', status: 'unknown' }],
   ] as const)('leaves a retryable failed job byte-identical on an %s reading', async (_name, lookup) => {
     const { instanceId } = await failedRetryable();
     const beforeJob = await row<Record<string, unknown>>(
@@ -1545,6 +1568,45 @@ describe('platform reconciliation and the guarded restart edge', () => {
       'SELECT * FROM event_cover_workflow_fences WHERE workflow_instance_id = ?', instanceId,
     )).toEqual(beforeFence);
     expect(await row('SELECT * FROM event_cover_backfill_runs WHERE id = ?', RUN)).toEqual(beforeRun);
+  });
+
+  it('materializes a failed lookup idempotently under the exact fenced ID', async () => {
+    const { instanceId } = await failedRetryable();
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'unknown', telemetry: 'cover_platform_lookup_failed' },
+    });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, recreated: 1, restarted: 0, resumed: 0, failuresRecorded: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `createBatch:${instanceId}`]);
+    expect(await currentJob()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+      retryable: 0, failure_code: null, terminal_at: null,
+      expires_at: null, reference_release_at: null,
+    });
+    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
+    expect(await row(`
+      SELECT total_count, queued_count, failed_count
+      FROM event_cover_backfill_runs WHERE id = ?
+    `, RUN)).toEqual({ total_count: 1, queued_count: 1, failed_count: 0 });
+  });
+
+  it('retains the exact creating claim when failed-lookup materialization is rejected', async () => {
+    const { instanceId } = await failedRetryable();
+    const platform = scriptedBackfillAccessor({
+      [instanceId]: { kind: 'unknown', telemetry: 'cover_platform_lookup_failed' },
+    }, { create: true });
+
+    expect(await reconcileCoverBackfillJobs(testEnv, now, platform.accessor)).toMatchObject({
+      inspected: 1, recreated: 0, restarted: 0, resumed: 0, failuresRecorded: 0,
+    });
+    expect(platform.calls).toEqual([`lookup:${instanceId}`, `createBatch:${instanceId}`]);
+    expect(await currentJob()).toMatchObject({
+      status: 'queued', dispatch_state: 'creating', dispatch_generation: 2,
+      retryable: 0, failure_code: null, terminal_at: null,
+    });
+    expect(await currentFence(instanceId)).toEqual({ state: 'open', dispatch_generation: 2 });
   });
 
   it('never inspects a job whose ledger row is already terminal', async () => {

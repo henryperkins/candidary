@@ -4,7 +4,7 @@
 
 **Goal:** Build and execute the route-less Task 11 harness so one new exact candidate proves the required Cloudflare Images, Workflows, purge, and runtime-identity behavior, then tears down the isolated staging estate and emits a checksum-verified `passed` artifact.
 
-**Architecture:** A small staging-only `WorkerEntrypoint` exposes closed, run-scoped RPC operations over a same-account service binding. A repository-pinned Node runner owns candidate verification, route-disabled deployment, live missing-instance discovery, conformance orchestration, append-only evidence, destructive target validation, teardown, and independent verification. Existing production handlers and deployment tooling remain unchanged except for exporting the inert entrypoint and adding a sentinel-gated fail-once hook to the backfill Workflow.
+**Architecture:** A small staging-only `WorkerEntrypoint` exposes closed, run-scoped RPC operations over a same-account service binding. A repository-pinned Node runner owns candidate verification, route-disabled deployment, live missing-instance contract discovery, conformance orchestration, append-only evidence, destructive target validation, teardown, and independent verification. The live probe established that lookup failures expose no safe discriminator; guarded recovery therefore uses deterministic IDs and idempotent `createBatch` while leaving successful unknown statuses mutation-free.
 
 **Tech Stack:** TypeScript 6, Node 24 type stripping, Vitest 4, Cloudflare Workers/Workflows/D1/R2/Images, Wrangler 4.113.0, canonical JSON and SHA-256 evidence.
 
@@ -17,7 +17,7 @@
 - Use only the candidate's Node/npm and `node_modules/.bin/wrangler.cmd`; require Wrangler `4.113.0`; never use `npx`, PATH fallback, `migrations apply --remote`, or `scripts/deploy-release.ts`.
 - Every implementation step is red-green-refactor. Run the named RED command and see the intended assertion fail before editing implementation.
 - Remote steps stop on uncertain results. Resume starts with read-only discovery and predecessor-receipt verification.
-- The live missing-instance discriminator is unknowable until the probe executes. Do not add a matcher before that evidence. If no stable non-message discriminator exists, retain a non-passing artifact, clean up the probe, and stop.
+- The completed live probe found no stable non-message missing-instance discriminator. Keep the matcher empty, preserve the sanitized probe result, and prove guarded idempotent materialization plus status-unknown preservation instead of inferring absence.
 - A code change after Task 10 invalidates the candidate. Run the complete exact-head release gate only after all code and tests are committed.
 - Do not write `status: "passed"` until conformance, fixture cleanup, resource destruction, and absence checks all verify.
 
@@ -493,7 +493,7 @@ Do not stage ignored fixture bytes or runtime manifests.
 
 - [ ] **Step 1: Write failing matrix-completeness tests**
 
-Require case IDs for create/confirm, automatic retry, retained ID, interrupted-claim `createBatch`, pause/resume/restart/terminate, all platform mappings, active-run/in-flight/minute/batch bounds, four deletion timing cases, purge cursor/phases, unknown retry, certified-missing materialize/terminate, terminal proof, R2-before-relational deletion, needs-replacement resolution, and four-zero verification closure.
+Require case IDs for create/confirm, automatic retry, retained ID, interrupted-claim `createBatch`, pause/resume/restart/terminate, all platform mappings, active-run/in-flight/minute/batch bounds, four deletion timing cases, purge cursor/phases, successful status-unknown preservation, failed-lookup idempotent materialization, termination, terminal proof, R2-before-relational deletion, needs-replacement resolution, and four-zero verification closure.
 
 - [ ] **Step 2: Write failing SQL safety tests**
 
@@ -577,11 +577,14 @@ git commit -m "feat: orchestrate task 11 staging conformance"
 
 ---
 
-### Task 10: Execute the live discovery gate and certify exactly one matcher
+### Task 10: Execute the live discovery gate and adopt the supported recovery primitive
 
 **Files:**
 - Modify only after evidence: `worker/workflows/cover-platform.ts`
+- Modify only after evidence: `worker/workflows/cover-backfill.ts`
+- Modify only after evidence: `worker/services/event-cover-publication.ts`
 - Test: `tests/worker/cover-backfill-workflow.test.ts`
+- Test: `tests/worker/event-cover-publication.test.ts`
 - Evidence: `output/operations/event-cover/<pre-candidate-sha>/task-11/<run-id>/...`
 
 - [ ] **Step 1: Record current branch identity and run all local focused tests**
@@ -599,31 +602,33 @@ npm run test:worker -- --run tests/worker/staging-conformance*.test.ts tests/wor
 npm run release:staging -- probe --candidate-sha $preProbeSha --run-id <canonical-run-id> --target <hashed-target-authorization-path>
 ```
 
-Inspect the sanitized receipt and independently confirm the temporary probe Worker is absent. If the result is ambiguous or absent, stop with a non-passing artifact; do not modify the matcher.
+Inspect the sanitized receipt and independently confirm the temporary probe Worker is absent. The observed result is `NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR`: absent and invalid IDs have no stable non-message distinction. Preserve that result and keep the matcher registry empty.
 
-- [ ] **Step 3: Write the RED matcher test from the exact observed structural property**
+- [ ] **Step 3: Write RED idempotent-materialization tests from the observed contract**
 
-The literal test uses only the qualifying property. It must also prove invalid IDs, synthetic failures, unknown shapes, and message-only lookalikes remain `unknown`.
+Prove that a failed lookup replays the already-fenced deterministic ID through `createBatch`, while a successfully found instance whose status is `unknown`, an unmapped status, and untrusted synthetic labels remain mutation-free. Prove the render adapter uses `createBatch` rather than collision-prone single `create`.
 
 ```ts
-expect(classifyWorkflowLookupError(platformAbsentShape)).toEqual({ kind: 'missing' });
+expect(classifyWorkflowLookupError(platformAbsentShape)).toEqual({
+  kind: 'unknown', telemetry: 'cover_platform_lookup_failed',
+});
 expect(classifyWorkflowLookupError(new Error('not found'))).toEqual({ kind: 'unknown' });
 ```
 
-- [ ] **Step 4: Run the RED test, then implement exactly one matcher**
+- [ ] **Step 4: Run the RED tests, then implement guarded materialization**
 
 ```powershell
 npm run test:worker -- --run tests/worker/cover-backfill-workflow.test.ts
 ```
 
-Add one narrow predicate to `CERTIFIED_NOT_FOUND_MATCHERS`. It may inspect only the one platform-proven structural field plus necessary object/type guards. It must not inspect message text or broaden any existing status mapping.
+Leave `CERTIFIED_NOT_FOUND_MATCHERS` empty. Use `createBatch` for render materialization and allow publication/backfill writers to materialize after the canonical failed-lookup signal only after their existing exact D1/fence/generation/currentness/capacity/checkpoint claim succeeds. Do not broaden any status mapping or treat a successful `unknown` status as absence.
 
 - [ ] **Step 5: Run focused tests and commit**
 
 ```powershell
-npm run test:worker -- --run tests/worker/cover-backfill-workflow.test.ts tests/worker/staging-conformance.test.ts
-git add -- worker/workflows/cover-platform.ts tests/worker/cover-backfill-workflow.test.ts
-git commit -m "fix: certify the workflow missing-instance shape"
+npm run test:worker -- --run tests/worker/cover-backfill-workflow.test.ts tests/worker/event-cover-publication.test.ts tests/worker/staging-conformance.test.ts
+git add -- worker/workflows/cover-platform.ts worker/workflows/cover-backfill.ts worker/services/event-cover-publication.ts tests/worker/cover-backfill-workflow.test.ts tests/worker/event-cover-publication.test.ts
+git commit -m "fix: materialize workflow recovery idempotently"
 ```
 
 ---
@@ -708,7 +713,7 @@ After each command, independently inspect the new receipt, confirm its predecess
 
 - [ ] **Step 3: Review every conformance result before teardown**
 
-Require every Images case, Workflow lifecycle case, bound, deletion fence, purge ordering case, needs-replacement resolution, and the four-zero verification closure. A missing or unknown case stops and preserves the core isolated topology for diagnosis.
+Require every Images case, Workflow lifecycle case, bound, deletion fence, purge ordering case, needs-replacement resolution, and the four-zero verification closure. A successful status-unknown observation must preserve state; a failed lookup must prove same-ID idempotent materialization. Any unclassified or incomplete case stops and preserves the core isolated topology for diagnosis.
 
 ---
 

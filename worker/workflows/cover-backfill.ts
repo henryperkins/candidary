@@ -1069,9 +1069,11 @@ function restorationClaimBinds(
  * this function exists to close. Keeping one authoritative writer is what lets
  * the fence stay a truthful record of what was dispatched.
  *
- * Nothing is written on an `unknown` reading, ever. Absence of information is
- * not evidence of absence of work, and the cost of guessing wrong is a second
- * instance rendering into a set the first one is still writing.
+ * A successful lookup whose status is unknown remains mutation-free. A failed
+ * lookup is different: after every D1, fence, capacity, currentness, and
+ * checkpoint guard passes, reconciliation may replay the exact deterministic
+ * ID through idempotent `createBatch`. That does not infer absence and cannot
+ * allocate a competitor: the platform skips an ID it still retains.
  */
 export async function reconcileCoverBackfillJobs(
   env: AppEnv,
@@ -1146,10 +1148,12 @@ export async function reconcileCoverBackfillJobs(
     );
     const disposition = dispositionForLookup(lookup);
     emitCoverPlatformTelemetry('backfill', disposition.telemetry);
+    const materializeAfterFailedLookup = lookup.kind === 'unknown'
+      && lookup.telemetry === 'cover_platform_lookup_failed';
     const nonterminal = (NONTERMINAL_COVER_BACKFILL_STATUSES as readonly string[])
       .includes(job.status);
 
-    if (!disposition.mutates) {
+    if (!disposition.mutates && !materializeAfterFailedLookup) {
       // A recovery claim whose instance turns out to be running did land: the
       // interruption was between the platform call and the confirmation. Record
       // that, so the ledger stops describing a claim nobody ever resolved.
@@ -1177,10 +1181,11 @@ export async function reconcileCoverBackfillJobs(
       continue;
     }
 
-    // 2. Certified absence, which the shipped adapter cannot produce: its
-    // matcher registry is empty by construction, so this is reachable only once
-    // Task 11 proves a stable discriminator against the deployed platform.
-    if (disposition.kind === 'missing') {
+    // 2. Materialization under the already-fenced deterministic ID. Certified
+    // absence remains supported for injected adapters, but the deployed path is
+    // a failed lookup followed by idempotent `createBatch`: retained instances
+    // are skipped, absent ones are created, and invalid IDs are rejected.
+    if (disposition.kind === 'missing' || materializeAfterFailedLookup) {
       if (!await backfillJobIsRestorable(job)) {
         summary.unchanged += 1;
         continue;

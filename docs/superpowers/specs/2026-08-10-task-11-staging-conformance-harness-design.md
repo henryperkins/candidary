@@ -12,8 +12,8 @@ must prove the real Cloudflare Images and Workflow behavior required by design
 section 15.5, the complete backfill and purge lifecycle matrix named by Task 11,
 and runtime correlation through `CF_VERSION_METADATA`.
 
-This work may change `agent/event-cover-studio-phase-2`, fix a platform-proven
-missing-instance discriminator, create a new candidate SHA, rerun Task 10, and
+This work may change `agent/event-cover-studio-phase-2`, adopt the platform-proven
+idempotent materialization contract, create a new candidate SHA, rerun Task 10, and
 redeploy isolated staging. It must not modify `main`, push, merge, deploy to
 production, mutate production D1 or R2, operate a production Workflow, begin
 Task 12, or claim physical-device support.
@@ -32,8 +32,9 @@ Task 12, or claim physical-device support.
   fresh remote D1 application, and topology isolation, but it does not prove
   runtime metadata, real Images behavior, the Workflow lifecycle matrix,
   purge ordering, or verification closure.
-- `CERTIFIED_NOT_FOUND_MATCHERS` is intentionally empty. Task 11 must discover a
-  stable non-message discriminator from the deployed binding before adding one.
+- `CERTIFIED_NOT_FOUND_MATCHERS` is intentionally empty. The Task 11 live probe
+  found no stable non-message discriminator; guarded recovery uses idempotent
+  materialization without adding one.
 
 The existing partial artifact is historical evidence. The harness archives it
 under a run-specific ignored evidence directory before replacing the canonical
@@ -110,9 +111,9 @@ The entrypoint exposes only bounded, typed operations:
 The RPC contract never returns image bytes, R2 keys, raw D1 rows, private URLs,
 tokens, secrets, or `error.message`.
 
-### Missing-instance discovery probe
+### Missing-instance contract probe and idempotent materialization
 
-Before changing the matcher, `staging-release probe` deploys a minimal,
+Before choosing a recovery primitive, `staging-release probe` deploys a minimal,
 route-disabled probe Worker with a binding to the existing isolated backfill
 Workflow definition. The probe is called through a local remote service binding
 and has no D1, R2, Images, Email, rate-limit, assets, or production binding.
@@ -126,20 +127,20 @@ It performs repeated calls for:
 The probe reduces thrown values to an allowlisted structural fingerprint:
 constructor family, `name`, stable scalar `code`-like fields, and fixed own-key
 names. It explicitly discards messages, stacks, causes containing text,
-identifiers, URLs, and unknown scalar values. A property qualifies only when it
-is identical across repeated absent-ID probes and distinct from every invalid
-and synthetic case.
+identifiers, URLs, and unknown scalar values. A property would qualify only when
+it is identical across repeated absent-ID probes and distinct from every invalid
+and synthetic case. The live probe found no such property, matching the
+documented binding contract: `get()` throws for both an absent and an invalid ID.
 
-If no such property exists, Task 11 cannot pass. The harness records that
-blocking result, removes the probe Worker, and stops. It never guesses from
-message text or broadens the matcher.
-
-If one stable property exists, implementation adds exactly one structural
-matcher to `CERTIFIED_NOT_FOUND_MATCHERS`. Focused tests prove that the observed
-absent shape classifies `missing`, while invalid IDs, synthetic failures,
-unknown shapes, and message-only lookalikes remain `unknown`. The same candidate
-then uses that matcher in publication, backfill, and purge through the existing
-shared adapter.
+The implementation therefore keeps `CERTIFIED_NOT_FOUND_MATCHERS` empty and
+never guesses from message text. Recovery owns canonical deterministic IDs and,
+only after all D1, fence, generation, currentness, capacity, and checkpoint
+guards pass, replays that exact ID through documented idempotent `createBatch`.
+The platform skips a retained ID, creates an absent ID, and rejects an invalid
+ID. A successful lookup whose instance reports `unknown`, an unmapped status,
+or an untrusted synthetic lookup label remains mutation-free. Focused tests
+cover publication and backfill materialization, retained-ID replay, rejected
+materialization, and status-unknown preservation.
 
 ### Deterministic staging fault controls
 
@@ -169,8 +170,8 @@ text, or step-history options.
 Create `scripts/staging-release.ts` as the only operator CLI for this Task 11
 run. It has six closed modes:
 
-- `probe`: validate the current partial target and discover the Workflow
-  missing-instance fingerprint;
+- `probe`: validate the current partial target and record the Workflow
+  missing-instance contract, including the no-discriminator fallback;
 - `deploy`: validate and deploy one new exact Task 10 candidate to the approved
   isolated topology;
 - `conform`: create run-scoped fixtures and execute the Images, Workflow,
@@ -271,14 +272,14 @@ The matrix proves:
 - retained-ID idempotence and `createBatch` recovery after an interrupted
   initial `creating` claim;
 - pause/resume and same-instance restart without step-history overrides;
-- errored, terminated, complete, active, certified-missing, invalid, and
-  unknown platform mappings before any D1 mutation;
+- errored, terminated, complete, active, invalid, failed-lookup, and
+  status-unknown platform observations before any D1 mutation;
 - rolling creation-minute, in-flight, active-run, and batch bounds;
 - deletion before dispatch, after dispatch, before Workflow preflight, and
   after preflight, with zero R2 writes after the matching deletion fence;
 - persisted purge cursor and phase across bounded passes;
-- unknown-status retry, certified-missing materialization/termination, terminal
-  proof, and R2-before-relational deletion;
+- status-unknown preservation, failed-lookup idempotent materialization,
+  termination, terminal proof, and R2-before-relational deletion;
 - a `needs_replacement` row that remains blocking until the same host source is
   replaced or removed, then resolves through the Worker path; and
 - canonical verification-run closure by the Worker with all four proof counts
@@ -310,7 +311,8 @@ The passing artifact records:
 - runtime `CF_VERSION_METADATA` correlation;
 - migration names and hashes;
 - sanitized Images and Workflow case results;
-- the certified missing-instance matcher shape by closed code, not raw error;
+- the closed no-discriminator probe result and idempotent materialization
+  observation codes, never raw errors;
 - four zero-proof counts and immutable verification timestamp;
 - fixture cleanup results; and
 - resource destruction and absence results.
@@ -401,7 +403,8 @@ and `verify`.
 The work is complete only when all of these are true:
 
 1. the harness and focused tests are committed on a clean cover branch;
-2. the platform-derived matcher, if available, has focused negative coverage;
+2. the no-discriminator platform result and idempotent materialization path have
+   focused positive and negative coverage;
 3. Task 10 passes on the new exact SHA with a valid independent manifest hash;
 4. that exact SHA is deployed only to the approved isolated staging topology;
 5. every Images, Workflow, backfill, deletion, purge, and verification case

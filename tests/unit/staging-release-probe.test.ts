@@ -132,7 +132,7 @@ describe('route-disabled discovery probe', () => {
     expect(calls).toEqual(['deploy', 'destroy', 'absent']);
   });
 
-  it('records a blocked result when deployed missing errors match ordinary Errors', async () => {
+  it('selects idempotent materialization when missing errors match ordinary Errors', async () => {
     const plain: WorkflowErrorFingerprint = {
       constructorFamily: 'Error', name: 'Error', codeFields: [], ownKeys: [],
     };
@@ -143,8 +143,10 @@ describe('route-disabled discovery probe', () => {
       async observeAbsent() { return true; },
     };
     await expect(runProbeDiscovery(adapter)).resolves.toEqual({
-      status: 'blocked',
-      blockerCode: 'NO_DISTINCT_WORKFLOW_MISSING_DISCRIMINATOR',
+      status: 'passed',
+      recovery: 'idempotent-create-batch',
+      discriminator: null,
+      observationCode: 'no-distinct-workflow-missing-discriminator',
       probeAbsent: true,
     });
   });
