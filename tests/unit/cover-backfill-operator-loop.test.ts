@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
