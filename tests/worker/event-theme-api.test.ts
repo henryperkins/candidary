@@ -2,13 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as EventTheme from '../../shared/event-theme';
 import { createApp } from '../../worker/app';
-import { AuthService } from '../../worker/auth/service';
-import { AccountsRepository } from '../../worker/db/accounts';
 import { EventsRepository } from '../../worker/db/events';
 import {
   cookiesFrom,
   eventAccess,
   exchangeEventEntry,
+  hostAccess,
+  hostWriteHeaders,
   origin,
   png,
   resetDatabase,
@@ -47,6 +47,10 @@ const EVENT_VIEW_KEYS = [
   'rsvpDeadlineDate',
   'rsvpRosterVersion',
   'theme',
+  // Manager-only. The guest list below is deliberately untouched, and is the
+  // guard proving neither field reaches a guest.
+  'coverPreparation',
+  'coverRevision',
 ] as const;
 
 const GUEST_EVENT_VIEW_KEYS = [
@@ -146,38 +150,6 @@ async function createdEvent(extra: Record<string, unknown> = {}) {
 }
 
 type EventAccess = Awaited<ReturnType<typeof eventAccess>>;
-
-async function hostAccess(events: readonly EventAccess[] = []) {
-  const email = `host-${crypto.randomUUID()}@example.com`;
-  const account = await new AccountsRepository(testEnv.DB).create({
-    email,
-    passwordHash: 'test-password-hash',
-    displayName: null,
-    createdAt: new Date().toISOString(),
-  });
-  if (!account) throw new Error('Expected a new host account.');
-  for (const access of events) {
-    await testEnv.DB.prepare(`
-      INSERT INTO event_hosts (event_id, account_id, role, created_at)
-      VALUES (?, ?, 'owner', ?)
-    `).bind(access.event.id, account.id, new Date().toISOString()).run();
-  }
-  const session = await new AuthService(testEnv).createHostSession(account.id, account.authVersion);
-  return {
-    account,
-    cookie: `candidary_host=${session.sessionToken.token}; candidary_host_csrf=${session.csrfToken}`,
-    csrf: session.csrfToken,
-  };
-}
-
-function hostWriteHeaders(host: { cookie: string; csrf: string }, extraCookie = '') {
-  return {
-    'content-type': 'application/json',
-    cookie: [host.cookie, extraCookie].filter(Boolean).join('; '),
-    origin,
-    'x-candidary-host-csrf': host.csrf,
-  };
-}
 
 function putTheme(
   eventId: string,
@@ -647,21 +619,25 @@ describe('authorized event theme updates', () => {
     }
   });
 
-  it('uses the explicit event view for cover finalize, settings, and theme update responses', async () => {
+  it('uses the explicit event view for cover publication, settings, and theme update responses', async () => {
     const access = await eventAccess();
-    const initiated = await createApp().request(`/api/manage/events/${access.event.id}/cover`, {
-      method: 'POST',
-      headers: writeHeaders(access.manager),
-      body: JSON.stringify({ filename: 'cover.png', mimeType: 'image/png', byteSize: 64 }),
-    }, testEnv);
-    const objectKey = (await initiated.json<any>()).data.objectKey as string;
-    await testEnv.MEDIA_BUCKET.put(objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
-    const finalized = await createApp().request(`/api/manage/events/${access.event.id}/cover/finalize`, {
-      method: 'POST',
-      headers: writeHeaders(access.manager),
-      body: JSON.stringify({ objectKey, mimeType: 'image/png' }),
-    }, testEnv);
-    expect(Object.keys((await finalized.json<any>()).data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
+    // A `none` publication is the one cover write that applies synchronously and
+    // returns the full Manager event view, so it is what pins the key set here.
+    const published = await createApp().request(
+      `/api/manage/events/${access.event.id}/cover/publications`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedRevision: 0,
+          source: { kind: 'none' },
+        }),
+      },
+      testEnv,
+    );
+    expect(published.status).toBe(200);
+    expect(Object.keys((await published.json<any>()).data.event).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
 
     const settings = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH',

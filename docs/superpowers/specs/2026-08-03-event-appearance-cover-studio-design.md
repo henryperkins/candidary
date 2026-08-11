@@ -626,8 +626,8 @@ master.
 `MAX_LIVE_COVER_DRAFTS_PER_EVENT = 3`. Each draft is also bounded by
 `MAX_LIVE_COVER_RAW_BYTES_PER_EVENT = 57_000_000` declared or verified bytes,
 `MAX_COVER_PREVIEW_FILES_PER_DRAFT = 5`,
-`MAX_COVER_PREVIEW_BYTES = 1_000_000` per file, and
-`MAX_COVER_PREVIEW_BYTES_PER_DRAFT = 5_000_000`. The draft-create transaction
+`MAX_COVER_PREVIEW_BYTES = 660_000` per file, and
+`MAX_COVER_PREVIEW_BYTES_PER_DRAFT = 3_300_000`. The draft-create transaction
 enforces both live-draft and aggregate raw-byte caps before returning the
 authenticated ingress route; `409 COVER_DRAFT_LIMIT` or
 `COVER_RAW_STORAGE_LIMIT` identifies the drafts the host may resume or discard.
@@ -1093,7 +1093,7 @@ dimension ceiling are rejected with a corrective message rather than retried.
 The raw upload is temporary. Successful inspection produces one canonical
 still WebP master with EXIF orientation applied, `metadata: none`, animation
 disabled, alpha retained when present, and no upscaling. The master must remain
-at least 620 × 420 and must not exceed `MAX_COVER_MASTER_BYTES = 12_000_000`
+at least 620 × 420 and must not exceed `MAX_COVER_MASTER_BYTES = 9_000_000`
 decimal bytes. Normalization uses this exact, server-owned five-attempt ladder:
 
 | Attempt | Maximum long edge | Maximum area | WebP quality |
@@ -1114,7 +1114,7 @@ the raw. Failed inspection deletes the raw, marks the draft failed, and
 publishes nothing. Neither raw nor master is a delivery source.
 
 Inspection also returns one authorized, metadata-free, uncropped natural
-preview capped at 1,000,000 bytes, plus the draft revision and server-pinned
+preview capped at 660,000 bytes, plus the draft revision and server-pinned
 composition-model version. Natural and effect previews use exactly four WebP
 rungs, without upscaling: `1280 px / quality 82`, `1280 / 76`, `1120 / 76`, and
 `960 / 72`, where the pixel value is the maximum long edge. The first valid
@@ -1157,7 +1157,7 @@ welcome is expanded or the desktop frame appears.
 | --- | --- | ---: | ---: | ---: |
 | `short-lookup` | ≤360 px wide and ≤600 px high lookup hero | 360×168 / 720×336 | 60 / 120 KiB | 90 / 180 KiB |
 | `compact-default` | ≤390 px default hero | 390×205 / 780×410 | 70 / 140 KiB | 100 / 200 KiB |
-| `standard-default` | 391–699 px unframed default hero, capped at 620 px | 620×218 / 1240×436 | 120 / 250 KiB | 180 / 360 KiB |
+| `standard-default` | 391–699 px unframed default hero, capped at 620 px | 620×218 / 1240×436 | 78 / 250 KiB | 120 / 360 KiB |
 | `framed-default` | ≥700×760 viewport, 620 px framed hero | 620×265 / 1240×530 | 140 / 300 KiB | 210 / 440 KiB |
 | `compact-expanded` | ≤390 px expanded-welcome hero | 390×420 / 780×840 | 130 / 280 KiB | 190 / 410 KiB |
 | `wide-expanded` | 391–699 px expanded-welcome hero, capped at 620 px | 620×420 / 1240×840 | 220 / 480 KiB | 330 / 700 KiB |

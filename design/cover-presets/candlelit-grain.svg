@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1600" viewBox="0 0 2400 1600">
+  <title>Candlelit Grain</title>
+  <desc>Amber organic grain with no literal candles, flames, people, typography, logo, venue, or event prop.</desc>
+  <!--
+    Warm light without depicting its source: an off-centre amber pool falling
+    away to chestnut, carrying the coarsest grain of the six.
+
+    The grain frequencies are chosen for the output, not the master. A profile
+    is between 1.9x and 6.7x smaller than this frame, so a feature finer than
+    about eight master pixels averages away entirely — which is why the grain
+    layers sit near baseFrequency 0.09 rather than the 0.5-plus that looks right
+    when the master is viewed on its own.
+  -->
+  <defs>
+    <radialGradient id="pool" cx="0.38" cy="0.34" r="0.92">
+      <stop offset="0" stop-color="#e7b174"/>
+      <stop offset="0.34" stop-color="#c2803f"/>
+      <stop offset="0.68" stop-color="#7d4622"/>
+      <stop offset="1" stop-color="#3a1d10"/>
+    </radialGradient>
+    <linearGradient id="fall" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#2a1409" stop-opacity="0.34"/>
+      <stop offset="0.5" stop-color="#2a1409" stop-opacity="0"/>
+      <stop offset="1" stop-color="#1d0e06" stop-opacity="0.46"/>
+    </linearGradient>
+    <filter id="grain" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.085" numOctaves="3" seed="71"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.18  0 0 0 0 0.09  0 0 0 0 0.04  0 0 0 0.30 0"/>
+    </filter>
+    <filter id="lift" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.115" numOctaves="2" seed="83"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 0.86  0 0 0 0 0.64  0 0 0 0.22 0"/>
+    </filter>
+    <filter id="tooth" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.34" numOctaves="1" seed="19"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.30  0 0 0 0 0.16  0 0 0 0 0.07  0 0 0 0.16 0"/>
+    </filter>
+    <filter id="swell" filterUnits="userSpaceOnUse" x="0" y="0" width="2400" height="1600"
+            color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.0019" numOctaves="3" seed="29"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.55  0 0 0 0 0.33  0 0 0 0 0.14  0 0 0 0.24 0"/>
+    </filter>
+  </defs>
+  <rect width="2400" height="1600" fill="url(#pool)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#swell)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#grain)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#lift)"/>
+  <rect width="2400" height="1600" fill="none" filter="url(#tooth)"/>
+  <rect width="2400" height="1600" fill="url(#fall)"/>
+</svg>

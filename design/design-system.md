@@ -179,13 +179,59 @@ control size, content order, and first-fold hierarchy are non-overridable.
 Ordinary progress chrome may follow resolved primary without changing its
 meaning; failure and delivery endpoints remain fixed.
 
-The existing private cover reservation, direct upload, inspection, storage, and
-read pipeline remains the only event image system. Themes continue to use the
-successful private cover through `--event-cover`; no request can provide a CSS
-URL. No-cover events use the preset gradient. Cover events use preset-owned
-overlays and a localized `coverTextScrim`. Manager preview reads the same private
-object through `GET /api/manage/events/:eventId/cover`; it creates no second
-upload, asset, or background-image system.
+The cover pipeline remains the only event image system, and it now has two halves
+rather than one. A host's photo is ingested through an authenticated, bounded
+Worker route instead of a presigned direct PUT, normalized into one private WebP
+master, and materialized into a fixed set of layout renderings before it can
+become the active cover. Beside it sits a finite library of built-in covers:
+six art-directed choices, versioned and checksummed, shipped as immutable static
+release assets under `/assets/event-covers/v{n}/`. Those are global artwork
+containing no event data — they are not a second upload system, and no event-bound
+route serves them.
+
+Themes still use the successful private cover through `--event-cover`; no request
+can provide a CSS URL. No-cover events use the preset gradient. Cover events use
+preset-owned overlays and a localized `coverTextScrim`. `#fffaf3` is composited
+under every cover transform as a fixed paper matte so a transparent PNG or WebP
+cannot produce edges that differ between formats; it is server-owned and never
+follows an event's colors. `surfaceTreatment` — currently `none` or
+`film-grain-v1` — is resolved by the server from the published style and layered
+at runtime. Neither is a forty-sixth `--event-*` property, and neither becomes a
+`[data-*]` conditional.
+
+The theme-overlay scope list above is unchanged: `EventAppearancePreview` remains
+mounted, and the live appearance canvas that will replace it is not yet reachable.
+
+The runtime layer order over a cover is fixed and is the same on the guest hero
+and in Manager: image, surface treatment, contrast scrim, then content and
+controls. None of the three overlays is ever baked into a rendered file, which is
+why changing an event's theme re-paints instantly and renders nothing.
+
+### Cover layout profiles
+
+Six layout states, and a cover is rendered for exactly these. The registry owns
+the state names, breakpoints, dimensions, and byte budgets; a request query
+string, a user agent, or a phone model never selects among them — only a measured
+container and hero state do.
+
+| Profile | Layout state | 1x / 2x | WebP 1x / 2x | JPEG 1x / 2x |
+| --- | --- | ---: | ---: | ---: |
+| `short-lookup` | ≤360 wide and ≤600 high lookup hero | 360×168 / 720×336 | 60 / 120 KiB | 90 / 180 KiB |
+| `compact-default` | ≤390 default hero | 390×205 / 780×410 | 70 / 140 KiB | 100 / 200 KiB |
+| `standard-default` | 391–699 unframed default, capped at 620 | 620×218 / 1240×436 | 78 / 250 KiB | 120 / 360 KiB |
+| `framed-default` | ≥700×760 viewport, 620 framed hero | 620×265 / 1240×530 | 140 / 300 KiB | 210 / 440 KiB |
+| `compact-expanded` | ≤390 expanded-welcome hero | 390×420 / 780×840 | 130 / 280 KiB | 190 / 410 KiB |
+| `wide-expanded` | 391–699 expanded welcome, capped at 620 | 620×420 / 1240×840 | 220 / 480 KiB | 330 / 700 KiB |
+
+Every 1x profile is mandatory. A 2x profile is offered only when the chosen crop
+can produce it without upscaling, so a smaller photo stays valid and simply looks
+slightly softer on dense screens rather than being refused.
+
+Legibility over a cover is a property of the layer arithmetic rather than of any
+file: `tests/unit/cover-contrast.test.ts` composites all 720 preset, effect,
+theme, and profile contexts and proves separately that the fixed scrim protects
+an arbitrary uploaded photograph. Axe covers semantics and is not evidence for
+text over an image.
 
 ### Typography
 
@@ -250,5 +296,27 @@ Guest before-start: `The event hasn't started yet`, `{event name} begins {format
 Create receipt: the existing links plus `Set up guest list`. It is permitted because a new event starts with RSVP paused until the host has a validated roster — photo intake is permitted from creation and opens on the event's own schedule — so the guest list is the one thing the receipt would otherwise name no way to reach.
 
 Manager: `Candidary`, event name/date, the event's start time and time zone, the server-derived photo intake state, capacity/lifecycle facts, the active section title, and the six destination labels `Intake`, `RSVP`, `Gallery`, `Notes`, `Share`, `Settings`. The RSVP destination's eight totals are labelled facts derived from the server, not marketing metrics.
+
+Cover preparation is Manager copy below the Settings fold, so it sits outside
+this list's above-the-fold reach — but it is recorded here because it is the one
+place Candidary tells a host that something is happening to their event without
+their having caused it just then. The complete permitted set is
+`Preparing cover {n} of 6. Your current cover is still live.`,
+`Still preparing. Your current cover is safe, and you can close this window.`,
+and `Try again`. The progress fragment counts layouts in host terms and never
+exposes the word `profile`; the count comes from durable progress and is never
+guessed from elapsed time. Nothing here may add a percentage, an estimate, or a
+spinner caption.
+
+The corrected cover-field copy on both upload controls is
+`Optional · JPEG, PNG, WebP, or HEIC · 19 MB max`. Its format list and ceiling
+are read from the same server-owned constants the route enforces, so the two
+cannot drift.
+
+Cover Studio's own copy, the six preset names (`Warm Linen`, `Botanical Shadow`,
+`Pressed Paper`, `Candlelit Grain`, `Coastal Haze`, `Midnight Wash`), and the five
+style names (`natural`, `warm`, `film`, `soft`, `monochrome`) are **reserved, not
+yet allowed**: they ship unrendered and no surface can reach them. They return to
+this list for review when the studio is wired.
 
 Apart from those entry points, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.

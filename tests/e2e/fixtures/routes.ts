@@ -63,6 +63,9 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
 
 export const EVENT_FIXTURE: EventView = {
   ...GUEST_EVENT_FIXTURE,
+  // Manager-only. The guest fixture it spreads deliberately has neither.
+  coverPreparation: null,
+  coverRevision: 0,
   eventStartTime: '17:00',
   // Permitted and past its start, which is the state every manager fixture is in.
   photosOpen: true,
@@ -683,6 +686,73 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       body: options.cover ?? PHOTOGRAPHIC_COVER,
     }));
   }
+  // Playwright's `*` does not cross `/`, so the bare `${base}/cover` stub above
+  // leaves every draft and publication sub-path unrouted — and an unrouted API
+  // call in this suite reaches the static preview server, which answers with
+  // index.html and produces a JSON parse error a long way from its cause.
+  //
+  // The Worker returns `202` for a new upload publication and `200` for a
+  // preset or removal, so the envelope carries the status the client branches on.
+  await page.route(
+    new RegExp(`/api/manage/events/${event.id}/cover/(drafts|publications)`, 'u'),
+    (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const draft = {
+        id: 'draft-e2e',
+        source: 'new-upload',
+        revision: 1,
+        expiresAt: '2026-08-07T00:00:00.000Z',
+        compositionModelVersion: 1,
+        master: { width: 2400, height: 1600, safeZoomMaximum: 2, available2xProfiles: [] },
+        focus: null,
+        preview: null,
+      };
+      if (path.endsWith('/raw')) {
+        return route.fulfill({
+          json: { data: { draft: { ...draft, state: 'transferred' } }, requestId: 'request-a' },
+        });
+      }
+      if (path.endsWith('/inspect')) {
+        return route.fulfill({
+          json: { data: { draft: { ...draft, state: 'inspected' } }, requestId: 'request-a' },
+        });
+      }
+      if (path.endsWith('/composition')) {
+        return route.fulfill({
+          json: { data: { draft: { ...draft, state: 'ready' } }, requestId: 'request-a' },
+        });
+      }
+      if (path.includes('/publications')) {
+        return route.fulfill({
+          status: route.request().method() === 'POST' ? 202 : 200,
+          json: {
+            data: {
+              operation: {
+                operationId: 'operation-e2e',
+                status: 'applied',
+                completedSteps: 6,
+                requiredSteps: 6,
+                retryable: false,
+                safeFailureCode: null,
+                updatedAt: '2026-08-06T00:00:00.000Z',
+              },
+              event: { ...event, coverRevision: event.coverRevision + 1 },
+            },
+            requestId: 'request-a',
+          },
+        });
+      }
+      return route.fulfill({
+        json: {
+          data: {
+            draft: { ...draft, state: 'reserved' },
+            ingress: { path: `/api/manage/events/${event.id}/cover/drafts/draft-e2e/raw` },
+          },
+          requestId: 'request-a',
+        },
+      });
+    },
+  );
   await page.route(`${base}/media*`, (route) => {
     // `cursor=` is a 422, so the client omits the parameter for the first page.
     const cursor = new URL(route.request().url()).searchParams.get('cursor') ?? 'first';

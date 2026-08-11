@@ -2,10 +2,363 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
 
 import { createApp } from '../../worker/app';
+import { AuthService } from '../../worker/auth/service';
+import { AccountsRepository } from '../../worker/db/accounts';
 import type { AppEnv } from '../../worker/env';
 
 export const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 export const origin = env.APP_ORIGIN;
+
+/**
+ * Execute prepared statements without ever exceeding D1's 100-statement batch
+ * ceiling. Rehearsals use this for large deterministic fixtures; callers still
+ * receive every result in statement order.
+ */
+export async function batchD1Statements(
+  db: D1Database,
+  statements: readonly D1PreparedStatement[],
+  batchSize = 100,
+): Promise<D1Result[]> {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) {
+    throw new RangeError('D1 rehearsal batches must contain between 1 and 100 statements.');
+  }
+  const results: D1Result[] = [];
+  for (let offset = 0; offset < statements.length; offset += batchSize) {
+    results.push(...await db.batch(statements.slice(offset, offset + batchSize)));
+  }
+  return results;
+}
+
+export interface RecordedR2Put {
+  key: string;
+}
+
+/**
+ * Observe R2 writes while delegating every operation to the real test bucket.
+ * The body is never inspected or consumed, so the storage path under rehearsal
+ * is byte-for-byte the same one production code invokes.
+ */
+export function withRecordingR2Puts(base: AppEnv = testEnv): {
+  env: AppEnv;
+  puts: RecordedR2Put[];
+} {
+  const puts: RecordedR2Put[] = [];
+  const bucket = new Proxy(base.MEDIA_BUCKET, {
+    get(target, property) {
+      if (property === 'put') {
+        return (...args: Parameters<R2Bucket['put']>) => {
+          puts.push({ key: args[0] });
+          return Reflect.apply(target.put, target, args) as ReturnType<R2Bucket['put']>;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { env: { ...base, MEDIA_BUCKET: bucket }, puts };
+}
+
+export interface Migration { name: string; queries: string[] }
+
+const migrationEnv = env as AppEnv & { TEST_MIGRATIONS: string };
+
+/** Every migration under `migrations/`, in applied order. */
+export const orderedMigrations = JSON.parse(migrationEnv.TEST_MIGRATIONS) as Migration[];
+
+/**
+ * Every migration *before* the named one — exclusive, so
+ * `migrationsUpTo('0012')` builds the schema a populated pre-0012 database has
+ * and leaves `0012` itself as the unit under test. `migration-0010.test.ts`
+ * reads it the same way; do not make it inclusive.
+ */
+export function migrationsUpTo(name: string): Migration[] {
+  const index = orderedMigrations.findIndex((migration) => migration.name.startsWith(name));
+  if (index === -1) throw new Error(`No migration named ${name}.`);
+  return orderedMigrations.slice(0, index);
+}
+
+export function migrationOnly(name: string): Migration {
+  const found = orderedMigrations.find((migration) => migration.name.startsWith(name));
+  if (!found) throw new Error(`No migration named ${name}.`);
+  return found;
+}
+
+type EventAccessFixture = Awaited<ReturnType<typeof eventAccess>>;
+
+/**
+ * A durable host account, optionally owning the given events.
+ *
+ * Paired with `hostWriteHeaders` on purpose: the two halves are one credential,
+ * and a caller that lifts only this one hand-rolls the header map — which is
+ * exactly how a scope ends up tested against the wrong CSRF header and passes.
+ * The return type stays inferred, because `AccountsRepository.create` already
+ * derives the account shape and a hand-written interface would drift from it.
+ */
+export async function hostAccess(events: readonly EventAccessFixture[] = []) {
+  const email = `host-${crypto.randomUUID()}@example.com`;
+  const account = await new AccountsRepository(testEnv.DB).create({
+    email,
+    passwordHash: 'test-password-hash',
+    displayName: null,
+    createdAt: new Date().toISOString(),
+  });
+  if (!account) throw new Error('Expected a new host account.');
+  for (const access of events) {
+    await testEnv.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, ?, 'owner', ?)
+    `).bind(access.event.id, account.id, new Date().toISOString()).run();
+  }
+  const session = await new AuthService(testEnv).createHostSession(account.id, account.authVersion);
+  return {
+    account,
+    cookie: `candidary_host=${session.sessionToken.token}; candidary_host_csrf=${session.csrfToken}`,
+    csrf: session.csrfToken,
+  };
+}
+
+/** The host-account scope's write headers: `x-candidary-host-csrf`, not the guest pair. */
+export function hostWriteHeaders(host: { cookie: string; csrf: string }, extraCookie = '') {
+  return {
+    'content-type': 'application/json',
+    cookie: [host.cookie, extraCookie].filter(Boolean).join('; '),
+    origin,
+    'x-candidary-host-csrf': host.csrf,
+  };
+}
+
+export interface RecordedImagesCall {
+  input: { byteLength: number };
+  transforms: unknown[];
+  output: unknown;
+}
+
+export interface RecordingImagesOptions {
+  /** Source dimensions `IMAGES.info()` reports, before any transform. */
+  source?: { width: number; height: number };
+  encode?(call: RecordedImagesCall): {
+    bytes: Uint8Array;
+    width: number;
+    height: number;
+    contentType: string;
+  };
+}
+
+/**
+ * The one Images fake.
+ *
+ * The pre-existing inline fake discarded every `transform()` argument and
+ * returned a fixed 400x300 PNG, which cannot support an assertion about the
+ * exact parameters a recipe requests or about a rung missing its byte ceiling.
+ * This records every call and lets a test choose the encoded size, so ladder
+ * exhaustion is provoked deliberately rather than hoped for.
+ */
+export function withRecordingImages(
+  options: RecordingImagesOptions = {},
+): { env: AppEnv; calls: RecordedImagesCall[] } {
+  const calls: RecordedImagesCall[] = [];
+  const source = options.source ?? { width: 2400, height: 1600 };
+  const encode = options.encode ?? ((call: RecordedImagesCall) => {
+    // Deterministic and dimension-proportional, so a smaller rung really does
+    // produce fewer bytes and a quality step really does matter.
+    const last = call.transforms.at(-1) as { width?: number; height?: number } | undefined;
+    const width = last?.width ?? source.width;
+    const height = last?.height ?? source.height;
+    const quality = (call.output as { quality?: number }).quality ?? 82;
+    const format = (call.output as { format?: string }).format ?? 'image/webp';
+    const byteLength = Math.max(16, Math.round((width * height * quality) / 4_000));
+    return { bytes: new Uint8Array(byteLength).fill(7), width, height, contentType: format };
+  });
+
+  const images = {
+    info(stream: ReadableStream) {
+      void stream;
+      return Promise.resolve({ format: 'image/jpeg', ...source });
+    },
+    input(stream: ReadableStream) {
+      const call: RecordedImagesCall = { input: { byteLength: 0 }, transforms: [], output: {} };
+      void stream;
+      const transformer = {
+        transform(transform: unknown) {
+          call.transforms.push(transform);
+          return transformer;
+        },
+        draw() { return transformer; },
+        output(output: unknown) {
+          call.output = output;
+          calls.push(call);
+          const encoded = encode(call);
+          // `.buffer` rather than the view: workerd's BodyInit does not accept a
+          // generically-parameterized Uint8Array.
+          const body = () => encoded.bytes.buffer.slice(
+            encoded.bytes.byteOffset,
+            encoded.bytes.byteOffset + encoded.bytes.byteLength,
+          ) as ArrayBuffer;
+          return Promise.resolve({
+            image: () => new Response(body()).body!,
+            contentType: () => encoded.contentType,
+            response: () => new Response(body()),
+          });
+        },
+      };
+      return transformer;
+    },
+  };
+
+  return { env: { ...testEnv, IMAGES: images } as unknown as AppEnv, calls };
+}
+
+const HEX_64 = 'a'.repeat(64);
+
+export interface SeededCoverGraph {
+  masterId: string;
+  draftId: string;
+  previewId: string;
+  renderSetId: string;
+  renderObjectId: string;
+  operationId: string;
+  rateEventId: string;
+  retiredObjectId: string;
+  runId: string;
+  jobId: string;
+  workflowInstanceId: string;
+}
+
+/**
+ * One row in every cover table, all owned by `eventId`.
+ *
+ * Written by direct SQL rather than through the routes on purpose: the purge and
+ * migration tests need every table populated including terminal and
+ * release-only states no single request sequence produces, and they must be able
+ * to do it against a partially migrated database.
+ */
+export async function seedEventCoverGraph(
+  db: D1Database,
+  eventId: string,
+  now = '2026-08-04T00:00:00.000Z',
+): Promise<SeededCoverGraph> {
+  const suffix = crypto.randomUUID();
+  const ids: SeededCoverGraph = {
+    masterId: `master-${suffix}`,
+    draftId: `draft-${suffix}`,
+    previewId: `preview-${suffix}`,
+    renderSetId: `set-${suffix}`,
+    renderObjectId: `object-${suffix}`,
+    operationId: `operation-${suffix}`,
+    rateEventId: `rate-${suffix}`,
+    retiredObjectId: `retired-${suffix}`,
+    runId: `run-${suffix}`,
+    jobId: `job-${suffix}`,
+    workflowInstanceId: `instance-${suffix}`,
+  };
+  const prefix = `events/${eventId}/cover`;
+
+  await db.batch([
+    db.prepare(`
+      INSERT INTO event_cover_masters (
+        id, event_id, object_key, mime_type, byte_size, width, height, sha256,
+        normalization_version, normalization_rung, auto_focus_x, auto_focus_y,
+        composition_model_version, created_at
+      ) VALUES (?, ?, ?, 'image/webp', 900000, 2400, 1600, ?, 1, 1, 0.5, 0.5, 1, ?)
+    `).bind(ids.masterId, eventId, `${prefix}/masters/${ids.masterId}.webp`, HEX_64, now),
+    db.prepare(`
+      INSERT INTO event_cover_drafts (
+        id, event_id, source, state, draft_intent_id, request_sha256, draft_revision,
+        raw_object_key, declared_filename, declared_mime_type, declared_byte_size,
+        master_id, created_at, updated_at, expires_at
+      ) VALUES (?, ?, 'new_upload', 'published', ?, ?, 3, ?, 'porch.jpg', 'image/jpeg', 400000, ?, ?, ?, ?)
+    `).bind(
+      ids.draftId, eventId, `intent-${suffix}`, HEX_64,
+      `${prefix}/raw/${ids.draftId}`, ids.masterId, now, now, now,
+    ),
+    db.prepare(`
+      INSERT INTO event_cover_draft_previews (
+        id, draft_id, event_id, effect_id, recipe_version, state, object_key,
+        mime_type, byte_size, width, height, ladder_rung, sha256, retryable,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, 'natural', 1, 'ready', ?, 'image/webp', 90000, 1280, 853, 1, ?, 0, ?, ?)
+    `).bind(
+      ids.previewId, ids.draftId, eventId,
+      `${prefix}/previews/${ids.draftId}/natural-1.webp`, HEX_64, now, now,
+    ),
+    db.prepare(`
+      INSERT INTO event_cover_render_sets (
+        id, event_id, master_id, draft_id, recipe_json, recipe_sha256, state,
+        required_slots, manifest_sha256, published_revision, created_at, ready_at, published_at
+      ) VALUES (?, ?, ?, ?, '{"effect":"natural"}', ?, 'active', 12, ?, 1, ?, ?, ?)
+    `).bind(ids.renderSetId, eventId, ids.masterId, ids.draftId, HEX_64, HEX_64, now, now, now),
+    db.prepare(`
+      INSERT INTO event_cover_render_objects (
+        id, render_set_id, event_id, profile_id, density, format, object_key,
+        content_type, byte_size, width, height, quality_rung, sha256, created_at
+      ) VALUES (?, ?, ?, 'wide-expanded', '1x', 'jpeg', ?, 'image/jpeg', 120000, 620, 420, 1, ?, ?)
+    `).bind(
+      ids.renderObjectId, ids.renderSetId, eventId,
+      `${prefix}/rendered/${ids.renderSetId}/wide-expanded-1x.jpeg`, HEX_64, now,
+    ),
+    db.prepare(`
+      INSERT INTO event_cover_publish_receipts (
+        event_id, operation_id, draft_id, render_set_id, request_sha256, action,
+        expected_revision, status, workflow_instance_id, dependency_versions_json,
+        completed_profiles, required_profiles, applied_revision, retryable,
+        dispatch_state, dispatch_generation, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, 'publish', 0, 'applied', ?, '{"tonalEffect":1}', 6, 6, 1, 0, 'confirmed', 1, ?, ?, ?)
+    `).bind(
+      eventId, ids.operationId, ids.draftId, ids.renderSetId, HEX_64,
+      ids.workflowInstanceId, now, now, now,
+    ),
+    db.prepare(`
+      INSERT INTO event_cover_workflow_fences (
+        workflow_binding, workflow_instance_id, event_id, dispatch_generation,
+        state, created_at, updated_at, expires_at
+      ) VALUES ('COVER_RENDER_WORKFLOW', ?, ?, 1, 'open', ?, ?, ?)
+    `).bind(ids.workflowInstanceId, eventId, now, now, now),
+    db.prepare(`
+      INSERT INTO event_cover_rate_events (
+        id, event_id, action, replay_key, request_sha256, window_start, created_at, expires_at
+      ) VALUES (?, ?, 'publication', ?, ?, 1785196800, ?, ?)
+    `).bind(ids.rateEventId, eventId, ids.operationId, HEX_64, now, now),
+    db.prepare(`
+      INSERT INTO event_cover_retired_legacy_objects (
+        id, event_id, object_key, key_fingerprint, reason, retired_at, cleanup_after
+      ) VALUES (?, ?, ?, ?, 'replaced', ?, ?)
+    `).bind(ids.retiredObjectId, eventId, `${prefix}/legacy-${suffix}.jpg`, HEX_64, now, now),
+    db.prepare(`
+      INSERT INTO event_cover_purge_progress (event_id, phase, created_at, updated_at)
+      VALUES (?, 'fences', ?, ?)
+    `).bind(eventId, now, now),
+    db.prepare(`
+      INSERT INTO event_cover_backfill_runs (id, mode, status, created_at, updated_at)
+      VALUES (?, 'execute', 'executing', ?, ?)
+    `).bind(ids.runId, now, now),
+    db.prepare(`
+      INSERT INTO event_cover_backfill_jobs (
+        id, run_id, event_id, expected_revision, legacy_key_fingerprint, master_id,
+        render_set_id, workflow_instance_id, dispatch_state, dispatch_generation,
+        status, dependency_versions_json, retryable, terminal_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, 'confirmed', 1, 'applied', '{"tonalEffect":1}', 0, ?, ?, ?)
+    `).bind(
+      ids.jobId, ids.runId, eventId, HEX_64, ids.masterId, ids.renderSetId,
+      `backfill-${suffix}`, now, now, now,
+    ),
+  ]);
+
+  return ids;
+}
+
+/** Every cover table that carries an `event_id`, in no particular order. */
+export const EVENT_COVER_TABLES = [
+  'event_cover_masters',
+  'event_cover_drafts',
+  'event_cover_draft_previews',
+  'event_cover_render_sets',
+  'event_cover_render_objects',
+  'event_cover_publish_receipts',
+  'event_cover_rate_events',
+  'event_cover_retired_legacy_objects',
+  'event_cover_purge_progress',
+  'event_cover_backfill_jobs',
+] as const;
 
 export function cookiesFrom(response: Response) {
   const value = response.headers.get('set-cookie') ?? '';

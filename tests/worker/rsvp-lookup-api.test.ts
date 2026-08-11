@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import {
@@ -362,7 +362,31 @@ describe('household session scope', () => {
   });
 });
 
+// `RsvpRateLimitsRepository.reserve` derives `window_started_at` by flooring the
+// wall clock into a fixed 15-minute bucket, and that column is part of the row's
+// unique key. A run that straddles :00/:15/:30/:45 therefore rotates the bucket
+// partway through a budget test, inserts a fresh row at `attempts = 1`, and the
+// refusal that must fire silently does not — so these blocks read as red purely
+// because of when they were started. Freeze the clock at the current bucket's
+// start: `now` stays plausible for the fixtures, and a frozen `Date` can never
+// cross a boundary. Only `Date` is faked, because the workerd pool still needs
+// real timers for its own plumbing.
+function pinLookupWindow(): void {
+  beforeEach(() => {
+    const windowMs = 15 * 60 * 1000;
+    const bucketStartedAt = Math.floor(Date.now() / windowMs) * windowMs;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(bucketStartedAt));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+}
+
 describe('lookup abuse boundaries', () => {
+  pinLookupWindow();
+
   it('charges the IP once and each submitted name once', async () => {
     const access = await ready();
     await lookup(access, { firstName: 'Alex Lee', secondName: 'Sam Lee' });
@@ -446,6 +470,8 @@ describe('lookup abuse boundaries', () => {
 // for a reason a lookup would. Every boundary therefore has to hold exactly as
 // it does while RSVP is open.
 describe('lookup abuse boundaries in the read-only window', () => {
+  pinLookupWindow();
+
   async function readOnly(name = 'Maya & Theo') {
     const access = await ready(name);
     await readOnlyWindow(access);

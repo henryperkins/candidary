@@ -8,6 +8,7 @@ import { eventRoutes } from './routes/event';
 import { exportRoutes } from './routes/exports';
 import { exchangeRoutes } from './routes/exchange';
 import { contentRoutes } from './routes/content';
+import { eventCoverRoutes } from './routes/event-cover';
 import { galleryRoutes } from './routes/gallery';
 import { hostAuthRoutes } from './routes/host-auth';
 import { hostPublicRoutes } from './routes/host-public';
@@ -38,6 +39,9 @@ export function createApp() {
   app.route('/api', uploadRoutes);
   app.route('/api', contentRoutes);
   app.route('/api', galleryRoutes);
+  // Ahead of `manageRoutes`, which no longer owns any `/cover` path, so the
+  // cover surface has exactly one owner rather than two mount positions.
+  app.route('/api', eventCoverRoutes);
   app.route('/api', manageRoutes);
   app.route('/api', manageRsvpRoutes);
   app.route('/api', rsvpRoutes);

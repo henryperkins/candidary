@@ -34,7 +34,9 @@ const event: EventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
-  coverObjectKey: 'events/event-a/cover/private-photo.jpg',
+  coverObjectKey: 'cover-present',
+  coverPreparation: null,
+  coverRevision: 0,
   uploadsEnabled: true,
   galleryVisible: true,
   moderationRequired: true,
@@ -72,6 +74,10 @@ function Harness({ initial = eventWithoutCover }: { initial?: EventView }) {
       key={current.id}
       event={current}
       onEventWrite={(request) => request()}
+      onEventRead={(request) => request()}
+      // jsdom has no Worker, OffscreenCanvas, or ImageBitmap, so the composition
+      // model is injected here exactly as `GuestUploadFlow` takes a transport.
+      compositionRunner={async () => ({ x: 0.42, y: 0.61 })}
       onThemeSaved={(updated) => setCurrent((held) => mergeThemeResponse(held, updated))}
       onCoverSaved={(updated) => setCurrent((held) => mergeCoverResponse(held, updated))}
       onAutosaveStateChange={setState}
@@ -445,37 +451,154 @@ describe('event appearance editor', () => {
     expect(themeMutationCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('uploads and removes a cover immediately without creating a theme write', async () => {
-    const covered = { ...event, coverObjectKey: 'events/event-a/cover/new.png' };
-    const cleared = { ...event, coverObjectKey: null };
+  it('uploads through the draft pipeline and removes with one publication', async () => {
+    const cleared = { ...event, coverObjectKey: null, coverRevision: 2 };
+    const calls: string[] = [];
+    const draft = (state: string, revision: number, extra: Record<string, unknown> = {}) => ({
+      id: 'draft-a',
+      source: 'new-upload',
+      state,
+      revision,
+      expiresAt: '2026-08-05T00:00:00Z',
+      compositionModelVersion: 1,
+      master: null,
+      focus: null,
+      preview: null,
+      ...extra,
+    });
+    const preparing = {
+      operationId: 'operation-a',
+      status: 'preparing',
+      completedSteps: 1,
+      requiredSteps: 6,
+      retryable: false,
+      safeFailureCode: null,
+      updatedAt: '2026-08-04T00:00:00Z',
+    };
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (path === '/api/manage/events/event-a/cover' && method === 'POST') {
-        return json({ objectKey: 'events/event-a/cover/new.png', url: 'https://upload.test/cover' });
+      calls.push(method + ' ' + path);
+      if (path === '/api/manage/events/event-a/cover/drafts' && method === 'POST') {
+        return json({
+          draft: draft('reserved', 0),
+          ingress: { method: 'PUT', path: '/api/manage/events/event-a/cover/drafts/draft-a/raw' },
+          replayed: false,
+        });
       }
-      if (path === 'https://upload.test/cover' && method === 'PUT') {
-        return Promise.resolve(new Response(null, { status: 200 }));
+      if (path === '/api/manage/events/event-a/cover/drafts/draft-a/raw' && method === 'PUT') {
+        return json({ draft: draft('transferred', 2) });
       }
-      if (path === '/api/manage/events/event-a/cover/finalize' && method === 'POST') {
-        return json({ event: covered });
+      if (path === '/api/manage/events/event-a/cover/drafts/draft-a/inspect' && method === 'POST') {
+        return json({ draft: draft('inspected', 3, {
+          master: { width: 2400, height: 1600, safeZoomMaximum: 2, available2xProfiles: [] },
+          preview: { effect: 'natural', width: 1280, height: 853, byteSize: 900, recipeVersion: 1 },
+        }) });
       }
-      if (path === '/api/manage/events/event-a/cover' && method === 'DELETE') {
-        return json({ event: cleared });
+      if (path === '/api/manage/events/event-a/cover/drafts/draft-a/previews/natural' && method === 'POST') {
+        return Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) } as Response);
+      }
+      if (path === '/api/manage/events/event-a/cover/drafts/draft-a/composition' && method === 'PATCH') {
+        return json({ draft: draft('ready', 4, { focus: { x: 0.42, y: 0.61, modelVersion: 1 } }) });
+      }
+      if (path === '/api/manage/events/event-a/cover/publications' && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { source: { kind: string } };
+        if (body.source.kind === 'none') {
+          return json({ applied: true, appliedRevision: 2, operation: null, event: cleared });
+        }
+        return json({ applied: false, operation: { ...preparing, completedSteps: 0 } });
+      }
+      if (path === '/api/manage/events/event-a' && method === 'GET') {
+        return json({ event: { ...event, coverPreparation: preparing } });
+      }
+      if (path === '/api/manage/events/event-a/cover/publications/operation-a' && method === 'GET') {
+        return json({ operation: preparing });
       }
       throw new Error('Unexpected request ' + method + ' ' + path);
     });
     vi.stubGlobal('fetch', fetchMock);
-    render(<Harness />);
+    render(<Harness initial={eventWithoutCover} />);
     const input = document.querySelector<HTMLInputElement>('.cover-field__input')!;
-    const file = new File([new Uint8Array([1, 2, 3])], 'cover.png', { type: 'image/png' });
+    // HEIC, which is what an iPhone photo picker hands over and what neither
+    // control accepted before.
+    const file = new File([new Uint8Array([1, 2, 3])], 'porch.heic', { type: 'image/heic' });
 
     fireEvent.change(input, { target: { files: [file] } });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove cover' })).toBeVisible());
+    await waitFor(() => expect(calls).toContain('POST /api/manage/events/event-a/cover/publications'));
+
+    // Reserve, transfer, inspect, compose, publish — once each.
+    expect(calls.filter((call) => call.endsWith('/cover/drafts'))).toHaveLength(1);
+    expect(calls).toContain('PUT /api/manage/events/event-a/cover/drafts/draft-a/raw');
+    expect(calls).toContain('PATCH /api/manage/events/event-a/cover/drafts/draft-a/composition');
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
 
+    // A 202 leaves the current cover exactly as it was; the status beside the
+    // summary owns the rest, and its copy comes from durable step counts.
+    await waitFor(() => expect(screen.getByText(/Preparing cover 2 of 6/u)).toBeVisible());
+
+    cleanup();
+    render(<Harness initial={{ ...event, coverRevision: 1 }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+    const removal = (fetchMock.mock.calls as Array<[RequestInfo | URL, RequestInit?]>)
+      .filter(([path, init]) => String(path).endsWith('/cover/publications') && String(init?.method) === 'POST')
+      .map(([, init]) => JSON.parse(String(init?.body)) as { source: { kind: string }; expectedRevision: number })
+      .find((body) => body.source.kind === 'none');
+    // Removal is a publication carrying the revision this page last read, not a
+    // DELETE that assumes it is still current.
+    expect(removal?.expectedRevision).toBe(1);
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('reads the recovery view out of a 409 envelope instead of reporting a generic error', async () => {
+    const winner = { ...event, coverObjectKey: null, coverRevision: 5 };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (path === '/api/manage/events/event-a/cover/publications' && method === 'POST') {
+        // §11's recovery view travels in the response envelope, not in an error
+        // body — so it carries no `code` and no `message`.
+        return Promise.resolve(new Response(JSON.stringify({
+          data: {
+            applied: false,
+            operation: { operationId: 'operation-a', status: 'conflict', completedSteps: 0, requiredSteps: 0, retryable: false, safeFailureCode: null, updatedAt: '2026-08-04T00:00:00Z' },
+            event: winner,
+          },
+          requestId: 'request-a',
+        }), { status: 409, headers: { 'content-type': 'application/json' } }));
+      }
+      throw new Error('Unexpected request ' + method + ' ' + path);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={{ ...event, coverRevision: 1 }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove cover' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeVisible());
+    // Not "Something went wrong."
+    expect(screen.getByRole('alert')).toHaveTextContent(/changed somewhere else/u);
+    // And the page is rebased onto the winning revision, so the next change
+    // sends an expectedRevision the server will accept.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
+  });
+
+  it('refuses an unsupported type before any request', async () => {
+    const fetchMock = vi.fn(() => { throw new Error('No request should be made.'); });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={eventWithoutCover} />);
+    const input = document.querySelector<HTMLInputElement>('.cover-field__input')!;
+
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array([1])], 'clip.gif', { type: 'image/gif' })] },
+    });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/JPEG, PNG, WebP, or HEIC/u));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('states the real accepted formats and ceiling', () => {
+    vi.stubGlobal('fetch', vi.fn());
+    render(<Harness initial={eventWithoutCover} />);
+    const input = document.querySelector<HTMLInputElement>('.cover-field__input')!;
+    expect(input.accept).toBe('image/jpeg,image/png,image/webp,image/heic');
+    expect(screen.getByText(/JPEG, PNG, WebP, or HEIC · 19 MB max/u)).toBeVisible();
   });
 });

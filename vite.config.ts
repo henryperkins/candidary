@@ -67,6 +67,13 @@ export default defineConfig(({ command }) => {
   const buildCandidate = resolveConfigBuildCandidate(repositoryRoot, command);
   return {
     plugins: [react(), cloudflare(), omitLocalDevVarsPlugin()],
+    // The first Web Worker in this application. The composition model runs off
+    // the main thread on the authorized natural preview, so choosing a cover
+    // never blocks the manager's own scrolling or typing. ES output because the
+    // worker imports the shared saliency module rather than inlining it.
+    worker: {
+      format: 'es',
+    },
     build: {
       assetsInlineLimit: 0,
     },

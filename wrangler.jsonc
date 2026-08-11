@@ -65,6 +65,16 @@
       "name": "candidary-export",
       "binding": "EXPORT_WORKFLOW",
       "class_name": "ExportWorkflow"
+    },
+    {
+      "name": "candidary-cover-render",
+      "binding": "COVER_RENDER_WORKFLOW",
+      "class_name": "CoverRenderWorkflow"
+    },
+    {
+      "name": "candidary-cover-backfill",
+      "binding": "COVER_BACKFILL_WORKFLOW",
+      "class_name": "CoverBackfillWorkflow"
     }
   ],
   "triggers": {

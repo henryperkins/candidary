@@ -51,6 +51,54 @@ npm run test:e2e
 git diff --check
 ```
 
+### Cover storage targeted verification
+
+The narrow feature gate for the phase-1 cover pipeline is:
+
+```powershell
+npx vitest run --config vitest.config.ts tests/unit/event-cover.test.ts tests/unit/cover-presets.test.ts tests/unit/cover-contrast.test.ts tests/unit/cover-saliency.test.ts tests/unit/cover-backfill-launcher.test.ts tests/unit/verify-fresh-d1.test.ts tests/ui/cover-studio.test.tsx tests/ui/manager-cover-preparation.test.tsx tests/ui/responsive-event-cover.test.tsx tests/ui/event-appearance-editor.test.tsx
+npx vitest run --config vitest.worker.config.ts tests/worker/migration-0012.test.ts tests/worker/event-cover-storage.test.ts tests/worker/event-cover-images.test.ts tests/worker/event-cover-publication.test.ts tests/worker/event-cover-api.test.ts tests/worker/event-cover-delivery.test.ts tests/worker/cover-render-workflow.test.ts tests/worker/cover-backfill-workflow.test.ts tests/worker/cleanup.test.ts
+npm run verify:cover-presets
+npm run verify:bindings
+```
+
+The asset matrix is regenerated with `npm run build:cover-presets`, which needs headless Chromium.
+A rebuild from unchanged sources reproduces all 720 files byte for byte; if it does not, the seeds
+or the browser version moved and the manifest checksums will say so.
+
+### Phase-2 backfill evidence boundary
+
+The distinct Phase-2 local rehearsal gate is:
+
+```powershell
+npx vitest run --config vitest.config.ts tests/unit/cover-backfill-operator-loop.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/cover-backfill-rehearsal.test.ts
+```
+
+The two Phase-2 rehearsals establish different local facts and must not be promoted beyond them:
+
+- `tests/worker/cover-backfill-rehearsal.test.ts` runs 101 migrated legacy events through literal
+  100/1/0 inventory pages and 25/25/25/25/1/0 dispatch observations. It exercises interruption,
+  deterministic IDs/generations, deletion fencing before confirmation and before R2, stale-create
+  recovery, unknown-with-no-mutation, retryable restart, paused resume, superseded resolution,
+  counters, proof, and Worker-only atomic closure. Its Images and Workflow implementations are
+  deterministic injected fakes.
+- `tests/unit/cover-backfill-operator-loop.test.ts` pins Wrangler 4.113.0, applies exactly migrations
+  `0001` through `0013` to a unique disposable local D1, walks the generated inventory/claim/read/
+  confirm/receipt/proof order, and proves a failing claim file rolls back. It inspects generated
+  Workflow command strings only and deliberately executes no trigger, terminate, resume, or restart.
+
+Together they prove local orchestration, observed Wrangler/local-D1 rollback atomicity, artifact
+ordering, replay behavior, and bounds.
+They do **not** prove Cloudflare Images output bytes, orientation/metadata stripping, JPEG/WebP codec
+limits, HEIC/vendor MIME behavior, Workflow create/status/retry/resume/restart/terminate semantics,
+completed-instance retention, or the production missing-instance discriminator. The candidate's
+matcher is empty, so certified-missing recreation is unreachable through the default adapter. Those
+behaviors require an exact-candidate staging deployment against real Images and Workflow resources
+before production backfill authorization; pinning a discriminator creates a new candidate and repeats
+both gates. The rehearsals also provide no physical-device, Safari, Android, native picker, remote D1,
+deployment, production-data, or Phase-3 evidence.
+
 ## Tracked visual baselines
 
 The two landing baselines were recaptured on Windows and inspected side by side at their natural
@@ -441,6 +489,36 @@ No waiting, automatic-transition, or manager photo-intake PNG is claimed.
   cursor-less first-page request through the normal route stub. The answered poll keeps all 120
   unique rows and does not restore `Load more photos`. `tests/ui/app.test.tsx` separately pins
   overlap, discontinuity, stale-query, and concurrent append ordering with controlled timers.
+- **The `cover-present` sentinel.** The compatibility Manager and guest projections return the
+  constant string `cover-present` when an event has any cover, and null otherwise. They deliberately
+  do not return the `cover_object_key` column, because that column now holds the private normalized
+  master rather than a legacy original — projecting it would be worse than the status quo, not a
+  neutral carry-forward. Every current client uses the field only as a presence flag and requests the
+  authorized route, so neither audience loses anything.
+- **A replaced cover becomes visible only after a reload.** `useEventCover` keys its effect on the
+  request path, and neither compatibility cover URL carries a key or a revision, so nothing in the
+  client can detect a replacement. This predates the cover work — replacing a cover already produced
+  no refetch — but under a constant sentinel it is now unconditional. It is accepted for this
+  release and is fixed by the revision-scoped delivery routes, not by a client change.
+- **Miniflare proves Workflow creation and nothing else about a Workflow's life.**
+  `EXPORT_WORKFLOW.create()` is awaited before a `202` and asserted by `export-api.test.ts:29`, so
+  binding presence and instance creation are genuinely demonstrated under the workerd pool. Cover
+  Workflow lifecycle calls — `get()`, `.status()`, `.resume()`, `.restart()`, `.terminate()`, and
+  `createBatch()` recovery — are exercised against injected fakes; the operator-loop rehearsal does
+  not execute its generated platform strings. Every §9.4 disposition depends on real platform
+  behavior those local tests cannot establish. No local probe was run against real statuses, and none
+  of this candidate's tests should be read as evidence that the platform behaves as the fake does.
+  Closing that distance is the exact-candidate §15.5 staging gate's job.
+- **Cover contrast is arithmetic, not screenshots.** All 720 preset, effect, theme, and profile
+  contexts are composited by `coverTextContrast` over the brightest pixel each rendered profile
+  actually contains, measured once at build time into the asset manifest. A separate monotonicity
+  argument proves the fixed scrim protects an arbitrary uploaded photograph, since white copy is
+  hardest to read over the brightest possible source. 720 Playwright screenshots would be slower,
+  flakier, and would still say nothing about uploads; axe reads declared colours and cannot speak to
+  text over an image at all.
+- **No rows were added to `design/fidelity-ledger.md`.** This release renders no new guest surface
+  and exactly one small Manager status. The ledger's convention is that evidence is recorded at the
+  strength it was observed, and there is no new responsive state to record.
 
 ## Contrast remediation
 

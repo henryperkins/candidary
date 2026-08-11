@@ -4,7 +4,11 @@ import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
-import { MAX_EVENT_MEDIA } from '../../shared/constants';
+import {
+  COVER_UPLOAD_MIME_TYPES,
+  MAX_COVER_UPLOAD_BYTES,
+  MAX_EVENT_MEDIA,
+} from '../../shared/constants';
 import type { EventThemePresetId } from '../../shared/contracts';
 import { EVENT_THEME_VERSION } from '../../shared/event-theme';
 import { PageHeader } from '../components/Brand';
@@ -12,6 +16,16 @@ import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventThemePresetSelector } from '../components/EventThemePresetSelector';
 import { HostAccountPanel } from '../components/HostAccountPanel';
 import { hostRegisterHref } from '../app/recovery';
+import {
+  CoverUploadRejected,
+  publishCoverUpload,
+  validateCoverFile,
+} from '../features/cover/cover-draft-client';
+
+// Both cover controls read the server's own list and ceiling. Neither restates
+// them, and neither can drift from the route that enforces them.
+const COVER_ACCEPT = COVER_UPLOAD_MIME_TYPES.join(',');
+const COVER_MAX_MB = Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000);
 
 interface Created {
   // `eventStartAt` is the instant the Worker resolved from the date, the local
@@ -119,10 +133,10 @@ export function CreatePage() {
       setSaved(result.savedToAccount === true);
       if (cover) {
         try {
-          const upload = await api<{ objectKey: string; url: string }>(`/api/manage/events/${result.event.id}/cover`, { method: 'POST', body: JSON.stringify({ filename: cover.name, mimeType: cover.type, byteSize: cover.size }) });
-          const transferred = await fetch(upload.url, { method: 'PUT', headers: { 'content-type': cover.type }, body: cover });
-          if (!transferred.ok) throw new Error('Cover transfer failed.');
-          await api(`/api/manage/events/${result.event.id}/cover/finalize`, { method: 'POST', body: JSON.stringify({ objectKey: upload.objectKey, mimeType: cover.type }) });
+          // The same bounded pipeline the manager control uses: automatic
+          // composition, the faithful style, one durable receipt. A new event is
+          // at revision 0, and creation returns before the renderings are ready.
+          await publishCoverUpload({ eventId: result.event.id, file: cover, expectedRevision: 0 });
         } catch { setCoverError('Your event was created, but the cover did not finish uploading. Add it again from event settings.'); }
       }
     } catch (caught) {
@@ -181,7 +195,7 @@ export function CreatePage() {
       <div className="create-field"><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" required aria-invalid={Boolean(fields.rsvpDeadlineDate)} aria-describedby={fields.rsvpDeadlineDate ? 'rsvpDeadlineDate-error' : undefined} /></label>{fields.rsvpDeadlineDate && <small id="rsvpDeadlineDate-error">{fields.rsvpDeadlineDate}</small>}</div>
       <div className="create-field"><label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." aria-invalid={Boolean(fields.welcomeMessage)} aria-describedby={fields.welcomeMessage ? 'welcomeMessage-error' : undefined} /></label>{fields.welcomeMessage && <small id="welcomeMessage-error">{fields.welcomeMessage}</small>}</div>
       <EventThemePresetSelector name="themePreset" value={themePresetId} onChange={setThemePresetId} disabled={busy} />
-      <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : 'Optional · JPEG, PNG, or WebP · 10 MB max'}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only cover-field__input" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0] ?? null; setCover(file && file.size <= 10 * 1024 * 1024 ? file : null); if (file && file.size > 10 * 1024 * 1024) setError('Cover photos must be 10 MB or smaller.'); }} /></label>
+      <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : `Optional · JPEG, PNG, WebP, or HEIC · ${COVER_MAX_MB} MB max`}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only cover-field__input" type="file" accept={COVER_ACCEPT} onChange={(event) => { const file = event.target.files?.[0] ?? null; if (!file) { setCover(null); return; } try { validateCoverFile(file); setCover(file); } catch (rejected) { setCover(null); setError(rejected instanceof CoverUploadRejected ? rejected.message : 'That photo could not be used as a cover.'); } }} /></label>
       <button className="button button--primary button--wide" disabled={busy}>{busy ? 'Creating your event…' : 'Create private event'}</button>
       <p className="form-note"><LockKeyhole aria-hidden="true" /> Your links act as the keys to this private event.</p>
     </form>

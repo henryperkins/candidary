@@ -37,10 +37,10 @@ const MANAGED_EVENT = {
 
 interface MediaPage { media: unknown[]; nextCursor: string | null }
 
-function managerFetch(pages: Record<string, MediaPage>) {
+function managerFetch(pages: Record<string, MediaPage>, event: Record<string, unknown> = MANAGED_EVENT) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+    if (url.endsWith('/api/manage/events/event-a')) return json({ event });
     if (url.includes('/media')) {
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
       return json(pages[cursor] ?? { media: [], nextCursor: null });
@@ -779,32 +779,39 @@ describe('manager settings autosave guards', () => {
 
   it('keeps a deferred cover response from restoring stale settings or theme', async () => {
     const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
+    // Removal is the one cover write that applies synchronously and answers with
+    // a whole event, so it is what can carry stale neighbours back.
+    const covered = {
+      ...MANAGED_EVENT,
+      coverObjectKey: 'cover-present',
+      coverRevision: 1,
+    };
     let releaseCover: (() => void) | null = null;
-    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } }, covered);
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (url.endsWith('/cover') && method === 'POST') {
-        return json({ objectKey: 'events/event-a/cover/new.jpg', url: 'https://r2.test/put' }, 201);
-      }
-      if (url === 'https://r2.test/put') return Promise.resolve(new Response(null, { status: 200 }));
-      if (url.endsWith('/cover/finalize') && method === 'POST') {
+      if (url.endsWith('/cover/publications') && method === 'POST') {
         await new Promise<void>((resolve) => { releaseCover = resolve; });
         // Built from a row read before either later write.
         return json({
+          applied: true,
+          appliedRevision: 2,
+          operation: null,
           event: {
-            ...MANAGED_EVENT,
-            coverObjectKey: 'events/event-a/cover/new.jpg',
+            ...covered,
+            coverObjectKey: null,
+            coverRevision: 2,
             moderationRequired: true,
             theme: MANAGED_EVENT.theme,
           },
         });
       }
       if (url.endsWith('/settings') && method === 'PATCH') {
-        return json({ event: { ...MANAGED_EVENT, moderationRequired: false } });
+        return json({ event: { ...covered, moderationRequired: false } });
       }
       if (url.endsWith('/theme') && method === 'PUT') {
-        return json({ event: { ...MANAGED_EVENT, theme: gardenTheme } });
+        return json({ event: { ...covered, theme: gardenTheme } });
       }
       return fetchMock(input);
     }));
@@ -812,8 +819,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    const file = new File([new Uint8Array([1, 2, 3])], 'cover.png', { type: 'image/png' });
-    await user.upload(document.querySelector<HTMLInputElement>('.cover-field__input')!, file);
+    await user.click(screen.getByRole('button', { name: 'Remove cover' }));
     await waitFor(() => expect(releaseCover).not.toBeNull());
 
     await user.click(screen.getByLabelText('Review notes before sharing'));
@@ -823,7 +829,7 @@ describe('manager settings autosave guards', () => {
     releaseCover!();
 
     // The cover response owns the cover and nothing else.
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove cover' })).toBeVisible());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove cover' })).not.toBeInTheDocument());
     expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
     expect(screen.getByTestId('event-appearance-preview')).toHaveStyle({ '--event-primary': '#245c46' });
   });

@@ -223,8 +223,9 @@ deployed, physically verified, certified, wedding-ready, or production-ready.
 Local candidate evidence does not authorize a remote migration or deployment. Inventory the remote
 ledger and follow the migration-specific runbook first, under its own approval. Do not apply every
 pending migration merely because it is checked in: `0010_event_start.sql` has the data-aware procedure
-below, while `0011_release_certifications.sql` is a distinct, later schema operation and does not
-certify anything by being applied.
+below, `0011_release_certifications.sql` is a distinct, later schema operation and does not
+certify anything by being applied, and `0012_event_cover_storage.sql` is a third, later still — and
+applying it is not authorization to run the cover backfill that follows it.
 
 After the approved remote migration state is compatible, select the passed manifest for the exact
 clean checkout and request deployment authorization separately:
@@ -290,8 +291,8 @@ than the column, so a migrated database serving the previous deployment is a sta
 written to sit in.
 
 Production was read-only verified through `0010_event_start.sql` on 2026-08-02, with
-`0011_release_certifications.sql` pending. This dated statement is not authority: re-read the exact
-remote ledger before every release. A pending migration blocks claims about remote convergence but
+`0011_release_certifications.sql` and `0012_event_cover_storage.sql` pending. This dated statement is
+not authority: re-read the exact remote ledger before every release. A pending migration blocks claims about remote convergence but
 does not alter a local manifest's `remoteMigration: not_run` claim.
 
 ### 0008 is a clean-launch migration with no backfill
@@ -380,8 +381,8 @@ Run the immutable local candidate gate above before starting this remote procedu
 `$candidateManifest` still names evidence for that exact SHA. The local result does not replace any
 inventory or authorize any write. If an environment is still behind `0010`, the approved migration source must
 present **exactly** `0010_event_start.sql` as pending at step 2; do not run the command from a source
-that would also apply `0011_release_certifications.sql`. Apply `0011` only as its own separately
-reviewed and authorized operation.
+that would also apply `0011_release_certifications.sql` or `0012_event_cover_storage.sql`. Apply each
+of `0011` and `0012` only as its own separately reviewed and authorized operation.
 
 1. **Before applying `0010`, inventory and plan every non-deleted event.** Start with a fresh artifact
    directory, capture Wrangler's machine-readable envelope, then let the Node tool resolve each local
@@ -568,6 +569,54 @@ deploy wrapper, nor any HTTP route or checked-in command inserts that record. A 
 therefore still uncertified until a future, explicitly designed physical-evidence workflow records an
 exact matching Worker version, build SHA, journey version, migration digest, evidence-manifest digest,
 and redacted physical references. See [operations.md](operations.md) for the fail-closed contract.
+
+### 0012 is the first of three cover phases, and applying it authorizes none of the others
+
+`0012_event_cover_storage.sql` is additive: three `events` columns and twelve cover inventory tables.
+It is the widest schema change in this repository's history, and it is also the one most likely to be
+misread as permission to do the work that follows it. It is not. The event cover cutover is three
+explicitly separated releases, each with its own authorization:
+
+| Phase | What it is | What it does **not** authorize |
+| --- | --- | --- |
+| 1 | Apply `0012`; deploy the Worker with `COVER_RENDER_WORKFLOW`, `COVER_BACKFILL_WORKFLOW`, and the versioned preset assets. New and replacement uploads use the bounded pipeline; the client contract is unchanged. | Running the backfill. Enabling Cover Studio or the responsive reader. Authoring `0013`. |
+| 2 | Convert every pre-`0012` legacy cover with the backfill launcher and produce the zero-legacy proof. | Phase 3. A green proof authorizes opening that candidate and nothing else. |
+| 3 | `0013_event_cover_invariants.sql`, the new Manager and guest projections, the revision-scoped delivery routes, and Cover Studio. | Anything before its own review and release. |
+
+Phase 2 itself has three authorization gates. They are sequential evidence boundaries, not three
+steps authorized by one approval:
+
+| Phase-2 gate | Required evidence | What passing it does not authorize |
+| --- | --- | --- |
+| Candidate verification | One exact clean SHA; independent source review; exactly 13 migrations, ending in `0013_guest_message_hardening.sql` from the `main` integration; the complete local release gate plus the populated Worker rehearsal and local-D1 operator loop; local claims only. | Remote migration, deployment, staging, production data, or the backfill. |
+| Staging deployment and conformance | Deploy that exact candidate to separately identified staging resources. Prove real Images/codec behavior and real `COVER_BACKFILL_WORKFLOW` create, status, retry, resume, restart, terminate, retained-ID, failed-lookup idempotent materialization, status-unknown preservation, and deletion-fence behavior. The certified-not-found matcher remains empty because the deployed probe found no stable non-message discriminator. Record the staging account/resources, deployed version ID/tag, candidate SHA, timestamps, sanitized results, and cleanup. | Production migration/data/backfill or any Phase-3 activity. Deterministic local fakes do not satisfy this gate. |
+| Production backfill | New explicit production authorization after both earlier gates pass; exact account/Worker/D1/Workflow/migration identity; the exact candidate at 100% traffic; an owned no-deploy window; and execution of the bounded claim/launch/confirm/proof protocol in the runbook. | `0014_event_cover_invariants.sql`, responsive projections/routes, Cover Studio activation, or a Phase-3 deployment. |
+
+A new commit, migration, deployed version/tag, binding change, or staging remediation invalidates later
+gate evidence until the affected gate is repeated on the new exact candidate. The current remediation
+plan deliberately stops before candidate verification; this section describes future gates and does
+not mark any of them passed.
+
+Two properties make the phase-1 apply safe to perform on its own. Every new column has a SQLite-safe
+constant default, so a populated database migrates without a data pass. And the compatibility reader
+keeps the current `coverObjectKey` projection and the current cover URL shape, so a deployed Worker
+serves exactly what it served before — for a legacy row, the original; for a converted one, the
+`wide-expanded` 1x JPEG derivative.
+
+One behaviour changes at phase 1 and is worth stating plainly: **a displaced cover original is no
+longer deleted eagerly.** It is inventoried in `event_cover_retired_legacy_objects` with a seven-day
+`cleanup_after`, and only the bounded scheduled sweep removes it from R2 — after verifying absence and
+before removing the row that named it. Storage therefore grows slightly during the recovery window,
+which is the trade the recovery window buys.
+
+Every cover table's `event_id` is `ON DELETE RESTRICT`, the first such clauses in this schema. Event
+purge handles them in an explicit child-before-parent order. If a purge ever fails with a foreign-key
+error after this migration, the cause is a cover row the order does not cover, not a corrupt event.
+
+The executable operator procedure is [cover-backfill-runbook.md](cover-backfill-runbook.md); the
+design-time task contract remains in
+`docs/superpowers/plans/2026-08-05-event-appearance-cover-studio-phase-2.md`. Applying `0012` and
+deploying does not start the backfill, and nothing in this repository starts it automatically.
 
 ## Wedding rehearsal gate
 
