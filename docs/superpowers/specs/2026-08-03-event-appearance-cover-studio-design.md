@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-03
 
-**Status:** Revised design approved; written specification awaiting final review
+**Status:** Implemented and deployed to production on 2026-08-11
 
 ## 1. Decision
 
@@ -1025,14 +1025,14 @@ by their dedicated inventory through the recovery window.
 **Phase 3 — responsive contract and invariant release**
 
 Only after the separately authorized production zero-legacy proof may a later
-candidate add `0013_event_cover_invariants.sql`, enable the new projections and
-responsive routes, and turn on Cover Studio. `0013` is absent from the phase-1
+candidate add `0014_event_cover_invariants.sql`, enable the new projections and
+responsive routes, and turn on Cover Studio. `0014` is absent from the phase-1
 candidate; checking it into the repository earlier would cause fresh and test
 databases to apply it immediately after `0012` through `readD1Migrations()`.
 Applying both migrations in order is expected for a fresh database after phase
 3 because it contains no legacy rows.
 
-`0013` adds tested source/pointer and manifest triggers without making event
+`0014` adds tested source/pointer and manifest triggers without making event
 purge impossible. Referenced masters or sets cannot be deleted from a live
 event, but a soft-deleted event may first clear its active pointers and then use
 the explicit receipt → render-object → render-set/draft → master order in §14.
@@ -1764,13 +1764,13 @@ purge.
   same-job restart, new-run IDs, skip-on-change, needs-replacement resolution,
   retired-original inventory, reference release/ledger expiry, zero-legacy
   proof, and complete-manifest proof; plus a separate later-release
-  fixture where `0013` follows `0012` and enforces live invariants without
+  fixture where `0014` follows the integrated `0013` guest-message migration and enforces live invariants without
   blocking ordered purge.
 - For the phase-1 candidate, `scripts/verify-fresh-d1.ts` and its unit fixture
   assert `0012`, the exact `events` columns, terminal definitions, new tables,
-  indexes, foreign keys, and the absence of `0013`/phase-3 triggers. The later
+  indexes, foreign keys, and the absence of `0014`/phase-3 triggers. The later
   phase-3 candidate deliberately updates that verifier to apply and assert
-  `0013`; one candidate never claims both states.
+  `0014`; one candidate never claims both states.
 
 The repository currently substitutes a deterministic fake Images transformer
 in relevant Worker tests; Cloudflare's default local/Vitest binding is also
@@ -1885,9 +1885,9 @@ local passing suite.
 Local implementation may add phase-1 migration `0012`, compatibility code,
 unwired responsive/Cover Studio modules, both Workflow classes, the dry-run-first
 backfill launcher, generated preset assets, and tests. The phase-1 candidate
-must not contain `0013`. Local schema work updates
+must not contain `0014`. Local schema work updates
 `scripts/verify-fresh-d1.ts` and its fixtures to assert the phase-1 schema and
-the absence of `0013`. Only the later phase-3 candidate changes that verifier to
+the absence of `0014`. Only the later phase-3 candidate changes that verifier to
 assert the phase-3 triggers. Final candidate verification uses:
 
 ```text
@@ -1904,13 +1904,13 @@ None of the following is authorized by implementation or a local passing gate:
 - creating, restarting, terminating, or triggering remote Workflow instances;
 - mutating production R2 or launching the legacy backfill;
 - enabling the strict responsive reader or new client projection;
-- adding/applying `0013` before the separate production zero-legacy proof;
+- adding/applying `0014` before the separate production zero-legacy proof;
 - claiming deployed Images/Workflow conformance; or
 - claiming physical iPhone, Android, VoiceOver, or TalkBack support.
 
 Those require separately authorized phase-1 deployment/migration, backfill,
 staging conformance, zero-legacy proof, and phase-3 invariant/reader release
-activities. `0013` is authored and checked in only for that later phase-3
+activities. `0014` is authored and checked in only for that later phase-3
 candidate.
 
 ## 17. External platform references
