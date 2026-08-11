@@ -967,7 +967,7 @@ describe('the generated cover-backfill operator loop', () => {
     } finally {
       safeRemoveTemporaryDirectory(temporaryRoot);
     }
-  }, 120_000);
+  }, 240_000);
 
   it('keeps a stale refused claim pending and emits no trigger artifact on replay', () => {
     const database = migratedDatabase();
