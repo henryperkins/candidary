@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   canonicalJson,
   collectMigrationManifest,
+  deployWranglerConfigBytes,
   normalizedBindingTopology,
   sha256,
   type CandidateManifest,
@@ -138,7 +139,12 @@ function makeManifest(root: string): CandidateManifest {
     const bytes = readFileSync(join(root, ...path.split('/')));
     return { path, bytes: bytes.length, sha256: sha256(bytes) };
   };
-  const deployWranglerConfig = hashed('dist/candidary/wrangler.json');
+  const deployConfigBytes = deployWranglerConfigBytes(generatedConfig());
+  const deployWranglerConfig = {
+    path: 'dist/candidary/wrangler.json',
+    bytes: deployConfigBytes.length,
+    sha256: sha256(deployConfigBytes),
+  };
   const worker = hashed('dist/candidary/index.js');
   const client = [hashed('dist/client/index.html')];
   const artifactDigest = sha256(canonicalJson({ deployWranglerConfig, worker, client }));
@@ -282,6 +288,25 @@ describe('Task 10 candidate verification for Task 11', () => {
     });
     expect(verified.manifest.commands).toHaveLength(14);
     expect(Object.keys(verified.manifest.migrations!.verification.terminalSchema)).toHaveLength(3);
+  });
+
+  it('accepts generated config relocated to this worktree while preserving its portable bytes', () => {
+    const root = temporaryRoot();
+    makeManifest(root);
+    const relocated = {
+      ...generatedConfig(),
+      configPath: join(root, 'wrangler.jsonc'),
+      userConfigPath: join(root, 'wrangler.jsonc'),
+    };
+    put(root, 'dist/candidary/wrangler.json', `${JSON.stringify(relocated)}\n`);
+
+    expect(() => verifyTask10Candidate(root, CANDIDATE_SHA, observation())).not.toThrow();
+
+    put(root, 'dist/candidary/wrangler.json', `${JSON.stringify({
+      ...relocated, workers_dev: true,
+    })}\n`);
+    expect(() => verifyTask10Candidate(root, CANDIDATE_SHA, observation()))
+      .toThrow(/Wrangler config artifact/u);
   });
 
   it('rejects head, tree, status, manifest-sidecar, and artifact drift', () => {

@@ -17,6 +17,7 @@ import {
   assertRedactedCandidateManifest,
   canonicalJson,
   collectMigrationManifest,
+  deployWranglerConfigBytes,
   normalizedBindingTopology,
   sha256,
   type CandidateManifest,
@@ -157,6 +158,19 @@ function verifyHashedFile(projectRoot: string, file: HashedFile, label: string):
   }
 }
 
+function verifiedPortableWranglerConfig(
+  projectRoot: string,
+  file: HashedFile,
+): { readonly bytes: Buffer; readonly value: unknown } {
+  const path = exactRegularFile(projectRoot, file.path, 'Wrangler config');
+  const value = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+  const bytes = deployWranglerConfigBytes(value);
+  if (bytes.length !== file.bytes || sha256(bytes) !== file.sha256) {
+    throw new Error('Wrangler config artifact bytes do not match the candidate manifest.');
+  }
+  return { bytes, value };
+}
+
 function assertManifestGate(manifest: CandidateManifest, candidateSha: string, tree: string): void {
   if (manifest.status !== 'passed' || manifest.candidate === null
     || manifest.candidate.gitSha !== candidateSha) {
@@ -224,7 +238,7 @@ export function verifyTask10Candidate(
     throw new Error('Candidate migration manifest does not match the Task 10 evidence.');
   }
 
-  verifyHashedFile(projectRoot, manifest.artifacts!.deployWranglerConfig, 'Wrangler config');
+  verifiedPortableWranglerConfig(projectRoot, manifest.artifacts!.deployWranglerConfig);
   verifyHashedFile(projectRoot, manifest.artifacts!.worker, 'Worker');
   for (const file of manifest.artifacts!.client) verifyHashedFile(projectRoot, file, 'client');
 
@@ -447,19 +461,26 @@ export function createOwnedDeployRoot(
   mkdirSync(root, { recursive: false });
 
   const artifacts = candidate.manifest.artifacts!;
-  const copiedFiles = [artifacts.deployWranglerConfig, artifacts.worker, ...artifacts.client];
+  const generatedConfig = verifiedPortableWranglerConfig(
+    candidate.projectRoot,
+    artifacts.deployWranglerConfig,
+  );
+  const copiedFiles = [artifacts.worker, ...artifacts.client];
   for (const file of copiedFiles) copyVerifiedFile(candidate.projectRoot, root, file);
   for (const file of candidate.manifest.migrations!.manifest) {
     copyVerifiedFile(candidate.projectRoot, root, file);
   }
 
   const generatedConfigPath = resolve(root, artifacts.deployWranglerConfig.path);
-  const generatedConfig = JSON.parse(readFileSync(generatedConfigPath, 'utf8')) as unknown;
-  const stagingConfig = buildStagingWranglerConfig(generatedConfig, authorization);
+  if (!within(root, generatedConfigPath)) throw new Error('Owned Wrangler config path escapes its root.');
+  mkdirSync(dirname(generatedConfigPath), { recursive: true });
+  writeFileSync(generatedConfigPath, generatedConfig.bytes, { flag: 'wx' });
+  const stagingConfig = buildStagingWranglerConfig(generatedConfig.value, authorization);
   const configPath = resolve(dirname(generatedConfigPath), 'wrangler.staging.json');
   const configBytes = `${canonicalJson(stagingConfig)}\n`;
   writeFileSync(configPath, configBytes, { encoding: 'utf8', flag: 'wx' });
-  const copiedManifest = copiedFiles.concat(candidate.manifest.migrations!.manifest)
+  const copiedManifest = [artifacts.deployWranglerConfig, ...copiedFiles]
+    .concat(candidate.manifest.migrations!.manifest)
     .map(({ path, bytes, sha256: digest }) => ({ path, bytes, sha256: digest }));
   const sourceDigest = sha256(canonicalJson({
     candidateSha: candidate.sha,
