@@ -44,6 +44,7 @@ import {
 } from './workflows/cover-platform';
 
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const VERSION_INSTANT_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/u;
 const ALLOWED_MIME_TYPES = new Set([
   'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif',
 ]);
@@ -126,6 +127,15 @@ function assertInstant(value: unknown): Date {
   const date = new Date(value);
   if (date.toISOString() !== value) throw new Error('STAGING_CONFORMANCE_INPUT_INVALID');
   return date;
+}
+
+function validVersionInstant(value: string): boolean {
+  const match = VERSION_INSTANT_PATTERN.exec(value);
+  if (!match) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return false;
+  const milliseconds = (match[2] ?? '').padEnd(3, '0').slice(0, 3);
+  return date.toISOString() === `${match[1]}.${milliseconds}Z`;
 }
 
 function assertPositiveDimension(value: unknown): number {
@@ -386,8 +396,7 @@ export class StagingConformanceService {
     scope(this.env, input);
     const identity = resolveRuntimeReleaseIdentity(this.env);
     const metadata = this.env.CF_VERSION_METADATA;
-    if (!identity || metadata.tag !== identity.buildSha || !ISO_INSTANT_PATTERN.test(metadata.timestamp)
-      || new Date(metadata.timestamp).toISOString() !== metadata.timestamp) {
+    if (!identity || metadata.tag !== identity.buildSha || !validVersionInstant(metadata.timestamp)) {
       throw new Error('STAGING_CONFORMANCE_RUNTIME_IDENTITY_INVALID');
     }
     return {

@@ -13,7 +13,10 @@ const RUN_ID = '1000000a-0000-4000-8000-000000000001';
 const TEST_BUILD_SHA = '0123456789abcdef0123456789abcdef01234567';
 const VERSION_ID = '1000000a-0000-4000-8000-000000000002';
 
-function env(origin: string = STAGING_ORIGIN): AppEnv {
+function env(
+  origin: string = STAGING_ORIGIN,
+  versionTimestamp = '2026-08-10T12:00:00.000Z',
+): AppEnv {
   return new Proxy(testEnv, {
     get(target, property, receiver) {
       if (property === 'APP_ORIGIN') return origin;
@@ -21,7 +24,7 @@ function env(origin: string = STAGING_ORIGIN): AppEnv {
         return {
           id: VERSION_ID,
           tag: TEST_BUILD_SHA,
-          timestamp: '2026-08-10T12:00:00.000Z',
+          timestamp: versionTimestamp,
         };
       }
       return Reflect.get(target, property, receiver) as unknown;
@@ -138,6 +141,16 @@ describe('staging conformance RPC service', () => {
       versionId: VERSION_ID,
       versionTag: TEST_BUILD_SHA,
       versionTimestamp: '2026-08-10T12:00:00.000Z',
+    });
+  });
+
+  it('accepts the microsecond precision emitted by Cloudflare version metadata', () => {
+    const versionTimestamp = '2026-08-11T04:40:19.106577Z';
+    const service = new StagingConformanceService(env(STAGING_ORIGIN, versionTimestamp), dependencies());
+    expect(service.runtimeIdentity({ runId: RUN_ID })).toEqual({
+      versionId: VERSION_ID,
+      versionTag: TEST_BUILD_SHA,
+      versionTimestamp,
     });
   });
 
