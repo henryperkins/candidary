@@ -368,6 +368,25 @@ async function raster(
   return pipeline.jpeg({ quality: 92, chromaSubsampling: '4:4:4' }).toBuffer();
 }
 
+async function geometryRaster(width: number, height: number): Promise<Buffer> {
+  const pixels = Buffer.allocUnsafe(width * height * 3);
+  const radius = Math.min(width, height) / 7;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 3;
+      const dx = x - width / 2;
+      const dy = y - height / 2;
+      const marker = dx * dx + dy * dy <= radius * radius;
+      pixels[index] = marker ? 232 : Math.round(40 + 150 * x / (width - 1));
+      pixels[index + 1] = marker ? 92 : Math.round(55 + 125 * y / (height - 1));
+      pixels[index + 2] = marker ? 58 : 128;
+    }
+  }
+  return sharp(pixels, { raw: { width, height, channels: 3 } })
+    .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
+    .toBuffer();
+}
+
 async function generatedFixture(recipe: GeneratedFixtureRecipe): Promise<Buffer> {
   if (recipe === 'opaque-png') return raster(1200, 900, 'png', 0x0a11ce);
   if (recipe === 'transparent-png') return raster(1200, 900, 'png', 0x7a11ce, true);
@@ -395,9 +414,9 @@ async function generatedFixture(recipe: GeneratedFixtureRecipe): Promise<Buffer>
   if (preview) return raster(2400, 1800, 'jpeg', 0x200000 + Number(preview[1]) * 0x20202);
   const profile = /^dense-profile-([1-4])$/u.exec(recipe);
   if (profile) return raster(1800, 1260, 'jpeg', 0x300000 + Number(profile[1]) * 0x30303);
-  if (recipe === 'geometry-complete-2x') return raster(2400, 1800, 'jpeg', 0xc02000);
-  if (recipe === 'geometry-partial-2x') return raster(1100, 850, 'jpeg', 0xa11200);
-  if (recipe === 'geometry-no-upscale') return raster(500, 300, 'jpeg', 0x000500);
+  if (recipe === 'geometry-complete-2x') return geometryRaster(2400, 1800);
+  if (recipe === 'geometry-partial-2x') return geometryRaster(1100, 850);
+  if (recipe === 'geometry-no-upscale') return geometryRaster(500, 300);
   return raster(1800, 1200, 'jpeg', 0x0ace11);
 }
 
