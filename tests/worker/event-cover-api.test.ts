@@ -147,7 +147,7 @@ function withCoverRenderWorkflow(
   } = {},
 ) {
   const calls: string[] = [];
-  let created = false;
+  const createdIds = new Set<string>();
   const instance = {
     id: '',
     async pause() { calls.push('pause'); },
@@ -169,14 +169,22 @@ function withCoverRenderWorkflow(
     async create(input?: { id?: string }) {
       const id = input?.id ?? '';
       calls.push(`create:${id}`);
-      if (options.rejectDuplicate && created) throw new Error('duplicate instance');
+      if (options.rejectDuplicate && createdIds.has(id)) throw new Error('duplicate instance');
       await options.onCreate?.(id);
-      created = true;
+      createdIds.add(id);
       return { ...instance, id };
     },
     async createBatch(batch: Array<{ id?: string }>) {
-      calls.push('createBatch');
-      return batch.map(({ id = '' }) => ({ ...instance, id }));
+      const created = [];
+      for (const { id = '' } of batch) {
+        calls.push(`create:${id}`);
+        // Cloudflare's batch primitive skips retained IDs instead of colliding.
+        if (createdIds.has(id)) continue;
+        await options.onCreate?.(id);
+        createdIds.add(id);
+        created.push({ ...instance, id });
+      }
+      return created;
     },
   } as unknown as AppEnv['COVER_RENDER_WORKFLOW'];
   return { env: { ...base, COVER_RENDER_WORKFLOW: workflow }, calls };
@@ -906,7 +914,7 @@ describe('cover publication', () => {
     });
   });
 
-  it('keeps a stale initial claim retryable when its retained lookup is unknown', async () => {
+  it('materializes a stale initial claim idempotently when its retained lookup fails', async () => {
     const access = await eventAccess();
     const { draft, env } = await readyDraft(access);
     const unavailable = withCoverRenderWorkflow(env, {
@@ -931,10 +939,16 @@ describe('cover publication', () => {
 
     const replay = await publish(access, body, stillUnknown.env);
 
-    expect(replay.status).toBe(503);
-    expect(replay.headers.get('retry-after')).toBe('5');
-    expect(stillUnknown.calls.some((call) => call.startsWith('create:'))).toBe(false);
+    expect(replay.status).toBe(202);
+    expect(replay.headers.get('retry-after')).toBe('2');
+    expect(stillUnknown.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
     expect(stillUnknown.calls.filter((call) => call === 'restart')).toHaveLength(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT status, dispatch_state, dispatch_generation
+      FROM event_cover_publish_receipts WHERE operation_id = ?
+    `).bind(operationId).first()).toEqual({
+      status: 'queued', dispatch_state: 'confirmed', dispatch_generation: 2,
+    });
   });
 
   it('returns accepted progress for a young initial claim whose retained instance is active', async () => {
