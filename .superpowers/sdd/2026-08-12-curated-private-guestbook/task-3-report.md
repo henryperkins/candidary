@@ -122,3 +122,50 @@ Fresh final gates:
   eventually consistent Cloudflare behavior and is represented by the supported
   binding fixture; durable enforcement is independently exercised against D1.
 - No unresolved implementation concern remains within Task 3 scope.
+
+## Fix round 1
+
+### Disposition
+
+- Accepted and implemented: removed the structural
+  `GuestMessageHmacBinding` interface. The three guest-message HMAC helpers now
+  accept `hmacKey: string` directly. Every Worker route call site reads
+  `context.env.GUEST_MESSAGE_HMAC_KEY` from the generated `Cloudflare.Env` and
+  passes that value into the helper, keeping configuration drift protection at
+  the route boundary without redeclaring any Env shape.
+- Rejected as design-incompatible and intentionally unchanged: adding
+  `guestName.min(1)`. Approved Section 7.2 requires empty and whitespace-only
+  submitted names to canonicalize to `null`; the existing normalization test
+  continues to pin that behavior.
+- Rejected and intentionally unchanged: chunking the 115-statement trusted-IP
+  test fixture based on a claimed 100-statement D1 batch ceiling. The current
+  D1 limits cited for this review do not define that ceiling; the direct fixture
+  seeds test state and is not production query behavior.
+
+### RED evidence
+
+The unit HMAC callers were changed first to pass the wished-for string-key API.
+Against the old structural-object implementation:
+
+- `npx vitest run --config vitest.config.ts tests/unit/security.test.ts`
+  - 2 failed, 7 passed.
+  - Both new API cases reached the old `env.GUEST_MESSAGE_HMAC_KEY` access with
+    a string and failed as `DataError: Zero-length key is not supported`.
+
+### GREEN evidence
+
+Fix-round code commit:
+`d5a8afa518783ea5f3eb8886723733a975086eb7`
+(`Narrow guest message HMAC helpers`).
+
+- `npx vitest run --config vitest.config.ts tests/unit/security.test.ts`
+  - 1 file passed, 9 tests passed.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/messages-api.test.ts tests/worker/cleanup.test.ts`
+  - 2 files passed, 117 tests passed.
+- Fix-round total: 126 passed, 0 failed.
+- `npm run typecheck`: passed.
+- `npm run lint`: passed with zero warnings.
+- `rg -n "GuestMessageHmacBinding" worker tests`: no matches.
+- `git diff --check` and `git diff --cached --check`: passed.
+- No push, deployment, remote migration, or remote-state mutation was
+  performed.
