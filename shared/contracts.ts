@@ -112,6 +112,7 @@ export interface EventView {
   name: string;
   eventDate: string;
   welcomeMessage: string;
+  guestbookPrompt: string;
   cover: EventCoverView;
   uploadsEnabled: boolean;
   galleryVisible: boolean;
@@ -158,6 +159,7 @@ export type GuestEventView = Pick<
   | 'name'
   | 'eventDate'
   | 'welcomeMessage'
+  | 'guestbookPrompt'
   | 'uploadsEnabled'
   | 'galleryVisible'
   | 'moderationRequired'
@@ -169,6 +171,67 @@ export type GuestEventView = Pick<
   | 'rsvpDeadlineDate'
   | 'theme'
 > & GuestPhaseView & { cover: GuestEventCoverView };
+
+export type GuestbookSource = 'guest_note' | 'photo_caption';
+export type GuestbookSharedVisibility = 'shared' | 'author_only';
+
+export interface GuestbookNoteItem {
+  id: string;
+  source: 'guest_note';
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  state: 'pending' | 'approved' | 'rejected';
+  visibility: GuestbookSharedVisibility;
+}
+
+export type DeletedGuestbookNoteItem = Omit<
+  GuestbookNoteItem,
+  'state' | 'visibility'
+> & {
+  state: 'deleted';
+  visibility: 'host_only';
+};
+
+export interface GuestbookCaptionItem {
+  id: string;
+  source: 'photo_caption';
+  mediaId: string;
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  state: 'unpublished' | 'published' | 'hidden';
+  visibility: GuestbookSharedVisibility;
+  previewAvailable: boolean;
+}
+
+export type GuestbookVisibleItem = GuestbookNoteItem | GuestbookCaptionItem;
+export type GuestbookItem = GuestbookVisibleItem | DeletedGuestbookNoteItem;
+
+export interface GuestbookCompatibilityAliases {
+  /** @deprecated Use `source`. */
+  kind: 'message' | 'caption';
+  /** @deprecated Use the source-specific `state`. */
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  /** @deprecated Caption items carry their media ID directly. */
+  mediaId: string | null;
+}
+
+export type GuestGuestbookItem = GuestbookVisibleItem
+  & { isOwn: boolean }
+  & GuestbookCompatibilityAliases;
+export type ManagerGuestbookItem = GuestbookItem;
+
+/** @deprecated Use the source-discriminated guestbook item contracts. */
+export interface LegacyGuestbookItem {
+  id: string;
+  kind: 'message' | 'caption';
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  mediaId: string | null;
+}
 
 // RSVP. Every shape below is written out rather than derived from a database
 // record, because the difference between what a household may see and what a

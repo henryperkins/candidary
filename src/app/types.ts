@@ -1,4 +1,11 @@
-export type { EventView, GuestEventView } from '../../shared/contracts';
+export type {
+  EventView,
+  GuestEventView,
+  GuestbookItem,
+  GuestbookSource,
+  GuestGuestbookItem,
+  ManagerGuestbookItem,
+} from '../../shared/contracts';
 
 export interface MediaView {
   id: string;

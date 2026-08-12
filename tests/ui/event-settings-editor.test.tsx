@@ -4,6 +4,7 @@ import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT, MAX_GUESTBOOK_PROMPT_LENGTH } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { AUTOSAVE_DEBOUNCE_MS, type DomainAutosaveState } from '../../src/features/settings/autosave-queue';
 import { mergeSettingsResponse } from '../../src/features/settings/event-merge';
@@ -24,6 +25,7 @@ function errorJson(body: Record<string, unknown>, status: number) {
 const EVENT: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
@@ -110,6 +112,8 @@ describe('event settings editor', () => {
 
     expect(screen.getByLabelText('Event name')).toHaveValue('Maya & Theo');
     expect(screen.getByLabelText('Welcome message')).toHaveValue('Welcome.');
+    expect(screen.getByLabelText('Guestbook prompt')).toHaveValue(DEFAULT_GUESTBOOK_PROMPT);
+    expect(screen.getByRole('button', { name: 'Reset prompt' })).toBeInTheDocument();
     expect(screen.getByLabelText('Event time zone')).toHaveValue('America/Chicago');
     expect(screen.getByLabelText('Event start time')).toHaveValue('17:00');
     expect(screen.getByLabelText('RSVP deadline')).toHaveValue('2026-09-05');
@@ -139,7 +143,7 @@ describe('event settings editor', () => {
     vi.stubGlobal('fetch', vi.fn(() => json({ event: legacyEvent })));
     render(<Harness initial={legacyEvent} />);
 
-    fireEvent.click(screen.getByLabelText('Review notes before sharing'));
+    fireEvent.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await settleMicrotasks();
 
     expect(screen.getByLabelText(/^RSVP deadline/)).toHaveAttribute('aria-invalid', 'true');
@@ -156,12 +160,61 @@ describe('event settings editor', () => {
     expect(settingsWrites()).toHaveLength(1);
     expect(settingsWrites()[0]).toEqual({
       name: 'Maya & Theo', welcomeMessage: 'Welcome.', eventTimezone: 'America/Chicago',
+      guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
       eventStartTime: '17:00',
       rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false,
       galleryVisible: false, moderationRequired: true, rsvpRosterVersion: 7,
     });
     await settleMicrotasks();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saved');
+  });
+
+  it('trims and persists a valid prompt through the complete serialized payload', async () => {
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ event: { ...EVENT, ...payload } });
+    }));
+    render(<Harness />);
+    const prompt = screen.getByLabelText('Guestbook prompt');
+
+    fireEvent.change(prompt, { target: { value: '  Tell us what made you smile.  ' } });
+    fireEvent.blur(prompt);
+    await settleMicrotasks();
+
+    expect(settingsWrites()).toHaveLength(1);
+    expect(settingsWrites()[0]).toMatchObject({
+      guestbookPrompt: 'Tell us what made you smile.',
+      name: 'Maya & Theo', welcomeMessage: 'Welcome.', moderationRequired: true,
+    });
+    expect(prompt).toHaveValue('Tell us what made you smile.');
+  });
+
+  it('keeps an invalid prompt local and reset autosaves the approved default', async () => {
+    const custom = { ...EVENT, guestbookPrompt: 'Share your favorite moment.' };
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT })));
+    render(<Harness initial={custom} />);
+    const prompt = screen.getByLabelText('Guestbook prompt');
+
+    fireEvent.change(prompt, { target: { value: 'g'.repeat(MAX_GUESTBOOK_PROMPT_LENGTH + 1) } });
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS * 2);
+    expect(settingsWrites()).toHaveLength(0);
+    expect(prompt).toHaveAccessibleDescription(
+      `Use ${MAX_GUESTBOOK_PROMPT_LENGTH} characters or fewer.`,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset prompt' }));
+    await settleMicrotasks();
+    expect(settingsWrites()).toHaveLength(1);
+    expect(settingsWrites()[0]).toMatchObject({ guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT });
+    expect(prompt).toHaveValue(DEFAULT_GUESTBOOK_PROMPT);
+  });
+
+  it('uses the approved moderation label', () => {
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT })));
+    render(<Harness />);
+
+    expect(screen.getByLabelText('Review guestbook notes before sharing')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Review notes before sharing')).not.toBeInTheDocument();
   });
 
   it.each([
@@ -253,7 +306,7 @@ describe('event settings editor', () => {
     expect(screen.getByText('Event settings can’t save. Event name: Enter an event name.')).toBeInTheDocument();
 
     // The payload is atomic, so one bad field holds back an otherwise fine toggle.
-    fireEvent.click(screen.getByLabelText('Review notes before sharing'));
+    fireEvent.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS * 2);
     expect(settingsWrites()).toHaveLength(0);
 
@@ -367,7 +420,7 @@ describe('event settings editor', () => {
     expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:invalid');
     // Editing an unrelated field cannot clear a refusal about this one.
-    fireEvent.click(screen.getByLabelText('Review notes before sharing'));
+    fireEvent.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS * 2);
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:invalid');
   });
@@ -574,7 +627,7 @@ describe('event settings editor', () => {
     }, 401)));
     render(<Harness />);
 
-    fireEvent.click(screen.getByLabelText('Review notes before sharing'));
+    fireEvent.click(screen.getByLabelText('Review guestbook notes before sharing'));
 
     await settleMicrotasks();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:failed');

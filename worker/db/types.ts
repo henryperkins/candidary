@@ -20,6 +20,7 @@ export interface EventRecord {
   name: string;
   eventDate: string;
   welcomeMessage: string;
+  guestbookPrompt: string;
   themeConfig: EventThemeConfigV1;
   coverObjectKey: string | null;
   uploadsEnabled: boolean;

@@ -7,6 +7,7 @@ export interface EventRow {
   name: string;
   event_date: string;
   welcome_message: string;
+  guestbook_prompt: string;
   theme_config: string;
   cover_object_key: string | null;
   uploads_enabled: number;
@@ -59,6 +60,7 @@ export function mapEvent(row: EventRow): EventRecord {
     name: row.name,
     eventDate: row.event_date,
     welcomeMessage: row.welcome_message,
+    guestbookPrompt: row.guestbook_prompt,
     themeConfig: parseStoredEventThemeConfig(row.theme_config),
     coverObjectKey: row.cover_object_key,
     uploadsEnabled: row.uploads_enabled === 1,
@@ -367,6 +369,7 @@ export class EventsRepository {
     input: {
       name?: string;
       welcomeMessage?: string;
+      guestbookPrompt?: string;
       galleryVisible: boolean;
       moderationRequired: boolean;
       eventTimezone: string;
@@ -383,6 +386,7 @@ export class EventsRepository {
       UPDATE events SET
         name = COALESCE(?, name),
         welcome_message = COALESCE(?, welcome_message),
+        guestbook_prompt = COALESCE(?, guestbook_prompt),
         gallery_visible = ?,
         moderation_required = ?,
         event_timezone = ?,
@@ -428,6 +432,7 @@ export class EventsRepository {
     `).bind(
       input.name ?? null,
       input.welcomeMessage ?? null,
+      input.guestbookPrompt ?? null,
       input.galleryVisible ? 1 : 0,
       input.moderationRequired ? 1 : 0,
       input.eventTimezone,

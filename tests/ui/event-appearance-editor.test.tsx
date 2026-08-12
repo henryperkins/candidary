@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { AUTOSAVE_DEBOUNCE_MS, type DomainAutosaveState } from '../../src/features/settings/autosave-queue';
 import { mergeCoverResponse, mergeThemeResponse } from '../../src/features/settings/event-merge';
@@ -34,6 +35,7 @@ const event: EventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: {
       version: 1,

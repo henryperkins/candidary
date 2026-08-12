@@ -1,7 +1,11 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
+import {
+  DEFAULT_GUESTBOOK_PROMPT,
+  MANAGER_BULK_SELECTION_MAX,
+  MAX_GUESTBOOK_PROMPT_LENGTH,
+} from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { EventEntriesRepository } from '../../worker/db/event-entries';
 import { EventsRepository } from '../../worker/db/events';
@@ -286,6 +290,50 @@ describe('manager media pagination', () => {
 });
 
 describe('manager settings and private photo intake', () => {
+  it('defaults the guestbook prompt on creation and returns it to guests and managers', async () => {
+    const access = await eventAccess();
+
+    expect(access.event.guestbookPrompt).toBe(DEFAULT_GUESTBOOK_PROMPT);
+    const guest = await createApp().request(`/api/event/${access.event.slug}`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect((await guest.json<any>()).data.event.guestbookPrompt).toBe(DEFAULT_GUESTBOOK_PROMPT);
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: DEFAULT_GUESTBOOK_PROMPT });
+  });
+
+  it('trims and persists a valid guestbook prompt', async () => {
+    const access = await eventAccess();
+
+    const response = await applySettings(access, {
+      guestbookPrompt: '  Leave us a favorite memory.  ',
+    });
+
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.event.guestbookPrompt)
+      .toBe('Leave us a favorite memory.');
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: 'Leave us a favorite memory.' });
+  });
+
+  it.each([
+    ['', 'String must contain at least 1 character(s)'],
+    [' '.repeat(4), 'String must contain at least 1 character(s)'],
+    ['g'.repeat(MAX_GUESTBOOK_PROMPT_LENGTH + 1),
+      `String must contain at most ${MAX_GUESTBOOK_PROMPT_LENGTH} character(s)`],
+  ])('rejects an invalid guestbook prompt without changing the stored value', async (value) => {
+    const access = await eventAccess();
+
+    const response = await applySettings(access, { guestbookPrompt: value });
+
+    expect(response.status).toBe(422);
+    const body = await response.json<any>();
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors.guestbookPrompt).toEqual(expect.any(String));
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: DEFAULT_GUESTBOOK_PROMPT });
+  });
+
   it('rejects an implausible RSVP deadline year before storing it', async () => {
     const access = await eventAccess();
 

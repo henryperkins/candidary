@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { GuestEventView, RsvpHouseholdView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { GuestRsvpFlow } from '../../src/features/rsvp/GuestRsvpFlow';
 
 const event: GuestEventView = {
@@ -11,6 +12,7 @@ const event: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We cannot wait to celebrate with you.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: false,
   galleryVisible: false,

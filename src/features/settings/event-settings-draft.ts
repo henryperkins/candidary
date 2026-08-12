@@ -1,5 +1,8 @@
 import type { EventView } from '../../../shared/contracts';
-import { MIN_EVENT_CALENDAR_YEAR } from '../../../shared/constants';
+import {
+  MAX_GUESTBOOK_PROMPT_LENGTH,
+  MIN_EVENT_CALENDAR_YEAR,
+} from '../../../shared/constants';
 import { canonicalTimeZone, isIanaTimeZone } from '../../../shared/event-time';
 
 /**
@@ -18,6 +21,7 @@ import { canonicalTimeZone, isIanaTimeZone } from '../../../shared/event-time';
 export interface EventSettingsDraft {
   name: string;
   welcomeMessage: string;
+  guestbookPrompt: string;
   eventTimezone: string;
   // A local 24-hour wall clock, never an instant. The Worker resolves it
   // against the event date and the zone, for the same reason it owns the
@@ -42,6 +46,7 @@ export interface EventSettingsPayload extends EventSettingsDraft {
 export const EVENT_SETTINGS_FIELDS = [
   'name',
   'welcomeMessage',
+  'guestbookPrompt',
   'eventTimezone',
   'eventStartTime',
   'rsvpDeadlineDate',
@@ -53,12 +58,13 @@ export const EVENT_SETTINGS_FIELDS = [
 export const EVENT_SETTINGS_LABELS: Record<EventSettingsField, string> = {
   name: 'Event name',
   welcomeMessage: 'Welcome message',
+  guestbookPrompt: 'Guestbook prompt',
   eventTimezone: 'Event time zone',
   eventStartTime: 'Event start time',
   rsvpDeadlineDate: 'RSVP deadline',
   rsvpEnabled: 'Accept RSVPs',
   galleryVisible: 'Show the optional shared gallery',
-  moderationRequired: 'Review notes before sharing',
+  moderationRequired: 'Review guestbook notes before sharing',
 };
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/u;
@@ -87,6 +93,7 @@ export function draftFromEvent(event: EventView): EventSettingsDraft {
   return {
     name: event.name,
     welcomeMessage: event.welcomeMessage,
+    guestbookPrompt: event.guestbookPrompt,
     eventTimezone: event.eventTimezone,
     eventStartTime: event.eventStartTime,
     rsvpDeadlineDate: event.rsvpDeadlineDate ?? '',
@@ -108,6 +115,7 @@ export function canonicalEventSettings(
   return {
     name: draft.name.trim(),
     welcomeMessage: draft.welcomeMessage.trim(),
+    guestbookPrompt: draft.guestbookPrompt.trim(),
     eventTimezone: canonicalTimeZone(draft.eventTimezone) ?? draft.eventTimezone,
     eventStartTime: draft.eventStartTime,
     rsvpDeadlineDate: draft.rsvpDeadlineDate,
@@ -123,6 +131,7 @@ export function eventSettingsKey(payload: EventSettingsPayload): string {
   return JSON.stringify([
     payload.name,
     payload.welcomeMessage,
+    payload.guestbookPrompt,
     payload.eventTimezone,
     payload.eventStartTime,
     payload.rsvpDeadlineDate,
@@ -150,6 +159,12 @@ export function validateEventSettings(
   const welcome = draft.welcomeMessage.trim();
   if (welcome.length === 0) errors.welcomeMessage = 'Enter a welcome message.';
   else if (welcome.length > 500) errors.welcomeMessage = 'Use 500 characters or fewer.';
+
+  const guestbookPrompt = draft.guestbookPrompt.trim();
+  if (guestbookPrompt.length === 0) errors.guestbookPrompt = 'Enter a guestbook prompt.';
+  else if (guestbookPrompt.length > MAX_GUESTBOOK_PROMPT_LENGTH) {
+    errors.guestbookPrompt = `Use ${MAX_GUESTBOOK_PROMPT_LENGTH} characters or fewer.`;
+  }
 
   if (!isIanaTimeZone(draft.eventTimezone)) errors.eventTimezone = 'Choose a valid time zone.';
 

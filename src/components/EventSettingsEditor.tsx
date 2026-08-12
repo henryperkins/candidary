@@ -2,6 +2,10 @@ import { useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { KeyboardEvent, Ref } from 'react';
 
 import type { EventView } from '../../shared/contracts';
+import {
+  DEFAULT_GUESTBOOK_PROMPT,
+  MAX_GUESTBOOK_PROMPT_LENGTH,
+} from '../../shared/constants';
 import { api, ClientApiError } from '../app/api';
 import {
   createAutosaveQueue,
@@ -75,7 +79,7 @@ function scheduleKey(settings: ScheduleFields): string {
 
 function zeroGenerations(): FieldGenerations {
   return {
-    name: 0, welcomeMessage: 0, eventTimezone: 0, eventStartTime: 0,
+    name: 0, welcomeMessage: 0, guestbookPrompt: 0, eventTimezone: 0, eventStartTime: 0,
     rsvpDeadlineDate: 0, rsvpEnabled: 0, galleryVisible: 0, moderationRequired: 0,
   };
 }
@@ -394,7 +398,10 @@ export function EventSettingsEditor({
   // A raw value that canonicalizes to what is already stored is normalized on
   // screen and needs no request; anything else is flushed rather than waiting
   // out the rest of its window.
-  function settleField(field: 'name' | 'welcomeMessage' | 'eventTimezone', canonical: string) {
+  function settleField(
+    field: 'name' | 'welcomeMessage' | 'guestbookPrompt' | 'eventTimezone',
+    canonical: string,
+  ) {
     const current = stateRef.current;
     if (current.draft[field] !== canonical) {
       apply({ ...current, draft: { ...current.draft, [field]: canonical } }, 'enqueue');
@@ -426,6 +433,26 @@ export function EventSettingsEditor({
           onKeyDown={flushOnEnter}
         />
         {fieldError('name')}
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-guestbook-prompt">Guestbook prompt</label>
+        <textarea
+          id="settings-guestbook-prompt"
+          name="guestbookPrompt"
+          rows={3}
+          maxLength={MAX_GUESTBOOK_PROMPT_LENGTH}
+          value={state.draft.guestbookPrompt}
+          aria-invalid={Boolean(errors.guestbookPrompt)}
+          aria-describedby={describedBy('guestbookPrompt')}
+          onChange={(change) => edit('guestbookPrompt', change.target.value, 'enqueue')}
+          onBlur={() => settleField('guestbookPrompt', state.draft.guestbookPrompt.trim())}
+        />
+        {fieldError('guestbookPrompt')}
+        <button
+          className="button button--secondary"
+          type="button"
+          onClick={() => edit('guestbookPrompt', DEFAULT_GUESTBOOK_PROMPT, 'immediate')}
+        >Reset prompt</button>
       </div>
       <div className="settings-field">
         <label htmlFor="settings-welcome-message">Welcome message</label>
@@ -496,7 +523,7 @@ export function EventSettingsEditor({
       {([
         ['rsvpEnabled', 'Accept RSVPs'],
         ['galleryVisible', 'Show the optional shared gallery'],
-        ['moderationRequired', 'Review notes before sharing'],
+        ['moderationRequired', 'Review guestbook notes before sharing'],
       ] as const).map(([field, label]) => <div className="settings-toggle-field" key={field}>
         <label className="toggle">
           <input

@@ -18,7 +18,11 @@ vi.mock('../../src/app/management-link', async (importOriginal) => ({
 }));
 vi.mock('qrcode', () => ({ default: { toDataURL: qrToDataURL } }));
 
-import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import {
+  DEFAULT_GUESTBOOK_PROMPT,
+  MANAGER_BULK_SELECTION_MAX,
+  MANAGER_MEDIA_PAGE_SIZE,
+} from '../../shared/constants';
 import type { GuestEventView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
@@ -2372,6 +2376,7 @@ describe('guest event phase composition', () => {
     name: 'Maya & Theo',
     eventDate: '2026-09-19',
     welcomeMessage: 'Come celebrate with us.',
+    guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
     cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
     uploadsEnabled: true,
     galleryVisible: false,
