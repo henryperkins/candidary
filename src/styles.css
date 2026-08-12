@@ -898,8 +898,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* The exact string the gate wants, selectable rather than described — the same answer
    `.link-card--expanded` gives for the event link. */
 .entry-confirm__target { min-width: 0; }
+/* Selecting text needs no tab stop, and a focusable element a keyboard cannot act on is one the user
+   has to tab past for nothing — so the name is styled as the string to copy and left unfocusable. */
 .entry-confirm__target code { padding: 2px 5px; border-radius: 4px; background: #f2eadf; color: var(--ink); overflow-wrap: anywhere; }
-.entry-confirm__target code:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .entry-confirm .button { min-height: 44px; }
 .manager-credential { margin-top: 50px; padding-top: 30px; border-top: 1px solid var(--border); }
 .manager-credential h3 { margin: 0 0 8px; font-size: 1.35rem; }

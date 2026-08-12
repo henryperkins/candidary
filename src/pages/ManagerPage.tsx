@@ -781,7 +781,7 @@ export function ManagerPage() {
         second keyboard plane and beating autocapitalisation — and the button says nothing about why it
         will not respond. The keyboard is told not to fight the host, and the string they have to
         produce is printed beside the field as selectable text, the way the event link already is. */}
-    <p className="entry-confirm__target">Type <code tabIndex={0}>{event.name}</code> to confirm.</p>
+    <p className="entry-confirm__target">Type <code>{event.name}</code> to confirm.</p>
     <input
       id="entry-confirm-name"
       value={entryConfirm}
