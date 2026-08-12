@@ -119,3 +119,107 @@ One earlier combined typecheck/three-file Worker invocation timed out without di
 
 - The feature has repository/Worker/static verification only. No deployment, live D1 inspection, remote migration, browser acceptance, or physical-device evidence is claimed.
 - `ManagerMediaView` and the visibility-correlated caption compatibility union were necessary controller-authorized corrections to Task 1's shared contracts; downstream client adoption remains a later task.
+
+## Fix round 1
+
+Status: complete
+
+Implementation commit: `3651012` (`fix: harden guestbook cursors and responses`)
+
+No push, deployment, remote migration, paid provider call, or remote-state mutation was performed.
+
+### Accepted findings and changed files
+
+- `worker/http/guestbook-cursor.ts` — replaced the raw guest session ID in the wire payload with a domain-separated HMAC binding derived from the canonical session ID, and authenticated the complete encoded version-2 payload with a second domain-separated HMAC under the existing generated `SESSION_HMAC_KEY`. Guest and Manager encode/decode are async, all semantic bindings and the 512-character/malformed gates remain enforced, and comparisons use the existing constant-time helper.
+- `worker/routes/messages.ts` — awaits the authenticated guest/Manager cursor codec with `SESSION_HMAC_KEY`; shared-only continuation now returns an empty private item page and null private cursor while retaining the real private count.
+- `worker/db/guestbook.ts` — added a bounded, parameterized count-only query for the current guest's author-only rows, avoiding a discarded private page fetch.
+- `worker/db/media.ts` — bulk publication now retrieves the changed records with a bounded parameterized statement and restores request order so the route can serialize every result safely.
+- `worker/routes/manage.ts` — maps every bulk result through the existing `managerMediaView` allowlist.
+- `tests/unit/guestbook-cursor.test.ts` — proves guest payload privacy, guest and Manager full-payload authentication, one-byte payload/signature tamper rejection, current-session binding, semantic binding, malformed/oversized/unsigned rejection, and 422 error behavior.
+- `tests/worker/manage-api.test.ts` — proves every bulk result has exactly the ten `ManagerMediaView` keys, preserves request order, and discloses no session, storage, preview-object, idempotency, MIME, byte-size, or lifecycle fields.
+- `tests/worker/messages-api.test.ts` — proves a shared continuation returns no private rows/cursor but preserves the true `ownUnsharedCount` when private rows exist; direct cursor fixtures now use the authenticated async codec.
+
+### RED evidence
+
+Cursor privacy/integrity:
+
+```text
+npx vitest run --config vitest.config.ts tests/unit/guestbook-cursor.test.ts
+
+Test Files  1 failed (1)
+Tests       4 failed | 1 passed (5)
+```
+
+The pre-fix cursor was a synchronous, unsigned base64 JSON payload containing `sessionId`; signed round-trip and tamper tests failed before implementation.
+
+Bulk Manager media response:
+
+```text
+npx vitest run --config vitest.worker.config.ts tests/worker/manage-api.test.ts -t "returns only ManagerMediaView fields for every bulk"
+
+Test Files  1 failed (1)
+Tests       1 failed | 37 skipped (38)
+```
+
+The pre-fix `changed` response contained bare ID strings, so its response objects did not have the required allowlisted view keys.
+
+Shared-continuation private count:
+
+```text
+npx vitest run --config vitest.worker.config.ts tests/worker/messages-api.test.ts -t "returns independently paginated shared and private"
+
+Test Files  1 failed (1)
+Tests       1 failed | 11 skipped (12)
+```
+
+The continuation returned `ownUnsharedCount: 0`; the fixture's real private count was 1.
+
+### GREEN evidence
+
+Each new focused test passed after its minimal implementation. The fresh final Task 2 gate was:
+
+```text
+npx vitest run --config vitest.worker.config.ts tests/worker/guestbook-repository.test.ts tests/worker/messages-api.test.ts tests/worker/manage-api.test.ts
+
+Test Files  3 passed (3)
+Tests       56 passed (56)
+```
+
+Cursor and shared-contract unit gate:
+
+```text
+npx vitest run --config vitest.config.ts tests/unit/guestbook-cursor.test.ts tests/unit/guestbook-contracts.test.ts
+
+Test Files  2 passed (2)
+Tests       6 passed (6)
+```
+
+Static and diff gates:
+
+```text
+npm run typecheck -- --pretty false
+# exit 0
+
+npm run lint
+# exit 0, zero warnings
+
+git diff --check
+# exit 0
+```
+
+Worker runs printed the repository's standard missing-local-secrets warning for bindings supplied by the test environment; all tests passed.
+
+### Fix-round self-review
+
+- The guest wire payload contains only the non-reversible session binding, never the canonical session ID; both guest and Manager version-2 payloads are authenticated before parsing or semantic use.
+- Domain labels distinguish session-binding and cursor-payload HMAC inputs while retaining the existing generated secret and constant-time comparison helper.
+- Routes still perform normal guest/Manager authorization on every request; the cursor is only pagination state.
+- Wrong event, session, stream, view, or source still fails with 422, as do malformed, oversized, unsigned, payload-tampered, and signature-tampered values.
+- Every bulk record crosses the explicit `managerMediaView` serializer, and the behavioral test asserts the exact response-key set for each result.
+- The bulk reread is parameterized and bounded by the existing 50-ID request limit; result order is restored to request order.
+- Shared continuation executes a count-only author-private query and never fetches/discards a private page; its response still uses empty private items and a null private cursor.
+
+### Fix-round concerns
+
+- Verification remains local Worker/unit/static evidence only. No deployment, remote migration, live D1 inspection, browser acceptance, or physical-device proof is claimed.
+- Cursor signing invalidates unsigned version-2 cursors issued by the pre-fix local implementation; that implementation was not deployed under this task.
