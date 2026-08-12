@@ -52,6 +52,7 @@ const MIGRATIONS = [
   '0012_event_cover_storage.sql',
   PHASE_2_MIGRATION,
   PHASE_3_MIGRATION,
+  '0015_curated_private_guestbook.sql',
 ] as const;
 
 const COMMANDS = [
@@ -130,7 +131,7 @@ interface CandidateFixture {
   writeManifest(): void;
 }
 
-function candidateFixture(migrationCount: 13 | 14): CandidateFixture {
+function candidateFixture(migrationCount: 13 | 14 | 15): CandidateFixture {
   const root = temporaryRoot();
   const packageLock = `${canonicalJson({
     lockfileVersion: 3,
@@ -252,6 +253,17 @@ describe('exact release candidate verification', () => {
       expect(verified.manifestSha256).toHaveLength(64);
       expect(verified.artifactTreeSha256).toBe(fixture.manifest.artifacts!.firstTreeSha256);
     }
+  });
+
+  it('accepts the post-cutover fifteen-migration candidate without changing historical boundaries', () => {
+    const fixture = candidateFixture(15);
+    expect(() => verifyExactReleaseCandidate({
+      candidateRoot: fixture.root,
+      sha: SHA,
+      manifestPath: fixture.manifestPath,
+      approvedBaseSha: APPROVED_BASE,
+      expectedMigrationCount: 15,
+    }, observation())).not.toThrow();
   });
 
   it('rejects wrong commit, HEAD, tree, dirt, base, sidecar, migration, artifact, and symlink identity', () => {

@@ -167,6 +167,23 @@ function target(purpose: 'workflow-conformance' | 'cutover'): StagingTargetDescr
   };
 }
 
+function postCutoverTarget(purpose: 'workflow-conformance' | 'cutover'): Record<string, unknown> {
+  const historical = target(purpose);
+  const enabled = purpose === 'cutover';
+  return {
+    ...historical,
+    schemaVersion: 2,
+    rateLimits: {
+      ...historical.rateLimits,
+      guestMessage: {
+        binding: 'GUEST_MESSAGE_RATE_LIMIT', enabled,
+        namespaceId: enabled ? '2003' : '2103', limit: 120, period: 60,
+      },
+    },
+    requiredSecretNames: [...historical.requiredSecretNames, 'GUEST_MESSAGE_HMAC_KEY'],
+  };
+}
+
 function candidateFixture(count: 13 | 14, sha: string): VerifiedReleaseCandidate {
   const root = tempRoot();
   put(root, 'dist/candidary/index.js', 'export default {};\n');
@@ -372,6 +389,19 @@ function request(source: ReleaseInputs, mode: 'initialize' | 'deploy' | 'migrate
 }
 
 describe('staging target and CLI contract', () => {
+  it('parses and overlays the post-cutover three-limiter/new-secret target', () => {
+    const descriptor = postCutoverTarget('cutover');
+    const parsed = parseStagingTargetDescriptor(descriptor, NOW);
+    const overlay = buildStagingOverlay(generatedConfig(), parsed, []);
+    expect(overlay.config.ratelimits).toEqual([
+      { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '2001', simple: { limit: 20, period: 60 } },
+      { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '2002', simple: { limit: 30, period: 60 } },
+      { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '2003', simple: { limit: 120, period: 60 } },
+    ]);
+    expect((overlay.config.secrets as { required: string[] }).required)
+      .toContain('GUEST_MESSAGE_HMAC_KEY');
+  });
+
   it('accepts a closed staging descriptor and rejects unknown fields, production reuse, and public conformance ingress', () => {
     const valid = target('workflow-conformance');
     expect(parseStagingTargetDescriptor(valid, NOW)).toEqual(valid);
@@ -613,7 +643,8 @@ describe('staging finalization and independent verification', () => {
     };
     const evidenceInput = writeInput(phase3.candidateRoot, 'final-evidence.json', artifact);
     const localAdapters = {
-      verifyCandidate(value: { expectedMigrationCount: 13 | 14 }) {
+      verifyCandidate(value: { expectedMigrationCount: 13 | 14 | 15 }) {
+        if (value.expectedMigrationCount === 15) throw new Error('Historical staging evidence cannot use post-cutover candidates.');
         return value.expectedMigrationCount === 13 ? phase2 : phase3;
       },
     };
@@ -654,6 +685,7 @@ describe('repository-pinned Wrangler path resolution', () => {
     }
     const artifacts = collectDeployableArtifacts(candidateRoot);
     const migrationManifest = collectMigrationManifest(candidateRoot);
+    const historicalMigrationFiles = migrationManifest.files.slice(0, 14);
     expect(migrationManifest).toEqual(repositoryMigrations);
     const candidate = {
       candidateRoot, sha: PHASE_3_SHA, tree: TREE, approvedBaseSha: BASE,
@@ -665,9 +697,9 @@ describe('repository-pinned Wrangler path resolution', () => {
           client: artifacts.client, firstTreeSha256: artifacts.treeSha256,
           secondTreeSha256: artifacts.treeSha256, dryRunWorkerSha256: artifacts.worker.sha256,
         },
-        migrations: { manifest: migrationManifest.files },
+        migrations: { manifest: historicalMigrationFiles },
       } as unknown as CandidateManifest,
-      migrations: migrationManifest.files, migrationCount: 14,
+      migrations: historicalMigrationFiles, migrationCount: 14,
       artifactTreeSha256: artifacts.treeSha256, wranglerVersion: '4.113.0',
       wranglerCliPath: resolve(repositoryRoot, 'node_modules/wrangler/bin/wrangler.js'),
     } satisfies VerifiedReleaseCandidate;

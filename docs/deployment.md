@@ -147,22 +147,26 @@ npx wrangler secret put LOGIN_HMAC_KEY
 npx wrangler secret put ENTRY_HMAC_KEY
 npx wrangler secret put ENTRY_ENCRYPTION_KEY
 npx wrangler secret put RSVP_LOOKUP_HMAC_KEY
+npx wrangler secret put GUEST_MESSAGE_HMAC_KEY
 npx wrangler secret put R2_ACCESS_KEY_ID
 npx wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
 Scope the R2 credentials to the single Candidary bucket with object read/write permissions. Never reuse the token or session HMAC key. Both encryption values are base64url-encoded 32-byte keys.
 
-Three of these are **persisted-data keys, not rotation controls**. `ENTRY_HMAC_KEY` digests the credential printed on every invitation, `ENTRY_ENCRYPTION_KEY` encrypts the same credential for redisplay, and `RSVP_LOOKUP_HMAC_KEY` keys every stored name digest and rate-limit scope. Rotating any of them without a matching re-digest or re-encryption migration breaks every printed QR or makes every household unreachable by lookup. Signing guest devices out and rotating a management link are the routine controls and must never touch these three. Verify only their names in release evidence, never their values, and provision them through secret-safe tooling rather than shell history.
+Four of these are **persisted-data keys, not rotation controls**. `ENTRY_HMAC_KEY` digests the credential printed on every invitation, `ENTRY_ENCRYPTION_KEY` encrypts the same credential for redisplay, `RSVP_LOOKUP_HMAC_KEY` keys every stored name digest and RSVP rate-limit scope, and `GUEST_MESSAGE_HMAC_KEY` keys durable Guestbook replay receipts plus session/IP rate-window digests. Rotating the Guestbook key requires a coordinated re-HMAC migration or an explicit invalidation decision; ordinary credential rotation is unsafe while receipts remain. Signing guest devices out and rotating a management link must never touch these four. Verify only their names in release evidence, never their values, and provision them through secret-safe tooling rather than shell history.
 
-All nine are listed under `secrets.required` in `wrangler.jsonc`. That declaration is the source of truth for generated binding types and makes Wrangler refuse to deploy a Worker whose required secret is missing, so a forgotten value fails the upload rather than the first host who tries to sign in. Run `npx wrangler types` after changing it.
+All ten are listed under `secrets.required` in `wrangler.jsonc`. That declaration is the source of truth for generated binding types and makes Wrangler refuse to deploy a Worker whose required secret is missing, so a forgotten value fails the upload rather than the first Guestbook submission. Run `npm run cf-typegen` after changing it.
 
 ## Rate-limiting bindings
 
-Two Cloudflare rate-limiting namespaces are declared in `wrangler.jsonc`: `HOST_AUTH_RATE_LIMIT` for
-account authentication, and `RSVP_LOOKUP_RATE_LIMIT` at 30 requests per 60 seconds for household
-lookup. Confirm both exist in the target account before an event opens; the D1 budgets behind them are
-defense in depth, not a replacement.
+The active post-cutover inventory has exactly three isolated Cloudflare rate-limit bindings:
+`HOST_AUTH_RATE_LIMIT` (`1001`, 20 per 60 seconds), `RSVP_LOOKUP_RATE_LIMIT` (`1002`, 30 per 60
+seconds), and `GUEST_MESSAGE_RATE_LIMIT` (`1003`, 120 per 60 seconds per event/trusted client IP).
+The Guestbook limiter is coarse edge shedding; D1 separately enforces durable session and IP windows.
+Historical Phase-2/Phase-3 candidate evidence still correctly records only the first two bindings.
+Confirm the exact target-specific namespace IDs before release; staging uses separately authorized
+nonproduction identities (the post-cutover baseline reserves `2003` for Guestbook).
 
 ## Build immutable local candidate evidence
 
@@ -251,13 +255,19 @@ Worker Version Metadata supplies the runtime version ID, tag, and timestamp thro
 `CF_VERSION_METADATA`; runtime identity fails closed unless the tag equals the embedded build SHA.
 The wrapper does not migrate D1 and does not create a certification row.
 
-### Phase 3 release sequence — current 14-migration contract
+### Historical Phase 3 release sequence — immutable 14-migration contract
 
 The current boundaries are exact: the Phase-2 proof has 13 migrations and ends at
 `0013_guest_message_hardening.sql`; the Phase-3 candidate has 14 and adds only
 `0014_event_cover_invariants.sql`. The older cover plan called the invariant migration `0013` before
 the guest-message migration was integrated. Do not rename either file, reuse the old number, or infer
 a migration boundary from prose in a historical plan.
+
+The active source/config baseline now has 15 migrations and ends at
+`0015_curated_private_guestbook.sql`, three rate-limit bindings, and the new required persisted-data
+secret. Those local changes do not amend or supersede the historical candidate/staging artifacts
+below. Production secret provisioning, deployment, remote migration, runtime certification, policy
+approval, and physical-device acceptance each remain separately authorized evidence gates.
 
 Each row below requires its own named authorization and evidence. Passing one row does not authorize
 the next.

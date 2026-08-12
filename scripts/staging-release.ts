@@ -71,6 +71,11 @@ export const REQUIRED_STAGING_SECRET_NAMES = [
   'TOKEN_HMAC_KEY',
 ] as const;
 
+export const POST_CUTOVER_REQUIRED_STAGING_SECRET_NAMES = [
+  ...REQUIRED_STAGING_SECRET_NAMES,
+  'GUEST_MESSAGE_HMAC_KEY',
+] as const;
+
 export type StagingPurpose = 'workflow-conformance' | 'cutover';
 export type StagingRemoteMode = 'initialize' | 'deploy' | 'migrate';
 export type StagingMode = StagingRemoteMode | 'finalize' | 'verify';
@@ -82,7 +87,7 @@ interface EnabledIdentity {
 
 export interface StagingTargetDescriptorV1 {
   kind: 'candidary.staging-target';
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   purpose: StagingPurpose;
   accountId: string;
   worker: {
@@ -123,6 +128,12 @@ export interface StagingTargetDescriptorV1 {
       binding: 'RSVP_LOOKUP_RATE_LIMIT';
       namespaceId: string;
       limit: 30;
+      period: 60;
+    };
+    guestMessage?: EnabledIdentity & {
+      binding: 'GUEST_MESSAGE_RATE_LIMIT';
+      namespaceId: string;
+      limit: 120;
       period: 60;
     };
   };
@@ -355,6 +366,7 @@ const PRODUCTION_IDENTITIES = new Set([
   'candidary-cover-backfill',
   '1001',
   '1002',
+  '1003',
   'hello@candidary.app',
   'https://candidary.app',
   'https://candidary.online',
@@ -371,8 +383,8 @@ function stagingIdentity(value: unknown, label: string): string {
 }
 
 function parseRate<
-  Binding extends 'HOST_AUTH_RATE_LIMIT' | 'RSVP_LOOKUP_RATE_LIMIT',
-  Limit extends 20 | 30,
+  Binding extends 'HOST_AUTH_RATE_LIMIT' | 'RSVP_LOOKUP_RATE_LIMIT' | 'GUEST_MESSAGE_RATE_LIMIT',
+  Limit extends 20 | 30 | 120,
 >(
   value: unknown,
   bindingName: Binding,
@@ -422,7 +434,8 @@ export function parseStagingTargetDescriptor(
     'assets', 'email', 'rateLimits', 'workflows', 'crons', 'vars', 'requiredSecretNames',
     'observability', 'placement', 'expiresAt', 'cleanupOwner',
   ], 'Staging target descriptor');
-  if (item.kind !== 'candidary.staging-target' || item.schemaVersion !== 1
+  if (item.kind !== 'candidary.staging-target'
+    || (item.schemaVersion !== 1 && item.schemaVersion !== 2)
     || (item.purpose !== 'workflow-conformance' && item.purpose !== 'cutover')) {
     throw new Error('Staging target identity or purpose is invalid.');
   }
@@ -433,7 +446,11 @@ export function parseStagingTargetDescriptor(
   const images = binding(item.images, 'IMAGES', ['identity'], 'Staging Images');
   const assets = binding(item.assets, 'ASSETS', ['identity'], 'Staging assets');
   const email = binding(item.email, 'EMAIL', ['destinationAddress'], 'Staging Email');
-  const rateLimits = exactRecord(item.rateLimits, ['hostAuth', 'rsvpLookup'], 'Staging rate limits');
+  const rateLimits = exactRecord(
+    item.rateLimits,
+    item.schemaVersion === 2 ? ['hostAuth', 'rsvpLookup', 'guestMessage'] : ['hostAuth', 'rsvpLookup'],
+    'Staging rate limits',
+  );
   const workflows = exactRecord(item.workflows, ['export', 'render', 'backfill'], 'Staging Workflows');
   const variables = exactRecord(item.vars, [
     'APP_ORIGIN', 'ALTERNATE_ORIGINS', 'R2_ACCOUNT_ID', 'R2_BUCKET_NAME', 'EMAIL_FROM',
@@ -445,7 +462,10 @@ export function parseStagingTargetDescriptor(
   const workersDev = booleanValue(worker.workersDev, 'Staging workersDev');
   const previewUrls = booleanValue(worker.previewUrls, 'Staging previewUrls');
   const requiredSecretNames = exactStrings(item.requiredSecretNames, 'Staging required secret names').sort();
-  if (canonicalJson(requiredSecretNames) !== canonicalJson([...REQUIRED_STAGING_SECRET_NAMES])) {
+  const expectedSecrets = item.schemaVersion === 2
+    ? POST_CUTOVER_REQUIRED_STAGING_SECRET_NAMES
+    : REQUIRED_STAGING_SECRET_NAMES;
+  if (canonicalJson(requiredSecretNames) !== canonicalJson([...expectedSecrets].sort())) {
     throw new Error('Staging required secret-name set is incomplete or foreign.');
   }
   if (d1.binding !== 'DB') throw new Error('Staging D1 binding is invalid.');
@@ -454,7 +474,7 @@ export function parseStagingTargetDescriptor(
   if (expiresAt <= now) throw new Error('Staging target is expired.');
 
   const parsed: StagingTargetDescriptorV1 = {
-    kind: 'candidary.staging-target', schemaVersion: 1, purpose,
+    kind: 'candidary.staging-target', schemaVersion: item.schemaVersion, purpose,
     accountId: patternValue(item.accountId, ACCOUNT_PATTERN, 'Staging accountId'),
     worker: {
       name: stagingIdentity(worker.name, 'Staging Worker name'), routes,
@@ -484,6 +504,14 @@ export function parseStagingTargetDescriptor(
     rateLimits: {
       hostAuth: parseRate(rateLimits.hostAuth, 'HOST_AUTH_RATE_LIMIT', 20, 'hostAuth rate limit'),
       rsvpLookup: parseRate(rateLimits.rsvpLookup, 'RSVP_LOOKUP_RATE_LIMIT', 30, 'RSVP rate limit'),
+      ...(item.schemaVersion === 2 ? {
+        guestMessage: parseRate(
+          rateLimits.guestMessage,
+          'GUEST_MESSAGE_RATE_LIMIT',
+          120,
+          'Guestbook message rate limit',
+        ),
+      } : {}),
     },
     workflows: {
       export: parseWorkflow(workflows.export, 'EXPORT_WORKFLOW', 'ExportWorkflow', 'export Workflow') as StagingTargetDescriptorV1['workflows']['export'],
@@ -515,7 +543,8 @@ export function parseStagingTargetDescriptor(
     }
     if (crons.length !== 0) throw new Error('Workflow-conformance target cannot enable cron triggers.');
     if (parsed.assets.enabled || parsed.email.enabled
-      || parsed.rateLimits.hostAuth.enabled || parsed.rateLimits.rsvpLookup.enabled) {
+      || parsed.rateLimits.hostAuth.enabled || parsed.rateLimits.rsvpLookup.enabled
+      || parsed.rateLimits.guestMessage?.enabled) {
       throw new Error('Workflow-conformance public assets, Email, and rate limits must be explicitly disabled.');
     }
   }
@@ -742,7 +771,11 @@ export function buildStagingOverlay(
   if (target.email.enabled) {
     source.send_email = [{ name: target.email.binding, destination_address: target.email.destinationAddress }];
   }
-  source.ratelimits = [target.rateLimits.hostAuth, target.rateLimits.rsvpLookup]
+  source.ratelimits = [
+    target.rateLimits.hostAuth,
+    target.rateLimits.rsvpLookup,
+    ...(target.rateLimits.guestMessage ? [target.rateLimits.guestMessage] : []),
+  ]
     .filter((rate) => rate.enabled)
     .map((rate) => ({
       name: rate.binding,

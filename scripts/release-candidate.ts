@@ -28,6 +28,7 @@ import {
 export const PINNED_WRANGLER_VERSION = '4.113.0' as const;
 export const PHASE_2_MIGRATION = '0013_guest_message_hardening.sql' as const;
 export const PHASE_3_MIGRATION = '0014_event_cover_invariants.sql' as const;
+export const POST_CUTOVER_MIGRATION = '0015_curated_private_guestbook.sql' as const;
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const MIGRATION_NAME_PATTERN = /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/u;
@@ -37,7 +38,7 @@ export interface ReleaseCandidateVerificationRequest {
   sha: string;
   manifestPath: string;
   approvedBaseSha: string;
-  expectedMigrationCount: 13 | 14;
+  expectedMigrationCount: 13 | 14 | 15;
 }
 
 export interface ReleaseCandidateObservationAdapter {
@@ -56,7 +57,7 @@ export interface VerifiedReleaseCandidate {
   manifestSha256: string;
   manifest: CandidateManifest;
   migrations: HashedFile[];
-  migrationCount: 13 | 14;
+  migrationCount: 13 | 14 | 15;
   artifactTreeSha256: string;
   wranglerVersion: typeof PINNED_WRANGLER_VERSION;
   wranglerCliPath: string;
@@ -237,7 +238,9 @@ export function verifyExactReleaseCandidate(
   }
   const requiredLastMigration = request.expectedMigrationCount === 13
     ? PHASE_2_MIGRATION
-    : PHASE_3_MIGRATION;
+    : request.expectedMigrationCount === 14
+      ? PHASE_3_MIGRATION
+      : POST_CUTOVER_MIGRATION;
   if (basename(migrationInventory.files.at(-1)?.path ?? '') !== requiredLastMigration) {
     throw new Error('Candidate migration boundary does not match the required release phase.');
   }

@@ -58,6 +58,14 @@
         "limit": 30,
         "period": 60
       }
+    },
+    {
+      "name": "GUEST_MESSAGE_RATE_LIMIT",
+      "namespace_id": "1003",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
     }
   ],
   "workflows": [
@@ -96,6 +104,7 @@
       "ENTRY_HMAC_KEY",
       "ENTRY_ENCRYPTION_KEY",
       "RSVP_LOOKUP_HMAC_KEY",
+      "GUEST_MESSAGE_HMAC_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_SECRET_ACCESS_KEY"
     ]

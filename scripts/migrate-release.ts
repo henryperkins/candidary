@@ -48,7 +48,7 @@ export const PRODUCTION_TRIGGER_NAMES = [
   'event_cover_source_pointer_update',
 ] as const;
 
-const REQUIRED_SECRET_NAMES = [
+const HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES = [
   'ENTRY_ENCRYPTION_KEY',
   'ENTRY_HMAC_KEY',
   'GUEST_TOKEN_ENCRYPTION_KEY',
@@ -59,6 +59,13 @@ const REQUIRED_SECRET_NAMES = [
   'SESSION_HMAC_KEY',
   'TOKEN_HMAC_KEY',
 ] as const;
+
+const POST_CUTOVER_REQUIRED_SECRET_NAMES = [
+  ...HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES,
+  'GUEST_MESSAGE_HMAC_KEY',
+] as const;
+
+type ProductionTopologyBaseline = 'historical-phase-3' | 'post-cutover';
 
 export interface ProductionMigrationAuthorizationV1 {
   kind: 'candidary.production-migration-authorization';
@@ -339,7 +346,10 @@ function containsConfiguredValue(value: unknown): boolean {
   return String(value).length > 0;
 }
 
-function productionTopology(candidateRoot: string): Record<string, unknown> {
+function productionTopology(
+  candidateRoot: string,
+  baseline: ProductionTopologyBaseline,
+): Record<string, unknown> {
   const configPath = exactRegularFile(
     resolve(candidateRoot, 'dist/candidary/wrangler.json'),
     'Production Wrangler config',
@@ -418,6 +428,9 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
     rateLimits: [
       { name: 'HOST_AUTH_RATE_LIMIT', namespaceId: '1001', simple: { limit: 20, period: 60 } },
       { name: 'RSVP_LOOKUP_RATE_LIMIT', namespaceId: '1002', simple: { limit: 30, period: 60 } },
+      ...(baseline === 'post-cutover' ? [{
+        name: 'GUEST_MESSAGE_RATE_LIMIT', namespaceId: '1003', simple: { limit: 120, period: 60 },
+      }] : []),
     ],
     workflows: [
       { name: 'candidary-export', binding: 'EXPORT_WORKFLOW', className: 'ExportWorkflow' },
@@ -430,7 +443,9 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
       R2_ACCOUNT_ID: vars.R2_ACCOUNT_ID, R2_BUCKET_NAME: 'candidary-media',
       EMAIL_FROM: 'hello@candidary.app',
     },
-    requiredSecrets: [...REQUIRED_SECRET_NAMES],
+    requiredSecrets: baseline === 'post-cutover'
+      ? [...POST_CUTOVER_REQUIRED_SECRET_NAMES].sort()
+      : [...HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES],
     observability: { enabled: true },
     placement: { mode: 'smart' },
   };
@@ -442,11 +457,18 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
 }
 
 export function productionTopologySha256(candidateRoot: string): string {
-  return sha256(canonicalJson(productionTopology(candidateRoot)));
+  return sha256(canonicalJson(productionTopology(candidateRoot, 'post-cutover')));
 }
 
-function productionAccountId(candidateRoot: string): string {
-  const topology = productionTopology(candidateRoot);
+export function historicalPhase3ProductionTopologySha256(candidateRoot: string): string {
+  return sha256(canonicalJson(productionTopology(candidateRoot, 'historical-phase-3')));
+}
+
+function productionAccountId(
+  candidateRoot: string,
+  baseline: ProductionTopologyBaseline,
+): string {
+  const topology = productionTopology(candidateRoot, baseline);
   return (topology.vars as Record<string, unknown>).R2_ACCOUNT_ID as string;
 }
 
@@ -544,8 +566,8 @@ function validateCrossReferences(
     || candidate.sha !== request.sha || authorization.manifestSha256 !== candidate.manifestSha256) {
     throw new Error('Production authorization does not bind the exact landed candidate and manifest.');
   }
-  const topologySha = productionTopologySha256(candidate.candidateRoot);
-  const accountId = productionAccountId(candidate.candidateRoot);
+  const topologySha = historicalPhase3ProductionTopologySha256(candidate.candidateRoot);
+  const accountId = productionAccountId(candidate.candidateRoot, 'historical-phase-3');
   if (authorization.productionTopologySha256 !== topologySha
     || authorization.accountId !== accountId
     || authorization.databaseName !== PRODUCTION_DATABASE_NAME

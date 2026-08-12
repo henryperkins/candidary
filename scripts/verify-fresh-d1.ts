@@ -86,12 +86,12 @@ const INVARIANT_STATEMENT_COUNT = 12;
  * file that is not checked in is never seen, and a correctly numbered extra file
  * that *is* checked in would simply be accepted as the next entry.
  *
- * Fourteen after Phase 3: `0013_guest_message_hardening.sql`
- * is a guest-message column and index, unrelated to covers. It is deliberately
- * is unrelated to covers; `0014_event_cover_invariants.sql` is the phase-3
- * migration. Count and exact trigger hashes move together in this candidate.
+ * Fifteen after the post-Phase-3 Guestbook cutover: `0014` closes the Cover
+ * Studio invariants and `0015_curated_private_guestbook.sql` is the new active
+ * terminal migration. Count, terminal event metadata, and exact trigger hashes
+ * move together in this candidate.
  */
-const EXPECTED_MIGRATION_COUNT = 14;
+const EXPECTED_MIGRATION_COUNT = 15;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the nine
@@ -254,6 +254,8 @@ const EXPECTED_COLUMN_NAMES = {
     'event_start_at', 'photos_open_from',
     // 0012, appended so every earlier ordinal is unmoved.
     'cover_config', 'cover_revision', 'cover_render_set_id',
+    // 0015, appended without relabeling the historical Phase-3 schema.
+    'guestbook_prompt',
   ],
   rsvpRosterBatchReceipts: [
     'event_id', 'idempotency_key', 'request_digest', 'receipt_json', 'created_at',
@@ -296,6 +298,13 @@ const EXPECTED_TERMINAL_COLUMNS: Record<keyof typeof EXPECTED_COLUMN_NAMES, Expe
     },
     { name: 'cover_revision', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
     { name: 'cover_render_set_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+    {
+      name: 'guestbook_prompt',
+      type: 'TEXT',
+      notnull: 1,
+      dflt_value: "'Share a wish, memory, or moment from the day.'",
+      pk: 0,
+    },
   ],
   rsvpRosterBatchReceipts: [
     { name: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 },

@@ -36,11 +36,12 @@ npx playwright test tests/e2e/core-journey.spec.ts --project=mobile
 ```
 
 Local secrets go in `.dev.vars` (copy `.dev.vars.example`). `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`,
-`LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and
+`LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_MESSAGE_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and
 `ENTRY_ENCRYPTION_KEY` must be independent values; the two encryption keys must each be exactly
-32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY`
-are persisted-data keys: rotating one without a re-encryption/re-digest migration breaks every
-printed QR or the roster lookup. Ordinary guest-grant and session rotation must leave them alone.
+32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, `RSVP_LOOKUP_HMAC_KEY`, and
+`GUEST_MESSAGE_HMAC_KEY` are persisted-data keys: rotating one without a coordinated re-encryption,
+re-digest, re-HMAC, or invalidation migration breaks persisted behavior. Ordinary guest-grant and
+session rotation must leave them alone.
 Local `vite dev` reads this file, while production builds explicitly omit it from generated output.
 
 ## Architecture
@@ -49,7 +50,8 @@ One Cloudflare Worker (`worker/index.ts`) serves everything: a Hono API, the Rea
 binding, daily cleanup and hourly notification-dispatch scheduled jobs, and the exported
 `ExportWorkflow`, `CoverRenderWorkflow`, and `CoverBackfillWorkflow` classes. Bindings are `DB` (D1),
 `MEDIA_BUCKET` (private R2), `IMAGES`, `EXPORT_WORKFLOW`, `COVER_RENDER_WORKFLOW`,
-`COVER_BACKFILL_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`, and `ASSETS`.
+`COVER_BACKFILL_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`,
+`GUEST_MESSAGE_RATE_LIMIT`, and `ASSETS`.
 `CF_VERSION_METADATA` supplies the deployed Worker version identity used by release certification.
 
 Three build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`),
@@ -191,7 +193,8 @@ slot, retired/cross-event set, or impossible pointer graph fails closed. There i
 reader, legacy-object response, lazy Images transform, or normalized-master fallback. The nine
 `0014_event_cover_invariants.sql` triggers make those semantic, receipt, active-set, and ordered-purge
 relationships database invariants; Phase 2 ends one file earlier at
-`0013_guest_message_hardening.sql`.
+`0013_guest_message_hardening.sql`. Those 13/14-migration boundaries remain immutable historical
+release evidence; the active post-cutover schema ends at `0015_curated_private_guestbook.sql`.
 
 ### Exports
 
@@ -200,6 +203,10 @@ relationships database invariants; Phase 2 ends one file earlier at
 `workflows/export.ts` partitions the snapshot at 2 GiB of source bytes, streams store-mode ZIP parts
 through R2 multipart upload, and writes `candidary-export-manifest.csv`. Retries bump `attempt`, write to
 a new prefix, and clear prior part rows. Failures surface as `EXPORT_*` codes carried in `errorCode`.
+
+Post-cutover export creation also freezes Guestbook metadata and entries for a printable HTML keepsake
+and a separate private CSV archive. Both inherit the Ready artifact's 24-hour object expiry; immutable
+snapshot rows remain in D1 for authorized retry until event purge.
 
 The daily cron (`workflows/cleanup.ts`) sweeps bounded auth and RSVP scratch, releases expired
 reservations, deletes expired export objects, and purges retention-due events. The hourly cron

@@ -21,6 +21,7 @@ import {
 } from '../../scripts/release-candidate';
 import {
   PRODUCTION_TRIGGER_NAMES,
+  historicalPhase3ProductionTopologySha256,
   parseMigrateReleaseArgs,
   productionTopologySha256,
   runMigrateRelease,
@@ -113,6 +114,15 @@ function productionConfig(): Record<string, unknown> {
   };
 }
 
+function postCutoverProductionConfig(): Record<string, unknown> {
+  const config = productionConfig();
+  (config.ratelimits as unknown[]).push({
+    name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '1003', simple: { limit: 120, period: 60 },
+  });
+  ((config.secrets as { required: string[] }).required).push('GUEST_MESSAGE_HMAC_KEY');
+  return config;
+}
+
 interface Fixture {
   root: string;
   verified: VerifiedReleaseCandidate;
@@ -176,7 +186,7 @@ function fixture(): Fixture {
   const authorization: ProductionMigrationAuthorizationV1 = {
     kind: 'candidary.production-migration-authorization', schemaVersion: 1, runId: RUN_ID,
     approvedMainSha: SHA, candidateSha: SHA, manifestSha256: verified.manifestSha256,
-    productionTopologySha256: productionTopologySha256(root),
+    productionTopologySha256: historicalPhase3ProductionTopologySha256(root),
     accountId: ACCOUNT, databaseName: 'candidary-core', databaseId: DATABASE_ID,
     migrationName: PHASE_3_MIGRATION,
     migrationSha256: migrationFiles.at(-1)!.sha256,
@@ -264,6 +274,24 @@ describe('production migration CLI', () => {
       '--sha', SHA, '--sha', SHA, '--manifest', source.manifestPath,
       '--authorization', source.authorizationPath, '--bookmark', source.bookmarkPath,
     ], source.root)).toThrow(/duplicate|unknown/u);
+  });
+});
+
+describe('post-cutover production topology', () => {
+  it('requires exactly three isolated rate limiters and the Guestbook persisted-data secret', () => {
+    const root = temporaryRoot();
+    put(root, 'dist/candidary/wrangler.json', `${canonicalJson(postCutoverProductionConfig())}\n`);
+    expect(productionTopologySha256(root)).toMatch(/^[0-9a-f]{64}$/u);
+
+    const missingRate = postCutoverProductionConfig();
+    (missingRate.ratelimits as unknown[]).pop();
+    put(root, 'dist/candidary/wrangler.json', `${canonicalJson(missingRate)}\n`);
+    expect(() => productionTopologySha256(root)).toThrow(/topology/u);
+
+    const missingSecret = postCutoverProductionConfig();
+    (missingSecret.secrets as { required: string[] }).required.pop();
+    put(root, 'dist/candidary/wrangler.json', `${canonicalJson(missingSecret)}\n`);
+    expect(() => productionTopologySha256(root)).toThrow(/topology/u);
   });
 });
 

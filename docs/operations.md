@@ -101,6 +101,12 @@ Only one queued or running export exists per event. A request snapshots every st
 
 Each retry increments `attempt`, uses a new attempt prefix, and clears prior persisted part rows. Partial attempt objects are deleted after a failure. Ready objects expire after 24 hours; manager download URLs expire after 15 minutes.
 
+Post-cutover exports also freeze Guestbook snapshot metadata and entries. They produce a guest-visible
+printable HTML keepsake and a separate private CSV archive; the private CSV may include author-only
+content and is never a guest download. Both objects share the 24-hour Ready expiry and are deleted
+from the durable object inventory before the job becomes Expired. Event purge removes the objects,
+dependent snapshot rows, notes/captions, and finally the event in that order.
+
 Investigate:
 
 - `EXPORT_SOURCE_MISSING` as an R2/D1 consistency failure.
@@ -245,6 +251,10 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `EVENT_MEDIA_LIMIT`, `EVENT_STORAGE_LIMIT` — the 10,000-photo or 100-GiB event quota is full.
 - `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh.
 - `MESSAGE_SUBMISSION_CONFLICT` — a successful guest-note key was reused with different words. The client replaces the key and offers the preserved note for another send.
+- `MESSAGE_PURGED` — a permanently deleted note was retried with its original key; it cannot be restored or recreated.
+- `MESSAGE_EVENT_LIMIT` — the event has reached its retained standalone-note cap. Existing Guestbook content remains readable and manageable.
+- `EVENT_PHASE_CONFLICT` — the event phase no longer accepts a new note. Preserve the draft and keep the existing book readable.
+- `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a stale Manager Guestbook action lost a conditional write; refetch the row or first page instead of replaying the mutation.
 - `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
@@ -260,7 +270,12 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `RSVP_ROSTER_BATCH_CONFLICT` — the event roster or an explicitly targeted household changed after preview, and nothing was written. The typed details identify changed, archived, or missing targets; refresh them and preview the preserved draft again.
 - `RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT` — a committed manager batch key was reused for different canonical content. Keep the original key only for an unchanged retry; changed staged work needs a fresh preview and key.
 - `RATE_LIMITED` on a lookup — the edge budget (30/IP/minute, `Retry-After: 60`) or a D1 budget (20/event/IP or 8/event/name per 15 minutes, `Retry-After: 900`) is spent. The body is deliberately generic.
-- `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED` — inspect the active job and its persisted parts.
+- `RATE_LIMITED` on a Guestbook submission — either the isolated edge budget (120/event/trusted-IP/minute) or a durable session/IP window is spent. Honor `Retry-After`, preserve the draft, and never log a raw IP or digest.
+- `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED`, `EXPORT_LIMIT_EXCEEDED`, `EXPORT_SNAPSHOT_CHANGED` — inspect the active job, immutable Guestbook snapshot metadata, and persisted object inventory.
+
+These source/config and runbook updates are local implementation evidence only. Production secret
+provisioning, remote migration, deployment, runtime certification, policy/legal approval, and
+physical-device proof remain separate unauthorized gates.
 
 Cover codes are Manager-only. None is reachable from a guest load, which is why all ten classify as
 `retry` in `shared/load-failure.ts` — none of `latest-link`, `ended-event`, or `sign-in` describes a

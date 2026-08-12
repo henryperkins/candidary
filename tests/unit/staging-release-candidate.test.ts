@@ -275,6 +275,14 @@ function authorization(): StagingTargetAuthorization {
   };
 }
 
+function postCutoverAuthorization(): Record<string, unknown> {
+  return {
+    ...authorization(),
+    schemaVersion: 2,
+    guestMessageRateLimitNamespaceId: '2003',
+  };
+}
+
 describe('Task 10 candidate verification for Task 11', () => {
   it('accepts only exact clean passed candidates with fourteen gates and thirteen migrations', () => {
     const root = temporaryRoot();
@@ -335,6 +343,23 @@ describe('Task 10 candidate verification for Task 11', () => {
 });
 
 describe('owned staging deployment root', () => {
+  it('builds the post-cutover staging config with three isolated limiters and the persisted-data secret', () => {
+    const activeGenerated = generatedConfig();
+    (activeGenerated.ratelimits as unknown[]).push({
+      name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '1003', simple: { limit: 120, period: 60 },
+    });
+    ((activeGenerated.secrets as { required: string[] }).required).push('GUEST_MESSAGE_HMAC_KEY');
+
+    const config = buildStagingWranglerConfig(activeGenerated, postCutoverAuthorization());
+    expect(config.ratelimits).toEqual([
+      { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '2001', simple: { limit: 20, period: 60 } },
+      { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '2002', simple: { limit: 30, period: 60 } },
+      { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '2003', simple: { limit: 120, period: 60 } },
+    ]);
+    expect((config.secrets as { required: string[] }).required)
+      .toContain('GUEST_MESSAGE_HMAC_KEY');
+  });
+
   it('rewrites only resource identities and removes all public and scheduled ingress', () => {
     const config = buildStagingWranglerConfig(generatedConfig(), authorization());
     expect(assertSafeStagingWranglerConfig(config, authorization())).toEqual(config);

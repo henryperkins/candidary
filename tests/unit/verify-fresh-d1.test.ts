@@ -61,16 +61,18 @@ const eventColumnNames = [
   'event_timezone', 'rsvp_enabled', 'rsvp_deadline_at', 'rsvp_roster_version',
   'event_start_at', 'photos_open_from',
   'cover_config', 'cover_revision', 'cover_render_set_id',
+  'guestbook_prompt',
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// verifier refuses a candidate whose ledger is not exactly fourteen.
+// post-cutover verifier refuses a candidate whose ledger is not exactly fifteen.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
+  '0015_curated_private_guestbook.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -141,6 +143,10 @@ function terminalRows() {
   });
   Object.assign(events[27]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
   Object.assign(events[28]!, { type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 });
+  Object.assign(events[29]!, {
+    type: 'TEXT', notnull: 1,
+    dflt_value: "'Share a wish, memory, or moment from the day.'", pk: 0,
+  });
 
   const roster = columns(rosterColumnNames);
   Object.assign(roster[0]!, { type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 });
@@ -382,6 +388,9 @@ describe('fresh local D1 verification', () => {
       // The stored `none` literal drifting is a silent data-shape change: every
       // row created afterwards would read as an unparseable cover config.
       (output) => { (output[3] as { results: ColumnRow[] }).results[26]!.dflt_value = "'{}'"; },
+      // The Guestbook prompt is persisted event metadata and must retain its
+      // non-null approved default on a fresh post-cutover database.
+      (output) => { (output[3] as { results: ColumnRow[] }).results[29]!.dflt_value = "'Changed'"; },
       // A cover table missing, and one that should not exist.
       (output) => { (output[6] as { results: unknown[] }).results.pop(); },
       (output) => { (output[6] as { results: unknown[] }).results.push({ name: 'event_cover_extra' }); },
@@ -419,12 +428,12 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly fourteen migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly fifteen migrations', async () => {
     const candidate = await fixture();
-    const fifteen = [...candidate.ledgerNames, '0015_unexpected.sql'];
+    const fourteen = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
-    output[0]!.results = fifteen.map((name, index) => ({ id: index + 1, name }));
-    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), fifteen)).toThrow();
+    output[0]!.results = fourteen.map((name, index) => ({ id: index + 1, name }));
+    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), fourteen)).toThrow();
   });
 
   it('keeps the reported terminal schema at exactly three keys', async () => {

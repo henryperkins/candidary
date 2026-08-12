@@ -40,6 +40,7 @@ export default defineConfig({
           ENTRY_HMAC_KEY: 'test-entry-hmac-key-with-at-least-32-bytes',
           ENTRY_ENCRYPTION_KEY: 'ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA',
           RSVP_LOOKUP_HMAC_KEY: 'test-rsvp-lookup-hmac-key-with-at-least-32-bytes',
+          GUEST_MESSAGE_HMAC_KEY: 'test-guest-message-hmac-key-with-at-least-32-bytes',
           EMAIL_FROM: 'hello@candidary.test',
           R2_ACCOUNT_ID: 'local',
           R2_ACCESS_KEY_ID: 'test-r2-access-key',
