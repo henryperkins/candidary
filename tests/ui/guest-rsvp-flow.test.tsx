@@ -92,6 +92,27 @@ afterEach(() => {
 });
 
 describe('household RSVP guest flow', () => {
+  it('reports a successful lookup name to the shared remembered-name owner', async () => {
+    const onGuestNameChange = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/rsvp/household')) return sessionRequired();
+      if (path.endsWith('/rsvp/lookup')) return success({ status: 'found', household });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+
+    render(<GuestRsvpFlow
+      event={event}
+      presentation="primary"
+      guestName=""
+      onGuestNameChange={onGuestNameChange}
+    />);
+    await openInvitation(user, 'Taylor Morgan');
+
+    expect(onGuestNameChange).toHaveBeenCalledWith('Taylor Morgan');
+  });
+
   it('draws the guest hero on primary RSVP only and steps its heading down when embedded', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       if (String(input).endsWith('/rsvp/household')) return sessionRequired();

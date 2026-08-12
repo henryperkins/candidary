@@ -30,7 +30,15 @@ function startTime(value: string, timeZone: string) {
  * portion is the ordinary RSVP flow embedded — reusing lookup and receipt, so a household arriving
  * on a device that never held a session can still read back what it sent.
  */
-export function GuestBeforeStart({ event }: { event: GuestEventView }) {
+export function GuestBeforeStart({
+  event,
+  guestName,
+  onGuestNameChange,
+}: {
+  event: GuestEventView;
+  guestName?: string;
+  onGuestNameChange?: (name: string) => void;
+}) {
   return <section className="rsvp-flow rsvp-flow--with-hero guest-before-start">
     <GuestEventHero
       event={event}
@@ -46,7 +54,12 @@ export function GuestBeforeStart({ event }: { event: GuestEventView }) {
       </header>
       {/* An event that never adopted RSVP — and one whose household window has closed for good —
           gets no household affordance here, and issues no household request either. */}
-      {event.rsvpAccess !== 'unavailable' && <GuestRsvpFlow event={event} presentation="embedded" />}
+      {event.rsvpAccess !== 'unavailable' && <GuestRsvpFlow
+        event={event}
+        presentation="embedded"
+        guestName={guestName}
+        onGuestNameChange={onGuestNameChange}
+      />}
     </div>
   </section>;
 }
