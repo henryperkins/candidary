@@ -239,8 +239,14 @@ test('the manager rail holds its counts at the documented photo cap', async ({ p
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(destination(page, 'Intake').locator('.manager-nav__count'))
     .toHaveText(String(MAX_EVENT_MEDIA));
+  // Below 761 the six destinations leave the header for the foot of the viewport, so they are no
+  // longer inside `.manager-nav`'s own box — screenshotting it here would picture the brand row and
+  // nothing this test is named for, while `toHaveText` above went on passing off the intact DOM. The
+  // subject is the destination bar, so the bar is what is captured and what is proven visible first.
+  const destinations = page.locator('.manager-nav nav');
+  await expect(destinations).toBeVisible();
   await settle(page);
-  await expect(page.locator('.manager-nav')).toHaveScreenshot('manager-nav-count-390.png');
+  await expect(destinations).toHaveScreenshot('manager-nav-count-390.png');
 });
 
 test('the manager card controls and the mobile export panel hold their layout', async ({ page }) => {
@@ -250,6 +256,12 @@ test('the manager card controls and the mobile export panel hold their layout', 
   await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
   const card = page.locator('.moderation-grid article').first();
   const cardContent = card.locator('.intake-card-actions').locator('..');
+  // Below 761 the contact sheet's one tap target is selection and the four per-photo controls belong
+  // to the chosen card, so the card is chosen before its controls are pictured. `toHaveCount` counts
+  // the DOM and passed either way, which is how an unselected card could have gone on standing in for
+  // a baseline named after the controls; the row is proven visible instead.
+  await card.locator('.intake-select').click();
+  await expect(cardContent.locator('.intake-card-actions')).toBeVisible();
   await expect(cardContent.locator('.intake-card-actions button')).toHaveCount(3);
   await settle(page);
   // The evidence is the wrapped identity and its controls. Chromium GPU processes can quantize the

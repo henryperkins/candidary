@@ -396,7 +396,8 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
   await page.getByRole('button', { name: 'Filter', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Clear', exact: true })).toBeVisible();
 
-  // Every media-grid mode: one phone column, the 431 two-column band, and the three-column rail layout.
+  // The stacked contact sheet at three of its widths, then the three-column wide layout. 431 is no
+  // longer a turnover — it is kept only because a control that fits at 390 and 470 has to fit between.
   for (const width of [390, 431, 470, 1200]) {
     await page.setViewportSize({ width, height: 900 });
 
