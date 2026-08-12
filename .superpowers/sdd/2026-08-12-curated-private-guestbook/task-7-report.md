@@ -114,3 +114,55 @@ There is no known local Task 7 blocker. The post-cutover staging namespace ID is
 only; actual nonproduction provisioning still requires separate authorization. Production secret
 provisioning, deployment, remote migration, runtime certification, policy/legal approval, and
 physical-device/assistive-technology acceptance remain unperformed and unauthorized.
+
+## Fix round 1
+
+Implementation commit: `6122849a2d6cf307ba2177ccb875e4637fda8844`.
+
+### RED
+
+The exact seven-file Task 7 command exited 1 with 7 files, 59 tests, 53 passes, and 6 failures.
+The intended regressions showed that deployment rejected the 15-migration candidate, staging
+evidence rejected schema v2 as “not one passing v1 artifact,” and remote staging rejected the v2
+review authorization before it could bind the final candidate. Two additional failures identified
+shared test arrays that had accidentally appended `0015` to historical 14-migration expectations;
+those historical fixtures were corrected to take the immutable first 14 entries.
+
+### GREEN
+
+- Exact seven-file Task 7 command: exit 0; 7 files passed; 60/60 tests passed.
+- Additional focused staging/deploy/evidence run: exit 0; 3 files passed; 31/31 tests passed before
+  the final v1/v2 finalization cases were added; the final exact command above includes those cases.
+- `npm run verify:bindings`: exit 0; Wrangler 4.113.0 reports generated types current.
+- `npm run typecheck`: exit 0.
+- `npm run lint`: exit 0 with zero warnings.
+- `git diff --check`: exit 0; only Windows LF-to-CRLF notices were emitted.
+- Fresh D1 was not rerun because this fix round changed no migration or binding configuration; the
+  original Task 7 fresh-D1 evidence above remains the applicable local result.
+
+### Fix summary and self-review
+
+- Production deployment verification now accepts the closed historical 14-migration and active
+  post-cutover 15-migration boundaries, with the same independently verified count used before and
+  after rebuild.
+- Remote staging requires target, review authorization, and staging authorization schema versions
+  to match. Schema v2 names only the exact final 15-migration candidate; schema v1 retains its exact
+  13/14 historical paths. Repreparation reuses the already closed verification request.
+- Schema-v2 migration creates and hashes one atomic suffix bundle containing exactly `0014` and
+  `0015`, verifies the exact 15-file ledger and authorized post-cutover schema fingerprint, and does
+  not call that suffix Phase 3.
+- Finalization and independent verification accept a separately named schema-v2 artifact with
+  `postCutover` source/deployment identities, an exact 15-file ledger, final migration-manifest
+  digest, two-file suffix digest, and bundle digest. Historical v1 artifacts remain unchanged.
+- Behavioral tests cover v2+14 rejection, v2+15 acceptance, v1+15 rejection, target/auth schema
+  substitution, historical manifest substitution during finalization, and independent verification.
+- `secrets.required` remains canonically sorted and compared as a set; order was not made
+  significant. `docs/operations.md` now has one consolidated `MEDIA_STATE_CONFLICT` entry.
+- Explicit staging covered only the nine fix files for the implementation commit. No remote-capable
+  command ran, and no source/config, deployment, secret, D1, or other remote state was mutated.
+
+### Concerns and remaining gates
+
+No known local blocker. This round establishes source-level validation and local evidence only.
+Production secret provisioning, deployment, remote migration, runtime certification, policy/legal
+approval, and physical-device/assistive-technology proof remain unperformed and unauthorized.
