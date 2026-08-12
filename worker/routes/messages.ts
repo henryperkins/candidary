@@ -78,7 +78,11 @@ function guestMessageItem(message: MessageRecord): GuestGuestbookItem {
 messageRoutes.post('/event/:slug/messages', async (context) => {
   const auth = await guestAuth(context, true);
   const trustedIp = clientIp(context);
-  const ipScopeDigest = await guestMessageIpScopeDigest(context.env, auth.event.id, trustedIp);
+  const ipScopeDigest = await guestMessageIpScopeDigest(
+    context.env.GUEST_MESSAGE_HMAC_KEY,
+    auth.event.id,
+    trustedIp,
+  );
   if (!(await context.env.GUEST_MESSAGE_RATE_LIMIT.limit({ key: ipScopeDigest })).success) {
     context.header('Retry-After', '60');
     throw new ApiError('RATE_LIMITED', 'Too many note attempts. Try again in a minute.', 429);
@@ -91,12 +95,12 @@ messageRoutes.post('/event/:slug/messages', async (context) => {
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Write a note with 1 to 500 characters.', 422);
   const now = new Date().toISOString();
   const requestHmac = await guestMessagePayloadHmac(
-    context.env,
+    context.env.GUEST_MESSAGE_HMAC_KEY,
     parsed.data.guestName || null,
     parsed.data.body,
   );
   const sessionScopeDigest = await guestMessageSessionScopeDigest(
-    context.env,
+    context.env.GUEST_MESSAGE_HMAC_KEY,
     auth.event.id,
     auth.session.id,
   );
@@ -313,7 +317,11 @@ messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (contex
       current.id,
       auth.event.id,
       expectedState as GuestMessageState,
-      await guestMessagePayloadHmac(context.env, current.guestName, current.body),
+      await guestMessagePayloadHmac(
+        context.env.GUEST_MESSAGE_HMAC_KEY,
+        current.guestName,
+        current.body,
+      ),
       new Date().toISOString(),
     );
     return context.json({ data: { purged }, requestId: context.get('requestId') });

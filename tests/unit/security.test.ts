@@ -51,27 +51,25 @@ describe('secret token security', () => {
 });
 
 describe('guest message persisted-data HMACs', () => {
-  const env = {
-    GUEST_MESSAGE_HMAC_KEY: 'test-guest-message-hmac-key-with-at-least-32-bytes',
-  };
+  const hmacKey = 'test-guest-message-hmac-key-with-at-least-32-bytes';
 
   it('canonicalizes the normalized nullable-name and body tuple under a versioned domain', async () => {
-    await expect(guestMessagePayloadHmac(env, null, 'A quiet, perfect moment.'))
+    await expect(guestMessagePayloadHmac(hmacKey, null, 'A quiet, perfect moment.'))
       .resolves.toBe('WWDxup0LSPV3jk5MwoHpAHvm7txGmkoqpyLxniu__x0');
-    await expect(guestMessagePayloadHmac(env, 'Avery', 'A quiet, perfect moment.'))
+    await expect(guestMessagePayloadHmac(hmacKey, 'Avery', 'A quiet, perfect moment.'))
       .resolves.toBe('SO_zVt6vEJiQpsmhSAw9uUP9aOw1c1UIPmNMWYFoStE');
   });
 
   it('domain-separates event-scoped session and trusted-IP rate identities', async () => {
-    const session = await guestMessageSessionScopeDigest(env, 'event-a', 'session-a');
-    const ip = await guestMessageIpScopeDigest(env, 'event-a', 'session-a');
+    const session = await guestMessageSessionScopeDigest(hmacKey, 'event-a', 'session-a');
+    const ip = await guestMessageIpScopeDigest(hmacKey, 'event-a', 'session-a');
 
     expect(session).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(ip).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(session).not.toBe(ip);
-    await expect(guestMessageSessionScopeDigest(env, 'event-b', 'session-a'))
+    await expect(guestMessageSessionScopeDigest(hmacKey, 'event-b', 'session-a'))
       .resolves.not.toBe(session);
-    await expect(guestMessageIpScopeDigest(env, 'event-b', 'session-a'))
+    await expect(guestMessageIpScopeDigest(hmacKey, 'event-b', 'session-a'))
       .resolves.not.toBe(ip);
   });
 });
