@@ -26,6 +26,7 @@ import { restartCoverPublication } from '../../worker/services/event-cover-publi
 import worker from '../../worker/index';
 import {
   EVENT_COVER_TABLES,
+  batchD1Statements,
   eventAccess,
   importRoster,
   openRsvp,
@@ -913,7 +914,9 @@ describe('lifecycle cleanup', () => {
     await createApp().request(`/api/event/${access.event.slug}/messages`, {
       method: 'POST',
       headers: writeHeaders(access.guest),
-      body: JSON.stringify({ guestName: 'Avery', body: 'A lovely evening.' }),
+      body: JSON.stringify({
+        idempotencyKey: 'event-purge-note', guestName: 'Avery', body: 'A lovely evening.',
+      }),
     }, testEnv);
     await householdSession(access, 'Henry Perkins');
 
@@ -1018,6 +1021,41 @@ describe('lifecycle cleanup', () => {
     expect(windows.results.every((row: any) => row.window_started_at >= '2026-07-21T12:00:00.000Z'))
       .toBe(true);
     expect(await foreignKeyCheck()).toEqual([]);
+  });
+
+  it('sweeps stale guest-message rate rows in bounded pages but retains purge receipts', async () => {
+    const access = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    if (!sessionId) throw new Error('Expected a guest session fixture.');
+    await batchD1Statements(testEnv.DB, Array.from({ length: 120 }, (_, index) => testEnv.DB.prepare(`
+      INSERT INTO guest_message_rate_events (
+        id, event_id, session_scope_digest, ip_scope_digest, window_started_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      crypto.randomUUID(), access.event.id, `session-${index}`, `ip-${index}`,
+      index === 0 ? '2026-07-21T12:00:00.000Z' : '2026-07-21T11:59:59.999Z',
+      '2026-07-21T12:01:00.000Z',
+    )));
+    await testEnv.DB.prepare(`
+      INSERT INTO guest_message_purge_receipts (
+        event_id, guest_session_id, idempotency_key, request_hmac, purged_at
+      ) VALUES (?, ?, 'retained-receipt', ?, '2026-07-21T11:00:00.000Z')
+    `).bind(access.event.id, sessionId, 'a'.repeat(43)).run();
+
+    await scheduledCleanup(testEnv, new Date('2026-07-21T12:15:00.000Z'));
+
+    expect(await testEnv.DB.prepare(`
+      SELECT window_started_at FROM guest_message_rate_events WHERE event_id = ?
+    `).bind(access.event.id).all()).toMatchObject({
+      results: [{ window_started_at: '2026-07-21T12:00:00.000Z' }],
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT idempotency_key FROM guest_message_purge_receipts WHERE event_id = ?
+    `).bind(access.event.id).all()).toMatchObject({
+      results: [{ idempotency_key: 'retained-receipt' }],
+    });
   });
 
   it('revokes but never deletes household data when the printed entry is disabled', async () => {

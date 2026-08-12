@@ -1,7 +1,13 @@
 import type { ManagerGuestbookItem, ModerationStatus } from '../../shared/contracts';
-import { GUEST_MESSAGE_PAGE_SIZE } from '../../shared/constants';
+import {
+  GUEST_MESSAGE_PAGE_SIZE,
+  MAX_EVENT_GUEST_NOTES,
+  MAX_GUEST_NOTES_PER_IP_WINDOW,
+  MAX_GUEST_NOTES_PER_SESSION_WINDOW,
+} from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import type { MessageCursor } from '../http/message-cursor';
+import { constantTimeEqual } from '../security/crypto';
 import type { FeedItem, MessageRecord } from './types';
 
 interface MessageRow {
@@ -42,6 +48,10 @@ function mapMessage(row: MessageRow): MessageRecord {
   };
 }
 
+interface PurgeReceiptRow {
+  request_hmac: string;
+}
+
 function mapManagerMessage(row: Pick<
   MessageRow,
   'id' | 'guest_name' | 'body' | 'moderation_status' | 'created_at' | 'deleted_at'
@@ -74,9 +84,12 @@ export interface CreateMessageRecord {
   guestSessionId: string;
   guestName: string | null;
   body: string;
-  moderationStatus: ModerationStatus;
-  idempotencyKey: string | null;
+  idempotencyKey: string;
   createdAt: string;
+  sessionScopeDigest: string;
+  ipScopeDigest: string;
+  windowStartedAt: string;
+  requestHmac: string;
 }
 
 export interface CreateMessageResult {
@@ -89,47 +102,148 @@ export interface MessageFeedPage {
   nextCursor: MessageCursor | null;
 }
 
+export type GuestMessageState = ModerationStatus | 'deleted';
+export type GuestMessageStateAction = 'approve' | 'reject' | 'delete' | 'restore';
+
 export class MessagesRepository {
   constructor(private readonly db: D1Database) {}
 
-  async create(input: CreateMessageRecord): Promise<CreateMessageResult> {
-    const inserted = await this.db.prepare(`
+  async createBounded(input: CreateMessageRecord): Promise<CreateMessageResult> {
+    const results = await this.db.batch([
+      this.db.prepare(`
       INSERT INTO guest_messages (
         id, event_id, guest_session_id, guest_name, body, moderation_status,
         idempotency_key, created_at, approved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT ?, e.id, ?, ?, ?,
+        CASE WHEN e.moderation_required = 1 THEN 'pending' ELSE 'approved' END,
+        ?, ?, CASE WHEN e.moderation_required = 1 THEN NULL ELSE ? END
+      FROM events e
+      WHERE e.id = ? AND e.deleted_at IS NULL
+        AND e.uploads_enabled = 1
+        AND COALESCE(e.photos_open_from, e.event_start_at) <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM guest_message_purge_receipts r
+          WHERE r.event_id = e.id AND r.guest_session_id = ? AND r.idempotency_key = ?
+        )
+        AND (
+        SELECT COUNT(*) FROM guest_message_rate_events
+        WHERE event_id = ? AND session_scope_digest = ? AND window_started_at = ?
+      ) < ? AND (
+        SELECT COUNT(*) FROM guest_message_rate_events
+        WHERE event_id = ? AND ip_scope_digest = ? AND window_started_at = ?
+      ) < ? AND (
+        SELECT COUNT(*) FROM guest_messages WHERE event_id = e.id
+      ) < ?
       ON CONFLICT (event_id, guest_session_id, idempotency_key) DO NOTHING
     `).bind(
       input.id,
-      input.eventId,
       input.guestSessionId,
       input.guestName,
       input.body,
-      input.moderationStatus,
       input.idempotencyKey,
       input.createdAt,
-      input.moderationStatus === 'approved' ? input.createdAt : null,
-    ).run();
+      input.createdAt,
+      input.eventId,
+      input.createdAt,
+      input.guestSessionId,
+      input.idempotencyKey,
+      input.eventId,
+      input.sessionScopeDigest,
+      input.windowStartedAt,
+      MAX_GUEST_NOTES_PER_SESSION_WINDOW,
+      input.eventId,
+      input.ipScopeDigest,
+      input.windowStartedAt,
+      MAX_GUEST_NOTES_PER_IP_WINDOW,
+      MAX_EVENT_GUEST_NOTES,
+      ),
+      this.db.prepare(`
+        INSERT INTO guest_message_rate_events (
+          id, event_id, session_scope_digest, ip_scope_digest, window_started_at, created_at
+        )
+        SELECT ?, ?, ?, ?, ?, ? WHERE changes() = 1
+      `).bind(
+        crypto.randomUUID(),
+        input.eventId,
+        input.sessionScopeDigest,
+        input.ipScopeDigest,
+        input.windowStartedAt,
+        input.createdAt,
+      ),
+    ]);
+    const inserted = results[0];
+    if (!inserted) throw new Error('Guest note reservation batch returned no insert result.');
     if ((inserted.meta.changes ?? 0) === 1) {
       return { message: (await this.getById(input.id))!, replayed: false };
     }
 
-    if (!input.idempotencyKey) {
-      throw new Error('Guest note insert did not create a row.');
-    }
     const existing = await this.db.prepare(`
       SELECT * FROM guest_messages
       WHERE event_id = ? AND guest_session_id = ? AND idempotency_key = ?
     `).bind(input.eventId, input.guestSessionId, input.idempotencyKey).first<MessageRow>();
-    if (!existing) throw new Error('Guest note idempotency conflict had no stored row.');
-    if (existing.guest_name !== input.guestName || existing.body !== input.body) {
-      throw new ApiError(
-        'MESSAGE_SUBMISSION_CONFLICT',
-        'This note changed after an earlier send attempt. Send it again.',
-        409,
-      );
+    if (existing) {
+      if (existing.guest_name !== input.guestName || existing.body !== input.body) {
+        throw new ApiError(
+          'MESSAGE_SUBMISSION_CONFLICT',
+          'This note changed after an earlier send attempt. Send it again.',
+          409,
+        );
+      }
+      return { message: mapMessage(existing), replayed: true };
     }
-    return { message: mapMessage(existing), replayed: true };
+
+    const receipt = await this.db.prepare(`
+      SELECT request_hmac FROM guest_message_purge_receipts
+      WHERE event_id = ? AND guest_session_id = ? AND idempotency_key = ?
+    `).bind(
+      input.eventId, input.guestSessionId, input.idempotencyKey,
+    ).first<PurgeReceiptRow>();
+    if (receipt) {
+      if (!constantTimeEqual(receipt.request_hmac, input.requestHmac)) {
+        throw new ApiError(
+          'MESSAGE_SUBMISSION_CONFLICT',
+          'This note changed after an earlier send attempt. Send it again.',
+          409,
+        );
+      }
+      throw new ApiError('MESSAGE_PURGED', 'This note was permanently deleted and cannot be restored.', 410);
+    }
+
+    const guards = await this.db.prepare(`
+      SELECT
+        EXISTS (
+          SELECT 1 FROM events e WHERE e.id = ? AND e.deleted_at IS NULL
+            AND e.uploads_enabled = 1
+            AND COALESCE(e.photos_open_from, e.event_start_at) <= ?
+        ) AS phase_open,
+        (SELECT COUNT(*) FROM guest_message_rate_events
+          WHERE event_id = ? AND session_scope_digest = ? AND window_started_at = ?) AS session_count,
+        (SELECT COUNT(*) FROM guest_message_rate_events
+          WHERE event_id = ? AND ip_scope_digest = ? AND window_started_at = ?) AS ip_count,
+        (SELECT COUNT(*) FROM guest_messages WHERE event_id = ?) AS event_count
+    `).bind(
+      input.eventId, input.createdAt,
+      input.eventId, input.sessionScopeDigest, input.windowStartedAt,
+      input.eventId, input.ipScopeDigest, input.windowStartedAt,
+      input.eventId,
+    ).first<{
+      phase_open: number;
+      session_count: number;
+      ip_count: number;
+      event_count: number;
+    }>();
+    if (guards?.phase_open !== 1) {
+      throw new ApiError('EVENT_PHASE_CONFLICT', 'This event is not accepting new guestbook notes.', 409);
+    }
+    if ((guards.session_count ?? 0) >= MAX_GUEST_NOTES_PER_SESSION_WINDOW
+      || (guards.ip_count ?? 0) >= MAX_GUEST_NOTES_PER_IP_WINDOW) {
+      throw new ApiError('RATE_LIMITED', 'Too many notes were sent in this window. Try again later.', 429);
+    }
+    if ((guards.event_count ?? 0) >= MAX_EVENT_GUEST_NOTES) {
+      throw new ApiError('MESSAGE_EVENT_LIMIT', 'This guestbook is not accepting more notes.', 409);
+    }
+    throw new Error('Guarded guest note insert did not create a row.');
   }
 
   async getById(id: string): Promise<MessageRecord | null> {
@@ -209,31 +323,81 @@ export class MessagesRepository {
     };
   }
 
-  async moderate(
+  async changeState(
     id: string,
-    expected: ModerationStatus,
-    target: ModerationStatus,
+    eventId: string,
+    expected: GuestMessageState,
+    action: GuestMessageStateAction,
     changedAt: string,
   ): Promise<MessageRecord> {
-    const result = await this.db.prepare(`
-      UPDATE guest_messages SET moderation_status = ?, approved_at = ?
-      WHERE id = ? AND moderation_status = ? AND deleted_at IS NULL
-    `).bind(target, target === 'approved' ? changedAt : null, id, expected).run();
+    const target = action === 'approve' ? 'approved' : 'rejected';
+    const statement = action === 'restore'
+      ? this.db.prepare(`
+          UPDATE guest_messages
+          SET moderation_status = 'rejected', approved_at = NULL, deleted_at = NULL
+          WHERE id = ? AND event_id = ? AND deleted_at IS NOT NULL AND ? = 'deleted'
+        `).bind(id, eventId, expected)
+      : action === 'delete'
+        ? this.db.prepare(`
+            UPDATE guest_messages SET deleted_at = ?
+            WHERE id = ? AND event_id = ? AND deleted_at IS NULL AND moderation_status = ?
+          `).bind(changedAt, id, eventId, expected)
+        : this.db.prepare(`
+            UPDATE guest_messages SET moderation_status = ?, approved_at = ?
+            WHERE id = ? AND event_id = ? AND deleted_at IS NULL AND moderation_status = ?
+          `).bind(target, target === 'approved' ? changedAt : null, id, eventId, expected);
+    const result = await statement.run();
     if ((result.meta.changes ?? 0) !== 1) {
-      throw new ApiError('MEDIA_STATE_CONFLICT', 'This note changed since you last viewed it. Refresh and try again.', 409);
+      throw new ApiError(
+        'MESSAGE_STATE_CONFLICT',
+        'This note changed since you last viewed it. Refresh and try again.',
+        409,
+      );
     }
     return (await this.getById(id))!;
   }
 
-  async delete(id: string, deletedAt: string): Promise<MessageRecord> {
-    const result = await this.db.prepare(`
-      UPDATE guest_messages SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL
-    `).bind(deletedAt, id).run();
-    if ((result.meta.changes ?? 0) !== 1) {
-      const current = await this.getById(id);
-      if (current?.deletedAt) return current;
-      throw new ApiError('MEDIA_STATE_CONFLICT', 'This note no longer exists.', 404);
+  async purgeDeleted(
+    id: string,
+    eventId: string,
+    expected: GuestMessageState,
+    requestHmac: string,
+    purgedAt: string,
+  ): Promise<{ source: 'guest_note'; id: string }> {
+    const results = await this.db.batch([
+      this.db.prepare(`
+        INSERT INTO guest_message_purge_receipts (
+          event_id, guest_session_id, idempotency_key, request_hmac, purged_at
+        )
+        SELECT event_id, guest_session_id, idempotency_key, ?, ?
+        FROM guest_messages
+        WHERE id = ? AND event_id = ? AND deleted_at IS NOT NULL
+          AND ? = 'deleted' AND idempotency_key IS NOT NULL
+        ON CONFLICT (event_id, guest_session_id, idempotency_key) DO NOTHING
+      `).bind(requestHmac, purgedAt, id, eventId, expected),
+      this.db.prepare(`
+        DELETE FROM guest_messages
+        WHERE id = ? AND event_id = ? AND deleted_at IS NOT NULL AND ? = 'deleted'
+          AND (
+            idempotency_key IS NULL OR EXISTS (
+              SELECT 1 FROM guest_message_purge_receipts r
+              WHERE r.event_id = guest_messages.event_id
+                AND r.guest_session_id = guest_messages.guest_session_id
+                AND r.idempotency_key = guest_messages.idempotency_key
+                AND r.request_hmac = ?
+            )
+          )
+      `).bind(id, eventId, expected, requestHmac),
+    ]);
+    const deleted = results[1];
+    if (!deleted) throw new Error('Guest note purge batch returned no delete result.');
+    if ((deleted.meta.changes ?? 0) !== 1) {
+      throw new ApiError(
+        'MESSAGE_STATE_CONFLICT',
+        'This note changed since you last viewed it. Refresh and try again.',
+        409,
+      );
     }
-    return (await this.getById(id))!;
+    return { source: 'guest_note', id };
   }
 }

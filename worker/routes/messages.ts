@@ -3,19 +3,30 @@ import { z } from 'zod';
 
 import type { GuestGuestbookItem, LegacyGuestbookItem, ModerationStatus } from '../../shared/contracts';
 import {
+  GUEST_NOTE_WINDOW_MS,
   MANAGER_GUESTBOOK_DEFAULT_PAGE_SIZE,
   MANAGER_GUESTBOOK_MAX_PAGE_SIZE,
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
 import { AuthService } from '../auth/service';
-import { MessagesRepository } from '../db/messages';
+import {
+  MessagesRepository,
+  type GuestMessageState,
+  type GuestMessageStateAction,
+} from '../db/messages';
 import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
 import { decodeMessageCursor, encodeMessageCursor } from '../http/message-cursor';
 import { decodeGuestbookCursor, encodeGuestbookCursor } from '../http/guestbook-cursor';
+import { clientIp } from '../http/client-ip';
+import {
+  guestMessageIpScopeDigest,
+  guestMessagePayloadHmac,
+  guestMessageSessionScopeDigest,
+} from '../security/guest-message';
 import type { MessageRecord } from '../db/types';
 
 // Guest notes are a link-session surface; host moderation goes through the shared
@@ -66,23 +77,56 @@ function guestMessageItem(message: MessageRecord): GuestGuestbookItem {
 
 messageRoutes.post('/event/:slug/messages', async (context) => {
   const auth = await guestAuth(context, true);
+  const trustedIp = clientIp(context);
+  const ipScopeDigest = await guestMessageIpScopeDigest(context.env, auth.event.id, trustedIp);
+  if (!(await context.env.GUEST_MESSAGE_RATE_LIMIT.limit({ key: ipScopeDigest })).success) {
+    context.header('Retry-After', '60');
+    throw new ApiError('RATE_LIMITED', 'Too many note attempts. Try again in a minute.', 429);
+  }
   const parsed = z.object({
-    idempotencyKey: z.string().trim().min(1).max(128).optional(),
+    idempotencyKey: z.string().trim().min(1).max(128),
     guestName: z.string().trim().max(80).nullish(),
     body: z.string().trim().min(1).max(500),
   }).safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Write a note with 1 to 500 characters.', 422);
   const now = new Date().toISOString();
-  const created = await new MessagesRepository(context.env.DB).create({
-    id: crypto.randomUUID(),
-    eventId: auth.event.id,
-    guestSessionId: auth.session.id,
-    guestName: parsed.data.guestName || null,
-    body: parsed.data.body,
-    moderationStatus: auth.event.moderationRequired ? 'pending' : 'approved',
-    idempotencyKey: parsed.data.idempotencyKey ?? null,
-    createdAt: now,
-  });
+  const requestHmac = await guestMessagePayloadHmac(
+    context.env,
+    parsed.data.guestName || null,
+    parsed.data.body,
+  );
+  const sessionScopeDigest = await guestMessageSessionScopeDigest(
+    context.env,
+    auth.event.id,
+    auth.session.id,
+  );
+  const windowStartedAt = new Date(
+    Math.floor(Date.parse(now) / GUEST_NOTE_WINDOW_MS) * GUEST_NOTE_WINDOW_MS,
+  ).toISOString();
+  let created;
+  try {
+    created = await new MessagesRepository(context.env.DB).createBounded({
+      id: crypto.randomUUID(),
+      eventId: auth.event.id,
+      guestSessionId: auth.session.id,
+      guestName: parsed.data.guestName || null,
+      body: parsed.data.body,
+      idempotencyKey: parsed.data.idempotencyKey,
+      createdAt: now,
+      sessionScopeDigest,
+      ipScopeDigest,
+      windowStartedAt,
+      requestHmac,
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'RATE_LIMITED') {
+      const retryAfter = Math.max(1, Math.ceil(
+        (Date.parse(windowStartedAt) + GUEST_NOTE_WINDOW_MS - Date.parse(now)) / 1_000,
+      ));
+      context.header('Retry-After', String(retryAfter));
+    }
+    throw error;
+  }
   const item = guestMessageItem(created.message);
   return context.json({
     data: {
@@ -249,23 +293,38 @@ messageRoutes.get('/manage/events/:eventId/guestbook', async (context) => {
 messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (context) => {
   const auth = await requireManager(context, { write: true });
   const parsed = z.object({
-    action: z.enum(['approve', 'reject', 'delete']),
-    expectedStatus: z.enum(['pending', 'approved', 'rejected']).default('pending'),
+    action: z.enum(['approve', 'reject', 'delete', 'restore', 'purge']),
+    expectedState: z.enum(['pending', 'approved', 'rejected', 'deleted']).optional(),
+    expectedStatus: z.enum(['pending', 'approved', 'rejected']).optional(),
   }).safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Choose a valid note action.', 422);
+  const expectedState = parsed.data.expectedState ?? parsed.data.expectedStatus;
+  if (!expectedState || (parsed.data.expectedState && parsed.data.expectedStatus
+    && parsed.data.expectedState !== parsed.data.expectedStatus)) {
+    throw new ApiError('VALIDATION_FAILED', 'Use one matching expected note state.', 422);
+  }
   const repository = new MessagesRepository(context.env.DB);
   const current = await repository.getById(context.req.param('messageId'));
   if (!current || current.eventId !== auth.event.id) {
     throw new ApiError('RESOURCE_FORBIDDEN', 'This note belongs to a different event.', 403);
   }
-  const message = parsed.data.action === 'delete'
-    ? await repository.delete(current.id, new Date().toISOString())
-    : await repository.moderate(
+  if (parsed.data.action === 'purge') {
+    const purged = await repository.purgeDeleted(
       current.id,
-      parsed.data.expectedStatus,
-      parsed.data.action === 'approve' ? 'approved' : 'rejected',
+      auth.event.id,
+      expectedState as GuestMessageState,
+      await guestMessagePayloadHmac(context.env, current.guestName, current.body),
       new Date().toISOString(),
     );
+    return context.json({ data: { purged }, requestId: context.get('requestId') });
+  }
+  const message = await repository.changeState(
+    current.id,
+    auth.event.id,
+    expectedState as GuestMessageState,
+    parsed.data.action as GuestMessageStateAction,
+    new Date().toISOString(),
+  );
   const item = await new GuestbookRepository(context.env.DB).noteItemById(message.id);
   if (!item) throw new Error('Updated note projection was not found.');
   return context.json({ data: { item }, requestId: context.get('requestId') });

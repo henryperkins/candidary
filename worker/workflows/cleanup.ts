@@ -4,6 +4,7 @@ import {
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_PURGE_FENCES_PER_PASS,
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
+  GUEST_NOTE_WINDOW_MS,
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import type { AppEnv } from '../env';
@@ -199,6 +200,35 @@ async function sweepRsvpScratch(
     sessions: results[0]?.meta.changes ?? 0,
     rateLimits: results[1]?.meta.changes ?? 0,
   };
+}
+
+// Guest-message quota rows are scratch; purge receipts are deliberately not.
+// Each statement has a hard page bound and the pass cap prevents one scheduled
+// invocation from turning a pathological backlog into an unbounded delete.
+const GUEST_MESSAGE_SCRATCH_BATCH = 100;
+const GUEST_MESSAGE_SCRATCH_MAX_PASSES = 50;
+
+export async function cleanupGuestMessageRateEvents(
+  env: AppEnv,
+  now = new Date(),
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - GUEST_NOTE_WINDOW_MS).toISOString();
+  let total = 0;
+  for (let pass = 0; pass < GUEST_MESSAGE_SCRATCH_MAX_PASSES; pass += 1) {
+    const deleted = await env.DB.prepare(`
+      DELETE FROM guest_message_rate_events
+      WHERE rowid IN (
+        SELECT rowid FROM guest_message_rate_events
+        WHERE window_started_at < ?
+        ORDER BY window_started_at, created_at, id
+        LIMIT ?
+      )
+    `).bind(cutoff, GUEST_MESSAGE_SCRATCH_BATCH).run();
+    const changes = deleted.meta.changes ?? 0;
+    total += changes;
+    if (changes < GUEST_MESSAGE_SCRATCH_BATCH) break;
+  }
+  return total;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1782,6 +1812,7 @@ export async function resumeDeletedEventPurges(
 export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {
   await cleanupAuthScratch(env, now);
   await cleanupRsvpScratch(env, now);
+  await cleanupGuestMessageRateEvents(env, now);
   await cleanupExpiredReservations(env, now);
   await cleanupExpiredExports(env, now);
   // Global before per-instance recovery: a job whose exact legacy source is no

@@ -1,20 +1,427 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { GUEST_MESSAGE_PAGE_SIZE } from '../../shared/constants';
+import { GUEST_MESSAGE_PAGE_SIZE, MAX_EVENT_GUEST_NOTES } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { encodeGuestbookCursor } from '../../worker/http/guestbook-cursor';
 import {
   eventAccess,
+  batchD1Statements,
   resetDatabase,
   secondGuest,
   testEnv,
   uploadPending,
+  withGuestMessageRateLimit,
   writeHeaders,
 } from './helpers';
 
 beforeEach(resetDatabase);
+afterEach(() => vi.useRealTimers());
 
 describe('guest notes and captions', () => {
+  it('refuses at the event-and-trusted-IP edge boundary after auth but before body parsing', async () => {
+    const access = await eventAccess();
+    const edge = withGuestMessageRateLimit(() => false);
+
+    const response = await createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.42',
+        'X-Forwarded-For': '198.51.100.200',
+      },
+      body: 'not json at all',
+    }, edge.env);
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('60');
+    expect(await response.json<any>()).toMatchObject({ code: 'RATE_LIMITED' });
+    expect(edge.keys).toHaveLength(1);
+    expect(edge.keys[0]).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(edge.keys[0]).not.toContain('203.0.113.42');
+    expect(edge.keys[0]).not.toContain('198.51.100.200');
+    expect(await testEnv.DB.prepare('SELECT COUNT(*) AS count FROM guest_message_rate_events')
+      .first('count')).toBe(0);
+  });
+
+  it('requires and normalizes the bounded idempotency key, body, and optional name', async () => {
+    const access = await eventAccess();
+    const path = `/api/event/${access.event.slug}/messages`;
+    const send = (payload: unknown) => createApp().request(path, {
+      method: 'POST',
+      headers: { ...writeHeaders(access.guest), 'CF-Connecting-IP': '203.0.113.43' },
+      body: JSON.stringify(payload),
+    }, testEnv);
+
+    for (const payload of [
+      { body: 'Missing key.', guestName: null },
+      { idempotencyKey: '   ', body: 'Blank key.', guestName: null },
+      { idempotencyKey: 'k'.repeat(129), body: 'Long key.', guestName: null },
+      { idempotencyKey: 'blank-body', body: '   ', guestName: null },
+      { idempotencyKey: 'long-body', body: 'b'.repeat(501), guestName: null },
+      { idempotencyKey: 'long-name', body: 'Hello.', guestName: 'n'.repeat(81) },
+    ]) {
+      const response = await send(payload);
+      expect(response.status).toBe(422);
+      expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    }
+
+    const normalized = await send({
+      idempotencyKey: '  normalized-key  ',
+      guestName: '   ',
+      body: '  Safely trimmed.  ',
+    });
+    expect(normalized.status).toBe(201);
+    expect((await normalized.json<any>()).data.item).toMatchObject({
+      guestName: null,
+      body: 'Safely trimmed.',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT idempotency_key, guest_name, body FROM guest_messages WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({
+      idempotency_key: 'normalized-key',
+      guest_name: null,
+      body: 'Safely trimmed.',
+    });
+  });
+
+  it('admits five new notes per session window and resets exactly at the fixed boundary', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-08-12T12:00:01.000Z'));
+    const access = await eventAccess();
+    const send = (key: string) => createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.50',
+      },
+      body: JSON.stringify({ idempotencyKey: key, guestName: 'Avery', body: `Note ${key}.` }),
+    }, testEnv);
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      expect((await send(`session-${attempt}`)).status).toBe(201);
+    }
+    const refused = await send('session-6');
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('Retry-After')).toBe('899');
+    expect((await refused.json<any>()).code).toBe('RATE_LIMITED');
+
+    vi.setSystemTime(new Date('2026-08-12T12:15:00.000Z'));
+    expect((await send('session-next-window')).status).toBe(201);
+    const windows = await testEnv.DB.prepare(`
+      SELECT window_started_at, COUNT(*) AS count
+      FROM guest_message_rate_events WHERE event_id = ?
+      GROUP BY window_started_at ORDER BY window_started_at
+    `).bind(access.event.id).all<{ window_started_at: string; count: number }>();
+    expect(windows.results).toEqual([
+      { window_started_at: '2026-08-12T12:00:00.000Z', count: 5 },
+      { window_started_at: '2026-08-12T12:15:00.000Z', count: 1 },
+    ]);
+  });
+
+  it('keeps the 120-note trusted-IP budget across guest-session re-entry', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-08-12T12:05:00.000Z'));
+    const access = await eventAccess();
+    const ip = '203.0.113.51';
+    const send = (
+      guest: { cookie: string; csrf: string },
+      key: string,
+    ) => createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: { ...writeHeaders(guest), 'CF-Connecting-IP': ip },
+      body: JSON.stringify({ idempotencyKey: key, guestName: null, body: `Note ${key}.` }),
+    }, testEnv);
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      expect((await send(access.guest, `first-session-${attempt}`)).status).toBe(201);
+    }
+    const storedScope = await testEnv.DB.prepare(`
+      SELECT ip_scope_digest, window_started_at FROM guest_message_rate_events
+      WHERE event_id = ? LIMIT 1
+    `).bind(access.event.id).first<{ ip_scope_digest: string; window_started_at: string }>();
+    if (!storedScope) throw new Error('Expected a stored trusted-IP scope.');
+    expect(storedScope.ip_scope_digest).not.toContain(ip);
+    await testEnv.DB.batch(Array.from({ length: 115 }, (_, index) => testEnv.DB.prepare(`
+      INSERT INTO guest_message_rate_events (
+        id, event_id, session_scope_digest, ip_scope_digest, window_started_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      crypto.randomUUID(), access.event.id, `other-session-${index}`,
+      storedScope.ip_scope_digest, storedScope.window_started_at,
+      '2026-08-12T12:05:00.000Z',
+    )));
+
+    const reentered = await secondGuest(access.eventLink);
+    const refused = await send(reentered, 'reentered-session');
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('Retry-After')).toBe('600');
+    expect((await refused.json<any>()).code).toBe('RATE_LIMITED');
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_message_rate_events
+      WHERE event_id = ? AND ip_scope_digest = ? AND window_started_at = ?
+    `).bind(
+      access.event.id, storedScope.ip_scope_digest, storedScope.window_started_at,
+    ).first('count')).toBe(120);
+  });
+
+  it('allows reads and exact replays after photo intake closes but refuses genuinely new notes', async () => {
+    const access = await eventAccess();
+    const path = `/api/event/${access.event.slug}/messages`;
+    const send = (key: string, body: string) => createApp().request(path, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.52',
+      },
+      body: JSON.stringify({ idempotencyKey: key, guestName: 'Avery', body }),
+    }, testEnv);
+
+    expect((await send('phase-replay', 'Created while open.')).status).toBe(201);
+    await testEnv.DB.prepare(`
+      UPDATE events SET uploads_enabled = 0, photos_open_from = NULL WHERE id = ?
+    `).bind(access.event.id).run();
+
+    expect((await send('phase-replay', 'Created while open.')).status).toBe(200);
+    const changed = await send('phase-replay', 'Changed after closing.');
+    expect(changed.status).toBe(409);
+    expect((await changed.json<any>()).code).toBe('MESSAGE_SUBMISSION_CONFLICT');
+    const refused = await send('phase-new', 'A genuinely new note.');
+    expect(refused.status).toBe(409);
+    expect((await refused.json<any>()).code).toBe('EVENT_PHASE_CONFLICT');
+
+    const read = await createApp().request(`${path}?contract=2`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(read.status).toBe(200);
+    expect((await read.json<any>()).data.ownUnshared).toEqual([
+      expect.objectContaining({ body: 'Created while open.' }),
+    ]);
+  });
+
+  it('keeps the phase predicate inside the authoritative D1 creation batch', async () => {
+    const access = await eventAccess();
+    let raced = false;
+    const db = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!raced) {
+              raced = true;
+              await target.prepare(`
+                UPDATE events SET uploads_enabled = 0, photos_open_from = NULL WHERE id = ?
+              `).bind(access.event.id).run();
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const env = Object.create(testEnv) as typeof testEnv;
+    Object.defineProperty(env, 'DB', { value: db });
+
+    const response = await createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.53',
+      },
+      body: JSON.stringify({
+        idempotencyKey: 'phase-race', guestName: null, body: 'The pause wins.',
+      }),
+    }, env);
+
+    expect(raced).toBe(true);
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).code).toBe('EVENT_PHASE_CONFLICT');
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_messages WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_message_rate_events WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(0);
+  });
+
+  it('counts soft-deleted rows toward the 1,000-note retained event cap', async () => {
+    const access = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions
+      WHERE event_id = ? AND role = 'guest' AND revoked_at IS NULL
+      ORDER BY created_at DESC LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    if (!sessionId) throw new Error('Expected a guest session fixture.');
+    await batchD1Statements(testEnv.DB, Array.from({ length: MAX_EVENT_GUEST_NOTES }, (_, index) => (
+      testEnv.DB.prepare(`
+        INSERT INTO guest_messages (
+          id, event_id, guest_session_id, guest_name, body, moderation_status,
+          idempotency_key, created_at, deleted_at
+        ) VALUES (?, ?, ?, NULL, ?, 'rejected', ?, ?, ?)
+      `).bind(
+        crypto.randomUUID(), access.event.id, sessionId, `Retained ${index}`,
+        `retained-${index}`, new Date(Date.UTC(2026, 7, 12, 0, 0, 0, index)).toISOString(),
+        index % 2 === 0 ? '2026-08-12T01:00:00.000Z' : null,
+      )
+    )));
+
+    const response = await createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.54',
+      },
+      body: JSON.stringify({
+        idempotencyKey: 'over-event-cap', guestName: null, body: 'One note too many.',
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).code).toBe('MESSAGE_EVENT_LIMIT');
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_messages WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(MAX_EVENT_GUEST_NOTES);
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_message_rate_events WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(0);
+  });
+
+  it('state-guards approve, reject, delete, and restore with compatible expected-state fields', async () => {
+    const access = await eventAccess();
+    const created = await createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        idempotencyKey: 'state-actions', guestName: 'Avery', body: 'Guard every transition.',
+      }),
+    }, testEnv);
+    const id = (await created.json<any>()).data.item.id as string;
+    const patch = (payload: unknown) => createApp().request(
+      `/api/manage/events/${access.event.id}/messages/${id}`,
+      { method: 'PATCH', headers: writeHeaders(access.manager), body: JSON.stringify(payload) },
+      testEnv,
+    );
+
+    const approved = await patch({ action: 'approve', expectedState: 'pending' });
+    expect(approved.status).toBe(200);
+    expect((await approved.json<any>()).data.item).toMatchObject({ state: 'approved' });
+
+    const stale = await patch({ action: 'reject', expectedState: 'pending' });
+    expect(stale.status).toBe(409);
+    expect((await stale.json<any>()).code).toBe('MESSAGE_STATE_CONFLICT');
+
+    const rejectedCompat = await patch({ action: 'reject', expectedStatus: 'approved' });
+    expect(rejectedCompat.status).toBe(200);
+    expect((await rejectedCompat.json<any>()).data.item).toMatchObject({ state: 'rejected' });
+
+    const contradictory = await patch({
+      action: 'delete', expectedState: 'rejected', expectedStatus: 'approved',
+    });
+    expect(contradictory.status).toBe(422);
+    expect((await contradictory.json<any>()).code).toBe('VALIDATION_FAILED');
+
+    const deletedCompat = await patch({ action: 'delete', expectedStatus: 'rejected' });
+    expect(deletedCompat.status).toBe(200);
+    expect((await deletedCompat.json<any>()).data.item).toMatchObject({
+      state: 'deleted', visibility: 'host_only',
+    });
+
+    const restored = await patch({ action: 'restore', expectedState: 'deleted' });
+    expect(restored.status).toBe(200);
+    expect((await restored.json<any>()).data.item).toMatchObject({
+      state: 'rejected', visibility: 'author_only',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT moderation_status, approved_at, deleted_at FROM guest_messages WHERE id = ?
+    `).bind(id).first()).toEqual({
+      moderation_status: 'rejected', approved_at: null, deleted_at: null,
+    });
+  });
+
+  it('hard-deletes through a minimal tombstone and refuses every stale replay without charging', async () => {
+    const access = await eventAccess();
+    const path = `/api/event/${access.event.slug}/messages`;
+    const submit = (body: string) => createApp().request(path, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.55',
+      },
+      body: JSON.stringify({ idempotencyKey: 'purged-note', guestName: 'Avery', body }),
+    }, testEnv);
+    const created = await submit('Remove this forever.');
+    const item = (await created.json<any>()).data.item;
+    const mutate = (payload: unknown) => createApp().request(
+      `/api/manage/events/${access.event.id}/messages/${item.id}`,
+      { method: 'PATCH', headers: writeHeaders(access.manager), body: JSON.stringify(payload) },
+      testEnv,
+    );
+    expect((await mutate({ action: 'delete', expectedState: 'pending' })).status).toBe(200);
+
+    const purged = await mutate({ action: 'purge', expectedState: 'deleted' });
+    expect(purged.status).toBe(200);
+    expect((await purged.json<any>()).data).toEqual({
+      purged: { source: 'guest_note', id: item.id },
+    });
+    expect(await testEnv.DB.prepare('SELECT id FROM guest_messages WHERE id = ?')
+      .bind(item.id).first()).toBeNull();
+    const receipt = await testEnv.DB.prepare(`
+      SELECT event_id, guest_session_id, idempotency_key, request_hmac, purged_at
+      FROM guest_message_purge_receipts WHERE event_id = ?
+    `).bind(access.event.id).first<any>();
+    expect(receipt).toMatchObject({
+      event_id: access.event.id,
+      idempotency_key: 'purged-note',
+      request_hmac: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+      purged_at: expect.any(String),
+    });
+    expect(receipt.guest_session_id).toEqual(expect.any(String));
+
+    const same = await submit('Remove this forever.');
+    expect(same.status).toBe(410);
+    expect((await same.json<any>()).code).toBe('MESSAGE_PURGED');
+    const changed = await submit('Changed stale content.');
+    expect(changed.status).toBe(409);
+    expect((await changed.json<any>()).code).toBe('MESSAGE_SUBMISSION_CONFLICT');
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_message_rate_events WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_messages WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(0);
+  });
+
+  it('rolls back the purge receipt when the guarded hard delete fails', async () => {
+    const access = await eventAccess();
+    const created = await createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST', headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        idempotencyKey: 'atomic-purge', guestName: null, body: 'Keep me if deletion fails.',
+      }),
+    }, testEnv);
+    const id = (await created.json<any>()).data.item.id as string;
+    const mutate = (payload: unknown) => createApp().request(
+      `/api/manage/events/${access.event.id}/messages/${id}`,
+      { method: 'PATCH', headers: writeHeaders(access.manager), body: JSON.stringify(payload) },
+      testEnv,
+    );
+    expect((await mutate({ action: 'delete', expectedState: 'pending' })).status).toBe(200);
+    await testEnv.DB.prepare(`
+      CREATE TRIGGER task3_refuse_message_purge
+      BEFORE DELETE ON guest_messages
+      BEGIN
+        SELECT RAISE(ABORT, 'forced purge failure');
+      END;
+    `).run();
+
+    const failed = await mutate({ action: 'purge', expectedState: 'deleted' });
+    expect(failed.status).toBe(500);
+    expect(await testEnv.DB.prepare('SELECT deleted_at FROM guest_messages WHERE id = ?')
+      .bind(id).first('deleted_at')).toEqual(expect.any(String));
+    expect(await testEnv.DB.prepare(`
+      SELECT COUNT(*) AS count FROM guest_message_purge_receipts WHERE event_id = ?
+    `).bind(access.event.id).first('count')).toBe(0);
+  });
+
   it('returns independently paginated shared and private streams for contract 2', async () => {
     const access = await eventAccess();
     const sessionId = await testEnv.DB.prepare(`
@@ -352,7 +759,9 @@ describe('guest notes and captions', () => {
     const other = await secondGuest(access.eventLink);
     const created = await createApp().request(`/api/event/${access.event.slug}/messages`, {
       method: 'POST', headers: writeHeaders(access.guest),
-      body: JSON.stringify({ guestName: 'Avery', body: 'What a perfect evening.' }),
+      body: JSON.stringify({
+        idempotencyKey: 'pending-private-note', guestName: 'Avery', body: 'What a perfect evening.',
+      }),
     }, testEnv);
     const message = (await created.json<any>()).data.message;
     expect(message.moderationStatus).toBe('pending');
@@ -390,7 +799,11 @@ describe('guest notes and captions', () => {
     expect(published.status).toBe(200);
     const note = await createApp().request(`/api/event/${access.event.slug}/messages`, {
       method: 'POST', headers: writeHeaders(access.guest),
-      body: JSON.stringify({ guestName: 'Avery', body: 'And the dance floor was perfect.' }),
+      body: JSON.stringify({
+        idempotencyKey: 'caption-combination-note',
+        guestName: 'Avery',
+        body: 'And the dance floor was perfect.',
+      }),
     }, testEnv);
     const noteId = (await note.json<any>()).data.message.id;
     await createApp().request(`/api/manage/events/${access.event.id}/messages/${noteId}`, {
@@ -439,7 +852,9 @@ describe('guest notes and captions', () => {
     const created = await createApp().request(`/api/event/${second.event.slug}/messages`, {
       method: 'POST',
       headers: writeHeaders(second.guest),
-      body: JSON.stringify({ guestName: 'Avery', body: 'A note for the other event.' }),
+      body: JSON.stringify({
+        idempotencyKey: 'other-event-note', guestName: 'Avery', body: 'A note for the other event.',
+      }),
     }, testEnv);
     const messageId = (await created.json<any>()).data.message.id;
 
@@ -459,6 +874,7 @@ describe('guest notes and captions', () => {
 
   it('replays one note idempotently and rejects a changed payload under the same key', async () => {
     const access = await eventAccess();
+    const edge = withGuestMessageRateLimit();
     const path = `/api/event/${access.event.slug}/messages`;
     const request = (body: string) => createApp().request(path, {
       method: 'POST',
@@ -468,7 +884,7 @@ describe('guest notes and captions', () => {
         guestName: 'Avery',
         body,
       }),
-    }, testEnv);
+    }, edge.env);
 
     const first = await request('The first and only note.');
     const replay = await request('The first and only note.');
@@ -481,12 +897,18 @@ describe('guest notes and captions', () => {
     expect(await testEnv.DB.prepare(
       'SELECT COUNT(*) AS count FROM guest_messages WHERE event_id = ?',
     ).bind(access.event.id).first('count')).toBe(1);
+    expect(await testEnv.DB.prepare(
+      'SELECT COUNT(*) AS count FROM guest_message_rate_events WHERE event_id = ?',
+    ).bind(access.event.id).first('count')).toBe(1);
 
     const conflict = await request('Different words under the same key.');
     expect(conflict.status).toBe(409);
     const conflictBody = await conflict.json<any>();
     expect(conflictBody.code).toBe('MESSAGE_SUBMISSION_CONFLICT');
     expect(conflictBody.message).toBe('This note changed after an earlier send attempt. Send it again.');
+    expect(await testEnv.DB.prepare(
+      'SELECT COUNT(*) AS count FROM guest_message_rate_events WHERE event_id = ?',
+    ).bind(access.event.id).first('count')).toBe(1);
   });
 
   it('returns a bounded chronological feed with an opaque earlier-page cursor', async () => {
