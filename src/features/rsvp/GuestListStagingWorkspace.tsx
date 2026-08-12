@@ -34,6 +34,20 @@ import { GuestListInvitationDetails, type PlusOneResponseDraft } from './GuestLi
 import { useGuestListDraft } from './useGuestListDraft';
 
 type Step = 'capture' | 'organize' | 'details' | 'review' | 'receipt';
+
+// The workspace signalled a step change only by swapping its `h3`, so on a phone — where the whole flow
+// is never in view — a host had no sense of how far in they were or how much was left. Cover Studio, a
+// shorter and lower-stakes flow, already prints its index; the longer one needs it more. The receipt is
+// the outcome rather than a step, so the counter covers the four steps a host actually works through.
+const WORKED_STEPS = ['capture', 'organize', 'details', 'review'] as const satisfies ReadonlyArray<Step>;
+
+const STEP_TITLES: Record<Step, string> = {
+  capture: 'Add guests',
+  organize: 'Organize invitations',
+  details: 'Invitation details',
+  review: 'Review guest list',
+  receipt: 'Guests added',
+};
 type ConflictState = 'changed' | 'archived' | 'missing';
 
 function rememberedId(ids: Map<string, string>, key: string): string {
@@ -542,11 +556,16 @@ export function GuestListStagingWorkspace({
   }
 
   const batch = draft.batch;
+  // -1 on the receipt, which is the outcome rather than one of the four worked steps.
+  const workedStepIndex = WORKED_STEPS.indexOf(step as (typeof WORKED_STEPS)[number]);
   return <section className="guest-list-workspace" aria-labelledby="guest-list-workspace-title">
     <div className="guest-list-workspace__heading">
-      <h3 id="guest-list-workspace-title" tabIndex={-1} ref={heading}>
-        {step === 'capture' ? 'Add guests' : step === 'organize' ? 'Organize invitations' : step === 'details' ? 'Invitation details' : step === 'review' ? 'Review guest list' : 'Guests added'}
-      </h3>
+      <div>
+        {workedStepIndex >= 0 && <p className="guest-list-workspace__step">
+          Step {workedStepIndex + 1} of {WORKED_STEPS.length}
+        </p>}
+        <h3 id="guest-list-workspace-title" tabIndex={-1} ref={heading}>{STEP_TITLES[step]}</h3>
+      </div>
       {step !== 'receipt' && <button type="button" className="text-button" disabled={committing} onClick={onClose}>Close</button>}
     </div>
     {error && <p className="guest-list-workspace__error" role="alert">{error}</p>}

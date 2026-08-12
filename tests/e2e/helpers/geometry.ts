@@ -40,12 +40,29 @@ export async function measureSeparation(first: Locator, second: Locator) {
 
 // Descendants whose painted box leaves the viewport sideways, named so a failure says which ones.
 // Rects ignore clipping, so this still reports content an `overflow: hidden` ancestor has swallowed.
+//
+// Content inside a declared horizontal scroller is exempt, and only that. A snap row of cover presets
+// or of RSVP total chips is *meant* to continue past the right edge, and its own scroll is how a host
+// reaches the rest of it. The bug this function exists for is content that leaves the viewport with no
+// way back, so the exemption is granted by `overflow-x: auto | scroll` on an ancestor and by nothing
+// else — `hidden` still fails, which is the case the original note was written about. The scroller's
+// own box is measured as before, and `measureDocument` still fails the moment any of it pushes the
+// page itself sideways.
 export async function measureViewportEscapes(locator: Locator) {
   return locator.evaluate((container) => {
     const viewportWidth = document.documentElement.clientWidth;
+    const insideScroller = (element: HTMLElement) => {
+      for (let node = element.parentElement; node && node !== container; node = node.parentElement) {
+        const overflowX = getComputedStyle(node).overflowX;
+        if (overflowX === 'auto' || overflowX === 'scroll') return true;
+      }
+      return false;
+    };
     return Array.from(container.querySelectorAll<HTMLElement>('*')).flatMap((element) => {
       const rect = element.getBoundingClientRect();
-      return rect.width > 0 && (rect.left < -1 || rect.right > viewportWidth + 1)
+      return rect.width > 0
+        && (rect.left < -1 || rect.right > viewportWidth + 1)
+        && !insideScroller(element)
         ? [{ selector: `${element.tagName.toLowerCase()}.${element.getAttribute('class') ?? ''}`, left: rect.left, right: rect.right }]
         : [];
     });
