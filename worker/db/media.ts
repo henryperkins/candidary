@@ -597,7 +597,7 @@ export class MediaRepository {
     expected: PublicationStatus,
     target: PublicationStatus,
     changedAt: string,
-  ): Promise<string[]> {
+  ): Promise<MediaRecord[]> {
     const firstIdSlot = 4;
     const idPlaceholders = ids
       .map((_, index) => `?${firstIdSlot + index}`)
@@ -636,7 +636,16 @@ export class MediaRepository {
         409,
       );
     }
-    return [...ids];
+    const selected = await this.db.prepare(`
+      SELECT * FROM media
+      WHERE event_id = ? AND id IN (${ids.map(() => '?').join(', ')})
+    `).bind(eventId, ...ids).all<MediaRow>();
+    const byId = new Map(selected.results.map((row) => [row.id, mapMedia(row)]));
+    return ids.map((id) => {
+      const media = byId.get(id);
+      if (!media) throw new Error('Bulk-updated media row was not found.');
+      return media;
+    });
   }
 
   async setPreviewObjectKey(id: string, previewObjectKey: string): Promise<MediaRecord> {

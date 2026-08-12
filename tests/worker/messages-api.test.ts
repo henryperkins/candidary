@@ -69,6 +69,17 @@ describe('guest notes and captions', () => {
     expect(data.ownUnsharedCount).toBe(1);
     expect(data.ownUnsharedNextCursor).toBeNull();
     expect(data.nextCursor).toEqual(expect.any(String));
+
+    const sharedContinuation = await createApp().request(
+      `/api/event/${access.event.slug}/messages?contract=2&cursor=${encodeURIComponent(data.nextCursor)}`,
+      { headers: { cookie: access.guest.cookie } },
+      testEnv,
+    );
+    expect(sharedContinuation.status).toBe(200);
+    const continued = (await sharedContinuation.json<any>()).data;
+    expect(continued.ownUnshared).toEqual([]);
+    expect(continued.ownUnsharedCount).toBe(1);
+    expect(continued.ownUnsharedNextCursor).toBeNull();
   });
 
   it('advances only the requested contract-2 stream', async () => {
@@ -127,7 +138,7 @@ describe('guest notes and captions', () => {
       ORDER BY created_at ASC LIMIT 1
     `).bind(access.event.id).first<string>('id');
     if (!sessionId) throw new Error('Expected the first guest session fixture.');
-    const sharedCursor = encodeGuestbookCursor({
+    const sharedCursor = await encodeGuestbookCursor({
       version: 2,
       audience: 'guest',
       stream: 'shared',
@@ -136,7 +147,7 @@ describe('guest notes and captions', () => {
       createdAt: '2026-09-19T20:00:00.000Z',
       sourceRank: 0,
       id: '70000000-0000-4000-8000-000000000001',
-    });
+    }, testEnv.SESSION_HMAC_KEY);
     const requests = [
       createApp().request(
         `/api/event/${access.event.slug}/messages?contract=2&cursor=${encodeURIComponent(sharedCursor)}`,
@@ -317,7 +328,7 @@ describe('guest notes and captions', () => {
       });
     }
 
-    const wrongViewCursor = encodeGuestbookCursor({
+    const wrongViewCursor = await encodeGuestbookCursor({
       version: 2,
       audience: 'manager',
       eventId: access.event.id,
@@ -326,7 +337,7 @@ describe('guest notes and captions', () => {
       createdAt: '2026-09-19T20:00:00.000Z',
       sourceRank: 0,
       id: '80000000-0000-4000-8000-000000000002',
-    });
+    }, testEnv.SESSION_HMAC_KEY);
     const rejected = await createApp().request(
       `/api/manage/events/${access.event.id}/guestbook?view=hidden&source=guest_note&cursor=${encodeURIComponent(wrongViewCursor)}`,
       { headers: { cookie: access.manager.cookie } },

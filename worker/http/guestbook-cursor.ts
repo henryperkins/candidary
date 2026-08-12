@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
+import { constantTimeEqual, digestSecret } from '../security/crypto';
 
 const keySchema = z.object({
   createdAt: z.iso.datetime({ offset: true }),
@@ -13,7 +14,7 @@ const guestCursorSchema = keySchema.extend({
   audience: z.literal('guest'),
   stream: z.enum(['shared', 'own_unshared']),
   eventId: z.uuid(),
-  sessionId: z.string().min(1).max(128),
+  sessionBinding: z.string().min(1).max(128),
 }).strict();
 
 const managerCursorSchema = keySchema.extend({
@@ -27,40 +28,78 @@ const managerCursorSchema = keySchema.extend({
 const cursorSchema = z.discriminatedUnion('audience', [guestCursorSchema, managerCursorSchema]);
 
 export type GuestbookCursor = z.infer<typeof cursorSchema>;
+export type GuestbookCursorInput =
+  | Omit<z.infer<typeof guestCursorSchema>, 'sessionBinding'> & { sessionId: string }
+  | z.infer<typeof managerCursorSchema>;
 export type GuestbookCursorKey = Pick<GuestbookCursor, 'createdAt' | 'sourceRank' | 'id'>;
 export type GuestbookManagerView = z.infer<typeof managerCursorSchema>['view'];
 export type GuestbookManagerSource = z.infer<typeof managerCursorSchema>['source'];
 
 export type GuestbookCursorBinding =
-  | Pick<z.infer<typeof guestCursorSchema>, 'audience' | 'stream' | 'eventId' | 'sessionId'>
+  | Pick<z.infer<typeof guestCursorSchema>, 'audience' | 'stream' | 'eventId'> & { sessionId: string }
   | Pick<z.infer<typeof managerCursorSchema>, 'audience' | 'eventId' | 'view' | 'source'>;
 
 const MAX_CURSOR_LENGTH = 512;
-const BASE64URL = /^[A-Za-z0-9_-]+$/u;
+const SIGNED_CURSOR = /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/u;
+const SESSION_BINDING_DOMAIN = 'guestbook-cursor-session:v2:';
+const CURSOR_MAC_DOMAIN = 'guestbook-cursor-payload:v2:';
 
 function invalidCursor(): ApiError {
   return new ApiError('VALIDATION_FAILED', 'The guestbook page cursor is invalid.', 422);
 }
 
-export function encodeGuestbookCursor(cursor: GuestbookCursor): string {
+function encodePayload(cursor: GuestbookCursor): string {
   return btoa(JSON.stringify(cursor))
     .replaceAll('+', '-')
     .replaceAll('/', '_')
     .replace(/=+$/u, '');
 }
 
-export function decodeGuestbookCursor(
+async function sessionBinding(sessionId: string, keyMaterial: string): Promise<string> {
+  return digestSecret(`${SESSION_BINDING_DOMAIN}${sessionId}`, keyMaterial);
+}
+
+export async function encodeGuestbookCursor(
+  input: GuestbookCursorInput,
+  keyMaterial: string,
+): Promise<string> {
+  let cursor: GuestbookCursor;
+  if (input.audience === 'guest') {
+    const { sessionId, ...wire } = input;
+    cursor = guestCursorSchema.parse({
+      ...wire,
+      sessionBinding: await sessionBinding(sessionId, keyMaterial),
+    });
+  } else {
+    cursor = managerCursorSchema.parse(input);
+  }
+  const payload = encodePayload(cursor);
+  const mac = await digestSecret(`${CURSOR_MAC_DOMAIN}${payload}`, keyMaterial);
+  return `${payload}.${mac}`;
+}
+
+export async function decodeGuestbookCursor(
   value: string,
   binding: GuestbookCursorBinding,
-): GuestbookCursor {
-  if (value.length > MAX_CURSOR_LENGTH || !BASE64URL.test(value)) throw invalidCursor();
+  keyMaterial: string,
+): Promise<GuestbookCursor> {
+  if (value.length > MAX_CURSOR_LENGTH) throw invalidCursor();
   try {
-    const normalized = value.replaceAll('-', '+').replaceAll('_', '/');
+    const match = SIGNED_CURSOR.exec(value);
+    if (!match) throw invalidCursor();
+    const [, payload, suppliedMac] = match;
+    if (!payload || !suppliedMac) throw invalidCursor();
+    const expectedMac = await digestSecret(`${CURSOR_MAC_DOMAIN}${payload}`, keyMaterial);
+    if (!constantTimeEqual(suppliedMac, expectedMac)) throw invalidCursor();
+    const normalized = payload.replaceAll('-', '+').replaceAll('_', '/');
     const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), '=');
     const cursor = cursorSchema.parse(JSON.parse(atob(padded)));
     if (cursor.audience !== binding.audience || cursor.eventId !== binding.eventId) throw invalidCursor();
     if (cursor.audience === 'guest' && binding.audience === 'guest') {
-      if (cursor.stream !== binding.stream || cursor.sessionId !== binding.sessionId) throw invalidCursor();
+      const expectedBinding = await sessionBinding(binding.sessionId, keyMaterial);
+      if (cursor.stream !== binding.stream || !constantTimeEqual(cursor.sessionBinding, expectedBinding)) {
+        throw invalidCursor();
+      }
     } else if (cursor.audience === 'manager' && binding.audience === 'manager') {
       if (cursor.view !== binding.view || cursor.source !== binding.source) throw invalidCursor();
     } else {

@@ -320,6 +320,14 @@ export class GuestbookRepository {
     return { ...page, count };
   }
 
+  async countGuestOwnUnshared(eventId: string, guestSessionId: string): Promise<number> {
+    return await this.db.prepare(`
+      WITH guestbook AS (${GUEST_PROJECTION})
+      SELECT COUNT(*) AS count FROM guestbook
+      WHERE guest_visibility = 'author_only' AND is_own = 1
+    `).bind(eventId, guestSessionId).first<number>('count') ?? 0;
+  }
+
   async summaryForManager(eventId: string): Promise<GuestbookSummary> {
     const row = await this.db.prepare(`
       WITH guestbook AS (${MANAGER_PROJECTION})

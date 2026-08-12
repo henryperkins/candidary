@@ -8,10 +8,29 @@ import { decodeMessageCursor, encodeMessageCursor } from '../../worker/http/mess
 
 const eventId = '11111111-1111-4111-8111-111111111111';
 const sessionId = '22222222-2222-4222-8222-222222222222';
+const sessionHmacKey = 'unit-test-session-hmac-key-with-at-least-32-bytes';
+
+function decodeBase64Url(value: string): Uint8Array {
+  const normalized = value.replaceAll('-', '+').replaceAll('_', '/');
+  const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function encodeBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+function tamperOneByte(segment: string): string {
+  const bytes = decodeBase64Url(segment);
+  bytes[0] = (bytes[0] ?? 0) ^ 1;
+  return encodeBase64Url(bytes);
+}
 
 describe('guestbook cursors', () => {
-  it('round-trips a version-2 guest cursor only for its event, session, and stream', () => {
-    const cursor = encodeGuestbookCursor({
+  it('round-trips a signed guest cursor without disclosing its raw session ID', async () => {
+    const cursor = await encodeGuestbookCursor({
       version: 2,
       audience: 'guest',
       stream: 'shared',
@@ -20,19 +39,34 @@ describe('guestbook cursors', () => {
       createdAt: '2026-09-19T20:00:00.000Z',
       sourceRank: 1,
       id: '33333333-3333-4333-8333-333333333333',
-    });
+    }, sessionHmacKey);
 
-    expect(decodeGuestbookCursor(cursor, {
-      audience: 'guest',
-      stream: 'shared',
-      eventId,
-      sessionId,
-    })).toEqual({
+    const [encodedPayload, signature, extra] = cursor.split('.');
+    expect(encodedPayload).toEqual(expect.any(String));
+    expect(signature).toEqual(expect.any(String));
+    expect(extra).toBeUndefined();
+    const decodedPayload = new TextDecoder().decode(decodeBase64Url(encodedPayload!));
+    expect(decodedPayload).not.toContain(sessionId);
+    expect(JSON.parse(decodedPayload)).toMatchObject({
       version: 2,
       audience: 'guest',
       stream: 'shared',
       eventId,
+      sessionBinding: expect.any(String),
+    });
+    expect(JSON.parse(decodedPayload)).not.toHaveProperty('sessionId');
+
+    await expect(decodeGuestbookCursor(cursor, {
+      audience: 'guest',
+      stream: 'shared',
+      eventId,
       sessionId,
+    }, sessionHmacKey)).resolves.toMatchObject({
+      version: 2,
+      audience: 'guest',
+      stream: 'shared',
+      eventId,
+      sessionBinding: expect.any(String),
       createdAt: '2026-09-19T20:00:00.000Z',
       sourceRank: 1,
       id: '33333333-3333-4333-8333-333333333333',
@@ -43,14 +77,14 @@ describe('guestbook cursors', () => {
       { audience: 'guest' as const, stream: 'shared' as const, eventId, sessionId: crypto.randomUUID() },
       { audience: 'guest' as const, stream: 'shared' as const, eventId: crypto.randomUUID(), sessionId },
     ]) {
-      expect(() => decodeGuestbookCursor(cursor, binding)).toThrowError(
+      await expect(decodeGuestbookCursor(cursor, binding, sessionHmacKey)).rejects.toMatchObject(
         expect.objectContaining({ code: 'VALIDATION_FAILED', status: 422 }),
       );
     }
   });
 
-  it('binds manager cursors to the event, view, and source filter', () => {
-    const cursor = encodeGuestbookCursor({
+  it('authenticates Manager cursors and binds event, view, and source', async () => {
+    const cursor = await encodeGuestbookCursor({
       version: 2,
       audience: 'manager',
       eventId,
@@ -59,35 +93,61 @@ describe('guestbook cursors', () => {
       createdAt: '2026-09-19T20:00:00.000Z',
       sourceRank: 1,
       id: '33333333-3333-4333-8333-333333333333',
-    });
+    }, sessionHmacKey);
 
-    expect(decodeGuestbookCursor(cursor, {
+    await expect(decodeGuestbookCursor(cursor, {
       audience: 'manager',
       eventId,
       view: 'needs-review',
       source: 'photo_caption',
-    })).toMatchObject({ version: 2, audience: 'manager', sourceRank: 1 });
-    expect(() => decodeGuestbookCursor(cursor, {
+    }, sessionHmacKey)).resolves.toMatchObject({ version: 2, audience: 'manager', sourceRank: 1 });
+    await expect(decodeGuestbookCursor(cursor, {
       audience: 'manager',
       eventId,
       view: 'shared',
       source: 'photo_caption',
-    })).toThrowError(expect.objectContaining({ code: 'VALIDATION_FAILED', status: 422 }));
-    expect(() => decodeGuestbookCursor(cursor, {
+    }, sessionHmacKey)).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 422 });
+    await expect(decodeGuestbookCursor(cursor, {
       audience: 'manager',
       eventId,
       view: 'needs-review',
       source: 'guest_note',
-    })).toThrowError(expect.objectContaining({ code: 'VALIDATION_FAILED', status: 422 }));
-    expect(() => decodeGuestbookCursor(cursor, {
+    }, sessionHmacKey)).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 422 });
+    await expect(decodeGuestbookCursor(cursor, {
       audience: 'manager',
       eventId: crypto.randomUUID(),
       view: 'needs-review',
       source: 'photo_caption',
-    })).toThrowError(expect.objectContaining({ code: 'VALIDATION_FAILED', status: 422 }));
+    }, sessionHmacKey)).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 422 });
   });
 
-  it('rejects malformed, oversized, and unsupported cursor payloads', () => {
+  it('rejects one-byte payload and signature tampering', async () => {
+    const cursor = await encodeGuestbookCursor({
+      version: 2,
+      audience: 'guest',
+      stream: 'shared',
+      eventId,
+      sessionId,
+      createdAt: '2026-09-19T20:00:00.000Z',
+      sourceRank: 1,
+      id: '33333333-3333-4333-8333-333333333333',
+    }, sessionHmacKey);
+    const [payload, signature] = cursor.split('.') as [string, string];
+    const binding = { audience: 'guest' as const, stream: 'shared' as const, eventId, sessionId };
+
+    await expect(decodeGuestbookCursor(
+      `${tamperOneByte(payload)}.${signature}`,
+      binding,
+      sessionHmacKey,
+    )).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 422 });
+    await expect(decodeGuestbookCursor(
+      `${payload}.${tamperOneByte(signature)}`,
+      binding,
+      sessionHmacKey,
+    )).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 422 });
+  });
+
+  it('rejects malformed, oversized, unsigned, and unsupported cursor payloads', async () => {
     const binding = { audience: 'guest' as const, stream: 'shared' as const, eventId, sessionId };
     const encoded = (value: unknown) => btoa(JSON.stringify(value))
       .replaceAll('+', '-')
@@ -111,9 +171,9 @@ describe('guestbook cursors', () => {
     ];
 
     for (const cursor of invalid) {
-      expect(() => decodeGuestbookCursor(cursor, binding)).toThrowError(
-        expect.objectContaining({ code: 'VALIDATION_FAILED', status: 422 }),
-      );
+      await expect(decodeGuestbookCursor(cursor, binding, sessionHmacKey)).rejects.toMatchObject({
+        code: 'VALIDATION_FAILED', status: 422,
+      });
     }
   });
 

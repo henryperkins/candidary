@@ -374,7 +374,10 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
     publicationTarget(parsed.data.action),
     new Date().toISOString(),
   );
-  return context.json({ data: { changed }, requestId: context.get('requestId') });
+  return context.json({
+    data: { changed: changed.map(managerMediaView) },
+    requestId: context.get('requestId'),
+  });
 });
 
 // Only the management link rotates as a link now. The guest side is reached

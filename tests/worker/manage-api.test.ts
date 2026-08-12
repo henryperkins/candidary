@@ -558,7 +558,54 @@ describe('manager settings and private photo intake', () => {
     const rows = await env.DB.prepare('SELECT id, publication_status FROM media ORDER BY id').all<any>();
     const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.publication_status]));
     expect(states).toMatchObject({ [first.id]: 'published', [second.id]: 'published', [untouched.id]: 'unpublished' });
-    expect((await response.json<any>()).data.changed).toEqual([first.id, second.id]);
+    expect((await response.json<any>()).data.changed.map((item: any) => item.id)).toEqual([first.id, second.id]);
+  });
+
+  it('returns only ManagerMediaView fields for every bulk moderation result', async () => {
+    const access = await eventAccess();
+    const first = await uploadPending(access, 'bulk-safe-1', 'First caption');
+    const second = await uploadPending(access, 'bulk-safe-2', 'Second caption');
+    await new MediaRepository(testEnv.DB).setPreviewObjectKey(
+      first.id,
+      `events/${access.event.id}/previews/${first.id}.webp`,
+    );
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
+      method: 'POST',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        ids: [first.id, second.id],
+        action: 'publish',
+        expectedStatus: 'unpublished',
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(200);
+    const changed = (await response.json<any>()).data.changed;
+    const expectedKeys = [
+      'caption',
+      'createdAt',
+      'guestName',
+      'height',
+      'id',
+      'originalFilename',
+      'previewAvailable',
+      'publicationStatus',
+      'uploadState',
+      'width',
+    ];
+    expect(changed).toHaveLength(2);
+    for (const item of changed) {
+      expect(Object.keys(item).sort()).toEqual(expectedKeys);
+    }
+    expect(changed.map((item: any) => item.id)).toEqual([first.id, second.id]);
+    expect(changed).toEqual([
+      expect.objectContaining({ publicationStatus: 'published', previewAvailable: true }),
+      expect.objectContaining({ publicationStatus: 'published', previewAvailable: false }),
+    ]);
+    expect(JSON.stringify(changed)).not.toMatch(
+      /objectKey|previewObjectKey|uploaderSessionId|idempotencyKey|byteSize|mimeType|reservationExpiresAt/u,
+    );
   });
 
   it('supports the maximum bulk selection through D1 in request order', async () => {
@@ -581,7 +628,7 @@ describe('manager settings and private photo intake', () => {
     }, testEnv);
 
     expect(response.status).toBe(200);
-    expect((await response.json<any>()).data.changed).toEqual(selectedIds);
+    expect((await response.json<any>()).data.changed.map((item: any) => item.id)).toEqual(selectedIds);
     const rows = await env.DB.prepare(`
       SELECT id, publication_status
       FROM media

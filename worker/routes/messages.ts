@@ -105,20 +105,20 @@ messageRoutes.get('/event/:slug/messages', async (context) => {
     const repository = new GuestbookRepository(context.env.DB);
     const sharedCursor = rawCursor === undefined
       ? undefined
-      : decodeGuestbookCursor(rawCursor, {
+      : await decodeGuestbookCursor(rawCursor, {
         audience: 'guest',
         stream: 'shared',
         eventId: auth.event.id,
         sessionId: auth.session.id,
-      });
+      }, context.env.SESSION_HMAC_KEY);
     const ownCursor = rawOwnCursor === undefined
       ? undefined
-      : decodeGuestbookCursor(rawOwnCursor, {
+      : await decodeGuestbookCursor(rawOwnCursor, {
         audience: 'guest',
         stream: 'own_unshared',
         eventId: auth.event.id,
         sessionId: auth.session.id,
-      });
+      }, context.env.SESSION_HMAC_KEY);
     const advancingShared = rawCursor !== undefined;
     const advancingOwn = rawOwnCursor !== undefined;
     const [shared, own] = await Promise.all([
@@ -126,33 +126,34 @@ messageRoutes.get('/event/:slug/messages', async (context) => {
         ? Promise.resolve({ items: [], nextCursor: null })
         : repository.listGuestShared(auth.event.id, auth.session.id, sharedCursor),
       advancingShared
-        ? Promise.resolve({ items: [], count: 0, nextCursor: null })
+        ? repository.countGuestOwnUnshared(auth.event.id, auth.session.id)
+          .then((count) => ({ items: [], count, nextCursor: null }))
         : repository.listGuestOwnUnshared(auth.event.id, auth.session.id, ownCursor),
     ]);
     return context.json({
       data: {
         items: shared.items,
         nextCursor: shared.nextCursor
-          ? encodeGuestbookCursor({
+          ? await encodeGuestbookCursor({
             version: 2,
             audience: 'guest',
             stream: 'shared',
             eventId: auth.event.id,
             sessionId: auth.session.id,
             ...shared.nextCursor,
-          })
+          }, context.env.SESSION_HMAC_KEY)
           : null,
         ownUnshared: own.items,
         ownUnsharedCount: own.count,
         ownUnsharedNextCursor: own.nextCursor
-          ? encodeGuestbookCursor({
+          ? await encodeGuestbookCursor({
             version: 2,
             audience: 'guest',
             stream: 'own_unshared',
             eventId: auth.event.id,
             sessionId: auth.session.id,
             ...own.nextCursor,
-          })
+          }, context.env.SESSION_HMAC_KEY)
           : null,
       },
       requestId: context.get('requestId'),
@@ -210,12 +211,12 @@ messageRoutes.get('/manage/events/:eventId/guestbook', async (context) => {
   }
   const cursor = parsed.data.cursor === undefined
     ? undefined
-    : decodeGuestbookCursor(parsed.data.cursor, {
+    : await decodeGuestbookCursor(parsed.data.cursor, {
       audience: 'manager',
       eventId: auth.event.id,
       view: parsed.data.view,
       source: parsed.data.source,
-    });
+    }, context.env.SESSION_HMAC_KEY);
   const repository = new GuestbookRepository(context.env.DB);
   const [page, summary] = await Promise.all([
     repository.listForManager(auth.event.id, {
@@ -230,14 +231,14 @@ messageRoutes.get('/manage/events/:eventId/guestbook', async (context) => {
     data: {
       items: page.items,
       nextCursor: page.nextCursor
-        ? encodeGuestbookCursor({
+        ? await encodeGuestbookCursor({
           version: 2,
           audience: 'manager',
           eventId: auth.event.id,
           view: parsed.data.view,
           source: parsed.data.source,
           ...page.nextCursor,
-        })
+        }, context.env.SESSION_HMAC_KEY)
         : null,
       summary,
     },
