@@ -200,8 +200,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .settings-field input[type='date'],
 .settings-field input[type='time'] { width: auto; min-width: 0; }
 /* The time-zone field is an ordinary text input with a datalist, so it does not
-   share the WebKit date-control problem above and takes the full field width. */
-.create-field input[list] { width: 100%; min-width: 0; }
+   share the WebKit date-control problem above and takes the full field width.
+   Settings takes the same value through the same control, so it is named here too. */
+.create-field input[list],
+.settings-field input[list] { width: 100%; min-width: 0; }
 .create-field small { display: block; margin-top: 5px; color: var(--muted); font-size: .8rem; }
 .cover-field { position: relative; margin: 6px 0 28px; padding: 17px; display: flex; gap: 14px; align-items: center; border: 1px dashed var(--border); border-radius: 8px; }.cover-field > svg { flex: 0 0 auto; color: var(--denim); font-size: 1.5rem; }.cover-field div { flex: 1; }.cover-field p { margin: 2px 0 0; color: var(--muted); font-size: .8rem; }.cover-field .button { min-height: 40px; padding: 8px 13px; }
 /* The file input is visually hidden, so the whole cover control carries its focus ring instead. */
@@ -246,7 +248,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .photo-grid figure, .photo-grid figcaption, .photo-grid figcaption span, .contributions li > span, .fullscreen figure, .fullscreen figcaption { min-width: 0; overflow-wrap: anywhere; }
 /* Narrow first: the manager base is the labelled two-tier phone header over one workspace column. */
 .manager-shell { min-height: 100svh; background: #faf6ee; }.manager-nav { position: sticky; top: 0; z-index: 5; min-width: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid var(--border); background: #f2eadf; }.manager-nav .brand { width: 100%; min-height: 52px; padding: 0 20px; }.manager-nav nav { width: 100%; margin: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--border); }.manager-nav button { min-width: 0; min-height: 58px; padding: 7px 2px 8px; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: .65rem; line-height: 1; text-align: center; }.manager-nav button svg { width: 20px; height: 20px; }.manager-nav button.active { background: var(--denim-soft); color: var(--chestnut); font-weight: 600; box-shadow: inset 0 -3px 0 var(--chestnut); }.manager-nav button:not(.active):hover { background: rgb(221 231 240 / 45%); color: var(--chestnut); }.manager-main { min-width: 0; padding: 28px 20px 60px; overflow: visible; }.manager-title { display: block; }.manager-title p { margin-bottom: 5px; color: var(--muted); font-size: .8rem; }.manager-title h1 { margin: 0; font-size: clamp(2.15rem, 10vw, 2.7rem); }.manager-title .status { margin-top: 18px; }.lifecycle { margin: 28px 0 45px; display: grid; gap: 7px; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }.lifecycle p { margin: 0; color: var(--muted); font-size: .84rem; }.workspace-heading { display: block; }.workspace-heading h2, .manager-panel h2 { margin: 0; font-size: clamp(2rem, 9vw, 2.25rem); }.filter-tabs { width: 100%; max-width: 100%; margin-top: 20px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; }.filter-tabs button { min-width: 44px; min-height: 44px; padding: 9px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: .75rem; text-transform: capitalize; cursor: pointer; }.filter-tabs button.active { background: var(--chestnut); color: white; }.bulk-bar { min-height: 61px; margin: 25px 0 17px; padding: 9px 13px; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--paper); border: 1px solid var(--border); border-radius: 7px; }.bulk-bar span { flex: 1 1 100%; color: var(--muted); font-size: .85rem; }.bulk-bar .button { flex: 1 1 140px; min-width: 44px; min-height: 44px; padding: 7px 11px; font-size: .78rem; }
-.moderation-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 13px; }.moderation-grid article { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--paper); transition: border 160ms, box-shadow 160ms; }.moderation-grid article.selected { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }.moderation-grid label { position: relative; display: block; cursor: pointer; }.moderation-grid input { position: absolute; top: 10px; left: 10px; z-index: 1; width: 20px; min-height: 20px; accent-color: var(--chestnut); }.moderation-grid img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }.moderation-grid article > div { padding: 11px; }.moderation-grid small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; color: var(--muted); }.moderation-grid article > div > div { margin-top: 10px; display: flex; gap: 5px; }.moderation-grid article button { width: 33px; height: 33px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 1px solid var(--border); background: transparent; color: var(--moss); border-radius: 5px; cursor: pointer; }.moderation-grid article button:nth-child(2), .moderation-grid article button:nth-child(3) { color: var(--danger); }
+.moderation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }.moderation-grid article { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--paper); transition: border 160ms, box-shadow 160ms; }.moderation-grid article.selected { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }.moderation-grid label { position: relative; display: block; cursor: pointer; }.moderation-grid input { position: absolute; top: 10px; left: 10px; z-index: 1; width: 20px; min-height: 20px; accent-color: var(--chestnut); }.moderation-grid img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }.moderation-grid article > div { padding: 11px; }.moderation-grid small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; color: var(--muted); }.moderation-grid article > div > div { margin-top: 10px; display: flex; gap: 5px; }.moderation-grid article button { width: 33px; height: 33px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 1px solid var(--border); background: transparent; color: var(--moss); border-radius: 5px; cursor: pointer; }.moderation-grid article button:nth-child(2), .moderation-grid article button:nth-child(3) { color: var(--danger); }
 /* The host recognises a photo by its name, so the compact label wraps to two lines instead of ending in an ellipsis. */
 .moderation-grid strong { display: -webkit-box; overflow: hidden; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .manager-utility { min-width: 0; background: var(--paper); }.manager-utility section { padding: 28px 20px; border-bottom: 1px solid var(--border); }.manager-utility__guest-entry, .manager-utility__capacity { display: none; }.manager-utility h2 { font-size: 1.55rem; }.manager-utility p { color: var(--muted); font-size: .9rem; }.stat { display: flex; align-items: baseline; gap: 9px; }.stat strong { font-family: 'Manrope'; font-size: 2.7rem; }.stat span { color: var(--muted); }.meter { height: 5px; margin: 19px 0 8px; background: #e8dfd5; border-radius: 5px; overflow: hidden; }.meter span { height: 100%; display: block; background: var(--denim); }.manager-utility small { color: var(--muted); }.export-state { display: grid; gap: 10px; }.export-state strong { text-transform: capitalize; color: var(--chestnut); }.export-state span { color: var(--muted); font-size: .85rem; }
@@ -664,7 +666,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .moderation-grid article > div > .intake-card-actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px; }
 .intake-card-actions a, .intake-card-actions button { width: 36px; height: 36px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--chestnut); cursor: pointer; }
 .intake-card-actions a { text-decoration: none; }
-.intake-card-actions button:last-child { color: var(--danger); }
+/* Download, Publish and Hide are reversible; Delete destroys a guest's original. At the 44px floor and
+   a 5px gap the two neighbours were one thumb-width apart on a card the host scrolls past at speed, so
+   delete takes the far edge of the row and is never adjacent to Hide. Its confirmation is in
+   `ManagerPage`, where the rest of the product's irreversible acts ask before they run. */
+.intake-card-actions button:last-child { margin-left: auto; color: var(--danger); }
 .manager-notice { margin: 20px 0 0; padding: 12px 14px; border-left: 3px solid var(--denim); background: var(--denim-soft); color: #665c58; font-size: .84rem; }
 .intake-qr { width: min(100%, 220px); margin: 18px auto; border: 1px solid var(--border); }
 .manager-utility .button--wide { width: 100%; }
@@ -693,6 +699,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    digit and as a capsule past that. */
 .manager-nav__count { min-width: 20px; height: 20px; margin: 0; padding: 0 5px; position: absolute; top: 5px; right: calc(50% - 22px); display: grid; place-items: center; border-radius: 999px; background: var(--chestnut); color: white; font-size: .75rem; line-height: 1; }
 .share-layout .button-row .button { width: 100%; }
+/* Share exists so a code reaches paper, and on a phone its only action wrote a PNG into Photos. The
+   system share sheet is the way off the device, so it leads the section instead of sitting beside the
+   download as an afterthought. */
+.share-actions { margin-top: 14px; display: grid; grid-template-columns: minmax(0, 1fr); }
+.share-actions .button { min-height: 44px; }
 .manager-qr { width: min(100%, 260px); }
 .manager-qr .button { width: 100%; }
 
@@ -731,7 +742,18 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    one is a status region, the other an alert, and both carry the words that say which. */
 .rsvp-manager__status { margin: 18px 0 0; padding: 11px 13px; border-left: 3px solid var(--moss); background: var(--moss-soft); color: #4e5b28; font-size: .875rem; overflow-wrap: anywhere; }
 .rsvp-manager__notice { margin: 18px 0 0; padding: 11px 13px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); font-size: .875rem; overflow-wrap: anywhere; }
-.rsvp-manager__totals { margin: 26px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+/* Eight equal numbers used to own the entire first screen: two columns of four put the 844px fold
+   inside the totals grid, so a host saw six numbers, two below it, and not one household. The reason
+   they open this on a phone is almost always who still has not answered. The totals are correct,
+   labelled and server-owned — the problem was that all eight were the same size, so none of them was
+   the answer. Narrow-first the two that imply an action lead at full tile size and the remaining six
+   follow as one horizontally scrolling row of compact chips. From 761 the wrappers dissolve and the
+   four-column grid resolves in the documented reading order again. */
+.rsvp-manager__totals { margin: 26px 0 0; display: grid; gap: 10px; }
+.rsvp-manager__totals--lead { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.rsvp-manager__totals--rest { min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(132px, auto); gap: 10px; padding-bottom: 6px; overflow-x: auto; overscroll-behavior-x: contain; }
+.rsvp-manager__totals--rest .rsvp-total { padding: 9px 11px; }
+.rsvp-manager__totals--rest .rsvp-total strong { font-size: 1.15rem; }
 .rsvp-total { min-width: 0; padding: 12px 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
 .rsvp-total strong { display: block; font-family: 'Manrope', sans-serif; font-size: 1.65rem; line-height: 1.1; }
 .rsvp-total span { display: block; margin-top: 3px; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
@@ -752,6 +774,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .rsvp-household-list__flag, .rsvp-household-editor__flag { margin: 0; color: var(--chestnut); font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .rsvp-manager__more { margin-top: 16px; display: grid; grid-template-columns: minmax(0, 1fr); }
 .rsvp-manager__more .button { min-height: 44px; }
+/* An export belongs after the thing it exports, not between the filters and the first household. */
+.rsvp-manager__export { margin-top: 20px; padding-top: 18px; display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--border); }
+.rsvp-manager__export .button { min-height: 44px; }
 .rsvp-manager__editor { margin: 26px 0 0; }
 .rsvp-manager__editor-empty { padding-top: 18px; display: grid; gap: 10px; justify-items: start; border-top: 1px solid var(--border); }
 .rsvp-manager__editor-empty p { margin: 0; color: var(--muted); font-size: .9rem; }
@@ -805,6 +830,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .guest-list-launcher .button { justify-self: start; min-height: 44px; }
 .guest-list-workspace { min-width: 0; margin: 22px 0; padding: 18px 16px; display: grid; gap: 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--paper); }
 .guest-list-workspace__heading { display: flex; gap: 12px; align-items: start; justify-content: space-between; }
+/* The workspace moves through five named steps and signalled the move only by swapping an `h3`. Cover
+   Studio — a shorter, lower-stakes flow — prints its step index; on a phone, where the whole flow is
+   never in view, the longer flow is the one that needs the counter. Same type ramp, stated once. */
+.guest-list-workspace__step { margin: 0 0 2px; color: var(--muted); font-size: .8rem; font-weight: 600; }
 .guest-list-workspace__heading .text-button { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
 .guest-list-workspace__heading h3:focus-visible { outline: 3px solid var(--denim); outline-offset: 3px; }
 .guest-list-workspace__error { margin: 0; padding: 11px 13px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); overflow-wrap: anywhere; }
@@ -815,12 +844,34 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .guest-list-workspace textarea, .guest-list-workspace input, .guest-list-workspace select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--ink); font: inherit; }
 .guest-list-workspace textarea { min-height: 132px; resize: vertical; }
 .guest-list-workspace input[type="checkbox"], .guest-list-workspace input[type="radio"] { width: 20px; min-height: 20px; padding: 0; }
-.guest-list-drop-zone { min-width: 0; padding: 14px; display: grid; gap: 8px; border: 1px dashed var(--border); border-radius: 7px; }
-.guest-list-drop-zone p { margin: 0; color: var(--muted); }
+/* "Drop a guest-list file here" is inert copy on a phone: there is no file dragging on iOS Safari or
+   Android Chrome, and the dashed region sat directly between the textarea and Continue, making the step
+   look longer and more technical than it is. Narrow-first the zone is the file control alone, wearing
+   the secondary button it always described; the drop target is drawn only where a pointer can actually
+   drop onto it. Same markup either way — the input keeps its label and its accessible name. */
+.guest-list-drop-zone { min-width: 0; display: grid; gap: 8px; }
+.guest-list-drop-zone > p { display: none; }
+.guest-list-drop-zone > label { min-height: 48px; display: flex; align-items: center; justify-content: center; padding: 12px 20px; border: 1px solid var(--chestnut); border-radius: 8px; color: var(--chestnut); font-weight: 600; cursor: pointer; }
+.guest-list-drop-zone > label:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.guest-list-drop-zone > input[type="file"] { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (hover: hover) and (pointer: fine) {
+  .guest-list-drop-zone { padding: 14px; border: 1px dashed var(--border); border-radius: 7px; }
+  .guest-list-drop-zone > p { display: block; margin: 0; color: var(--muted); }
+  .guest-list-drop-zone > label { min-height: 0; display: grid; padding: 0; border: 0; border-radius: 0; color: var(--ink); }
+  .guest-list-drop-zone > input[type="file"] { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
+}
 .guest-list-workspace__actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .guest-list-workspace__actions .button { min-height: 44px; }
-.guest-list-sample, .guest-list-issues { max-height: 240px; min-width: 0; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; }
-.guest-list-sample p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.guest-list-issues { max-height: 240px; min-width: 0; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; }
+/* Six rows printed as `row.join(' · ')` inside a 240px scroller nested in the page scroller: at 390px a
+   five-column row wrapped to three lines with nothing to say which fragment was which column, which is
+   exactly the judgement the mapper above it asks for. One row, read as a labelled key-value list,
+   answers the same question, needs no second scroll surface, and shrinks with the width. */
+.guest-list-sample { min-width: 0; margin: 0; padding: 10px; display: grid; gap: 8px; border: 1px solid var(--border); border-radius: 7px; }
+.guest-list-sample > div { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.guest-list-sample dt { color: var(--muted); font-size: .78rem; font-weight: 700; overflow-wrap: anywhere; }
+.guest-list-sample dd { margin: 0; min-width: 0; font-size: .88rem; overflow-wrap: anywhere; }
+.guest-list-sample__caption { margin: 0; color: var(--muted); font-size: .78rem; }
 .guest-list-grouping ul, .guest-list-issues ul, .guest-list-receipt ul { min-width: 0; margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 .guest-list-grouping li, .guest-list-issues li { overflow-wrap: anywhere; }
 .guest-list-grouping .text-button { margin-left: 8px; min-height: 44px; }
@@ -844,15 +895,141 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .entry-confirm p { margin: 0; color: var(--muted); font-size: .875rem; }
 .entry-confirm label { color: var(--ink); font-size: .8rem; font-weight: 700; }
 .entry-confirm input { width: 100%; min-width: 0; min-height: 44px; }
+/* The exact string the gate wants, selectable rather than described — the same answer
+   `.link-card--expanded` gives for the event link. */
+.entry-confirm__target { min-width: 0; }
+.entry-confirm__target code { padding: 2px 5px; border-radius: 4px; background: #f2eadf; color: var(--ink); overflow-wrap: anywhere; }
+.entry-confirm__target code:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .entry-confirm .button { min-height: 44px; }
 .manager-credential { margin-top: 50px; padding-top: 30px; border-top: 1px solid var(--border); }
 .manager-credential h3 { margin: 0 0 8px; font-size: 1.35rem; }
 .manager-credential p { margin: 0 0 14px; color: var(--muted); font-size: .9rem; }
 .manager-credential .button { min-height: 44px; }
 
-/* Two cards fit side by side only once each keeps its name, status, and 44px controls readable. */
-@media (min-width: 431px) {
-  .moderation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* Below 761 the manager is the stacked phone layout. Every panel here already stacks and every control
+   already clears 44px; what follows is the second decision after stacking — what the host reaches for
+   belongs at the *bottom* of the screen, and has to stay there while they work. `.cover-studio__footer`
+   is the pattern each of these follows, its `env(safe-area-inset-bottom)` included. The rails from 761
+   up are untouched by all of it. */
+@media (max-width: 760px) {
+  /* Everything anchored to the foot of the viewport stacks above the destination bar, so its height is
+     stated once. The bar's own safe-area padding is part of the figure. */
+  .manager-shell--intake { --manager-bar: calc(58px + env(safe-area-inset-bottom)); }
+
+  /* All six destinations lived in a bar stuck to the top under a brand row that does nothing on a
+     phone: 110px held permanently, in the one band a thumb cannot reach without regripping, which made
+     every section change a two-handed action. The bar leaves the header for the foot of the screen and
+     the brand row scrolls away with the page. */
+  .manager-nav { position: static; border-bottom: 0; }
+  .manager-nav .brand { border-bottom: 1px solid var(--border); }
+  .manager-nav nav {
+    position: fixed;
+    inset: auto 0 0;
+    z-index: 30;
+    padding-bottom: env(safe-area-inset-bottom);
+    border-top: 1px solid var(--border);
+    background: #f2eadf;
+  }
+  /* The active underline was drawn against the header's lower edge. At the foot of the screen the edge
+     the eye reads is the destination's own top one. */
+  .manager-nav button.active { box-shadow: inset 0 3px 0 var(--chestnut); }
+  /* The page has to end above the bar it no longer scrolls past. */
+  .manager-main { padding-bottom: calc(60px + var(--manager-bar)); }
+
+  /* Six columns across 390px give each destination 65px, and the badge is placed at `right: calc(50% -
+     22px)` — a figure tuned for one or two digits. At the counts this product is built for, the cap
+     being 10,000, the pill covers the icon it belongs to and fills most of its cell. It drops to a dot;
+     `ManagerPage` states the number in the destination's accessible name instead, which is what a host
+     actually reads off a tab. The exact figure is on the Intake screen twice already. */
+  .manager-nav__count {
+    top: 8px;
+    right: calc(50% - 15px);
+    min-width: 9px;
+    width: 9px;
+    height: 9px;
+    padding: 0;
+    font-size: 0;
+    color: transparent;
+  }
+
+  /* The step that asks a host to type into a 132px textarea put Continue two scrolls below the keyboard
+     the step requires, past a file control and a radio group. The workspace's action row becomes its
+     footer, so the step's one primary action — and the disabled state that says why it is not ready —
+     stay on screen through all five steps. */
+  .guest-list-workspace__actions {
+    position: sticky;
+    bottom: var(--manager-bar);
+    z-index: 4;
+    margin: 0 -16px -18px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--paper);
+  }
+
+  /* Search, status and the CSV each took a full-width row between the totals and the first household,
+     then scrolled away from the list they filter — and `Load more households` pages that list
+     indefinitely. Search and status share one row: at 390px a 2fr/1fr split gives 226px and 112px, both
+     clear of the 44px floor. The row then stays under the brand while the list scrolls. The CSV moves
+     below the list in `ManagerRsvpDashboard`, where an export belongs. */
+  .rsvp-manager__filters {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    align-items: end;
+    margin-inline: -20px;
+    padding: 12px 20px;
+    background: #faf6ee;
+  }
+
+  /* In a product with no save button the status chip is the entire contract, and it sat in the editor's
+     heading at the top of a form about 1,050px tall: change the last toggle and `Saved`, `Couldn't
+     save.` and its Retry are all off screen. The chip follows the host down the form instead. It is
+     already `width: fit-content`, so it costs one line above the destination bar. */
+  .event-settings-editor__heading {
+    position: sticky;
+    bottom: var(--manager-bar);
+    z-index: 4;
+    margin: 0 -20px;
+    padding: 8px 20px;
+    background: #faf6ee;
+  }
+
+  /* The second column used to arrive at 431px, which excludes every current iPhone — 390, 393, 402 and
+     430 all sit below it — so the shipping phones got one card per row at about 400px each, out of a
+     library that runs to 10,000. The breakpoint was honest about its reason: at two columns each card
+     holds 146px of content and the four 44px actions need 191px, so they wrapped. The card is what
+     fixes that, not the breakpoint. Two columns are the grid's own default now and the 431px rule is
+     gone; what is left here is the contact sheet itself — one tap target, which is selection, and the
+     per-photo actions on the card the host has actually chosen. */
+  .moderation-grid { gap: 10px; }
+  .moderation-grid article > div { padding: 8px; }
+  .moderation-grid .publication { font-size: .55rem; }
+  .moderation-grid strong { font-size: .82rem; }
+  .moderation-grid small { font-size: .78rem; }
+  /* Only the Gallery grid selects. The Intake grid carries a single download control and no checkbox,
+     so hiding its actions behind a selected state would strand them. */
+  .moderation-grid--selectable article:not(.selected) .intake-card-actions { display: none; }
+
+  /* Selection runs downward through the grid while the buttons stayed at the top and did not stick:
+     every batch was scroll down selecting, scroll back up, publish, scroll down again. The live region
+     announcing the 60-photo selection cap was up there too, so a host hit the limit without seeing why
+     the next checkbox stopped responding. It is already a status line and two full-width buttons — a
+     mobile selection bar that happened to be anchored at the top. It travels only while a selection
+     exists; with nothing chosen it is a caption for the grid and stays in the flow. */
+  .bulk-bar--pinned {
+    position: fixed;
+    inset: auto 0 var(--manager-bar);
+    z-index: 20;
+    margin: 0;
+    padding: 9px 13px;
+    border-inline: 0;
+    border-radius: 0;
+    box-shadow: 0 -8px 24px rgb(43 29 23 / 12%);
+  }
+  /* The status line wraps above two 44px buttons, so the grid ends a full bar clear of it rather than
+     under it. Measured against the tallest state the bar reaches at 320px, not its `min-height`. */
+  .bulk-bar--pinned ~ .moderation-grid { padding-bottom: 128px; }
 }
 
 /* From 761 the manager is a labelled compact rail beside the workspace, with the utility rail beneath. */
@@ -900,7 +1077,23 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
   .manager-main { padding: 36px 40px 80px; }
   .rsvp-manager__totals { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .rsvp-manager__filters { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; align-items: end; }
+  /* The two narrow groups stop being boxes, so all eight tiles are grid items of one four-column
+     track again. Their source order leads with the two a host came for; `order` restores the order
+     the totals are documented in — invited, then what they have said, then households still out. */
+  .rsvp-manager__totals--lead, .rsvp-manager__totals--rest { display: contents; }
+  .rsvp-manager__totals--lead .rsvp-total:nth-child(1) { order: 6; }
+  .rsvp-manager__totals--lead .rsvp-total:nth-child(2) { order: 8; }
+  .rsvp-manager__totals--rest .rsvp-total:nth-child(1) { order: 1; }
+  .rsvp-manager__totals--rest .rsvp-total:nth-child(2) { order: 2; }
+  .rsvp-manager__totals--rest .rsvp-total:nth-child(3) { order: 3; }
+  .rsvp-manager__totals--rest .rsvp-total:nth-child(4) { order: 4; }
+  .rsvp-manager__totals--rest .rsvp-total:nth-child(5) { order: 5; }
+  .rsvp-manager__totals--rest .rsvp-total:nth-child(6) { order: 7; }
+  .rsvp-manager__totals--rest .rsvp-total { padding: 12px 13px; }
+  .rsvp-manager__totals--rest .rsvp-total strong { font-size: 1.65rem; }
+  /* Search and status only: the CSV is an export and now follows the list it exports. */
+  .rsvp-manager__filters { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: end; }
+  .rsvp-manager__export, .share-actions { justify-content: start; grid-template-columns: auto; }
   .rsvp-manager__more, .rsvp-import__actions { justify-content: start; grid-template-columns: auto; }
   .entry-controls__choices { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .entry-controls__choices .button { width: auto; }
@@ -1111,7 +1304,15 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* min-height: 0 is load-bearing: without it this grid row refuses to shrink and
    the footer leaves the visible rectangle. */
 .cover-studio__controls { min-height: 0; overflow-y: auto; padding: 16px; }
-.cover-studio__footer { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: flex-end; gap: 10px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--paper); }
+/* Below 761 the sheet is full screen and this row sits in the band a right thumb rests in, so Back and
+   Continue must not be neighbours: going back from Choose a style discards the style selection, and it
+   should not be a 10px miss from advancing. The separation the sheet's own back-versus-close logic
+   already assumes is drawn here. From 761 up the sheet is a centred dialog and the pair reads as one
+   trailing group again. */
+.cover-studio__footer { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: space-between; gap: 10px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--paper); }
+/* Step one has no Back, so the lone Continue would sit at the leading edge under `space-between`. */
+.cover-studio__footer > :only-child { margin-left: auto; }
+@media (min-width: 761px) { .cover-studio__footer { justify-content: flex-end; } }
 .cover-studio__footer .button { min-height: 44px; }
 /* Short-height mode: below 421 visual pixels, including an approximately
    320x180 viewport at 400% page zoom, sticky geometry would leave nothing for
@@ -1134,11 +1335,23 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 .cover-source-picker fieldset { border: 0; padding: 0; margin: 0; }
 .cover-source-picker legend { margin-bottom: 10px; font-weight: 600; }
-.cover-source-picker__upload { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; }
+/* Three children — the source radio, the file chooser, and the format note — share one row, and at
+   390px none of them wins: the label wraps, the button breaks mid-word, and the note carrying the
+   format list and the server's own upload ceiling is squeezed into about 90px over four lines. The
+   note is the one that reads as a sentence, so it takes its own line and the two controls keep the
+   first. The settings cover field states the same limits and is checked with this. */
+.cover-source-picker__upload { min-height: 44px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; }
+.cover-source-picker__upload > .cover-source-picker__note { flex: 1 1 100%; }
 .cover-source-picker__upload-choice { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .cover-source-picker__upload > .button { min-height: 44px; display: inline-flex; align-items: center; cursor: pointer; }
-.cover-source-picker__presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; padding: 0; list-style: none; }
-@media (min-width: 761px) { .cover-source-picker__presets { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* Header, canvas and footer hold roughly 268px of the sheet, so a two-column grid of 16:9 thumbnails
+   with a name and a note each shows one and a half of its three rows: choosing between six pictures
+   means scrolling past them a pair at a time while the preview of the current choice stays pinned
+   above. Narrow-first the six are one snap-scrolling row with the next card peeking, so the whole
+   choice is one swipe and the vertical space goes back to the flow. The grid returns at 761. */
+.cover-source-picker__presets { display: grid; grid-auto-flow: column; grid-auto-columns: 62%; gap: 10px; margin-top: 12px; padding: 0 0 6px; list-style: none; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; }
+.cover-source-picker__presets > li { scroll-snap-align: start; }
+@media (min-width: 761px) { .cover-source-picker__presets { grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0; overflow: visible; scroll-snap-type: none; } }
 .cover-source-picker__presets label { min-height: 44px; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
 /* Selection is never carried by color alone: the border thickens and the name
    is always present beside the thumbnail. */

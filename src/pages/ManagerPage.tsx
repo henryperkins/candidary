@@ -1,4 +1,4 @@
-import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Trash2, X } from 'lucide-react';
+import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, Search, Settings, Share2, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
@@ -168,6 +168,9 @@ export function ManagerPage() {
   const settingsHeading = useRef<HTMLHeadingElement>(null);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
+  // Read once: the API's presence does not change for the life of the page, and a host must not watch
+  // a primary action appear after first paint.
+  const [canShareEventLink] = useState(() => typeof navigator !== 'undefined' && typeof navigator.share === 'function');
   const [status, setStatus] = useState<MediaStatus>('all');
   const [searchInput, setSearchInput] = useState('');
   const [guestFilter, setGuestFilter] = useState('');
@@ -434,6 +437,26 @@ export function ManagerPage() {
   // iOS Safari refuses `writeText` outside a permitted gesture and rejects rather than resolving, and
   // the API is absent entirely in any non-secure context. Left unhandled that is a silent no-op the
   // host reads as a copied link, so the refusal is reported and the readable link stays on screen.
+  // Share's whole purpose points off the device — "One code for RSVPs now and event photos later. Print
+  // it once." — and on a phone its only action wrote a 220px PNG into Photos, leaving the host to reach
+  // a desktop before any of that could happen. The system share sheet sends the code to a laptop, a
+  // printer, or a stationer in one tap. Absent the API nothing is offered and the download stands.
+  async function shareEventLink() {
+    if (!eventLink) return;
+    try {
+      await navigator.share({
+        title: event?.name ?? 'Candidary event',
+        text: 'Scan or open this to join the event.',
+        url: eventLink,
+      });
+      setActionError(null);
+    } catch (caught) {
+      // Dismissing the system sheet is a cancellation, not a failure worth a notice.
+      if (caught instanceof DOMException && caught.name === 'AbortError') return;
+      setActionError({ type: 'action', message: 'The event link could not be shared.', recoveryHint: eventLink });
+    }
+  }
+
   async function copyEventLink() {
     if (!eventLink) return;
     try {
@@ -556,6 +579,16 @@ export function ManagerPage() {
     await refresh();
   }
 
+  // Download, publish and hide are reversible; this destroys the guest's original, and it fired
+  // straight into the API from a 44px target that sat five pixels from Hide on a card the host is
+  // scrolling past. Every other irreversible act in this product asks first — rotating the management
+  // link and both entry actions — so this one asks too, in the same shape rotation already uses.
+  async function deleteOriginal(item: MediaView) {
+    const name = item.caption || item.originalFilename;
+    if (!window.confirm(`Delete ${name}? This permanently removes the guest's original and cannot be undone.`)) return;
+    await changePublication(item, 'delete');
+  }
+
   async function prepareExport() {
     await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' }));
     await refresh();
@@ -675,7 +708,11 @@ export function ManagerPage() {
   function renderMediaGrid(publicationControls: boolean) {
     if (!media.length) return <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>No matching photos.</h3><p>New private deliveries will appear here immediately.</p></div>;
     return <>
-      <div className="moderation-grid intake-grid">{media.map((item) => {
+      {/* Below 761 the grid is a two-up contact sheet whose one tap target is selection, and the four
+          per-photo actions appear on the card the host has chosen — the bulk bar already publishes and
+          hides a selection. Only the Gallery grid selects; Intake carries a single download control and
+          no checkbox, so it keeps its actions on every card at every width. */}
+      <div className={publicationControls ? 'moderation-grid moderation-grid--selectable intake-grid' : 'moderation-grid intake-grid'}>{media.map((item) => {
         const isSelected = selected.includes(item.id);
         const selectionUnavailable = !isSelected && selectionAtLimit;
         return <article className={isSelected ? 'selected' : ''} key={item.id}>
@@ -702,7 +739,7 @@ export function ManagerPage() {
               <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>
               {publicationControls && item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'publish'))}><Eye aria-hidden="true" /></button>}
               {publicationControls && item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'hide'))}><EyeOff aria-hidden="true" /></button>}
-              <button aria-label={`Delete ${item.originalFilename}`} onClick={() => void runManagerAction(() => changePublication(item, 'delete'))}><Trash2 aria-hidden="true" /></button>
+              <button aria-label={`Delete ${item.originalFilename}`} onClick={() => void runManagerAction(() => deleteOriginal(item))}><Trash2 aria-hidden="true" /></button>
             </div>
           </div>
         </article>;
@@ -740,20 +777,32 @@ export function ManagerPage() {
     <legend>{verb}</legend>
     <p>{warning}</p>
     <label htmlFor="entry-confirm-name">Confirm event name</label>
+    {/* The gate is an exact match with `event.name`, which on a phone means finding punctuation on a
+        second keyboard plane and beating autocapitalisation — and the button says nothing about why it
+        will not respond. The keyboard is told not to fight the host, and the string they have to
+        produce is printed beside the field as selectable text, the way the event link already is. */}
+    <p className="entry-confirm__target">Type <code tabIndex={0}>{event.name}</code> to confirm.</p>
     <input
       id="entry-confirm-name"
       value={entryConfirm}
       autoComplete="off"
+      autoCapitalize="none"
+      autoCorrect="off"
       spellCheck={false}
       onChange={(change) => setEntryConfirm(change.target.value)}
     />
     <div className="button-row">
+      {/* The label was `{verb} for {event.name}`, and every `.button-row .button` goes full width at
+          430 and below: a long event name made the destructive control a four-line block sitting above
+          a Cancel of the same width, so the two read as a stack of equals. The visible label is the
+          verb; the accessible name keeps the event so the action is never ambiguous out of context. */}
       <button
         type="button"
         className={action === 'disable' ? 'button button--danger-outline' : 'button button--secondary'}
+        aria-label={`${verb} for ${event.name}`}
         disabled={entryConfirm.trim() !== event.name}
         onClick={() => void runManagerAction(() => runEntryAction(action))}
-      >{verb} for {event.name}</button>
+      >{verb}</button>
       <button type="button" className="text-button" onClick={() => { setEntryAction(null); setEntryConfirm(''); }}>Cancel</button>
     </div>
   </fieldset>;
@@ -776,10 +825,14 @@ export function ManagerPage() {
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
         `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
     <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
+      {/* The badge is a dot below 761: six columns across 390px leave each destination 65px, and the
+          pill was placed for one or two digits. What a host reads off a tab is that there is something
+          new here, so the figure moves into the accessible name and the badge stops covering its own
+          icon. The rail from 761 up still prints the number. */}
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <><span className="manager-nav__count" aria-hidden="true">{photoCount}</span><span className="sr-only">{photoCount.toLocaleString()} {photoCount === 1 ? 'photo' : 'photos'}</span></>}</button>
       <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => openSection('rsvp')}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <span className="manager-nav__count">{messages.length}</span>}</button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <><span className="manager-nav__count" aria-hidden="true">{messages.length}</span><span className="sr-only">{messages.length.toLocaleString()} {messages.length === 1 ? 'note' : 'notes'}</span></>}</button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => openSection('settings')}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
     </nav></header>
@@ -852,7 +905,10 @@ export function ManagerPage() {
       {section === 'gallery' && <section aria-labelledby="gallery-publishing-title">
         <div className="workspace-heading"><div><p className="section-label">Optional shared view</p><h2 id="gallery-publishing-title">Gallery publishing</h2></div><div className="filter-tabs" role="group" aria-label="Publication status">{(['unpublished', 'published', 'hidden'] as const).map((value) => <button className={status === value ? 'active' : ''} onClick={() => { setStatus(value); setSelected([]); }} key={value}>{value}</button>)}</div></div>
         {!event.galleryVisible && <p className="manager-notice">The guest gallery is off. Publishing choices are saved for whenever you enable it.</p>}
-        <div className="bulk-bar"><span id="bulk-selection-status" role="status" aria-live="polite">{selectionAtLimit
+        {/* Below 761 the bar travels to the foot of the viewport while a selection exists, so the
+            actions are where the selection is being made and the cap announcement is on screen when a
+            host reaches it. With nothing chosen it is a caption for the grid and stays in the flow. */}
+        <div className={selected.length ? 'bulk-bar bulk-bar--pinned' : 'bulk-bar'}><span id="bulk-selection-status" role="status" aria-live="polite">{selectionAtLimit
           ? `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`
           : selected.length
             ? `${selected.length} selected`
@@ -869,6 +925,11 @@ export function ManagerPage() {
             : <p className="manager-notice">{entryDisabledAt
               ? 'This event QR was disabled and cannot be replaced.'
               : 'This event has no printed entry.'}</p>}
+            {eventLink && canShareEventLink && <div className="share-actions">
+              <button type="button" className="button button--primary" onClick={() => void shareEventLink()}>
+                <Share2 aria-hidden="true" /> Share event link
+              </button>
+            </div>}
             <p className="form-note">One code for RSVPs now and event photos later. Print it once.</p>
           </div>
           {qr && <div className="manager-qr"><img src={qr} alt="Event QR code" /><a className="button button--secondary" href={qr} download="candidary-event-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}
