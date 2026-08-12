@@ -7,7 +7,7 @@ const cursorSchema = z.object({
   id: z.uuid(),
 }).strict();
 
-export type MessageCursor = z.infer<typeof cursorSchema>;
+export type MessageCursor = z.infer<typeof cursorSchema> & { version: 1 };
 
 const MAX_CURSOR_LENGTH = 512;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
@@ -26,7 +26,7 @@ export function decodeMessageCursor(value: string): MessageCursor {
   try {
     const normalized = value.replaceAll('-', '+').replaceAll('_', '/');
     const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), '=');
-    return cursorSchema.parse(JSON.parse(atob(padded)));
+    return { version: 1, ...cursorSchema.parse(JSON.parse(atob(padded))) };
   } catch {
     throw new ApiError('VALIDATION_FAILED', 'The notes page cursor is invalid.', 422);
   }

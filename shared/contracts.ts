@@ -241,11 +241,12 @@ export type GuestGuestbookNoteItem = Omit<GuestbookNoteItem, 'state'>
   & GuestbookNoteStateAliases;
 
 type GuestbookCaptionStateAliases =
-  | { state: 'unpublished'; moderationStatus: 'pending' }
-  | { state: 'published'; moderationStatus: 'approved' }
-  | { state: 'hidden'; moderationStatus: 'rejected' };
+  | { state: 'unpublished'; visibility: 'author_only'; moderationStatus: 'pending' }
+  | { state: 'published'; visibility: 'shared'; moderationStatus: 'approved' }
+  | { state: 'published'; visibility: 'author_only'; moderationStatus: 'rejected' }
+  | { state: 'hidden'; visibility: 'author_only'; moderationStatus: 'rejected' };
 
-export type GuestGuestbookCaptionItem = Omit<GuestbookCaptionItem, 'state'>
+export type GuestGuestbookCaptionItem = Omit<GuestbookCaptionItem, 'state' | 'visibility'>
   & { isOwn: boolean }
   & Omit<GuestbookCaptionCompatibilityAliases, 'moderationStatus'>
   & GuestbookCaptionStateAliases;
@@ -262,6 +263,19 @@ export interface LegacyGuestbookItem {
   createdAt: string;
   moderationStatus: 'pending' | 'approved' | 'rejected';
   mediaId: string | null;
+}
+
+export interface ManagerMediaView {
+  id: string;
+  originalFilename: string;
+  guestName: string;
+  caption: string | null;
+  publicationStatus: PublicationStatus;
+  uploadState: UploadState;
+  previewAvailable: boolean;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
 }
 
 // RSVP. Every shape below is written out rather than derived from a database

@@ -1,4 +1,4 @@
-import type { PublicationStatus } from '../../shared/contracts';
+import type { ManagerMediaView, PublicationStatus } from '../../shared/contracts';
 import {
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_EVENT_BYTES,
@@ -89,6 +89,48 @@ function mapMedia(row: MediaRow): MediaRecord {
   };
 }
 
+export function managerMediaView(media: Pick<
+  MediaRecord,
+  | 'id'
+  | 'originalFilename'
+  | 'guestName'
+  | 'caption'
+  | 'publicationStatus'
+  | 'uploadState'
+  | 'previewObjectKey'
+  | 'width'
+  | 'height'
+  | 'createdAt'
+>): ManagerMediaView {
+  return {
+    id: media.id,
+    originalFilename: media.originalFilename,
+    guestName: media.guestName,
+    caption: media.caption,
+    publicationStatus: media.publicationStatus,
+    uploadState: media.uploadState,
+    previewAvailable: media.previewObjectKey !== null,
+    width: media.width,
+    height: media.height,
+    createdAt: media.createdAt,
+  };
+}
+
+function mapManagerMedia(row: MediaRow): ManagerMediaView {
+  return {
+    id: row.id,
+    originalFilename: row.original_filename,
+    guestName: row.guest_name,
+    caption: row.caption,
+    publicationStatus: row.publication_status,
+    uploadState: row.upload_state,
+    previewAvailable: row.preview_object_key !== null,
+    width: row.width,
+    height: row.height,
+    createdAt: row.created_at,
+  };
+}
+
 export interface ManagerMediaOptions {
   status?: PublicationStatus;
   guestName?: string;
@@ -97,7 +139,7 @@ export interface ManagerMediaOptions {
 }
 
 export interface ManagerMediaPage {
-  media: MediaRecord[];
+  media: ManagerMediaView[];
   nextCursor: ManagerMediaCursor | null;
 }
 
@@ -137,7 +179,10 @@ export function buildManagerMediaQuery(
 
   return {
     sql: `
-      SELECT * FROM media
+      SELECT
+        id, original_filename, guest_name, caption, publication_status,
+        upload_state, preview_object_key, width, height, created_at, stored_at
+      FROM media
       WHERE ${predicates.join(' AND ')}
       ORDER BY stored_at DESC, id DESC
       LIMIT ?
@@ -160,7 +205,7 @@ export class MediaRepository {
     // One extra row tells us whether another page exists without a second query.
     const result = await this.db.prepare(query.sql).bind(...query.bindings).all<MediaRow>();
     const pageRows = result.results.slice(0, limit);
-    const media = pageRows.map(mapMedia);
+    const media = pageRows.map(mapManagerMedia);
     const last = pageRows[pageRows.length - 1];
     const hasMore = result.results.length > limit;
     return {

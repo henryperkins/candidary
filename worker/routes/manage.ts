@@ -13,7 +13,8 @@ import {
 import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
-import { MediaRepository } from '../db/media';
+import { managerMediaView, MediaRepository } from '../db/media';
+import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { requestOrigin } from '../origins';
 import { canonicalTimeZone, isIanaTimeZone } from '../../shared/event-time';
@@ -352,7 +353,13 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
       ...(media.previewObjectKey ? [media.previewObjectKey] : []),
     ]);
   }
-  return context.json({ data: { media: result }, requestId: context.get('requestId') });
+  const item = parsed.data.action === 'delete'
+    ? null
+    : await new GuestbookRepository(context.env.DB).captionItemById(result.id);
+  return context.json({
+    data: { media: managerMediaView(result), item },
+    requestId: context.get('requestId'),
+  });
 });
 
 manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {

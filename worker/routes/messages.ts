@@ -1,15 +1,21 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
-import type { ModerationStatus } from '../../shared/contracts';
+import type { GuestGuestbookItem, LegacyGuestbookItem, ModerationStatus } from '../../shared/contracts';
+import {
+  MANAGER_GUESTBOOK_DEFAULT_PAGE_SIZE,
+  MANAGER_GUESTBOOK_MAX_PAGE_SIZE,
+} from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
 import { AuthService } from '../auth/service';
 import { MessagesRepository } from '../db/messages';
+import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
 import { decodeMessageCursor, encodeMessageCursor } from '../http/message-cursor';
+import { decodeGuestbookCursor, encodeGuestbookCursor } from '../http/guestbook-cursor';
 import type { MessageRecord } from '../db/types';
 
 // Guest notes are a link-session surface; host moderation goes through the shared
@@ -25,7 +31,7 @@ async function guestAuth(context: Context<AppBindings>, write = false) {
 
 export const messageRoutes = new Hono<AppBindings>();
 
-function guestMessageView(message: MessageRecord) {
+function legacyMessageView(message: MessageRecord): LegacyGuestbookItem {
   return {
     id: message.id,
     kind: 'message' as const,
@@ -35,6 +41,27 @@ function guestMessageView(message: MessageRecord) {
     createdAt: message.createdAt,
     mediaId: null,
   };
+}
+
+function guestMessageItem(message: MessageRecord): GuestGuestbookItem {
+  const base = {
+    id: message.id,
+    source: 'guest_note',
+    guestName: message.guestName,
+    body: message.body,
+    createdAt: message.createdAt,
+    visibility: message.moderationStatus === 'approved' ? 'shared' : 'author_only',
+    isOwn: true,
+    kind: 'message',
+    mediaId: null,
+  } as const;
+  if (message.moderationStatus === 'approved') {
+    return { ...base, state: 'approved', moderationStatus: 'approved' };
+  }
+  if (message.moderationStatus === 'rejected') {
+    return { ...base, state: 'rejected', moderationStatus: 'rejected' };
+  }
+  return { ...base, state: 'pending', moderationStatus: 'pending' };
 }
 
 messageRoutes.post('/event/:slug/messages', async (context) => {
@@ -56,14 +83,81 @@ messageRoutes.post('/event/:slug/messages', async (context) => {
     idempotencyKey: parsed.data.idempotencyKey ?? null,
     createdAt: now,
   });
+  const item = guestMessageItem(created.message);
   return context.json({
-    data: { message: guestMessageView(created.message), replayed: created.replayed },
+    data: {
+      item,
+      message: legacyMessageView(created.message),
+      replayed: created.replayed,
+    },
     requestId: context.get('requestId'),
   }, created.replayed ? 200 : 201);
 });
 
 messageRoutes.get('/event/:slug/messages', async (context) => {
   const auth = await guestAuth(context);
+  if (context.req.query('contract') === '2') {
+    const rawCursor = context.req.query('cursor');
+    const rawOwnCursor = context.req.query('ownCursor');
+    if (rawCursor !== undefined && rawOwnCursor !== undefined) {
+      throw new ApiError('VALIDATION_FAILED', 'Advance one guestbook section at a time.', 422);
+    }
+    const repository = new GuestbookRepository(context.env.DB);
+    const sharedCursor = rawCursor === undefined
+      ? undefined
+      : decodeGuestbookCursor(rawCursor, {
+        audience: 'guest',
+        stream: 'shared',
+        eventId: auth.event.id,
+        sessionId: auth.session.id,
+      });
+    const ownCursor = rawOwnCursor === undefined
+      ? undefined
+      : decodeGuestbookCursor(rawOwnCursor, {
+        audience: 'guest',
+        stream: 'own_unshared',
+        eventId: auth.event.id,
+        sessionId: auth.session.id,
+      });
+    const advancingShared = rawCursor !== undefined;
+    const advancingOwn = rawOwnCursor !== undefined;
+    const [shared, own] = await Promise.all([
+      advancingOwn
+        ? Promise.resolve({ items: [], nextCursor: null })
+        : repository.listGuestShared(auth.event.id, auth.session.id, sharedCursor),
+      advancingShared
+        ? Promise.resolve({ items: [], count: 0, nextCursor: null })
+        : repository.listGuestOwnUnshared(auth.event.id, auth.session.id, ownCursor),
+    ]);
+    return context.json({
+      data: {
+        items: shared.items,
+        nextCursor: shared.nextCursor
+          ? encodeGuestbookCursor({
+            version: 2,
+            audience: 'guest',
+            stream: 'shared',
+            eventId: auth.event.id,
+            sessionId: auth.session.id,
+            ...shared.nextCursor,
+          })
+          : null,
+        ownUnshared: own.items,
+        ownUnsharedCount: own.count,
+        ownUnsharedNextCursor: own.nextCursor
+          ? encodeGuestbookCursor({
+            version: 2,
+            audience: 'guest',
+            stream: 'own_unshared',
+            eventId: auth.event.id,
+            sessionId: auth.session.id,
+            ...own.nextCursor,
+          })
+          : null,
+      },
+      requestId: context.get('requestId'),
+    });
+  }
   const rawCursor = context.req.query('cursor');
   const page = await new MessagesRepository(context.env.DB).listFeed(
     auth.event.id,
@@ -89,6 +183,68 @@ messageRoutes.get('/manage/events/:eventId/messages', async (context) => {
   return context.json({ data: { messages }, requestId: context.get('requestId') });
 });
 
+const managerGuestbookQuery = z.object({
+  view: z.enum(['needs-review', 'shared', 'hidden', 'deleted']),
+  source: z.enum(['all', 'guest_note', 'photo_caption']).default('all'),
+  limit: z.coerce.number().int().min(1).max(MANAGER_GUESTBOOK_MAX_PAGE_SIZE)
+    .default(MANAGER_GUESTBOOK_DEFAULT_PAGE_SIZE),
+  cursor: z.string().optional(),
+});
+
+messageRoutes.get('/manage/events/:eventId/guestbook/summary', async (context) => {
+  const auth = await requireManager(context);
+  const summary = await new GuestbookRepository(context.env.DB).summaryForManager(auth.event.id);
+  return context.json({ data: { summary }, requestId: context.get('requestId') });
+});
+
+messageRoutes.get('/manage/events/:eventId/guestbook', async (context) => {
+  const auth = await requireManager(context);
+  const parsed = managerGuestbookQuery.safeParse({
+    view: context.req.query('view'),
+    source: context.req.query('source'),
+    limit: context.req.query('limit'),
+    cursor: context.req.query('cursor'),
+  });
+  if (!parsed.success) {
+    throw new ApiError('VALIDATION_FAILED', 'Choose a valid guestbook view, source, and page size.', 422);
+  }
+  const cursor = parsed.data.cursor === undefined
+    ? undefined
+    : decodeGuestbookCursor(parsed.data.cursor, {
+      audience: 'manager',
+      eventId: auth.event.id,
+      view: parsed.data.view,
+      source: parsed.data.source,
+    });
+  const repository = new GuestbookRepository(context.env.DB);
+  const [page, summary] = await Promise.all([
+    repository.listForManager(auth.event.id, {
+      view: parsed.data.view,
+      source: parsed.data.source,
+      limit: parsed.data.limit,
+      cursor,
+    }),
+    repository.summaryForManager(auth.event.id),
+  ]);
+  return context.json({
+    data: {
+      items: page.items,
+      nextCursor: page.nextCursor
+        ? encodeGuestbookCursor({
+          version: 2,
+          audience: 'manager',
+          eventId: auth.event.id,
+          view: parsed.data.view,
+          source: parsed.data.source,
+          ...page.nextCursor,
+        })
+        : null,
+      summary,
+    },
+    requestId: context.get('requestId'),
+  });
+});
+
 messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (context) => {
   const auth = await requireManager(context, { write: true });
   const parsed = z.object({
@@ -109,5 +265,7 @@ messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (contex
       parsed.data.action === 'approve' ? 'approved' : 'rejected',
       new Date().toISOString(),
     );
-  return context.json({ data: { message }, requestId: context.get('requestId') });
+  const item = await new GuestbookRepository(context.env.DB).noteItemById(message.id);
+  if (!item) throw new Error('Updated note projection was not found.');
+  return context.json({ data: { item }, requestId: context.get('requestId') });
 });

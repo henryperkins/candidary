@@ -1,4 +1,4 @@
-import type { ModerationStatus } from '../../shared/contracts';
+import type { ManagerGuestbookItem, ModerationStatus } from '../../shared/contracts';
 import { GUEST_MESSAGE_PAGE_SIZE } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import type { MessageCursor } from '../http/message-cursor';
@@ -39,6 +39,32 @@ function mapMessage(row: MessageRow): MessageRecord {
     createdAt: row.created_at,
     approvedAt: row.approved_at,
     deletedAt: row.deleted_at,
+  };
+}
+
+function mapManagerMessage(row: Pick<
+  MessageRow,
+  'id' | 'guest_name' | 'body' | 'moderation_status' | 'created_at' | 'deleted_at'
+>): ManagerGuestbookItem {
+  if (row.deleted_at) {
+    return {
+      id: row.id,
+      source: 'guest_note',
+      guestName: row.guest_name,
+      body: row.body,
+      createdAt: row.created_at,
+      state: 'deleted',
+      visibility: 'host_only',
+    };
+  }
+  return {
+    id: row.id,
+    source: 'guest_note',
+    guestName: row.guest_name,
+    body: row.body,
+    createdAt: row.created_at,
+    state: row.moderation_status,
+    visibility: row.moderation_status === 'approved' ? 'shared' : 'author_only',
   };
 }
 
@@ -111,17 +137,18 @@ export class MessagesRepository {
     return row ? mapMessage(row) : null;
   }
 
-  async listForManager(eventId: string, status?: ModerationStatus): Promise<MessageRecord[]> {
+  async listForManager(eventId: string, status?: ModerationStatus): Promise<ManagerGuestbookItem[]> {
     const result = status
       ? await this.db.prepare(`
-          SELECT * FROM guest_messages
+          SELECT id, guest_name, body, moderation_status, created_at, deleted_at FROM guest_messages
           WHERE event_id = ? AND moderation_status = ? AND deleted_at IS NULL
           ORDER BY created_at ASC
         `).bind(eventId, status).all<MessageRow>()
       : await this.db.prepare(`
-          SELECT * FROM guest_messages WHERE event_id = ? AND deleted_at IS NULL ORDER BY created_at ASC
+          SELECT id, guest_name, body, moderation_status, created_at, deleted_at
+          FROM guest_messages WHERE event_id = ? AND deleted_at IS NULL ORDER BY created_at ASC
         `).bind(eventId).all<MessageRow>();
-    return result.results.map(mapMessage);
+    return result.results.map(mapManagerMessage);
   }
 
   async listFeed(
@@ -143,16 +170,21 @@ export class MessagesRepository {
         WHERE event_id = ? AND deleted_at IS NULL
           AND (moderation_status = 'approved' OR guest_session_id = ?)
         UNION ALL
-        SELECT id, 'caption' AS kind, guest_name, caption AS body,
-          CASE publication_status
-            WHEN 'published' THEN 'approved'
-            WHEN 'hidden' THEN 'rejected'
-            ELSE 'pending'
+        SELECT media.id, 'caption' AS kind, media.guest_name, trim(media.caption) AS body,
+          CASE
+            WHEN media.publication_status = 'published' AND events.gallery_visible = 1 THEN 'approved'
+            WHEN media.publication_status = 'unpublished' THEN 'pending'
+            ELSE 'rejected'
           END AS moderation_status,
-          created_at, id AS media_id
+          media.created_at, media.id AS media_id
         FROM media
-        WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL AND caption IS NOT NULL
-          AND (publication_status = 'published' OR uploader_session_id = ?)
+        JOIN events ON events.id = media.event_id
+        WHERE media.event_id = ? AND media.upload_state = 'stored' AND media.deleted_at IS NULL
+          AND media.caption IS NOT NULL AND length(trim(media.caption)) > 0
+          AND (
+            (media.publication_status = 'published' AND events.gallery_visible = 1)
+            OR media.uploader_session_id = ?
+          )
       )
       ${cursorPredicate}
       ORDER BY created_at DESC, id DESC
@@ -172,7 +204,7 @@ export class MessagesRepository {
     return {
       items,
       nextCursor: result.results.length > limit && oldest
-        ? { createdAt: oldest.created_at, id: oldest.id }
+        ? { version: 1, createdAt: oldest.created_at, id: oldest.id }
         : null,
     };
   }

@@ -290,6 +290,52 @@ describe('manager media pagination', () => {
 });
 
 describe('manager settings and private photo intake', () => {
+  it('returns allowlisted Manager media and caption projections without private storage fields', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'safe-manager-media', 'A safe caption');
+    const previewObjectKey = `events/${access.event.id}/previews/${media.id}.webp`;
+    await new MediaRepository(testEnv.DB).setPreviewObjectKey(media.id, previewObjectKey);
+
+    const listed = await createApp().request(`/api/manage/events/${access.event.id}/media`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const listedBody = await listed.json<any>();
+    expect(listedBody.data.media).toEqual([{
+      id: media.id,
+      originalFilename: 'safe-manager-media.png',
+      guestName: 'Avery',
+      caption: 'A safe caption',
+      publicationStatus: 'unpublished',
+      uploadState: 'stored',
+      previewAvailable: true,
+      width: 800,
+      height: 600,
+      createdAt: media.createdAt,
+    }]);
+
+    const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+      method: 'PATCH',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({ action: 'publish', expectedStatus: 'unpublished' }),
+    }, testEnv);
+    const publishedBody = await published.json<any>();
+    expect(publishedBody.data.media).toMatchObject({
+      id: media.id,
+      publicationStatus: 'published',
+      previewAvailable: true,
+    });
+    expect(publishedBody.data.item).toMatchObject({
+      id: media.id,
+      source: 'photo_caption',
+      mediaId: media.id,
+      state: 'published',
+      visibility: 'author_only',
+      previewAvailable: true,
+    });
+    expect(JSON.stringify([listedBody, publishedBody]))
+      .not.toMatch(/objectKey|object_key|previewObjectKey|preview_object_key|uploaderSessionId|idempotencyKey/u);
+  });
+
   it('defaults the guestbook prompt on creation and returns it to guests and managers', async () => {
     const access = await eventAccess();
 

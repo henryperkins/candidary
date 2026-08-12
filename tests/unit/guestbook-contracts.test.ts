@@ -21,7 +21,7 @@ function compatibilityAliases(item: GuestGuestbookItem) {
   const kind: 'caption' = item.kind;
   const mediaId: string = item.mediaId;
   if (item.state === 'published') {
-    const moderationStatus: 'approved' = item.moderationStatus;
+    const moderationStatus: 'approved' | 'rejected' = item.moderationStatus;
     return { kind, mediaId, moderationStatus };
   }
   if (item.state === 'hidden') {
@@ -61,12 +61,27 @@ describe('guest guestbook wire contract', () => {
       kind: 'caption',
       moderationStatus: 'approved',
     };
+    const suppressedCaption: GuestGuestbookItem = {
+      ...caption,
+      visibility: 'author_only',
+      moderationStatus: 'rejected',
+    };
+    // @ts-expect-error A gallery-suppressed published caption must fail closed for legacy consumers.
+    const impossibleSuppressedCaption: GuestGuestbookItem = {
+      ...caption,
+      visibility: 'author_only',
+      moderationStatus: 'approved',
+    };
+    void impossibleSuppressedCaption;
 
     expect(compatibilityAliases(note)).toEqual({
       kind: 'message', mediaId: null, moderationStatus: 'approved',
     });
     expect(compatibilityAliases(caption)).toEqual({
       kind: 'caption', mediaId: 'media-a', moderationStatus: 'approved',
+    });
+    expect(compatibilityAliases(suppressedCaption)).toEqual({
+      kind: 'caption', mediaId: 'media-a', moderationStatus: 'rejected',
     });
   });
 });
