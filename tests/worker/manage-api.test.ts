@@ -316,6 +316,31 @@ describe('manager settings and private photo intake', () => {
       .bind(access.event.id).first()).toEqual({ guestbook_prompt: 'Leave us a favorite memory.' });
   });
 
+  it('requires the guestbook prompt in the complete settings payload without changing storage', async () => {
+    const access = await eventAccess();
+    const storedPrompt = 'Tell us what made you smile.';
+    expect((await applySettings(access, { guestbookPrompt: storedPrompt })).status).toBe(200);
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
+      method: 'PATCH',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        galleryVisible: access.event.galleryVisible,
+        moderationRequired: access.event.moderationRequired,
+        eventTimezone: access.event.eventTimezone,
+        eventStartTime: access.event.eventStartTime,
+        rsvpDeadlineDate: access.event.rsvpDeadlineDate,
+        rsvpEnabled: access.event.rsvpEnabled,
+        rsvpRosterVersion: access.event.rsvpRosterVersion,
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).fieldErrors.guestbookPrompt).toEqual(expect.any(String));
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: storedPrompt });
+  });
+
   it.each([
     ['', 'String must contain at least 1 character(s)'],
     [' '.repeat(4), 'String must contain at least 1 character(s)'],
@@ -447,6 +472,7 @@ describe('manager settings and private photo intake', () => {
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
       body: JSON.stringify({
+        guestbookPrompt: access.event.guestbookPrompt,
         galleryVisible: true, moderationRequired: true,
         eventTimezone: 'America/Chicago', eventStartTime: '00:00',
         rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,

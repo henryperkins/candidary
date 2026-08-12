@@ -480,6 +480,7 @@ export async function applySettings(
     method: 'PATCH',
     headers: writeHeaders(access.manager),
     body: JSON.stringify({
+      guestbookPrompt: access.event.guestbookPrompt,
       galleryVisible: access.event.galleryVisible,
       moderationRequired: access.event.moderationRequired,
       eventTimezone: access.event.eventTimezone,

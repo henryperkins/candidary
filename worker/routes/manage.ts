@@ -43,7 +43,7 @@ const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 const settingsSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   welcomeMessage: z.string().trim().min(1).max(500).optional(),
-  guestbookPrompt: z.string().trim().min(1).max(MAX_GUESTBOOK_PROMPT_LENGTH).optional(),
+  guestbookPrompt: z.string().trim().min(1).max(MAX_GUESTBOOK_PROMPT_LENGTH),
   galleryVisible: z.boolean(),
   moderationRequired: z.boolean(),
   eventTimezone: z.string().min(1).max(64).refine(isIanaTimeZone, 'Choose a valid time zone.'),

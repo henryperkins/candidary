@@ -985,6 +985,7 @@ describe('managing an event through an account', () => {
       method: 'PATCH',
       headers: hostHeaders(host),
       body: JSON.stringify({
+        guestbookPrompt: access.event.guestbookPrompt,
         galleryVisible: true, moderationRequired: true,
         eventTimezone: 'America/Chicago', eventStartTime: '00:00',
         rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,

@@ -147,6 +147,7 @@ describe('printed entry codes from before the RSVP migration', () => {
         method: 'PATCH',
         headers: writeHeaders(access.manager),
         body: JSON.stringify({
+          guestbookPrompt: access.event.guestbookPrompt,
           galleryVisible: true, moderationRequired: false,
           eventTimezone: 'America/Chicago', eventStartTime: '00:00',
           rsvpDeadlineDate: '2026-09-05', rsvpEnabled: true, rsvpRosterVersion: 0,

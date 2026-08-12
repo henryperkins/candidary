@@ -208,18 +208,49 @@ export interface GuestbookCaptionItem {
 export type GuestbookVisibleItem = GuestbookNoteItem | GuestbookCaptionItem;
 export type GuestbookItem = GuestbookVisibleItem | DeletedGuestbookNoteItem;
 
-export interface GuestbookCompatibilityAliases {
+export interface GuestbookNoteCompatibilityAliases {
   /** @deprecated Use `source`. */
-  kind: 'message' | 'caption';
+  kind: 'message';
   /** @deprecated Use the source-specific `state`. */
   moderationStatus: 'pending' | 'approved' | 'rejected';
   /** @deprecated Caption items carry their media ID directly. */
-  mediaId: string | null;
+  mediaId: null;
 }
 
-export type GuestGuestbookItem = GuestbookVisibleItem
+export interface GuestbookCaptionCompatibilityAliases {
+  /** @deprecated Use `source`. */
+  kind: 'caption';
+  /** @deprecated Use the source-specific `state`. */
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  /** @deprecated Caption items carry their media ID directly. */
+  mediaId: string;
+}
+
+export type GuestbookCompatibilityAliases =
+  | GuestbookNoteCompatibilityAliases
+  | GuestbookCaptionCompatibilityAliases;
+
+type GuestbookNoteStateAliases =
+  | { state: 'pending'; moderationStatus: 'pending' }
+  | { state: 'approved'; moderationStatus: 'approved' }
+  | { state: 'rejected'; moderationStatus: 'rejected' };
+
+export type GuestGuestbookNoteItem = Omit<GuestbookNoteItem, 'state'>
   & { isOwn: boolean }
-  & GuestbookCompatibilityAliases;
+  & Omit<GuestbookNoteCompatibilityAliases, 'moderationStatus'>
+  & GuestbookNoteStateAliases;
+
+type GuestbookCaptionStateAliases =
+  | { state: 'unpublished'; moderationStatus: 'pending' }
+  | { state: 'published'; moderationStatus: 'approved' }
+  | { state: 'hidden'; moderationStatus: 'rejected' };
+
+export type GuestGuestbookCaptionItem = Omit<GuestbookCaptionItem, 'state'>
+  & { isOwn: boolean }
+  & Omit<GuestbookCaptionCompatibilityAliases, 'moderationStatus'>
+  & GuestbookCaptionStateAliases;
+
+export type GuestGuestbookItem = GuestGuestbookNoteItem | GuestGuestbookCaptionItem;
 export type ManagerGuestbookItem = GuestbookItem;
 
 /** @deprecated Use the source-discriminated guestbook item contracts. */

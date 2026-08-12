@@ -35,7 +35,7 @@ describe('migration 0015 curated private guestbook', () => {
     expect(event?.guestbook_prompt).toBe(DEFAULT_GUESTBOOK_PROMPT);
   });
 
-  it('enforces the TypeScript prompt limit and trims at the database boundary', async () => {
+  it('enforces the TypeScript prompt length boundaries at the database boundary', async () => {
     await applyD1Migrations(env.DB, [...migrationsUpTo('0015'), migrationOnly('0015')]);
     await seedEvent();
 
