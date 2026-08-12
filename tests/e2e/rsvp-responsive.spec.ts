@@ -227,7 +227,9 @@ test('six manager destinations and the RSVP panel stay contained at 320, 390, an
       expect(target.height, `${name} height at ${width}`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
     }
 
-    await expectTouchTargets(page, '.rsvp-manager__filters .button', `CSV download at ${width}`);
+    // The CSV follows the list it exports rather than taking a full-width row between the filters and
+    // the first household, so it is measured where it now lives.
+    await expectTouchTargets(page, '.rsvp-manager__export .button', `CSV download at ${width}`);
     await expectTouchTargets(page, '.rsvp-household-list button', `household row at ${width}`);
     await expectTouchTargets(page, '.rsvp-manager__filters select', `status filter at ${width}`);
     await expectContained(page, page.locator('.manager-shell--intake'), `manager RSVP at ${width}`);

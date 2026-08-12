@@ -16,6 +16,7 @@ import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventThemePresetSelector } from '../components/EventThemePresetSelector';
 import { HostAccountPanel } from '../components/HostAccountPanel';
 import { hostRegisterHref } from '../app/recovery';
+import { detectedTimeZone, knownTimeZones } from '../app/time-zones';
 import {
   CoverUploadRejected,
   publishCoverUpload,
@@ -59,25 +60,6 @@ const CREATE_FIELDS = [
   'rsvpDeadlineDate',
   'welcomeMessage',
 ] as const;
-
-// The host's own zone is the right first guess, and the server validates
-// whatever comes back. `supportedValuesOf` is recent enough that a browser
-// without it still has to work: the datalist is a convenience, not the input.
-function detectedTimeZone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  } catch {
-    return 'UTC';
-  }
-}
-
-function knownTimeZones(): string[] {
-  try {
-    return Intl.supportedValuesOf?.('timeZone') ?? [];
-  } catch {
-    return [];
-  }
-}
 
 // Always the event's own zone, never this device's: a host in another zone must
 // read back the start they actually chose, not the one their laptop would show.
