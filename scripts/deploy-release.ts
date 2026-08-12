@@ -21,6 +21,7 @@ import {
 import { fileURLToPath } from 'node:url';
 
 import type * as ReleaseEvidenceModule from './release-evidence';
+import type { CandidateManifest } from './release-evidence';
 import {
   verifyExactReleaseCandidate,
   type ReleaseCandidateObservationAdapter,
@@ -384,12 +385,17 @@ export function runDeployRelease(
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error('Candidate root must be one exact directory.');
   }
+  const declaredMigrationCount = (JSON.parse(readFileSync(request.manifestPath, 'utf8')) as CandidateManifest)
+    .migrations?.verification.migrationCount;
+  if (declaredMigrationCount !== 14 && declaredMigrationCount !== 15) {
+    throw new Error('Deployment candidate is not at a supported historical or post-cutover boundary.');
+  }
   const initialCandidate = verifyExactReleaseCandidate({
     candidateRoot,
     sha: request.sha,
     manifestPath: request.manifestPath,
     approvedBaseSha: APPROVED_BASE_SHA,
-    expectedMigrationCount: 14,
+    expectedMigrationCount: declaredMigrationCount,
   }, releaseCandidateAdapters(adapters));
   const manifest = initialCandidate.manifest;
   if (manifest.bindings === null || manifest.artifacts === null) {
@@ -455,7 +461,7 @@ export function runDeployRelease(
     sha: request.sha,
     manifestPath: request.manifestPath,
     approvedBaseSha: APPROVED_BASE_SHA,
-    expectedMigrationCount: 14,
+    expectedMigrationCount: declaredMigrationCount,
   }, releaseCandidateAdapters(adapters));
   const rebuilt = collectDeployableArtifacts(candidateRoot);
 

@@ -346,10 +346,12 @@ export function buildPhase2BootstrapBundle(input: {
   through: typeof PHASE_2_MIGRATION;
   outputPath: string;
 }): MigrationBundle {
-  if (input.verifiedPhase2Candidate.migrationCount !== 13 || input.through !== PHASE_2_MIGRATION) {
+  if ((input.verifiedPhase2Candidate.migrationCount !== 13
+    && input.verifiedPhase2Candidate.migrationCount !== 15)
+    || input.through !== PHASE_2_MIGRATION) {
     throw new Error(`Phase-2 bootstrap must run through ${PHASE_2_MIGRATION}.`);
   }
-  const migrations = input.verifiedPhase2Candidate.migrations.map((file) => basename(file.path));
+  const migrations = input.verifiedPhase2Candidate.migrations.slice(0, 13).map((file) => basename(file.path));
   if (migrations.length !== 13 || migrations.at(-1) !== PHASE_2_MIGRATION) {
     throw new Error('Phase-2 bootstrap candidate has the wrong migration boundary.');
   }
@@ -374,6 +376,34 @@ export function buildPhase2BootstrapBundle(input: {
       chunks,
     ),
     migrations,
+  };
+}
+
+export function buildPostCutoverMigrationBundle(input: {
+  verifiedCandidate: VerifiedReleaseCandidate;
+  expectedLedger: readonly string[];
+  outputPath: string;
+}): MigrationBundle & { migrationsHash: string } {
+  if (input.verifiedCandidate.migrationCount !== 15) {
+    throw new Error(`Post-cutover bundle must end at ${POST_CUTOVER_MIGRATION}.`);
+  }
+  const expected = input.verifiedCandidate.migrations.slice(0, 13).map((file) => basename(file.path));
+  if (canonicalJson(input.expectedLedger) !== canonicalJson(expected)) {
+    throw new Error('Expected staging ledger does not match the historical Phase-2 boundary.');
+  }
+  const files = input.verifiedCandidate.migrations.slice(13);
+  const names = files.map((file) => basename(file.path));
+  if (canonicalJson(names) !== canonicalJson([PHASE_3_MIGRATION, POST_CUTOVER_MIGRATION])) {
+    throw new Error('Post-cutover candidate does not contain the exact 0014/0015 suffix.');
+  }
+  const chunks: Array<string | Uint8Array> = [];
+  for (const [index, file] of files.entries()) {
+    appendMigration(chunks, canonicalMigrationBytes(input.verifiedCandidate, file), names[index]!);
+  }
+  return {
+    ...writeExclusiveBundle(input.verifiedCandidate.candidateRoot, input.outputPath, chunks),
+    migrations: names,
+    migrationsHash: sha256(canonicalJson(files)),
   };
 }
 

@@ -317,6 +317,16 @@ absence booleans for both topologies; and start/finish times. It is written as c
 independently rechecks both manifests, authorizations, the artifact bytes, sidecar, all matrices, and
 both destruction records.
 
+The active post-cutover path uses schema v2 throughout the target, review authorization, staging
+authorization, and conformance artifact. Its exact final candidate has 15 migrations and ends at
+`0015_curated_private_guestbook.sql`; a v2 authorization cannot name a 13/14-migration final
+candidate, and a v1 authorization cannot name a 15-migration candidate. The v2 artifact calls the
+final source and deployment `postCutover`, records the exact 15-file `postCutoverLedger`, and binds
+one atomic suffix bundle containing both `0014_event_cover_invariants.sql` and
+`0015_curated_private_guestbook.sql`. This is a new baseline, not a relabeling of Phase 3. Required
+secret names are compared as a canonically sorted set so missing, extra, or foreign names fail
+closed without making source order a runtime property.
+
 #### Guarded staging commands
 
 Populate every variable below only from the separately approved descriptors and canonical artifacts:

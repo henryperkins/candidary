@@ -27,6 +27,7 @@ import {
   PHASE_3_MIGRATION,
   buildAtomicMigrationBundle,
   buildPhase2BootstrapBundle,
+  buildPostCutoverMigrationBundle,
   type VerifiedReleaseCandidate,
 } from '../../scripts/release-candidate';
 import { PRODUCTION_TRIGGER_NAMES, type ZeroLegacyObservation } from '../../scripts/migrate-release';
@@ -54,10 +55,12 @@ import {
   STAGING_ROUTE_CASE_IDS,
   STAGING_WORKFLOW_CASE_IDS,
   type StagingConformanceArtifactV1,
+  type StagingConformanceArtifactV2,
 } from '../../scripts/staging-release-evidence';
 
 const PHASE_2_SHA = 'c'.repeat(40);
 const PHASE_3_SHA = 'a'.repeat(40);
+const POST_CUTOVER_SHA = 'd'.repeat(40);
 const TREE = 'b'.repeat(40);
 const BASE = '0b92387d2e237d568d2514373dcc3044e7960d4b';
 const ACCOUNT = 'f'.repeat(32);
@@ -71,6 +74,7 @@ const migrations = [
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql',
   '0012_event_cover_storage.sql', PHASE_2_MIGRATION, PHASE_3_MIGRATION,
+  '0015_curated_private_guestbook.sql',
 ] as const;
 
 beforeEach(() => {
@@ -184,7 +188,7 @@ function postCutoverTarget(purpose: 'workflow-conformance' | 'cutover'): Record<
   };
 }
 
-function candidateFixture(count: 13 | 14, sha: string): VerifiedReleaseCandidate {
+function candidateFixture(count: 13 | 14 | 15, sha: string): VerifiedReleaseCandidate {
   const root = tempRoot();
   put(root, 'dist/candidary/index.js', 'export default {};\n');
   put(root, 'dist/candidary/wrangler.json', `${canonicalJson(generatedConfig())}\n`);
@@ -329,6 +333,46 @@ function inputs(count: 13 | 14, purpose: 'workflow-conformance' | 'cutover'): Re
   };
 }
 
+function postCutoverInputs(count: 14 | 15, purpose: 'workflow-conformance' | 'cutover'): ReleaseInputs {
+  const candidate = candidateFixture(count, POST_CUTOVER_SHA);
+  const workflowTarget = parseStagingTargetDescriptor(postCutoverTarget('workflow-conformance'), NOW);
+  const cutoverTarget = parseStagingTargetDescriptor(postCutoverTarget('cutover'), NOW);
+  const review = {
+    kind: 'candidary.post-cutover-review-authorization', schemaVersion: 2,
+    approvedMainSha: BASE, phase2Sha: PHASE_2_SHA,
+    phase2ManifestSha256: '8'.repeat(64), candidateSha: POST_CUTOVER_SHA,
+    candidateManifestSha256: candidate.manifestSha256,
+    reviewer: 'release-reviewer', issuedAt: '2026-08-10T11:00:00.000Z',
+    expiresAt: '2026-08-11T12:00:00.000Z',
+  };
+  const reviewInput = writeInput(candidate.candidateRoot, 'post-cutover-review.json', review);
+  const authorization = {
+    kind: 'candidary.staging-authorization', schemaVersion: 2, runId: RUN_ID,
+    reviewAuthorizationSha256: reviewInput.digest,
+    allowedCandidateShas: [POST_CUTOVER_SHA],
+    targetSha256s: {
+      workflowConformance: stagingTargetSha256(workflowTarget),
+      cutover: stagingTargetSha256(cutoverTarget),
+    },
+    allowedModes: ['initialize', 'deploy', 'migrate', 'finalize', 'verify'], cutoverCrons: [],
+    expectedSchemaSha256s: {
+      workflowConformancePhase2: '3'.repeat(64), cutoverPhase2: '4'.repeat(64),
+      cutoverPostCutover: '5'.repeat(64),
+    },
+    issuedAt: '2026-08-10T11:01:00.000Z', expiresAt: '2026-08-11T12:00:00.000Z',
+    cleanupOwner: 'staging-owner',
+  };
+  const authorizationInput = writeInput(candidate.candidateRoot, 'post-cutover-authorization.json', authorization);
+  const descriptor = purpose === 'workflow-conformance' ? workflowTarget : cutoverTarget;
+  const targetInput = writeInput(candidate.candidateRoot, `post-cutover-${purpose}.json`, descriptor);
+  return {
+    candidate, workflowTarget, cutoverTarget, targetPath: targetInput.path,
+    reviewPath: reviewInput.path, authorizationPath: authorizationInput.path,
+    review: review as unknown as ReviewAuthorizationV1,
+    authorization: authorization as unknown as StagingAuthorizationV1,
+  };
+}
+
 const zeroCounts: ZeroLegacyObservation = {
   legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0, uploadsWithoutActiveSet: 0,
 };
@@ -434,6 +478,53 @@ describe('staging target and CLI contract', () => {
 });
 
 describe('closed staging overlay and remote modes', () => {
+  it('rejects a schema-v2 target paired with historical schema-v1 authorization and a 14-migration candidate', () => {
+    const source = inputs(14, 'cutover');
+    const descriptor = parseStagingTargetDescriptor(postCutoverTarget('cutover'), NOW);
+    source.targetPath = writeInput(source.candidate.candidateRoot, 'substituted-v2-target.json', descriptor).path;
+    source.authorization.targetSha256s.cutover = stagingTargetSha256(descriptor);
+    source.authorizationPath = writeInput(
+      source.candidate.candidateRoot, 'substituted-v1-authorization.json', source.authorization,
+    ).path;
+    const run = adapters(source, [database(migrations.slice(0, 14), '5'.repeat(64))], {
+      secretNames: [...descriptor.requiredSecretNames],
+    });
+    expect(() => runStagingRelease(request(source, 'deploy'), run.value)).toThrow(/schema|version|post-cutover/u);
+    expect(run.commands).toHaveLength(0);
+  });
+
+  it('accepts a schema-v2 authorization only for the exact 15-migration post-cutover candidate', () => {
+    const historical = postCutoverInputs(14, 'cutover');
+    const historicalRun = adapters(historical, [database(migrations.slice(0, 14), '5'.repeat(64))], {
+      secretNames: [...historical.cutoverTarget.requiredSecretNames],
+    });
+    expect(() => runStagingRelease(request(historical, 'deploy'), historicalRun.value))
+      .toThrow();
+    expect(historicalRun.commands).toHaveLength(0);
+
+    const current = postCutoverInputs(15, 'cutover');
+    const currentRun = adapters(current, [database(migrations, '5'.repeat(64))], {
+      secretNames: [...current.cutoverTarget.requiredSecretNames],
+    });
+    expect(() => runStagingRelease(request(current, 'deploy'), currentRun.value)).not.toThrow();
+    expect(currentRun.commands).toHaveLength(1);
+  });
+
+  it('rejects a schema-v1 target and authorization paired with a 15-migration candidate', () => {
+    const source = inputs(14, 'cutover');
+    const candidate = candidateFixture(15, PHASE_3_SHA);
+    source.candidate = candidate;
+    source.targetPath = writeInput(candidate.candidateRoot, 'historical-cutover.json', source.cutoverTarget).path;
+    source.reviewPath = writeInput(candidate.candidateRoot, 'historical-review.json', {
+      ...source.review, candidateManifestSha256: candidate.manifestSha256,
+    }).path;
+    source.authorization.reviewAuthorizationSha256 = sha256(readFileSync(source.reviewPath));
+    source.authorizationPath = writeInput(candidate.candidateRoot, 'historical-authorization.json', source.authorization).path;
+    const run = adapters(source, [database(migrations, '5'.repeat(64))]);
+    expect(() => runStagingRelease(request(source, 'deploy'), run.value)).toThrow(/historical|fourteen|boundary/u);
+    expect(run.commands).toHaveLength(0);
+  });
+
   it('replaces or disables every production-capable surface', () => {
     for (const purpose of ['workflow-conformance', 'cutover'] as const) {
       const descriptor = target(purpose);
@@ -508,10 +599,10 @@ describe('closed staging overlay and remote modes', () => {
   it('migrates cutover from exactly 0013 to 0014 and proves rollback on a failed import', () => {
     const source = inputs(14, 'cutover');
     const before = database(migrations.slice(0, 13), source.authorization.expectedSchemaSha256s.cutoverPhase2);
-    const after = database(migrations, source.authorization.expectedSchemaSha256s.cutoverPhase3);
+    const after = database(migrations.slice(0, 14), source.authorization.expectedSchemaSha256s.cutoverPhase3);
     const run = adapters(source, [before, after]);
     expect(runStagingRelease(request(source, 'migrate'), run.value)).toMatchObject({
-      mode: 'migrate', ledger: [...migrations],
+      mode: 'migrate', ledger: [...migrations.slice(0, 14)],
     });
     expect(run.commands[0]!.args.join(' ')).not.toMatch(/migrations apply|npx/iu);
 
@@ -613,7 +704,7 @@ describe('staging finalization and independent verification', () => {
         workflowConformanceSha256: workflowInput.digest, cutoverSha256: cutoverInput.digest,
       },
       migrations: {
-        phase2Ledger: [...migrations.slice(0, 13)], phase3Ledger: [...migrations],
+        phase2Ledger: [...migrations.slice(0, 13)], phase3Ledger: [...migrations.slice(0, 14)],
         bootstrapSha256: bootstrap.sha256, phase3MigrationSha256: phase3Bundle.migrationHash,
         phase3BundleSha256: phase3Bundle.sha256, triggerNames: [...PRODUCTION_TRIGGER_NAMES],
         zeroCounts, integrity: 'ok', foreignKeyRows: 0,
@@ -660,6 +751,93 @@ describe('staging finalization and independent verification', () => {
       manifestPath: phase3.manifestPath, phase2ManifestPath: phase2.manifestPath,
       reviewAuthorizationPath: reviewInput.path, authorizationPath: authorizationInput.path,
     }, localAdapters)).toMatchObject({ sha256: written.sha256, artifact });
+
+    const postCutover = candidateFixture(15, POST_CUTOVER_SHA);
+    const postWorkflow = parseStagingTargetDescriptor(postCutoverTarget('workflow-conformance'), NOW);
+    const postCutoverTargetDescriptor = parseStagingTargetDescriptor(postCutoverTarget('cutover'), NOW);
+    const postReview = {
+      kind: 'candidary.post-cutover-review-authorization', schemaVersion: 2,
+      approvedMainSha: BASE, phase2Sha: PHASE_2_SHA,
+      phase2ManifestSha256: phase2.manifestSha256,
+      candidateSha: POST_CUTOVER_SHA, candidateManifestSha256: postCutover.manifestSha256,
+      reviewer: 'release-reviewer', issuedAt: '2026-08-10T11:00:00.000Z',
+      expiresAt: '2026-08-11T12:00:00.000Z',
+    } as const;
+    const postReviewInput = writeInput(postCutover.candidateRoot, 'post-final-review.json', postReview);
+    const postAuthorization = {
+      kind: 'candidary.staging-authorization', schemaVersion: 2, runId: RUN_ID,
+      reviewAuthorizationSha256: postReviewInput.digest,
+      allowedCandidateShas: [PHASE_2_SHA, POST_CUTOVER_SHA],
+      targetSha256s: {
+        workflowConformance: stagingTargetSha256(postWorkflow),
+        cutover: stagingTargetSha256(postCutoverTargetDescriptor),
+      },
+      allowedModes: ['initialize', 'deploy', 'migrate', 'finalize', 'verify'], cutoverCrons: [],
+      expectedSchemaSha256s: {
+        workflowConformancePhase2: '3'.repeat(64), cutoverPhase2: '4'.repeat(64),
+        cutoverPostCutover: '5'.repeat(64),
+      },
+      issuedAt: '2026-08-10T11:01:00.000Z', expiresAt: '2026-08-11T12:00:00.000Z',
+      cleanupOwner: 'staging-owner',
+    } as const;
+    const postAuthorizationInput = writeInput(postCutover.candidateRoot, 'post-final-authorization.json', postAuthorization);
+    const postWorkflowInput = writeInput(postCutover.candidateRoot, 'post-final-workflow.json', postWorkflow);
+    const postCutoverInput = writeInput(postCutover.candidateRoot, 'post-final-cutover.json', postCutoverTargetDescriptor);
+    const postBundlePath = resolve(postCutover.candidateRoot, 'output/precompute-post-cutover.sql');
+    const postBundle = buildPostCutoverMigrationBundle({
+      verifiedCandidate: postCutover, expectedLedger: migrations.slice(0, 13), outputPath: postBundlePath,
+    });
+    rmSync(postBundlePath);
+    const postArtifact: StagingConformanceArtifactV2 = {
+      ...artifact,
+      schemaVersion: 2,
+      candidateSha: POST_CUTOVER_SHA,
+      sources: {
+        phase2: artifact.sources.phase2,
+        postCutover: {
+          sha: POST_CUTOVER_SHA, manifestSha256: postCutover.manifestSha256,
+          migrationManifestSha256: postCutover.manifest.candidate!.migrationManifestSha256,
+        },
+      },
+      authorizations: { reviewSha256: postReviewInput.digest, stagingSha256: postAuthorizationInput.digest },
+      targets: {
+        workflowConformanceSha256: postWorkflowInput.digest, cutoverSha256: postCutoverInput.digest,
+      },
+      migrations: {
+        phase2Ledger: [...migrations.slice(0, 13)], postCutoverLedger: [...migrations],
+        bootstrapSha256: bootstrap.sha256, postCutoverMigrationsSha256: postBundle.migrationsHash,
+        postCutoverBundleSha256: postBundle.sha256, triggerNames: [...PRODUCTION_TRIGGER_NAMES],
+        zeroCounts, integrity: 'ok', foreignKeyRows: 0,
+      },
+      deployments: {
+        workflowConformance: { ...artifact.deployments.workflowConformance, tagSha: POST_CUTOVER_SHA, metadataSha: POST_CUTOVER_SHA },
+        phase2Cutover: artifact.deployments.phase2Cutover,
+        postCutoverCutover: { ...artifact.deployments.phase3Cutover, tagSha: POST_CUTOVER_SHA, metadataSha: POST_CUTOVER_SHA },
+      },
+    };
+    const postEvidenceInput = writeInput(postCutover.candidateRoot, 'post-final-evidence.json', postArtifact);
+    const postAdapters = {
+      verifyCandidate(value: { expectedMigrationCount: 13 | 14 | 15 }) {
+        return value.expectedMigrationCount === 13 ? phase2 : postCutover;
+      },
+    };
+    expect(() => finalizeStagingRelease({
+      sha: POST_CUTOVER_SHA, manifestPath: phase3.manifestPath, phase2ManifestPath: phase2.manifestPath,
+      workflowTargetPath: postWorkflowInput.path, cutoverTargetPath: postCutoverInput.path,
+      reviewAuthorizationPath: postReviewInput.path, authorizationPath: postAuthorizationInput.path,
+      evidenceInputPath: postEvidenceInput.path, runId: RUN_ID,
+    }, postAdapters)).toThrow(/boundar|bind|candidate|schema/u);
+    const postWritten = finalizeStagingRelease({
+      sha: POST_CUTOVER_SHA, manifestPath: postCutover.manifestPath, phase2ManifestPath: phase2.manifestPath,
+      workflowTargetPath: postWorkflowInput.path, cutoverTargetPath: postCutoverInput.path,
+      reviewAuthorizationPath: postReviewInput.path, authorizationPath: postAuthorizationInput.path,
+      evidenceInputPath: postEvidenceInput.path, runId: RUN_ID,
+    }, postAdapters);
+    expect(verifyFinalStagingRelease({
+      artifactPath: postWritten.path, sidecarPath: `${postWritten.path}.sha256`,
+      manifestPath: postCutover.manifestPath, phase2ManifestPath: phase2.manifestPath,
+      reviewAuthorizationPath: postReviewInput.path, authorizationPath: postAuthorizationInput.path,
+    }, postAdapters)).toMatchObject({ sha256: postWritten.sha256, artifact: postArtifact });
   });
 });
 

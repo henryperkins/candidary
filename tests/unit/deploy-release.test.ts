@@ -46,6 +46,7 @@ const migrationNames = [
   '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql',
   '0014_event_cover_invariants.sql',
+  '0015_curated_private_guestbook.sql',
 ] as const;
 
 afterEach(async () => {
@@ -84,11 +85,11 @@ interface Fixture {
   writeManifest(manifest?: CandidateManifest): Promise<void>;
 }
 
-async function candidateFixture(): Promise<Fixture> {
+async function candidateFixture(migrationCount: 14 | 15 = 14): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'candidary-deploy-test-'));
   roots.push(root);
   await put(root, 'config/release.json', '{"guestJourneyVersion":1}\n');
-  for (const [index, name] of migrationNames.entries()) {
+  for (const [index, name] of migrationNames.slice(0, migrationCount).entries()) {
     await put(root, `migrations/${name}`, `select ${index + 1};\n`);
   }
   await put(root, 'dist/candidary/index.js', `worker-${SHA}\n`);
@@ -263,6 +264,19 @@ function fakeAdapters(fixture: Fixture, options: AdapterOptions = {}) {
 }
 
 describe('guarded release deployment', () => {
+  it('accepts both the historical 14-migration baseline and the post-cutover 15-migration baseline', async () => {
+    for (const migrationCount of [14, 15] as const) {
+      const fixture = await candidateFixture(migrationCount);
+      const run = fakeAdapters(fixture);
+      expect(() => runDeployRelease({
+        candidateRoot: fixture.root, sha: SHA, manifestPath: fixture.manifestPath,
+      }, run.adapters)).not.toThrow();
+      expect(run.commands.map((command) => command.id)).toEqual([
+        'npm-ci', 'build', 'verify-pwa-build', 'deploy',
+      ]);
+    }
+  });
+
   it('requires one exact SHA and existing candidate manifest argument', async () => {
     const fixture = await candidateFixture();
     expect(() => parseDeployReleaseArgs([])).toThrow();

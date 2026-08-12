@@ -249,12 +249,11 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `TOKEN_REVOKED`, `SESSION_EXPIRED`, `EVENT_EXPIRED`, `EVENT_DELETED` — use a current link or confirm lifecycle state.
 - `FILE_TYPE_UNSUPPORTED`, `FILE_TOO_LARGE` — a selected or stored object failed type/signature/20 MB validation.
 - `EVENT_MEDIA_LIMIT`, `EVENT_STORAGE_LIMIT` — the 10,000-photo or 100-GiB event quota is full.
-- `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh.
 - `MESSAGE_SUBMISSION_CONFLICT` — a successful guest-note key was reused with different words. The client replaces the key and offers the preserved note for another send.
 - `MESSAGE_PURGED` — a permanently deleted note was retried with its original key; it cannot be restored or recreated.
 - `MESSAGE_EVENT_LIMIT` — the event has reached its retained standalone-note cap. Existing Guestbook content remains readable and manageable.
 - `EVENT_PHASE_CONFLICT` — the event phase no longer accepts a new note. Preserve the draft and keep the existing book readable.
-- `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a stale Manager Guestbook action lost a conditional write; refetch the row or first page instead of replaying the mutation.
+- `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh the affected surface. For a stale Manager Guestbook action, refetch the row or first page instead of replaying the mutation.
 - `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.

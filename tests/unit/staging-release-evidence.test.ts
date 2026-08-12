@@ -262,6 +262,45 @@ function expectedArtifactBindings(artifact: StagingConformanceArtifactV1) {
 }
 
 describe('Task 12 immutable staging conformance artifact', () => {
+  it('accepts a separately named 15-migration post-cutover artifact and rejects Phase-3 substitution', () => {
+    const historical = stagingArtifact();
+    const postCutover = {
+      ...historical,
+      schemaVersion: 2,
+      sources: {
+        phase2: historical.sources.phase2,
+        postCutover: {
+          sha: CANDIDATE_SHA, manifestSha256: '3'.repeat(64),
+          migrationManifestSha256: '4'.repeat(64),
+        },
+      },
+      migrations: {
+        phase2Ledger: historical.migrations.phase2Ledger,
+        postCutoverLedger: [
+          ...historical.migrations.phase3Ledger,
+          '0015_curated_private_guestbook.sql',
+        ],
+        bootstrapSha256: '9'.repeat(64),
+        postCutoverMigrationsSha256: 'a'.repeat(64),
+        postCutoverBundleSha256: 'b'.repeat(64),
+        triggerNames: historical.migrations.triggerNames,
+        zeroCounts: historical.migrations.zeroCounts,
+        integrity: 'ok', foreignKeyRows: 0,
+      },
+      deployments: {
+        workflowConformance: historical.deployments.workflowConformance,
+        phase2Cutover: historical.deployments.phase2Cutover,
+        postCutoverCutover: historical.deployments.phase3Cutover,
+      },
+    };
+    expect(assertStagingConformanceArtifact(postCutover)).toEqual(postCutover);
+    const substituted = structuredClone(postCutover) as Record<string, unknown>;
+    const sources = substituted.sources as Record<string, unknown>;
+    sources.phase3 = sources.postCutover;
+    delete sources.postCutover;
+    expect(() => assertStagingConformanceArtifact(substituted)).toThrow(/source|post-cutover|field/u);
+  });
+
   it('writes canonical bytes exclusively and independently rebinds every source digest', () => {
     const root = temporaryRoot();
     const artifact = stagingArtifact();

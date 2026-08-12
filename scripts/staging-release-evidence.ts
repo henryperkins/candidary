@@ -404,6 +404,33 @@ export interface StagingConformanceArtifactV1 {
   finishedAt: string;
 }
 
+export interface StagingConformanceArtifactV2 extends Omit<StagingConformanceArtifactV1,
+  'schemaVersion' | 'sources' | 'migrations' | 'deployments'> {
+  schemaVersion: 2;
+  sources: {
+    phase2: StagingConformanceArtifactV1['sources']['phase2'];
+    postCutover: StagingConformanceArtifactV1['sources']['phase3'];
+  };
+  migrations: {
+    phase2Ledger: string[];
+    postCutoverLedger: string[];
+    bootstrapSha256: string;
+    postCutoverMigrationsSha256: string;
+    postCutoverBundleSha256: string;
+    triggerNames: string[];
+    zeroCounts: StagingConformanceArtifactV1['migrations']['zeroCounts'];
+    integrity: 'ok';
+    foreignKeyRows: 0;
+  };
+  deployments: {
+    workflowConformance: StagingDeploymentEvidence;
+    phase2Cutover: StagingDeploymentEvidence;
+    postCutoverCutover: StagingDeploymentEvidence;
+  };
+}
+
+export type StagingConformanceArtifact = StagingConformanceArtifactV1 | StagingConformanceArtifactV2;
+
 export interface StagingDeploymentEvidence {
   versionId: string;
   tagSha: string;
@@ -412,6 +439,7 @@ export interface StagingDeploymentEvidence {
 }
 
 export interface StagingArtifactBindings {
+  schemaVersion?: 1;
   candidateSha: string;
   phase2Sha: string;
   approvedMainSha: string;
@@ -428,6 +456,26 @@ export interface StagingArtifactBindings {
   phase3BundleSha256: string;
 }
 
+export interface PostCutoverStagingArtifactBindings {
+  schemaVersion: 2;
+  candidateSha: string;
+  phase2Sha: string;
+  approvedMainSha: string;
+  phase2ManifestSha256: string;
+  candidateManifestSha256: string;
+  phase2MigrationManifestSha256: string;
+  postCutoverMigrationManifestSha256: string;
+  reviewAuthorizationSha256: string;
+  stagingAuthorizationSha256: string;
+  workflowTargetSha256: string;
+  cutoverTargetSha256: string;
+  bootstrapSha256: string;
+  postCutoverMigrationsSha256: string;
+  postCutoverBundleSha256: string;
+}
+
+export type AnyStagingArtifactBindings = StagingArtifactBindings | PostCutoverStagingArtifactBindings;
+
 const PHASE_2_LEDGER = [
   '0001_core.sql',
   '0002_wedding_photo_drop.sql',
@@ -443,6 +491,7 @@ const PHASE_2_LEDGER = [
   '0012_event_cover_storage.sql',
   PHASE_2_MIGRATION,
 ] as const;
+const POST_CUTOVER_LEDGER = [...PHASE_2_LEDGER, PHASE_3_MIGRATION, '0015_curated_private_guestbook.sql'] as const;
 
 function exactString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
@@ -542,7 +591,7 @@ function assertZeroProof(value: unknown): StagingConformanceArtifactV1['migratio
   return value as StagingConformanceArtifactV1['migrations']['zeroCounts'];
 }
 
-export function assertStagingConformanceArtifact(value: unknown): StagingConformanceArtifactV1 {
+function assertStagingConformanceArtifactV1(value: unknown): StagingConformanceArtifactV1 {
   const artifact = assertPlainRecord(value, 'Staging conformance artifact');
   assertExactKeys(artifact, [
     'kind', 'schemaVersion', 'status', 'candidateSha', 'runId', 'approvedMainSha',
@@ -653,6 +702,71 @@ export function assertStagingConformanceArtifact(value: unknown): StagingConform
   };
 }
 
+function assertStagingConformanceArtifactV2(value: unknown): StagingConformanceArtifactV2 {
+  const artifact = assertPlainRecord(value, 'Post-cutover staging conformance artifact');
+  assertExactKeys(artifact, [
+    'kind', 'schemaVersion', 'status', 'candidateSha', 'runId', 'approvedMainSha',
+    'sources', 'authorizations', 'targets', 'migrations', 'deployments', 'matrices',
+    'cleanup', 'startedAt', 'finishedAt',
+  ], 'Post-cutover staging conformance artifact');
+  if (artifact.kind !== 'candidary.staging-conformance'
+    || artifact.schemaVersion !== 2 || artifact.status !== 'passed') {
+    throw new Error('Staging conformance artifact is not one passing post-cutover v2 artifact.');
+  }
+  const sources = assertPlainRecord(artifact.sources, 'Post-cutover staging sources');
+  assertExactKeys(sources, ['phase2', 'postCutover'], 'Post-cutover staging sources');
+  const phase2 = assertSource(sources.phase2, 'Phase-2 source');
+  const postCutover = assertSource(sources.postCutover, 'Post-cutover source');
+  if (postCutover.sha !== artifact.candidateSha) {
+    throw new Error('Staging candidate does not match its post-cutover source.');
+  }
+  const migrations = assertPlainRecord(artifact.migrations, 'Post-cutover migrations');
+  assertExactKeys(migrations, [
+    'phase2Ledger', 'postCutoverLedger', 'bootstrapSha256', 'postCutoverMigrationsSha256',
+    'postCutoverBundleSha256', 'triggerNames', 'zeroCounts', 'integrity', 'foreignKeyRows',
+  ], 'Post-cutover migrations');
+  const phase2Ledger = exactStringArray(migrations.phase2Ledger, 'Phase-2 ledger');
+  const postCutoverLedger = exactStringArray(migrations.postCutoverLedger, 'Post-cutover ledger');
+  if (!sameStrings(phase2Ledger, PHASE_2_LEDGER)
+    || !sameStrings(postCutoverLedger, POST_CUTOVER_LEDGER)) {
+    throw new Error('Post-cutover staging migration ledgers are incomplete or out of order.');
+  }
+  const deployments = assertPlainRecord(artifact.deployments, 'Post-cutover deployments');
+  assertExactKeys(deployments, [
+    'workflowConformance', 'phase2Cutover', 'postCutoverCutover',
+  ], 'Post-cutover deployments');
+  const synthetic: StagingConformanceArtifactV1 = {
+    ...(artifact as unknown as StagingConformanceArtifactV2),
+    schemaVersion: 1,
+    sources: { phase2, phase3: postCutover },
+    migrations: {
+      phase2Ledger,
+      phase3Ledger: postCutoverLedger.slice(0, 14),
+      bootstrapSha256: assertSha256(migrations.bootstrapSha256, 'bootstrapSha256'),
+      phase3MigrationSha256: assertSha256(migrations.postCutoverMigrationsSha256, 'postCutoverMigrationsSha256'),
+      phase3BundleSha256: assertSha256(migrations.postCutoverBundleSha256, 'postCutoverBundleSha256'),
+      triggerNames: exactStringArray(migrations.triggerNames, 'Post-cutover trigger names'),
+      zeroCounts: assertZeroProof(migrations.zeroCounts),
+      integrity: migrations.integrity as 'ok', foreignKeyRows: migrations.foreignKeyRows as 0,
+    },
+    deployments: {
+      workflowConformance: deployments.workflowConformance as StagingDeploymentEvidence,
+      phase2Cutover: deployments.phase2Cutover as StagingDeploymentEvidence,
+      phase3Cutover: deployments.postCutoverCutover as StagingDeploymentEvidence,
+    },
+  };
+  assertStagingConformanceArtifactV1(synthetic);
+  assertSanitizedValue(artifact);
+  return value as StagingConformanceArtifactV2;
+}
+
+export function assertStagingConformanceArtifact(value: unknown): StagingConformanceArtifact {
+  const record = assertPlainRecord(value, 'Staging conformance artifact');
+  return record.schemaVersion === 2
+    ? assertStagingConformanceArtifactV2(value)
+    : assertStagingConformanceArtifactV1(value);
+}
+
 export function writeStagingConformanceArtifact(
   path: string,
   value: unknown,
@@ -669,10 +783,26 @@ function assertRegularEvidenceFile(path: string, label: string): string {
 }
 
 function assertArtifactBindings(
-  artifact: StagingConformanceArtifactV1,
-  expected: StagingArtifactBindings,
+  artifact: StagingConformanceArtifact,
+  expected: AnyStagingArtifactBindings,
 ): void {
-  const actual: StagingArtifactBindings = {
+  const actual: AnyStagingArtifactBindings = artifact.schemaVersion === 2 ? {
+    schemaVersion: 2,
+    candidateSha: artifact.candidateSha,
+    phase2Sha: artifact.sources.phase2.sha,
+    approvedMainSha: artifact.approvedMainSha,
+    phase2ManifestSha256: artifact.sources.phase2.manifestSha256,
+    candidateManifestSha256: artifact.sources.postCutover.manifestSha256,
+    phase2MigrationManifestSha256: artifact.sources.phase2.migrationManifestSha256,
+    postCutoverMigrationManifestSha256: artifact.sources.postCutover.migrationManifestSha256,
+    reviewAuthorizationSha256: artifact.authorizations.reviewSha256,
+    stagingAuthorizationSha256: artifact.authorizations.stagingSha256,
+    workflowTargetSha256: artifact.targets.workflowConformanceSha256,
+    cutoverTargetSha256: artifact.targets.cutoverSha256,
+    bootstrapSha256: artifact.migrations.bootstrapSha256,
+    postCutoverMigrationsSha256: artifact.migrations.postCutoverMigrationsSha256,
+    postCutoverBundleSha256: artifact.migrations.postCutoverBundleSha256,
+  } : {
     candidateSha: artifact.candidateSha,
     phase2Sha: artifact.sources.phase2.sha,
     approvedMainSha: artifact.approvedMainSha,
@@ -695,8 +825,8 @@ function assertArtifactBindings(
 
 export function verifyStagingConformanceArtifactFile(
   path: string,
-  expected: StagingArtifactBindings,
-): { artifact: StagingConformanceArtifactV1; sha256: string } {
+  expected: AnyStagingArtifactBindings,
+): { artifact: StagingConformanceArtifact; sha256: string } {
   const artifactPath = assertRegularEvidenceFile(path, 'Staging artifact');
   const sidecarPath = assertRegularEvidenceFile(`${artifactPath}.sha256`, 'Staging artifact sidecar');
   const bytes = readFileSync(artifactPath, 'utf8');
