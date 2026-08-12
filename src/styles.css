@@ -1334,7 +1334,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .cover-studio__error { margin-bottom: 16px; }
 .cover-studio__error:focus-visible, .cover-studio__confirm-error:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
-.cover-source-picker fieldset { border: 0; padding: 0; margin: 0; }
+/* `min-width: 0` is load-bearing, not tidying: a `fieldset` carries a UA `min-inline-size: min-content`
+   that no reset of border/padding/margin clears, so it refuses to shrink below its content. With the
+   note below asking for `flex-basis: 100%`, that percentage resolves against an indefinite width and
+   the row lays the note out at its full 532px sentence instead of wrapping — dragging the fieldset to
+   558px inside a 390px screen and carrying `Choose photo` off the right edge, where a thumb cannot
+   reach it. Giving the fieldset a definite width to shrink into is what makes the wrap actually wrap. */
+.cover-source-picker fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
 .cover-source-picker legend { margin-bottom: 10px; font-weight: 600; }
 /* Three children — the source radio, the file chooser, and the format note — share one row, and at
    390px none of them wins: the label wraps, the button breaks mid-word, and the note carrying the

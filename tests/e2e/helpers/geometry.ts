@@ -44,17 +44,26 @@ export async function measureSeparation(first: Locator, second: Locator) {
 // Content inside a declared horizontal scroller is exempt, and only that. A snap row of cover presets
 // or of RSVP total chips is *meant* to continue past the right edge, and its own scroll is how a host
 // reaches the rest of it. The bug this function exists for is content that leaves the viewport with no
-// way back, so the exemption is granted by `overflow-x: auto | scroll` on an ancestor and by nothing
-// else — `hidden` still fails, which is the case the original note was written about. The scroller's
-// own box is measured as before, and `measureDocument` still fails the moment any of it pushes the
-// page itself sideways.
+// way back, so `hidden` still fails, which is the case the original note was written about. The
+// scroller's own box is measured as before, and `measureDocument` still fails the moment any of it
+// pushes the page itself sideways.
+//
+// Computed `overflow-x` alone cannot carry that exemption. CSS resolves a `visible` axis to `auto` as
+// soon as the other axis is not `visible`, so every vertical scroll pane — `.cover-studio__controls`
+// sets only `overflow-y: auto` — reports `overflow-x: auto` and would exempt everything inside it.
+// That is not theoretical: it hid a cover upload row 168px wider than a 390px phone, with `Choose
+// photo` stranded off the right edge where no thumb reaches. Nor does `scrollWidth > clientWidth`
+// separate the two, because the accidental overflow makes the pane scrollable in exactly the way the
+// deliberate one is. The discriminator has to be something an author only writes on purpose, so a
+// horizontal scroller opts in by containing its own overscroll — which it wants regardless, to stop a
+// sideways swipe chaining to the page behind it.
 export async function measureViewportEscapes(locator: Locator) {
   return locator.evaluate((container) => {
     const viewportWidth = document.documentElement.clientWidth;
     const insideScroller = (element: HTMLElement) => {
       for (let node = element.parentElement; node && node !== container; node = node.parentElement) {
-        const overflowX = getComputedStyle(node).overflowX;
-        if (overflowX === 'auto' || overflowX === 'scroll') return true;
+        const { overflowX, overscrollBehaviorX } = getComputedStyle(node);
+        if ((overflowX === 'auto' || overflowX === 'scroll') && overscrollBehaviorX === 'contain') return true;
       }
       return false;
     };
