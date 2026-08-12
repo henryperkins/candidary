@@ -13,8 +13,22 @@ export interface GuestbookSubmission {
   replayed: boolean;
 }
 
+export interface GuestbookSubmissionIntent {
+  body: string;
+  effectiveGuestName: string | null;
+  idempotencyKey: string;
+}
+
 export type GuestbookReadStatus = 'idle' | 'loading' | 'ready' | 'retryable_error';
 export type GuestbookSubmitStatus = 'idle' | 'sending' | 'confirmed_success' | 'retryable_error' | 'invalid';
+
+export function isSameGuestbookDraft(
+  intent: GuestbookSubmissionIntent,
+  body: string,
+  effectiveGuestName: string | null,
+): boolean {
+  return intent.body === body && intent.effectiveGuestName === effectiveGuestName;
+}
 
 export function guestbookItemKey(item: Pick<GuestGuestbookItem, 'source' | 'id'>): string {
   return `${item.source}:${item.id}`;

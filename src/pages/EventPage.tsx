@@ -196,6 +196,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         </div>}
 
         <Guestbook
+          key={event.id}
           event={event}
           contributionEnabled={event.phase === 'photos-primary'}
           guestName={rememberedGuestName}

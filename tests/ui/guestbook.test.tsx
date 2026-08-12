@@ -1,10 +1,11 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import type { GuestEventView, GuestGuestbookItem } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
+import { Guestbook } from '../../src/features/guestbook/Guestbook';
 import { EventPage } from '../../src/pages/EventPage';
 
 const EVENT: GuestEventView = {
@@ -41,6 +42,20 @@ const SHARED_CAPTION: GuestGuestbookItem = {
   visibility: 'shared', previewAvailable: true, isOwn: false, kind: 'caption',
   moderationStatus: 'approved',
 };
+
+const EVENT_B: GuestEventView = {
+  ...EVENT,
+  id: 'event-b',
+  slug: 'june-ravi',
+  name: 'June & Ravi',
+  guestbookPrompt: 'Leave June and Ravi a note.',
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
 
 function success(data: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
@@ -266,6 +281,143 @@ describe('guest-facing Guestbook', () => {
 
     expect(attempts[0]?.idempotencyKey).not.toBe(attempts[1]?.idempotencyKey);
     expect(attempts[1]).toMatchObject({ body: 'First draft changed', guestName: null });
+  });
+
+  it('resets every private Guestbook surface at the event identity boundary and ignores a late prior-event page', async () => {
+    localStorage.setItem('candidary_guest_name', 'Taylor');
+    const lateApage = deferred<Response>();
+    const pendingBfeed = deferred<Response>();
+    const attempts: Array<{ event: string; body: string; idempotencyKey: string }> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return success({ event: EVENT, role: 'guest' });
+      if (path.endsWith('/api/event/june-ravi')) return success({ event: EVENT_B, role: 'guest' });
+      if (path.endsWith('/api/event/maya-theo/messages?contract=2')) return success({
+        items: [SHARED_CAPTION], nextCursor: 'late-a', ownUnshared: [PRIVATE_NOTE],
+        ownUnsharedCount: 1, ownUnsharedNextCursor: null,
+      });
+      if (path.endsWith('/api/event/maya-theo/messages?contract=2&cursor=late-a')) return lateApage.promise;
+      if (path.endsWith('/api/event/june-ravi/messages?contract=2')) return pendingBfeed.promise;
+      if (path.endsWith('/messages') && init?.method === 'POST') {
+        const payload = JSON.parse(String(init.body)) as { body: string; idempotencyKey: string };
+        attempts.push({ event: path, ...payload });
+        return Promise.reject(new TypeError('connection dropped'));
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+
+    render(<MemoryRouter initialEntries={['/event/maya-theo']}>
+      <Link to="/event/june-ravi">Open June and Ravi</Link>
+      <Routes><Route path="/event/:slug" element={<EventPage />} /></Routes>
+    </MemoryRouter>);
+    await user.click(await screen.findByText(/Guestbook/, { selector: 'span' }));
+    expect(await screen.findByText('A private memory.')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Show earlier shared entries' }));
+    const noteA = screen.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+    await user.type(noteA, 'Only for Maya and Theo');
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not sent/i);
+    expect(attempts).toHaveLength(1);
+
+    await user.click(screen.getByRole('link', { name: 'Open June and Ravi' }));
+    await screen.findByText(/June & Ravi/, { selector: '.photo-drop__event' });
+    expect(screen.queryByText('A private memory.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Golden hour.')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('Only for Maya and Theo')).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Confirm guestbook note' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const guestbookSummary = screen.getByText(/Guestbook/, { selector: 'span' });
+    if (!guestbookSummary.closest('details')?.open) await user.click(guestbookSummary);
+    expect(screen.getByRole('heading', { name: 'Leave a note for June & Ravi' })).toBeVisible();
+
+    lateApage.resolve(new Response(JSON.stringify({
+      data: {
+        items: [{ ...SHARED_CAPTION, id: 'late-a-row', mediaId: 'late-a-row', body: 'Late A row.' }],
+        nextCursor: null, ownUnshared: [], ownUnsharedCount: 1, ownUnsharedNextCursor: null,
+      },
+      requestId: 'late-a-request',
+    }), { headers: { 'content-type': 'application/json' } }));
+    await Promise.resolve();
+    expect(screen.queryByText('Late A row.')).not.toBeInTheDocument();
+
+    const noteB = screen.getByRole('textbox', { name: 'Your note for June & Ravi' });
+    await user.type(noteB, 'Only for June and Ravi');
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
+    await waitFor(() => expect(attempts).toHaveLength(2));
+    expect(attempts[1]?.event).toContain('/api/event/june-ravi/messages');
+    expect(attempts[1]?.idempotencyKey).not.toBe(attempts[0]?.idempotencyKey);
+
+    pendingBfeed.resolve(new Response(JSON.stringify({
+      data: { items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null },
+      requestId: 'request-b',
+    }), { headers: { 'content-type': 'application/json' } }));
+  });
+
+  it('keys failed intent to the effective prop-driven signature while preserving exact unsigned retries', async () => {
+    const attempts: Array<{ body: string; guestName: string | null; idempotencyKey: string }> = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/messages?contract=2')) return success({
+        items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0,
+        ownUnsharedNextCursor: null,
+      });
+      if (path.endsWith('/messages') && init?.method === 'POST') {
+        attempts.push(JSON.parse(String(init.body)) as typeof attempts[number]);
+        return Promise.reject(new TypeError('connection dropped'));
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    const onGuestNameChange = vi.fn();
+    const view = render(<Guestbook
+      event={EVENT}
+      contributionEnabled
+      guestName="Taylor"
+      onGuestNameChange={onGuestNameChange}
+      openRequest={0}
+    />);
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
+    const note = screen.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+    await user.type(note, 'Keep the intent exact');
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
+    await screen.findByRole('alert');
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(attempts).toHaveLength(2));
+    expect(attempts[1]).toEqual(attempts[0]);
+
+    view.rerender(<Guestbook
+      event={EVENT}
+      contributionEnabled
+      guestName="Morgan"
+      onGuestNameChange={onGuestNameChange}
+      openRequest={0}
+    />);
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    expect(screen.getByRole('group', { name: 'Confirm guestbook note' })).toHaveTextContent('signed as Morgan');
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
+    await waitFor(() => expect(attempts).toHaveLength(3));
+    expect(attempts[2]?.guestName).toBe('Morgan');
+    expect(attempts[2]?.idempotencyKey).not.toBe(attempts[1]?.idempotencyKey);
+
+    await user.click(screen.getByRole('button', { name: 'Leave unsigned' }));
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
+    await waitFor(() => expect(attempts).toHaveLength(4));
+    expect(attempts[3]?.guestName).toBeNull();
+    view.rerender(<Guestbook
+      event={EVENT}
+      contributionEnabled
+      guestName="Jordan"
+      onGuestNameChange={onGuestNameChange}
+      openRequest={0}
+    />);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(attempts).toHaveLength(5));
+    expect(attempts[4]).toEqual(attempts[3]);
   });
 
   it('moves a newly shared private row into the shared book while retaining Your entry', async () => {

@@ -11,9 +11,11 @@ import type { GuestEventView, GuestGuestbookItem } from '../../../shared/contrac
 import { api, ClientApiError, mediaPreview } from '../../app/api';
 import {
   appendGuestbookItems,
+  isSameGuestbookDraft,
   type GuestbookPage,
   type GuestbookReadStatus,
   type GuestbookSubmission,
+  type GuestbookSubmissionIntent,
   type GuestbookSubmitStatus,
   guestbookItemKey,
   guestbookPrivacyLabel,
@@ -77,24 +79,31 @@ export function Guestbook({
   const [submitStatus, setSubmitStatus] = useState<GuestbookSubmitStatus>('idle');
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const [confirmationOpen, setConfirmationOpen] = useState(false);
-  const [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID());
+  const [submissionKey, setSubmissionKey] = useState<string>(() => crypto.randomUUID());
+  const [failedIntent, setFailedIntent] = useState<GuestbookSubmissionIntent | null>(null);
   const [rotateConflictOnRetry, setRotateConflictOnRetry] = useState(false);
   const [submissionDisabled, setSubmissionDisabled] = useState(false);
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const noteInputRef = useRef<HTMLTextAreaElement>(null);
   const loadTicket = useRef(0);
+  const lifetimeTicket = useRef(0);
+  const readControllers = useRef(new Set<AbortController>());
   const lastOpenRequest = useRef(openRequest);
   const signedName = explicitlyUnsigned ? null : guestName.trim() || null;
 
   const loadFirstPage = useCallback(async (confirmedItem?: GuestGuestbookItem) => {
     const ticket = ++loadTicket.current;
+    const controller = new AbortController();
+    readControllers.current.add(controller);
     setReadStatus('loading');
     setFeedError(null);
     setSharedEarlierError(null);
     setPrivateEarlierError(null);
     try {
-      const page = await api<GuestbookPage>(`/api/event/${event.slug}/messages?contract=2`);
+      const page = await api<GuestbookPage>(`/api/event/${event.slug}/messages?contract=2`, {
+        signal: controller.signal,
+      });
       if (loadTicket.current !== ticket) return;
       let shared = page.items;
       let own = page.ownUnshared;
@@ -117,6 +126,8 @@ export function Guestbook({
         'The guestbook could not be loaded. Check your connection and try again.',
       ));
       setReadStatus('retryable_error');
+    } finally {
+      readControllers.current.delete(controller);
     }
   }, [event.slug]);
 
@@ -138,10 +149,24 @@ export function Guestbook({
     });
   }, [openRequest]);
 
-  useEffect(() => () => { loadTicket.current += 1; }, []);
+  useEffect(() => () => {
+    loadTicket.current += 1;
+    lifetimeTicket.current += 1;
+    for (const controller of readControllers.current) controller.abort();
+    readControllers.current.clear();
+  }, []);
 
-  function rotateAfterFailedEdit() {
-    if (submitStatus === 'retryable_error') setSubmissionKey(crypto.randomUUID());
+  useEffect(() => {
+    if (!failedIntent || isSameGuestbookDraft(failedIntent, body.trim(), signedName)) return;
+    setSubmissionKey(crypto.randomUUID());
+    setFailedIntent(null);
+    setSubmitStatus('idle');
+    setSubmitMessage(null);
+    setRotateConflictOnRetry(false);
+    setConfirmationOpen(false);
+  }, [body, failedIntent, signedName]);
+
+  function clearDraftFeedback() {
     setSubmitStatus('idle');
     setSubmitMessage(null);
     setRotateConflictOnRetry(false);
@@ -149,18 +174,18 @@ export function Guestbook({
   }
 
   function updateBody(value: string) {
-    if (value !== body) rotateAfterFailedEdit();
+    if (value !== body) clearDraftFeedback();
     setBody(value);
   }
 
   function updateRememberedName(value: string) {
-    if (value !== guestName) rotateAfterFailedEdit();
+    if (value !== guestName) clearDraftFeedback();
     setExplicitlyUnsigned(false);
     onGuestNameChange(value);
   }
 
   function leaveUnsigned() {
-    if (!explicitlyUnsigned) rotateAfterFailedEdit();
+    if (!explicitlyUnsigned) clearDraftFeedback();
     setExplicitlyUnsigned(true);
     setEditingSignature(false);
   }
@@ -175,6 +200,11 @@ export function Guestbook({
       return;
     }
     setBody(trimmed);
+    if (failedIntent && !isSameGuestbookDraft(failedIntent, trimmed, signedName)) {
+      setSubmissionKey(crypto.randomUUID());
+      setFailedIntent(null);
+      setRotateConflictOnRetry(false);
+    }
     setSubmitStatus('idle');
     setSubmitMessage(null);
     setConfirmationOpen(true);
@@ -182,8 +212,17 @@ export function Guestbook({
 
   async function sendNote() {
     if (submitStatus === 'sending' || submissionDisabled) return;
-    let key = submissionKey;
-    if (rotateConflictOnRetry) {
+    const lifetime = lifetimeTicket.current;
+    const submittedBody = body.trim();
+    const submittedName = signedName;
+    const sameFailedIntent = failedIntent
+      ? isSameGuestbookDraft(failedIntent, submittedBody, submittedName)
+      : false;
+    let key = sameFailedIntent && failedIntent ? failedIntent.idempotencyKey : submissionKey;
+    if (
+      rotateConflictOnRetry
+      || (failedIntent && !sameFailedIntent)
+    ) {
       key = crypto.randomUUID();
       setSubmissionKey(key);
     }
@@ -193,8 +232,9 @@ export function Guestbook({
     try {
       const result = await api<GuestbookSubmission>(`/api/event/${event.slug}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ body: body.trim(), guestName: signedName, idempotencyKey: key }),
+        body: JSON.stringify({ body: submittedBody, guestName: submittedName, idempotencyKey: key }),
       });
+      if (lifetimeTicket.current !== lifetime) return;
       const item = result.item;
       if (item.visibility === 'shared') {
         setSharedItems((current) => prependGuestbookItem(current, item));
@@ -207,17 +247,20 @@ export function Guestbook({
       setExplicitlyUnsigned(false);
       setEditingSignature(false);
       setSubmissionKey(crypto.randomUUID());
+      setFailedIntent(null);
       setRotateConflictOnRetry(false);
       setSubmitStatus('confirmed_success');
       setSubmitMessage(`Safely sent to ${event.name}.`);
       void loadFirstPage(item);
     } catch (caught) {
+      if (lifetimeTicket.current !== lifetime) return;
       if (caught instanceof ClientApiError) {
         if (caught.code === 'MESSAGE_SUBMISSION_CONFLICT') setRotateConflictOnRetry(true);
         if (caught.code === 'MESSAGE_EVENT_LIMIT' || caught.code === 'EVENT_PHASE_CONFLICT') {
           setSubmissionDisabled(true);
         }
       }
+      setFailedIntent({ body: submittedBody, effectiveGuestName: submittedName, idempotencyKey: key });
       setSubmitStatus('retryable_error');
       setSubmitMessage(calmFailure(
         caught,
@@ -229,6 +272,9 @@ export function Guestbook({
   async function loadEarlier(stream: 'shared' | 'private') {
     const cursor = stream === 'shared' ? sharedCursor : privateCursor;
     if (!cursor) return;
+    const lifetime = lifetimeTicket.current;
+    const controller = new AbortController();
+    readControllers.current.add(controller);
     const setBusy = stream === 'shared' ? setSharedEarlierBusy : setPrivateEarlierBusy;
     const setError = stream === 'shared' ? setSharedEarlierError : setPrivateEarlierError;
     setBusy(true);
@@ -237,7 +283,9 @@ export function Guestbook({
       const cursorName = stream === 'shared' ? 'cursor' : 'ownCursor';
       const page = await api<GuestbookPage>(
         `/api/event/${event.slug}/messages?contract=2&${cursorName}=${encodeURIComponent(cursor)}`,
+        { signal: controller.signal },
       );
+      if (lifetimeTicket.current !== lifetime) return;
       if (stream === 'shared') {
         setSharedItems((current) => appendGuestbookItems(current, page.items));
         setSharedCursor(page.nextCursor);
@@ -247,9 +295,11 @@ export function Guestbook({
         setPrivateCursor(page.ownUnsharedNextCursor);
       }
     } catch (caught) {
+      if (lifetimeTicket.current !== lifetime) return;
       setError(calmFailure(caught, 'Earlier entries could not be loaded. Try again.'));
     } finally {
-      setBusy(false);
+      readControllers.current.delete(controller);
+      if (lifetimeTicket.current === lifetime) setBusy(false);
     }
   }
 
