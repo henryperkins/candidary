@@ -132,3 +132,52 @@ Result: exit 1. The detector scanned the complete monolithic `src/styles.css` an
 
 - The Impeccable detector remains nonzero because of pre-existing full-stylesheet inventory and the known stale sidecar; it is recorded rather than repaired in this task.
 - This task ran the required focused unit/UI/static gates and targeted Task 2/3 regressions. It did not run browser screenshots, visual baseline recapture, full repository release verification, deployment, runtime certification, or physical iPhone/Android/assistive-technology acceptance. Those remain later evidence gates.
+
+## Fix round 1: event identity and failed-intent boundaries
+
+Implementation commit: `e592f6dcee75057e99e3187df5e162f22f3c3b63`
+
+### Accepted findings and RED
+
+Added test-first coverage for both accepted review findings in `tests/ui/guestbook.test.tsx`.
+
+The exact four-file focused command initially exited 1 with 2 failed and 148 passed out of 150 tests. The prop-driven signature case showed that changing the controlled name from Taylor to Morgan reused the prior ambiguous-failure idempotency key. The event-switch test first exposed a test-only route synchronization race; after waiting for the B event identity, this targeted RED showed both intended production failures:
+
+```text
+npx vitest run --config vitest.config.ts tests/ui/guestbook.test.tsx -t "resets every private|keys failed intent"
+```
+
+Result: exit 1; 2 failed and 9 skipped. Event A's `A private memory.` row remained rendered after Event B was installed, and Morgan's signed retry retained Taylor's key.
+
+### Remediation
+
+- `EventPage` keys the cohesive Guestbook by the stable event ID, creating a hard privacy boundary for rows, drafts, confirmation, errors, cursor state, and idempotency keys.
+- Guestbook aborts pending reads on unmount. First-page tickets and an event-lifetime ticket reject late first-page, pagination, and submission completions, while an already-authorized old submission is still allowed to finish on the network.
+- Failed sends retain an explicit `{ body, effectiveGuestName, idempotencyKey }` snapshot. Exact ambiguous retries reuse the snapshot key. A changed body or effective signed name rotates the key and clears stale retry/confirmation state before the next confirmation or send.
+- A device-global display-name prop change does not rotate an explicitly unsigned draft because its effective signature remains `null`.
+
+### GREEN and final gates
+
+Exact focused Task 4 command:
+
+```text
+npx vitest run --config vitest.config.ts tests/ui/guestbook.test.tsx tests/ui/guest-upload-flow.test.tsx tests/ui/guest-rsvp-flow.test.tsx tests/ui/app.test.tsx
+```
+
+Result: exit 0; 4 files and 150/150 tests passed. After the final compile-only state annotation, `tests/ui/guestbook.test.tsx` also passed 11/11.
+
+Task 2/3 regressions remained green:
+
+- Client API envelope/contracts/cursors: 3 files, 15/15 passed.
+- Worker messages API: 1 file, 22/22 passed, with only the repository's ordinary local missing-secret warning.
+
+`npm run typecheck`, `npm run lint`, `git diff --check`, and `git diff --cached --check` all exited 0. The first typecheck after snapshot-key wiring identified TypeScript's narrow `crypto.randomUUID()` template-literal inference; explicitly typing the local key state as `string` resolved it, and both final static gates passed with zero lint warnings.
+
+The Impeccable detector was not rerun, as required. No styles or design-sidecar files changed in this fix round. Explicit staging included only the three production modules and one UI test for the code commit, followed by this report alone.
+
+### Fix-round self-review and concerns
+
+- The event boundary is keyed by server event ID, not presentation phase, so lifecycle refreshes within one event preserve valid Guestbook state while cross-event navigation cannot.
+- Late Event A pagination is explicitly resolved after Event B is visible in the regression test and cannot repopulate B. B's first send uses a fresh key.
+- Signed external-name changes rotate failed intent; exact signed Retry and unsigned prop-only name changes preserve it.
+- No Manager, export, Worker, migration, style, remote, deployment, browser, or physical-device surface was changed or exercised in this round.
