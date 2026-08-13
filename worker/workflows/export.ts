@@ -1,14 +1,34 @@
 import { MAX_EXPORT_PART_SOURCE_BYTES } from '../../shared/constants';
 import type { AppEnv } from '../env';
 import { ExportsRepository, type ReadyExportPart } from '../db/exports';
+import { GuestbookRepository } from '../db/guestbook';
 import { MediaRepository } from '../db/media';
 import { buildExportManifest } from '../export/csv';
+import { buildGuestbookPrivateCsv, type GuestbookPhotoArchiveLocation } from '../export/guestbook-csv';
+import { buildGuestbookHtml } from '../export/guestbook-html';
 import { partitionExportSnapshot } from '../export/partition';
-import { exportPartName } from '../export/paths';
+import { exportPartName, exportPath } from '../export/paths';
 import { buildExportZipStream } from '../export/zip-stream';
 import { multipartPut } from '../storage/multipart';
 
 export { partitionExportSnapshot } from '../export/partition';
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function immutableGuestbookEntries(db: D1Database, jobId: string) {
+  const repository = new GuestbookRepository(db);
+  const entries = [];
+  let cursor;
+  do {
+    const page = await repository.listExportEntries(jobId, cursor, 100);
+    entries.push(...page.entries);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return entries;
+}
 
 export async function processExport(
   env: AppEnv,
@@ -30,6 +50,7 @@ export async function processExport(
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
     const storedParts: ReadyExportPart[] = [];
+    const photoArchiveByMediaId = new Map<string, GuestbookPhotoArchiveLocation>();
 
     for (const part of partitions) {
       const entries = [];
@@ -38,6 +59,10 @@ export async function processExport(
         if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
         entries.push({ media, body: object.body });
       }
+      part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
+        partNumber: part.partNumber,
+        path: exportPath(media, index),
+      }));
       const name = exportPartName(part.partNumber);
       const objectKey = `${baseKey}/${name}`;
       await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
@@ -55,18 +80,68 @@ export async function processExport(
       });
     }
 
-    await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
-      httpMetadata: {
-        contentType: 'text/csv; charset=utf-8',
-        contentDisposition: 'attachment; filename="candidary-export-manifest.csv"',
-      },
-    });
-    uploadedKeys.push(manifestObjectKey);
+    if (partitions.length) {
+      await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
+        httpMetadata: {
+          contentType: 'text/csv; charset=utf-8',
+          contentDisposition: 'attachment; filename="candidary-export-manifest.csv"',
+        },
+      });
+      uploadedKeys.push(manifestObjectKey);
+    }
+
+    let guestbook = null;
+    if (job.guestbookEntryCount !== null) {
+      if (!job.guestbookEventName || !job.guestbookEventDate
+        || !job.guestbookEventTimezone || !job.guestbookPrompt) {
+        throw new Error('EXPORT_GUESTBOOK_SNAPSHOT_INVALID');
+      }
+      const entries = await immutableGuestbookEntries(env.DB, job.id);
+      if (entries.length !== job.guestbookEntryCount) throw new Error('EXPORT_GUESTBOOK_SNAPSHOT_INVALID');
+      const htmlObjectKey = `${baseKey}/guestbook.html`;
+      const csvObjectKey = `${baseKey}/guestbook-private.csv`;
+      const encoder = new TextEncoder();
+      const htmlBytes = encoder.encode(buildGuestbookHtml({
+        eventName: job.guestbookEventName,
+        eventDate: job.guestbookEventDate,
+        eventTimezone: job.guestbookEventTimezone,
+        prompt: job.guestbookPrompt,
+        snapshotAt: job.snapshotAt,
+        entries,
+        photoArchiveByMediaId,
+      }));
+      const csvBytes = encoder.encode(buildGuestbookPrivateCsv(entries, photoArchiveByMediaId));
+      await env.MEDIA_BUCKET.put(htmlObjectKey, htmlBytes, {
+        httpMetadata: {
+          contentType: 'text/html; charset=utf-8',
+          contentDisposition: 'attachment; filename="guestbook.html"',
+        },
+      });
+      uploadedKeys.push(htmlObjectKey);
+      await env.MEDIA_BUCKET.put(csvObjectKey, csvBytes, {
+        httpMetadata: {
+          contentType: 'text/csv; charset=utf-8',
+          contentDisposition: 'attachment; filename="guestbook-private.csv"',
+        },
+      });
+      uploadedKeys.push(csvObjectKey);
+      guestbook = {
+        htmlObjectKey,
+        htmlBytes: htmlBytes.byteLength,
+        htmlSha256: await sha256(htmlBytes),
+        csvObjectKey,
+        csvBytes: csvBytes.byteLength,
+        csvSha256: await sha256(csvBytes),
+      };
+    }
     const completedAt = now.toISOString();
     return await exports.markReady(
       job.id,
-      manifestObjectKey,
-      storedParts,
+      {
+        manifestObjectKey: partitions.length ? manifestObjectKey : null,
+        parts: storedParts,
+        guestbook,
+      },
       completedAt,
       new Date(now.getTime() + 86_400_000).toISOString(),
     );

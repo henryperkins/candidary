@@ -64,14 +64,39 @@ export async function cleanupExpiredReservations(env: AppEnv, now = new Date()):
 
 export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Promise<number> {
   const repository = new ExportsRepository(env.DB);
-  const expired = await repository.expireReady(now.toISOString());
+  const timestamp = now.toISOString();
+  const expired = await repository.listExpiredReady(timestamp);
+  let cleaned = 0;
   for (const job of expired) {
     const parts = await repository.listParts(job.id);
-    const keys = [job.objectKey, job.manifestObjectKey, ...parts.map(({ objectKey }) => objectKey)]
+    const keys = [
+      job.objectKey,
+      job.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      job.guestbookHtmlObjectKey,
+      job.guestbookCsvObjectKey,
+    ]
       .filter((key): key is string => Boolean(key));
     if (keys.length) await env.MEDIA_BUCKET.delete(keys);
+    if (await repository.markExpired(job.id, timestamp)) cleaned += 1;
   }
-  return expired.length;
+  return cleaned;
+}
+
+async function deleteEventExportInventory(env: AppEnv, eventId: string): Promise<void> {
+  const repository = new ExportsRepository(env.DB);
+  const jobs = await repository.listForEvent(eventId);
+  for (const job of jobs) {
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      job.objectKey,
+      job.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      job.guestbookHtmlObjectKey,
+      job.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+    if (keys.length) await env.MEDIA_BUCKET.delete(keys);
+  }
 }
 
 // Each pass deletes at most this many rows per table, and the sweep repeats until a
@@ -1677,6 +1702,9 @@ export async function reconcileEventCoverPurge(
   }
 
   if (phase === 'r2') {
+    // Durable export inventory is authoritative. Delete those exact keys before
+    // the broader event sweep removes media and cover objects.
+    await deleteEventExportInventory(env, eventId);
     // The existing prefix already covers all four cover key shapes — raw,
     // masters, previews, rendered — because every one of them is built beneath
     // `events/{eventId}/cover/`. `cleanup.test.ts` asserts that rather than

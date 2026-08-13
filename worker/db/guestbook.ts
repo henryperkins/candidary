@@ -15,6 +15,7 @@ import type {
   GuestbookManagerSource,
   GuestbookManagerView,
 } from '../http/guestbook-cursor';
+import type { ExportGuestbookEntryRecord } from './types';
 
 interface GuestbookRow {
   id: string;
@@ -30,6 +31,49 @@ interface GuestbookRow {
   media_id: string | null;
   preview_available: number;
   total_count?: number;
+}
+
+interface ExportGuestbookEntryRow {
+  export_job_id: string;
+  source: ExportGuestbookEntryRecord['source'];
+  source_id: string;
+  source_rank: 0 | 1;
+  guest_name: string | null;
+  body: string;
+  created_at: string;
+  source_state: ExportGuestbookEntryRecord['sourceState'];
+  guest_visibility: ExportGuestbookEntryRecord['guestVisibility'];
+  included_in_keepsake: number;
+  media_id: string | null;
+  original_filename: string | null;
+}
+
+export interface ExportGuestbookCursor {
+  createdAt: string;
+  sourceRank: 0 | 1;
+  sourceId: string;
+}
+
+export interface ExportGuestbookPage {
+  entries: ExportGuestbookEntryRecord[];
+  nextCursor: ExportGuestbookCursor | null;
+}
+
+function exportEntry(row: ExportGuestbookEntryRow): ExportGuestbookEntryRecord {
+  return {
+    exportJobId: row.export_job_id,
+    source: row.source,
+    sourceId: row.source_id,
+    sourceRank: row.source_rank,
+    guestName: row.guest_name,
+    body: row.body,
+    createdAt: row.created_at,
+    sourceState: row.source_state,
+    guestVisibility: row.guest_visibility,
+    includedInKeepsake: row.included_in_keepsake === 1,
+    mediaId: row.media_id,
+    originalFilename: row.original_filename,
+  };
 }
 
 export interface GuestbookPageResult {
@@ -433,8 +477,42 @@ export class GuestbookRepository {
           AND media.caption IS NOT NULL
           AND length(trim(media.caption)) > 0
       )
+      WHERE changes() = 1
       ORDER BY created_at ASC, source_rank DESC, source_id ASC
     `).bind(input.exportJobId, input.eventId, input.snapshotAt)];
+  }
+
+  async listExportEntries(
+    exportJobId: string,
+    cursor?: ExportGuestbookCursor,
+    limit = 100,
+  ): Promise<ExportGuestbookPage> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Guestbook export page size must be between 1 and 100.');
+    }
+    const result = await this.db.prepare(`
+      SELECT * FROM export_guestbook_entries
+      WHERE export_job_id = ?1
+        ${cursor ? `AND (
+          created_at > ?2
+          OR (created_at = ?2 AND source_rank < ?3)
+          OR (created_at = ?2 AND source_rank = ?3 AND source_id > ?4)
+        )` : ''}
+      ORDER BY created_at ASC, source_rank DESC, source_id ASC
+      LIMIT ?${cursor ? 5 : 2}
+    `).bind(
+      exportJobId,
+      ...(cursor ? [cursor.createdAt, cursor.sourceRank, cursor.sourceId] : []),
+      limit + 1,
+    ).all<ExportGuestbookEntryRow>();
+    const rows = result.results.slice(0, limit);
+    const last = rows.at(-1);
+    return {
+      entries: rows.map(exportEntry),
+      nextCursor: result.results.length > limit && last
+        ? { createdAt: last.created_at, sourceRank: last.source_rank, sourceId: last.source_id }
+        : null,
+    };
   }
 
   async noteItemById(id: string): Promise<ManagerGuestbookItem | null> {

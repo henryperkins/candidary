@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { strFromU8, unzipSync } from 'fflate';
 
+import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { ExportsRepository } from '../../worker/db/exports';
 import { processExport } from '../../worker/workflows/export';
@@ -9,6 +10,82 @@ import { eventAccess, resetDatabase, testEnv, uploadPending, writeHeaders } from
 describe('manager exports', () => {
   beforeEach(resetDatabase);
 
+  it('atomically creates a new-format notes-only job with frozen metadata and entries', async () => {
+    const access = await eventAccess();
+    const guestSessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    await testEnv.DB.prepare(`
+      INSERT INTO guest_messages (
+        id, event_id, guest_session_id, guest_name, body, moderation_status,
+        idempotency_key, created_at, approved_at, deleted_at
+      ) VALUES ('note-only', ?, ?, 'Avery', 'A frozen note', 'approved',
+        'note-only-key', '2026-08-12T12:00:00.000Z', '2026-08-12T12:00:00.000Z', NULL)
+    `).bind(access.event.id, guestSessionId).run();
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+
+    expect(response.status).toBe(202);
+    const job = (await response.json<any>()).data.export;
+    expect(job).toMatchObject({
+      mediaCount: 0,
+      guestbookEntryCount: 1,
+      guestbookSharedCount: 1,
+      guestbookEventName: access.event.name,
+      guestbookEventDate: access.event.eventDate,
+      guestbookEventTimezone: access.event.eventTimezone,
+      guestbookPrompt: access.event.guestbookPrompt,
+      guestbookGalleryVisible: access.event.galleryVisible,
+    });
+    expect(job.snapshotAt).toBeTruthy();
+    const rows = await testEnv.DB.prepare(`
+      SELECT source, source_id, body, source_state, guest_visibility, included_in_keepsake
+      FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).all();
+    expect(rows.results).toEqual([{
+      source: 'guest_note', source_id: 'note-only', body: 'A frozen note',
+      source_state: 'approved', guest_visibility: 'shared', included_in_keepsake: 1,
+    }]);
+
+    await testEnv.DB.prepare(`
+      UPDATE guest_messages SET body = 'Changed after snapshot', moderation_status = 'rejected'
+      WHERE id = 'note-only'
+    `).run();
+    const ready = await processExport(testEnv, job.id, new Date());
+    expect(ready).toMatchObject({ state: 'ready', manifestObjectKey: null, partCount: 0 });
+    expect(ready?.guestbookHtmlBytes).toBeGreaterThan(0);
+    expect(ready?.guestbookHtmlSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(ready?.guestbookCsvBytes).toBeGreaterThan(0);
+    expect(ready?.guestbookCsvSha256).toMatch(/^[a-f0-9]{64}$/u);
+    const htmlObject = await testEnv.MEDIA_BUCKET.get(ready!.guestbookHtmlObjectKey!);
+    const csvObject = await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!);
+    expect(await htmlObject!.text()).toContain('A frozen note');
+    expect(await csvObject!.text()).toContain('A frozen note');
+    expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!))!.text())
+      .not.toContain('Changed after snapshot');
+    expect(htmlObject!.httpMetadata).toMatchObject({
+      contentType: 'text/html; charset=utf-8',
+      contentDisposition: 'attachment; filename="guestbook.html"',
+    });
+
+    const download = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/download`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(download.status).toBe(200);
+    const data = (await download.json<any>()).data;
+    expect(data.manifest).toBeNull();
+    expect(data.parts).toEqual([]);
+    expect(data.printableGuestbook.filename).toBe('guestbook.html');
+    expect(data.privateGuestbook.filename).toBe('guestbook-private.csv');
+    expect(data.printableGuestbook.expiresAt).toBe(data.privateGuestbook.expiresAt);
+    expect(data.printableGuestbook.url).toContain('X-Amz-Expires=900');
+    expect(data.privateGuestbook.url).toContain('X-Amz-Expires=900');
+  });
+
   it('rejects an empty snapshot', async () => {
     const access = await eventAccess();
     const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
@@ -16,6 +93,87 @@ describe('manager exports', () => {
     }, testEnv);
     expect(response.status).toBe(409);
     expect((await response.json<any>()).code).toBe('EXPORT_EMPTY');
+  });
+
+  it('discriminates active and oversized snapshots without leaving partial jobs', async () => {
+    const activeAccess = await eventAccess();
+    await uploadPending(activeAccess, 'active-export', null);
+    const first = await createApp().request(`/api/manage/events/${activeAccess.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(activeAccess.manager), body: '{}',
+    }, testEnv);
+    const second = await createApp().request(`/api/manage/events/${activeAccess.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(activeAccess.manager), body: '{}',
+    }, testEnv);
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(409);
+    expect((await second.json<any>()).code).toBe('EXPORT_ALREADY_ACTIVE');
+
+    const oversizedAccess = await eventAccess();
+    const media = await uploadPending(oversizedAccess, 'oversized-export', 'Too large');
+    await testEnv.DB.prepare('UPDATE media SET byte_size = ? WHERE id = ?')
+      .bind(MAX_EVENT_BYTES + 1, media.id).run();
+    const oversized = await createApp().request(`/api/manage/events/${oversizedAccess.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(oversizedAccess.manager), body: '{}',
+    }, testEnv);
+    expect(oversized.status).toBe(409);
+    expect((await oversized.json<any>()).code).toBe('EXPORT_LIMIT_EXCEEDED');
+    expect(await testEnv.DB.prepare(`SELECT count(*) AS count FROM export_jobs WHERE event_id = ?`)
+      .bind(oversizedAccess.event.id).first<number>('count')).toBe(0);
+  });
+
+  it('rolls back the queued job when immutable entry insertion fails', async () => {
+    const access = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    await testEnv.DB.prepare(`
+      INSERT INTO guest_messages (
+        id, event_id, guest_session_id, guest_name, body, moderation_status,
+        idempotency_key, created_at, approved_at, deleted_at
+      ) VALUES ('rollback-note', ?, ?, 'Avery', 'Rollback me', 'approved',
+        'rollback-note-key', '2026-08-12T12:00:00.000Z', '2026-08-12T12:00:00.000Z', NULL)
+    `).bind(access.event.id, sessionId).run();
+    await testEnv.DB.prepare(`
+      CREATE TRIGGER fail_guestbook_snapshot BEFORE INSERT ON export_guestbook_entries
+      BEGIN SELECT RAISE(ABORT, 'snapshot insert failed'); END
+    `).run();
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(response.status).toBe(500);
+    expect(await testEnv.DB.prepare(`SELECT count(*) AS count FROM export_jobs WHERE event_id = ?`)
+      .bind(access.event.id).first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`SELECT count(*) AS count FROM export_guestbook_entries`)
+      .first<number>('count')).toBe(0);
+  });
+
+  it('preserves more than 1,000 legacy notes without truncating the private snapshot', async () => {
+    const access = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    await testEnv.DB.prepare(`
+      WITH RECURSIVE notes(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM notes WHERE n < 1001
+      )
+      INSERT INTO guest_messages (
+        id, event_id, guest_session_id, guest_name, body, moderation_status,
+        idempotency_key, created_at, approved_at, deleted_at
+      ) SELECT printf('legacy-note-%04d', n), ?, ?, 'Legacy', printf('Note %d', n),
+        CASE WHEN n % 2 = 0 THEN 'approved' ELSE 'pending' END,
+        printf('legacy-key-%04d', n), '2026-08-12T12:00:00.000Z',
+        CASE WHEN n % 2 = 0 THEN '2026-08-12T12:00:00.000Z' ELSE NULL END, NULL
+      FROM notes
+    `).bind(access.event.id, sessionId).run();
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(response.status).toBe(202);
+    const job = (await response.json<any>()).data.export;
+    expect(job.guestbookEntryCount).toBe(1001);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(1001);
   });
 
   it('exports unpublished originals in bounded parts with a manifest and manager-only URLs', async () => {
@@ -54,6 +212,10 @@ describe('manager exports', () => {
     expect(manifest).toContain('photos-001.zip');
     expect(manifest).toContain('photos-002.zip');
     expect(manifest).toContain('Sunset toast');
+    expect(ready!.guestbookHtmlObjectKey).toContain('/attempt-1/guestbook.html');
+    expect(ready!.guestbookCsvObjectKey).toContain('/attempt-1/guestbook-private.csv');
+    expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookHtmlObjectKey!))!.text())
+      .toContain('No guestbook entries were shared at this snapshot.');
 
     const download = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
@@ -63,6 +225,8 @@ describe('manager exports', () => {
     expect(downloadData.manifest.url).toContain('X-Amz-Expires=900');
     expect(downloadData.parts).toHaveLength(2);
     expect(downloadData.parts.every((part: any) => part.url.includes('X-Amz-Expires=900'))).toBe(true);
+    expect(downloadData.printableGuestbook.filename).toBe('guestbook.html');
+    expect(downloadData.privateGuestbook.filename).toBe('guestbook-private.csv');
 
     const denied = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
       method: 'POST', headers: writeHeaders(access.guest), body: '{}',
@@ -84,6 +248,231 @@ describe('manager exports', () => {
     }, testEnv);
     expect(retry.status).toBe(202);
     expect((await retry.json<any>()).data.export.attempt).toBe(2);
+  });
+
+  it('cleans every object from repeated failed attempts and keeps deterministic prefixes', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'failure-cleanup-a', null);
+    const missing = await uploadPending(access, 'failure-cleanup-b', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await testEnv.MEDIA_BUCKET.delete(missing.objectKey);
+
+    const firstFailure = await processExport(testEnv, job.id, new Date(), 100);
+    expect(firstFailure).toMatchObject({ state: 'failed', errorCode: 'EXPORT_SOURCE_MISSING' });
+    expect((await testEnv.MEDIA_BUCKET.list({
+      prefix: `events/${access.event.id}/exports/${job.id}/attempt-1/`,
+    })).objects).toEqual([]);
+    const retry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/retry`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect((await retry.json<any>()).data.export.attempt).toBe(2);
+    const secondFailure = await processExport(testEnv, job.id, new Date(), 100);
+    expect(secondFailure).toMatchObject({ state: 'failed', attempt: 2, errorCode: 'EXPORT_SOURCE_MISSING' });
+    expect((await testEnv.MEDIA_BUCKET.list({
+      prefix: `events/${access.event.id}/exports/${job.id}/attempt-2/`,
+    })).objects).toEqual([]);
+  });
+
+  it('keeps count-drift failure behavior without publishing partial artifacts', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'count-drift', 'Frozen caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
+      .bind(new Date().toISOString(), media.id).run();
+    const failed = await processExport(testEnv, job.id, new Date());
+    expect(failed).toMatchObject({ state: 'failed', errorCode: 'EXPORT_SNAPSHOT_CHANGED' });
+    expect((await testEnv.MEDIA_BUCKET.list({
+      prefix: `events/${access.event.id}/exports/${job.id}/attempt-1/`,
+    })).objects).toEqual([]);
+  });
+
+  it('recomputes a count-equal photo plan but retains a frozen missing media ID', async () => {
+    const access = await eventAccess();
+    const frozen = await uploadPending(access, 'frozen-member', 'Frozen member caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
+      .bind(new Date().toISOString(), frozen.id).run();
+    const replacement = await uploadPending(access, 'replacement-member', null);
+    await testEnv.DB.prepare(`UPDATE media SET created_at = '2026-08-12T11:00:00.000Z' WHERE id = ?`)
+      .bind(replacement.id).run();
+
+    const ready = await processExport(testEnv, job.id, new Date());
+    expect(ready).toMatchObject({ state: 'ready', mediaCount: 1, guestbookEntryCount: 1 });
+    const csv = await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!))!.text();
+    expect(csv).toContain(`photo_caption,${frozen.id}`);
+    expect(csv).toContain(`,${frozen.id},,\r\n`);
+    const manifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
+    expect(manifest).toContain(replacement.id);
+    expect(manifest).not.toContain(frozen.id);
+  });
+
+  it('refuses retry before deleting ready inventory and resets all six Guestbook fields after durable deletion', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'retry-inventory', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const frozenRows = await testEnv.DB.prepare(`
+      SELECT source, source_id, body FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).all();
+    const keys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ]
+      .filter((key): key is string => Boolean(key));
+    const readyRetry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/retry`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(readyRetry.status).toBe(409);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+
+    await testEnv.DB.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`).bind(job.id).run();
+    const retry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/retry`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(retry.status).toBe(202);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect((await new ExportsRepository(testEnv.DB).getById(job.id))).toMatchObject({
+      state: 'queued', attempt: 2,
+      guestbookHtmlObjectKey: null, guestbookHtmlBytes: null, guestbookHtmlSha256: null,
+      guestbookCsvObjectKey: null, guestbookCsvBytes: null, guestbookCsvSha256: null,
+      guestbookEntryCount: ready!.guestbookEntryCount,
+      guestbookPrompt: ready!.guestbookPrompt,
+    });
+    expect((await testEnv.DB.prepare(`
+      SELECT source, source_id, body FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).all()).results).toEqual(frozenRows.results);
+  });
+
+  it('keeps private-only entries out of printable HTML and in the private archive', async () => {
+    const access = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    await testEnv.DB.prepare(`
+      INSERT INTO guest_messages (
+        id, event_id, guest_session_id, guest_name, body, moderation_status,
+        idempotency_key, created_at, approved_at, deleted_at
+      ) VALUES ('private-note', ?, ?, 'Taylor', 'For the hosts only', 'pending',
+        'private-note-key', '2026-08-12T12:00:00.000Z', NULL, NULL)
+    `).bind(access.event.id, sessionId).run();
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    expect(ready).toMatchObject({ guestbookEntryCount: 1, guestbookSharedCount: 0 });
+    expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookHtmlObjectKey!))!.text())
+      .toContain('No guestbook entries were shared at this snapshot.');
+    expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookHtmlObjectKey!))!.text())
+      .not.toContain('For the hosts only');
+    expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!))!.text())
+      .toContain('pending,author_only');
+  });
+
+  it('refuses partial Ready inventory and partial signed-download inventory', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'partial-inventory', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const repository = new ExportsRepository(testEnv.DB);
+    await repository.markRunning(job.id, new Date().toISOString());
+    await expect(repository.markReady(job.id, {
+      manifestObjectKey: null,
+      parts: [],
+      guestbook: {
+        htmlObjectKey: 'html', htmlBytes: 1, htmlSha256: 'a'.repeat(64),
+        csvObjectKey: 'csv', csvBytes: 1, csvSha256: 'b'.repeat(64),
+      },
+    }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))
+      .rejects.toThrow('requires a manifest and parts');
+
+    await testEnv.DB.prepare(`UPDATE export_jobs SET state = 'queued' WHERE id = ?`).bind(job.id).run();
+    const ready = await processExport(testEnv, job.id, new Date());
+    await testEnv.DB.prepare(`UPDATE export_jobs SET guestbook_csv_sha256 = NULL WHERE id = ?`)
+      .bind(job.id).run();
+    const download = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${ready!.id}/download`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(download.status).toBe(409);
+    expect((await download.json<any>()).code).toBe('EXPORT_FAILED');
+
+    const notesAccess = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(notesAccess.event.id).first<string>('id');
+    await testEnv.DB.prepare(`
+      INSERT INTO guest_messages (
+        id, event_id, guest_session_id, guest_name, body, moderation_status,
+        idempotency_key, created_at, approved_at, deleted_at
+      ) VALUES ('partial-note', ?, ?, NULL, 'Partial note', 'pending',
+        'partial-note-key', '2026-08-12T12:00:00.000Z', NULL, NULL)
+    `).bind(notesAccess.event.id, sessionId).run();
+    const notesCreated = await createApp().request(`/api/manage/events/${notesAccess.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(notesAccess.manager), body: '{}',
+    }, testEnv);
+    const notesJob = (await notesCreated.json<any>()).data.export;
+    await repository.markRunning(notesJob.id, new Date().toISOString());
+    await expect(repository.markReady(notesJob.id, {
+      manifestObjectKey: null, parts: [], guestbook: null,
+    }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))
+      .rejects.toThrow('requires complete Guestbook inventory');
+    await expect(repository.markReady(notesJob.id, {
+      manifestObjectKey: 'unexpected-manifest',
+      parts: [],
+      guestbook: {
+        htmlObjectKey: 'html', htmlBytes: 1, htmlSha256: 'a'.repeat(64),
+        csvObjectKey: 'csv', csvBytes: 1, csvSha256: 'b'.repeat(64),
+      },
+    }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))
+      .rejects.toThrow('cannot contain photo inventory');
+  });
+
+  it('keeps legacy photo-only rows downloadable with null Guestbook descriptors', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'legacy-download', null);
+    const snapshotAt = new Date().toISOString();
+    const repository = new ExportsRepository(testEnv.DB);
+    const legacy = await repository.createActive({
+      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
+      mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
+    });
+    expect(legacy).toMatchObject({
+      guestbookEntryCount: null,
+      guestbookHtmlObjectKey: null,
+      guestbookCsvObjectKey: null,
+    });
+    const ready = await processExport(testEnv, legacy.id, new Date());
+    expect(ready).toMatchObject({ state: 'ready', guestbookEntryCount: null });
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${legacy.id}/download`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data).toMatchObject({
+      printableGuestbook: null,
+      privateGuestbook: null,
+    });
   });
 
   it('uses a domain refusal when an export belongs to another event', async () => {

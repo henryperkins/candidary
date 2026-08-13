@@ -265,7 +265,10 @@ describe('GuestbookRepository', () => {
       eventId: access.event.id,
       snapshotAt: '2026-09-19T21:00:00.000Z',
     });
-    await testEnv.DB.batch(statements);
+    await testEnv.DB.batch([
+      testEnv.DB.prepare('UPDATE export_jobs SET snapshot_at = snapshot_at WHERE id = ?').bind(exportJobId),
+      ...statements,
+    ]);
     const rows = await testEnv.DB.prepare(`
       SELECT source, source_id, source_rank, body
       FROM export_guestbook_entries WHERE export_job_id = ?

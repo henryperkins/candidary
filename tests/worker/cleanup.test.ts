@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../worker/app';
 import { AuthService } from '../../worker/auth/service';
 import { MediaRepository } from '../../worker/db/media';
+import { ExportsRepository } from '../../worker/db/exports';
 import {
   COVER_CLEANUP_ROWS_PER_CLASS,
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
@@ -13,6 +14,7 @@ import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import {
   cleanupAuthScratch,
   cleanupEventCovers,
+  cleanupExpiredExports,
   cleanupExpiredReservations,
   cleanupRsvpScratch,
   deleteEventData,
@@ -21,6 +23,7 @@ import {
   scheduledCleanup,
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
+import { processExport } from '../../worker/workflows/export';
 import type { CoverWorkflowLookup } from '../../worker/workflows/cover-platform';
 import { restartCoverPublication } from '../../worker/services/event-cover-publication';
 import worker from '../../worker/index';
@@ -34,6 +37,7 @@ import {
   resetDatabase,
   seedEventCoverGraph,
   testEnv,
+  uploadPending,
   writeHeaders,
 } from './helpers';
 
@@ -140,6 +144,88 @@ function purgeAccessors(
 async function purgeSettled(eventId: string, now: Date) {
   return reconcileEventCoverPurge(testEnv, eventId, now, purgeAccessors().accessors);
 }
+
+describe('Guestbook export cleanup', () => {
+  beforeEach(resetDatabase);
+
+  it('deletes the complete durable inventory before expiring a job and retains immutable snapshot rows', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'cleanup-export', 'Frozen cleanup caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date('2026-08-12T12:00:00.000Z'));
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+
+    expect(await cleanupExpiredExports(testEnv, new Date('2026-08-14T12:00:00.000Z'))).toBe(1);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect(await repository.getById(job.id)).toMatchObject({ state: 'expired' });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(1);
+  });
+
+  it('keeps Ready state and durable inventory when object deletion fails', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'cleanup-failure', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await processExport(testEnv, job.id, new Date('2026-08-12T12:00:00.000Z'));
+    const bucket = Object.create(testEnv.MEDIA_BUCKET) as R2Bucket;
+    bucket.delete = vi.fn(async () => { throw new Error('R2 unavailable'); });
+    const failingEnv = { ...testEnv, MEDIA_BUCKET: bucket };
+
+    await expect(cleanupExpiredExports(failingEnv, new Date('2026-08-14T12:00:00.000Z')))
+      .rejects.toThrow('R2 unavailable');
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'ready' });
+  });
+
+  it('deletes exact durable export keys before event purge removes dependent rows', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'purge-export', 'Purge caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const durableKeys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+    const deleteCalls: string[][] = [];
+    const bucket = {
+      delete: async (keys: string | string[]) => {
+        deleteCalls.push(Array.isArray(keys) ? keys : [keys]);
+        return testEnv.MEDIA_BUCKET.delete(keys);
+      },
+      list: testEnv.MEDIA_BUCKET.list.bind(testEnv.MEDIA_BUCKET),
+    } as R2Bucket;
+    const purgeEnv = { ...testEnv, MEDIA_BUCKET: bucket };
+
+    await deleteEventData(purgeEnv, access.event.id, new Date());
+
+    expect(new Set(deleteCalls[0])).toEqual(new Set(durableKeys));
+    expect(await testEnv.DB.prepare('SELECT id FROM export_jobs WHERE id = ?').bind(job.id).first()).toBeNull();
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
+    for (const key of durableKeys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+});
 
 async function fenceRow(instanceId: string) {
   return testEnv.DB.prepare(`
