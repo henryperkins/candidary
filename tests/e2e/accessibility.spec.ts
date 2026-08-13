@@ -801,9 +801,9 @@ test('theme radios have textual names, native checked state, and a full-document
   await expectNoAxeViolations(page, 'manager Settings editor and preview');
 });
 
-test('Cover Studio loading, error, edit, confirmation, and preparing states are axe-clean', async ({ page }, testInfo) => {
+test('Cover Studio Choose, Compose, Style, Done, and preparing states are axe-clean and focus-ordered', async ({ page }, testInfo) => {
   onlyOnce(testInfo);
-  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.setViewportSize({ width: 390, height: 844 });
   const uploadCover: EventView['cover'] = {
     ...EVENT_FIXTURE.cover,
     config: {
@@ -830,7 +830,21 @@ test('Cover Studio loading, error, edit, confirmation, and preparing states are 
   await expectNoAxeViolations(page, 'Manager cover canvas');
 
   await page.getByRole('button', { name: 'Change cover' }).click();
-  await expect(page.getByRole('heading', { name: 'Choose a cover' })).toBeFocused();
+  const chooseHeading = page.getByRole('heading', { name: 'Choose a cover' });
+  await expect(chooseHeading).toBeFocused();
+  await page.keyboard.press('Tab');
+  const uploadRadio = page.getByRole('radio', { name: 'Upload a photo' });
+  await expect(uploadRadio).toBeFocused();
+  await page.keyboard.press('Tab');
+  const file = page.locator('.cover-source-picker__file');
+  await expect(file).toBeFocused();
+  const proxy = page.locator('.cover-source-picker__file-proxy');
+  expect(await proxy.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: style.outlineWidth, offset: style.outlineOffset };
+  })).toEqual({ style: 'solid', width: '2px', offset: '2px' });
+  const chooseDocument = await measureDocument(page);
+  expect(chooseDocument.scrollWidth).toBeLessThanOrEqual(chooseDocument.clientWidth + 1);
   await expectNoAxeViolations(page, 'Cover Studio Choose');
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.getByText('Preparing your photo…')).toBeVisible();
@@ -841,11 +855,23 @@ test('Cover Studio loading, error, edit, confirmation, and preparing states are 
   await expect(studio.getByRole('alert')).toBeFocused({ timeout: 5_000 });
   await expectNoAxeViolations(page, 'Cover Studio actionable error');
   await retry.click();
-  await expect(page.getByRole('button', { name: 'Adjust focus' })).toBeVisible({ timeout: 5_000 });
-  await expectNoAxeViolations(page, 'Cover Studio Compose');
+  await expect(page.getByRole('button', { name: 'Adjust framing' })).toBeVisible({ timeout: 5_000 });
+  await expectNoAxeViolations(page, 'Cover Studio Compose automatic');
 
-  await page.getByRole('button', { name: 'Adjust focus' }).click();
-  await page.getByRole('slider', { name: 'Horizontal focus' }).press('ArrowRight');
+  await page.getByRole('button', { name: 'Adjust framing' }).click();
+  await expectNoAxeViolations(page, 'Cover Studio Compose manual');
+  const reset = page.getByRole('button', { name: 'Reset to automatic' });
+  const horizontal = page.getByRole('slider', { name: 'Left or right' });
+  const vertical = page.getByRole('slider', { name: 'Up or down' });
+  const zoom = page.getByRole('slider', { name: 'Zoom' });
+  await reset.focus();
+  await page.keyboard.press('Tab');
+  await expect(horizontal).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(vertical).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(zoom).toBeFocused();
+  await horizontal.press('ArrowRight');
   await page.getByRole('button', { name: 'Cancel' }).click();
   const discard = page.getByRole('alertdialog', { name: 'Discard cover changes' });
   await expect(discard.getByRole('button', { name: 'Keep editing' })).toBeFocused();
@@ -866,6 +892,38 @@ test('Cover Studio loading, error, edit, confirmation, and preparing states are 
   await page.getByRole('button', { name: 'Close' }).click();
   await expect(page.locator('.cover-preparation')).toContainText('Preparing cover');
   await expectNoAxeViolations(page, 'Manager cover preparation');
+});
+
+test('Cover Studio Choose and Style are axe-clean with a native file-focus proxy at 320', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 320, height: 568 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Change cover' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a cover' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Cover Studio Choose at 320');
+
+  await page.getByRole('radio', { name: 'Upload a photo' }).focus();
+  await page.keyboard.press('Tab');
+  const file = page.locator('.cover-source-picker__file');
+  await expect(file).toBeFocused();
+  const proxy = page.locator('.cover-source-picker__file-proxy');
+  expect(await proxy.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: style.outlineWidth, offset: style.outlineOffset };
+  })).toEqual({ style: 'solid', width: '2px', offset: '2px' });
+  let documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+
+  await page.getByRole('radio', { name: /^Warm Linen/u }).check();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a style' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Cover Studio Style at 320');
+  documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });
 
 for (const terminal of [

@@ -140,6 +140,31 @@ afterEach(() => {
 });
 
 describe('event appearance editor', () => {
+  it('places a truthful guest canvas before theme and color controls', () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { container } = render(<Harness />);
+
+    const section = screen.getByRole('region', { name: 'Event appearance editor' });
+    const figure = container.querySelector('figure.event-appearance-canvas');
+    expect(figure).not.toBeNull();
+    expect(figure?.firstElementChild).toHaveTextContent('What guests see');
+    expect(screen.getByText(
+      'Choose the colors and shape guests see. Theme and color changes save as you make them. Cover changes begin after you choose Done, and the current cover stays live until the new one is ready.',
+    )).toBeVisible();
+    expect(screen.queryByText(/Cover changes apply immediately/u)).not.toBeInTheDocument();
+
+    for (const control of [
+      screen.getByRole('group', { name: 'Event appearance' }),
+      screen.getByRole('textbox', { name: 'Primary color' }),
+      screen.getByRole('textbox', { name: 'Accent color' }),
+    ]) {
+      expect(figure?.compareDocumentPosition(control)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(section).toContainElement(control);
+    }
+    const guest = screen.getByTestId('event-appearance-canvas');
+    expect(guest).not.toContainElement(screen.getByRole('button', { name: 'Change cover' }));
+  });
+
   it('shows the confirmed appearance, starts saved, and offers no manual Save button', () => {
     render(<Harness />);
 
@@ -592,8 +617,8 @@ describe('event appearance editor', () => {
     fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() => expect(calls).toContain('PATCH /api/manage/events/event-a/cover/drafts/draft-a/composition'));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Adjust focus' }));
-    await waitFor(() => expect(screen.getByRole('slider', { name: 'Horizontal focus' })).toBeVisible());
+    fireEvent.click(await screen.findByRole('button', { name: 'Adjust framing' }));
+    await waitFor(() => expect(screen.getByRole('slider', { name: 'Left or right' })).toBeVisible());
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
@@ -714,5 +739,32 @@ describe('event appearance editor', () => {
     const input = screen.getByLabelText<HTMLInputElement>('Choose photo');
     expect(input.accept).toBe('image/jpeg,image/png,image/webp,image/heic');
     expect(screen.getByText(/JPEG, PNG, WebP, or HEIC · 19 MB max/u)).toBeVisible();
+  });
+
+  it('uses static preset artwork for every style without creating an upload draft', () => {
+    const fetchMock = vi.fn(() => {
+      throw new Error('Selecting preset artwork must not make an API request.');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Harness initial={eventWithoutCover} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change cover' }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Warm Linen/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const stylePicker = screen.getByRole('group', { name: 'Style' });
+    const items = within(stylePicker).getAllByRole('listitem');
+    expect(items).toHaveLength(5);
+    const effects = ['natural', 'warm', 'film', 'soft', 'monochrome'] as const;
+    for (const [index, effect] of effects.entries()) {
+      const item = items[index]!;
+      expect(item).toHaveAttribute('data-thumbnail-state', 'ready');
+      expect(within(item).getByRole('radio')).toBeEnabled();
+      expect(item.querySelector('img')).toHaveAttribute(
+        'src',
+        `/assets/event-covers/v1/warm-linen/${effect}/standard-default-1x.webp`,
+      );
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
