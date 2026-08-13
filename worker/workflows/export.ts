@@ -30,21 +30,37 @@ async function immutableGuestbookEntries(db: D1Database, jobId: string) {
   return entries;
 }
 
+async function clearIncompleteAttempt(bucket: R2Bucket, prefix: string) {
+  for (;;) {
+    const page = await bucket.list({ prefix, limit: 1_000 });
+    const keys = page.objects.map(({ key }) => key);
+    if (!keys.length) return;
+    await bucket.delete(keys);
+  }
+}
+
 export async function processExport(
   env: AppEnv,
   jobId: string,
   now = new Date(),
   maxPartBytes = MAX_EXPORT_PART_SOURCE_BYTES,
+  claimStartedAt = now.toISOString(),
 ) {
   const exports = new ExportsRepository(env.DB);
   let job = await exports.getById(jobId);
   if (!job) return null;
   if (job.state === 'ready') return job;
-  const claim = await exports.claimRunning(jobId, now.toISOString());
+  const claim = await exports.claimRunning(jobId, claimStartedAt);
   if (!claim.owned) return claim.job;
   job = claim.job;
 
   const baseKey = `events/${job.eventId}/exports/${job.id}/attempt-${job.attempt}`;
+  // A callback retry resumes the same Workflow claim after an exception. No
+  // Ready inventory exists while the job is Running, so clear that exact
+  // deterministic attempt prefix before writing it again. Keep this outside
+  // the failure handler: a cleanup error must retry the Workflow callback and
+  // must not settle the job as Failed with unknown orphaned objects.
+  if (claim.resumed) await clearIncompleteAttempt(env.MEDIA_BUCKET, `${baseKey}/`);
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;
   const uploadedKeys: string[] = [];
   try {

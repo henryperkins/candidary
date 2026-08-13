@@ -332,7 +332,55 @@ describe('manager exports', () => {
     })).objects).toEqual([]);
   });
 
-  it('lets only the queued-to-running transition owner process one attempt', async () => {
+  it('lets the same serialized Workflow owner resume a Running attempt', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'same-owner-retry', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const repository = new ExportsRepository(testEnv.DB);
+    const claimStartedAt = '2026-08-12T12:00:00.000Z';
+    expect(await repository.claimRunning(job.id, claimStartedAt)).toMatchObject({ owned: true });
+    const attemptPrefix = `events/${access.event.id}/exports/${job.id}/attempt-1/`;
+    const staleObjectKey = `${attemptPrefix}orphaned-before-step-retry`;
+    await testEnv.MEDIA_BUCKET.put(staleObjectKey, 'stale');
+    const failingCleanupBucket = new Proxy(testEnv.MEDIA_BUCKET, {
+      get(target, property) {
+        if (property === 'delete') {
+          return async () => {
+            throw new Error('attempt cleanup unavailable');
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(processExport(
+      { ...testEnv, MEDIA_BUCKET: failingCleanupBucket },
+      job.id,
+      new Date('2026-08-12T12:00:30.000Z'),
+      undefined,
+      claimStartedAt,
+    )).rejects.toThrow('attempt cleanup unavailable');
+    expect(await repository.getById(job.id)).toMatchObject({
+      state: 'running', startedAt: claimStartedAt,
+    });
+
+    const resumed = await processExport(
+      testEnv,
+      job.id,
+      new Date('2026-08-12T12:01:00.000Z'),
+      undefined,
+      claimStartedAt,
+    );
+
+    expect(resumed).toMatchObject({ state: 'ready', startedAt: claimStartedAt });
+    expect(await testEnv.MEDIA_BUCKET.get(staleObjectKey)).toBeNull();
+  });
+
+  it('lets only the distinct queued-to-running transition owner process one attempt', async () => {
     const access = await eventAccess();
     const snapshotAt = new Date().toISOString();
     const repository = new ExportsRepository(testEnv.DB);
@@ -340,15 +388,20 @@ describe('manager exports', () => {
       id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
       mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
     });
-    await testEnv.DB.prepare(`
-      UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
-    `).bind(snapshotAt, job.id).run();
+    const ownerStartedAt = '2026-08-12T12:00:00.000Z';
+    expect(await repository.claimRunning(job.id, ownerStartedAt)).toMatchObject({ owned: true });
 
-    const duplicate = await processExport(testEnv, job.id, new Date());
+    const duplicate = await processExport(
+      testEnv,
+      job.id,
+      new Date('2026-08-12T12:01:00.000Z'),
+      undefined,
+      '2026-08-12T12:00:01.000Z',
+    );
 
-    expect(duplicate).toMatchObject({ state: 'running', startedAt: snapshotAt });
+    expect(duplicate).toMatchObject({ state: 'running', startedAt: ownerStartedAt });
     expect(await repository.getById(job.id)).toMatchObject({
-      state: 'running', startedAt: snapshotAt, errorCode: null,
+      state: 'running', startedAt: ownerStartedAt, errorCode: null,
     });
     expect((await testEnv.MEDIA_BUCKET.list({
       prefix: `events/${access.event.id}/exports/${job.id}/`,

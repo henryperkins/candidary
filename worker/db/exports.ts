@@ -77,7 +77,7 @@ export interface ReadyExportInventory {
 }
 
 export type ExportRunClaim =
-  | { owned: true; job: ExportRecord }
+  | { owned: true; resumed: boolean; job: ExportRecord }
   | { owned: false; job: ExportRecord | null };
 
 function mapExport(row: ExportRow): ExportRecord {
@@ -284,8 +284,12 @@ export class ExportsRepository {
       WHERE id = ? AND state = 'queued'
     `).bind(startedAt, id).run();
     const job = await this.getById(id);
-    return (result.meta.changes ?? 0) === 1 && job?.state === 'running'
-      ? { owned: true, job }
+    // A Workflow step may retry after its callback throws. Its event timestamp
+    // is stable across those serialized retries, so the original owner may
+    // resume while a distinct delivery (with a different token) remains a
+    // non-owner.
+    return job?.state === 'running' && job.startedAt === startedAt
+      ? { owned: true, resumed: (result.meta.changes ?? 0) !== 1, job }
       : { owned: false, job };
   }
 

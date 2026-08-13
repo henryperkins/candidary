@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 
+import { MAX_EXPORT_PART_SOURCE_BYTES } from '../shared/constants';
 import { createApp } from './app';
 import type { AppEnv } from './env';
 import { NotificationService } from './services/notifications';
@@ -28,7 +29,13 @@ const app = createApp();
 
 export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }> {
   async run(event: WorkflowEvent<{ jobId: string }>, step: WorkflowStep) {
-    return step.do('prepare private event export', async () => processExport(this.env, event.payload.jobId));
+    return step.do('prepare private event export', async () => processExport(
+      this.env,
+      event.payload.jobId,
+      new Date(),
+      MAX_EXPORT_PART_SOURCE_BYTES,
+      event.timestamp.toISOString(),
+    ));
   }
 }
 
