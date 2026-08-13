@@ -6,7 +6,10 @@ Implemented and locally verified in the isolated worktree on `codex/curated-priv
 
 Implementation commit: `5961213` (`feat: add immutable guestbook export artifacts`)
 
-Review-fix commit: `4e022e0` (`fix: serialize export workflow ownership`)
+Review-fix commits:
+
+- `4e022e0` (`fix: serialize export workflow ownership`)
+- `5b3fffc` (`fix: resume owned export workflow retries`)
 
 No push, deployment, remote D1 migration, remote state change, release certification, browser baseline update, or physical-device claim was made.
 
@@ -81,6 +84,7 @@ The required detector was run exactly once against `src/components/ManagerExport
 1. Accepted: `processExport()` did not verify ownership of the queued-to-running transition. `ExportsRepository.claimRunning()` now returns a discriminated ownership result, and only its owner proceeds. A duplicate invocation returns the current record without uploading, failing, or otherwise processing the attempt; an already-Ready invocation remains an idempotent return.
 2. Accepted: the old `markReady()` batch could delete and replace part rows before its final guarded state update lost. The batch now acquires a transaction-local Ready claim in its first statement, guards every part deletion/insertion with that claim, and finalizes inventory only while still owning it. D1 batch atomicity keeps the temporary claim invisible and rolls the whole sequence back on statement failure.
 3. Accepted: create, get, list, and retry serialized the internal `ExportRecord`, exposing durable object keys and internal artifact digests. These endpoints now use an explicit Manager projection allowlist; `ExportView` no longer declares `manifestObjectKey`. Signed download descriptors remain separately authorized and unchanged.
+4. Accepted: a Workflow callback exception could leave the exclusive claim Running, after which the platform's serialized retry looked like a non-owner and returned without completing the job. The stable Workflow `event.timestamp` now acts as the `started_at` ownership token: the same instance retry resumes while a distinct delivery loses. Before a resumed owner writes, it deletes the exact deterministic current-attempt prefix in bounded R2 pages. Prefix-list/delete failures remain callback failures with the job Running, so unknown orphaned objects cannot be hidden behind a Failed transition.
 
 ### Additional RED evidence
 
@@ -92,6 +96,12 @@ The required detector was run exactly once against `src/components/ManagerExport
 - `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts`
   - Exit 1; 19 tests total: 1 failed, 18 passed.
   - The Manager response allowlist failed because the raw record exposed event/internal timestamps, error state, object keys, artifact byte counts, and SHA-256 digests.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts -t "same serialized Workflow owner|distinct queued-to-running"`
+  - Exit 1; 20 tests total: 1 failed, 1 passed, 18 skipped.
+  - The same stable owner remained Running instead of resuming; the distinct-owner exclusion passed.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts -t "same serialized Workflow owner"`
+  - Exit 1; 20 tests total: 1 failed, 19 skipped.
+  - The retry reached Ready without invoking the forced failing prefix delete, proving crashed-attempt orphan cleanup was absent.
 
 ### Additional GREEN evidence
 
@@ -100,15 +110,18 @@ The required detector was run exactly once against `src/components/ManagerExport
 - `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts -t "does not mutate winner parts"`
   - 1 passed, 17 skipped.
 - `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts`
-  - 1 file passed; 19 tests passed after all three fixes.
+  - 1 file passed; 19 tests passed after the first three fixes.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts -t "same serialized Workflow owner|distinct queued-to-running"`
+  - 2 passed, 18 skipped.
+  - The same-owner case also proves a prefix-delete failure rejects while retaining Running, then a same-token retry removes the orphan before Ready.
 - Final combined verification:
   - `npx vitest run --config vitest.config.ts tests/unit/guestbook-export.test.ts tests/unit/export.test.ts` -- 2 files, 12 tests passed.
-  - `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts tests/worker/cleanup.test.ts tests/worker/guestbook-repository.test.ts` -- 3 files, 123 tests passed.
+  - `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts tests/worker/cleanup.test.ts tests/worker/guestbook-repository.test.ts` -- 3 files, 124 tests passed.
   - `npm run typecheck` -- exit 0.
   - `npm run lint` -- exit 0 with zero lint warnings.
   - `git diff --check` -- exit 0.
 
-Latest focused total: 135 passing tests, zero focused failures. The Worker harness emitted only its expected missing-local-secret warning.
+Latest focused total: 136 passing tests, zero focused failures. The Worker harness emitted only its expected missing-local-secret warning.
 
 The Impeccable detector was not rerun during this review-fix round, as required. No Task 8 fixture or browser/baseline file was changed.
 
