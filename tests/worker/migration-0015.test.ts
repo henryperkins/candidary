@@ -55,11 +55,13 @@ describe('migration 0015 curated private guestbook', () => {
       WHERE type = 'table' AND name IN (
         'guest_message_rate_events',
         'guest_message_purge_receipts',
-        'export_guestbook_entries'
+        'export_guestbook_entries',
+        'export_media_entries'
       ) ORDER BY name
     `).all<{ name: string }>();
     expect(tables.results.map(({ name }) => name)).toEqual([
       'export_guestbook_entries',
+      'export_media_entries',
       'guest_message_purge_receipts',
       'guest_message_rate_events',
     ]);
@@ -86,6 +88,19 @@ describe('migration 0015 curated private guestbook', () => {
       'guestbook_rate_event_ip_window',
       'guestbook_rate_event_session_window',
     ]);
+
+    const mediaSnapshotColumns = await env.DB.prepare(`PRAGMA table_info(export_media_entries)`)
+      .all<{ name: string }>();
+    expect(mediaSnapshotColumns.results.map(({ name }) => name)).toEqual([
+      'export_job_id', 'media_id', 'object_key', 'original_filename', 'mime_type',
+      'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption',
+      'publication_status', 'created_at', 'published_at',
+    ]);
+    const mediaSnapshotForeignKeys = await env.DB.prepare(`PRAGMA foreign_key_list(export_media_entries)`)
+      .all<{ table: string; from: string; on_delete: string }>();
+    expect(mediaSnapshotForeignKeys.results).toEqual([expect.objectContaining({
+      table: 'export_jobs', from: 'export_job_id', on_delete: 'CASCADE',
+    })]);
 
     expect(GUESTBOOK_SOURCE_RANK).toEqual({ guest_note: 0, photo_caption: 1 });
     await seedEvent();

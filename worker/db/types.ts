@@ -485,6 +485,27 @@ export interface MediaRecord {
   deletedAt: string | null;
 }
 
+export type ExportableMediaRecord = Pick<
+  MediaRecord,
+  | 'id'
+  | 'objectKey'
+  | 'originalFilename'
+  | 'mimeType'
+  | 'declaredByteSize'
+  | 'byteSize'
+  | 'width'
+  | 'height'
+  | 'guestName'
+  | 'caption'
+  | 'publicationStatus'
+  | 'createdAt'
+  | 'publishedAt'
+>;
+
+export interface ExportMediaEntryRecord extends ExportableMediaRecord {
+  exportJobId: string;
+}
+
 export interface ExportRecord {
   id: string;
   eventId: string;

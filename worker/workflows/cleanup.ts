@@ -1524,6 +1524,13 @@ export async function reconcileEventCoverPurge(
     env.DB.prepare(`
       UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?
     `).bind(timestamp, eventId),
+    // A queued export has not written anything and can be made terminal before
+    // its Workflow claims it. A running export remains the owner of its attempt
+    // cleanup; the purge waits below until that owner records a terminal state.
+    env.DB.prepare(`
+      UPDATE export_jobs SET state = 'failed', error_code = 'EXPORT_EVENT_DELETED'
+      WHERE event_id = ? AND state = 'queued'
+    `).bind(eventId),
     // Timestamp equality is not proof: a0ee's age escape hatch wrote the exact
     // same shape after unknown + failed termination. Before publishing the v2
     // marker, quarantine every *already blocked* row regardless of dated shape.
@@ -1689,6 +1696,20 @@ export async function reconcileEventCoverPurge(
   // No progress row and no event row means an earlier pass already finished.
   if (!progress) {
     return { ...summary, phase: 'complete', remainder: false };
+  }
+
+  const runningExports = await env.DB.prepare(`
+    SELECT count(*) AS count FROM export_jobs
+    WHERE event_id = ? AND state = 'running'
+  `).bind(eventId).first<{ count: number }>();
+  if ((runningExports?.count ?? 0) > 0) {
+    // This also upgrades a purge that older code had already advanced to R2:
+    // no event prefix is safe to sweep while an export attempt can still write.
+    await env.DB.prepare(`
+      UPDATE event_cover_purge_progress
+      SET phase = 'fences', updated_at = ? WHERE event_id = ?
+    `).bind(timestamp, eventId).run();
+    return { ...summary, phase: 'fences', remainder: true };
   }
 
   let phase = progress.phase;

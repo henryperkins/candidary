@@ -1,14 +1,14 @@
 import { MAX_EXPORT_PART_SOURCE_BYTES } from '../../shared/constants';
-import type { MediaRecord } from '../db/types';
+import type { ExportableMediaRecord } from '../db/types';
 
 export interface ExportPartition {
   partNumber: number;
-  media: MediaRecord[];
+  media: ExportableMediaRecord[];
   sourceBytes: number;
 }
 
 export function partitionExportSnapshot(
-  media: MediaRecord[],
+  media: ExportableMediaRecord[],
   maxBytes = MAX_EXPORT_PART_SOURCE_BYTES,
 ): ExportPartition[] {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('Export part size must be a positive integer.');

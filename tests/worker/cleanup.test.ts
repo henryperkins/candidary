@@ -171,6 +171,9 @@ describe('Guestbook export cleanup', () => {
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
     `).bind(job.id).first<number>('count')).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(1);
   });
 
   it('keeps Ready state and durable inventory when object deletion fails', async () => {
@@ -223,7 +226,70 @@ describe('Guestbook export cleanup', () => {
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
     `).bind(job.id).first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
     for (const key of durableKeys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('holds the event prefix and relational purge until a running export is terminal', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'purge-running-export', 'Frozen caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    let releaseSource!: () => void;
+    const released = new Promise<void>((resolve) => { releaseSource = resolve; });
+    let sourceReadStarted!: () => void;
+    const sourceRead = new Promise<void>((resolve) => { sourceReadStarted = resolve; });
+    let held = false;
+    const heldBucket = new Proxy(testEnv.MEDIA_BUCKET, {
+      get(target, property) {
+        if (property === 'get') {
+          return async (key: string) => {
+            if (!held && key === media.objectKey) {
+              held = true;
+              sourceReadStarted();
+              await released;
+            }
+            return target.get(key);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const running = processExport(
+      { ...testEnv, MEDIA_BUCKET: heldBucket },
+      job.id,
+      new Date('2026-08-12T12:00:00.000Z'),
+      undefined,
+      '2026-08-12T12:00:00.000Z',
+    );
+    await sourceRead;
+    const partialKey = `events/${access.event.id}/exports/${job.id}/attempt-1/partial.zip`;
+    await testEnv.MEDIA_BUCKET.put(partialKey, 'partial');
+
+    const firstPurge = await deleteEventData(testEnv, access.event.id, new Date('2026-08-12T12:00:30.000Z'));
+    const eventWhileRunning = await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+      .bind(access.event.id).first<{ deleted_at: string | null }>();
+    const jobWhileRunning = await new ExportsRepository(testEnv.DB).getById(job.id);
+    const partialWhileRunning = await testEnv.MEDIA_BUCKET.head(partialKey);
+    releaseSource();
+    const settled = await running;
+
+    expect(firstPurge).toMatchObject({ phase: 'fences', remainder: true });
+    expect(eventWhileRunning?.deleted_at).not.toBeNull();
+    expect(jobWhileRunning).toMatchObject({ state: 'running' });
+    expect(partialWhileRunning).not.toBeNull();
+    expect(settled).toMatchObject({ state: 'failed', errorCode: 'EXPORT_EVENT_DELETED' });
+
+    const completed = await deleteEventData(testEnv, access.event.id, new Date('2026-08-12T12:01:00.000Z'));
+    expect(completed).toMatchObject({ phase: 'complete', remainder: false });
+    expect((await testEnv.MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` })).objects).toEqual([]);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
   });
 });
 

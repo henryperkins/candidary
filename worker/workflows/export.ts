@@ -30,6 +30,17 @@ async function immutableGuestbookEntries(db: D1Database, jobId: string) {
   return entries;
 }
 
+async function immutableMediaEntries(repository: ExportsRepository, jobId: string) {
+  const entries = [];
+  let cursor;
+  do {
+    const page = await repository.listMediaEntries(jobId, cursor, 100);
+    entries.push(...page.entries);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return entries;
+}
+
 async function clearIncompleteAttempt(bucket: R2Bucket, prefix: string) {
   for (;;) {
     const page = await bucket.list({ prefix, limit: 1_000 });
@@ -60,11 +71,21 @@ export async function processExport(
   // deterministic attempt prefix before writing it again. Keep this outside
   // the failure handler: a cleanup error must retry the Workflow callback and
   // must not settle the job as Failed with unknown orphaned objects.
+  try {
+    await exports.assertOwnedRunActive(job.id, claimStartedAt);
+  } catch (error) {
+    const code = error instanceof Error && error.message.startsWith('EXPORT_')
+      ? error.message
+      : 'EXPORT_FAILED';
+    return exports.markFailed(job.id, code);
+  }
   if (claim.resumed) await clearIncompleteAttempt(env.MEDIA_BUCKET, `${baseKey}/`);
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;
   const uploadedKeys: string[] = [];
   try {
-    const snapshot = await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt);
+    const snapshot = job.guestbookEntryCount === null
+      ? await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt)
+      : await immutableMediaEntries(exports, job.id);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
     const storedParts: ReadyExportPart[] = [];
@@ -75,6 +96,7 @@ export async function processExport(
       for (const media of part.media) {
         const object = await env.MEDIA_BUCKET.get(media.objectKey);
         if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
+        await exports.assertOwnedRunActive(job.id, claimStartedAt);
         entries.push({ media, body: object.body });
       }
       part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
@@ -99,6 +121,7 @@ export async function processExport(
     }
 
     if (partitions.length) {
+      await exports.assertOwnedRunActive(job.id, claimStartedAt);
       await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
@@ -129,6 +152,7 @@ export async function processExport(
         photoArchiveByMediaId,
       }));
       const csvBytes = encoder.encode(buildGuestbookPrivateCsv(entries, photoArchiveByMediaId));
+      await exports.assertOwnedRunActive(job.id, claimStartedAt);
       await env.MEDIA_BUCKET.put(htmlObjectKey, htmlBytes, {
         httpMetadata: {
           contentType: 'text/html; charset=utf-8',
@@ -136,6 +160,7 @@ export async function processExport(
         },
       });
       uploadedKeys.push(htmlObjectKey);
+      await exports.assertOwnedRunActive(job.id, claimStartedAt);
       await env.MEDIA_BUCKET.put(csvObjectKey, csvBytes, {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
@@ -153,6 +178,7 @@ export async function processExport(
       };
     }
     const completedAt = now.toISOString();
+    await exports.assertOwnedRunActive(job.id, claimStartedAt);
     return await exports.markReady(
       job.id,
       {

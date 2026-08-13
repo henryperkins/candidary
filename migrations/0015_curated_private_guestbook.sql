@@ -76,6 +76,32 @@ CREATE TABLE export_guestbook_entries (
 CREATE INDEX guestbook_export_render_order
 ON export_guestbook_entries(export_job_id, created_at ASC, source_rank DESC, source_id ASC);
 
+-- Freeze the exact photo membership and export metadata alongside the job.
+-- This intentionally does not reference media: deleting a live media row after
+-- snapshotAt must not rewrite or cascade the historical export snapshot.
+CREATE TABLE export_media_entries (
+  export_job_id TEXT NOT NULL REFERENCES export_jobs(id) ON DELETE CASCADE,
+  media_id TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  original_filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  declared_byte_size INTEGER NOT NULL CHECK (declared_byte_size >= 0),
+  byte_size INTEGER CHECK (byte_size IS NULL OR byte_size >= 0),
+  width INTEGER CHECK (width IS NULL OR width > 0),
+  height INTEGER CHECK (height IS NULL OR height > 0),
+  guest_name TEXT NOT NULL,
+  caption TEXT,
+  publication_status TEXT NOT NULL CHECK (
+    publication_status IN ('unpublished', 'published', 'hidden')
+  ),
+  created_at TEXT NOT NULL,
+  published_at TEXT,
+  PRIMARY KEY (export_job_id, media_id)
+);
+
+CREATE INDEX export_media_entries_order
+ON export_media_entries(export_job_id, created_at ASC, media_id ASC);
+
 CREATE INDEX guestbook_notes_event_owner
 ON guest_messages(event_id, guest_session_id, created_at);
 

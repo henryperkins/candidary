@@ -5,7 +5,7 @@ import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { ExportsRepository } from '../../worker/db/exports';
 import { processExport } from '../../worker/workflows/export';
-import { eventAccess, resetDatabase, testEnv, uploadPending, writeHeaders } from './helpers';
+import { eventAccess, png, resetDatabase, testEnv, uploadPending, writeHeaders } from './helpers';
 
 const managerExportKeys = [
   'attempt',
@@ -196,6 +196,9 @@ describe('manager exports', () => {
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
     `).bind(job.id).first<number>('count')).toBe(1001);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
   });
 
   it('exports unpublished originals in bounded parts with a manifest and manager-only URLs', async () => {
@@ -314,6 +317,10 @@ describe('manager exports', () => {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     const job = (await created.json<any>()).data.export;
+    expect((await testEnv.DB.prepare(`
+      SELECT media_id, original_filename FROM export_media_entries
+      WHERE export_job_id = ? ORDER BY created_at, media_id
+    `).bind(job.id).all()).results).toHaveLength(2);
     await testEnv.MEDIA_BUCKET.delete(missing.objectKey);
 
     const firstFailure = await processExport(testEnv, job.id, new Date(), 100);
@@ -477,7 +484,7 @@ describe('manager exports', () => {
     }]);
   });
 
-  it('keeps count-drift failure behavior without publishing partial artifacts', async () => {
+  it('exports the immutable photo membership even when the live media row is later deleted', async () => {
     const access = await eventAccess();
     const media = await uploadPending(access, 'count-drift', 'Frozen caption');
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
@@ -486,34 +493,62 @@ describe('manager exports', () => {
     const job = (await created.json<any>()).data.export;
     await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
       .bind(new Date().toISOString(), media.id).run();
-    const failed = await processExport(testEnv, job.id, new Date());
-    expect(failed).toMatchObject({ state: 'failed', errorCode: 'EXPORT_SNAPSHOT_CHANGED' });
-    expect((await testEnv.MEDIA_BUCKET.list({
-      prefix: `events/${access.event.id}/exports/${job.id}/attempt-1/`,
-    })).objects).toEqual([]);
+    const ready = await processExport(testEnv, job.id, new Date());
+    expect(ready).toMatchObject({ state: 'ready', mediaCount: 1 });
+    const manifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
+    expect(manifest).toContain(media.id);
   });
 
-  it('recomputes a count-equal photo plan but retains a frozen missing media ID', async () => {
+  it('never substitutes a reservation finalized after snapshot for a deleted frozen photo', async () => {
     const access = await eventAccess();
     const frozen = await uploadPending(access, 'frozen-member', 'Frozen member caption');
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        filename: 'replacement-member.png', mimeType: 'image/png', byteSize: 128,
+        idempotencyKey: 'replacement-member', guestName: 'Avery', caption: null,
+      }),
+    }, testEnv);
+    expect(initiated.status).toBe(201);
+    const replacement = (await initiated.json<any>()).data.media;
+    await testEnv.MEDIA_BUCKET.put(replacement.objectKey, png(), {
+      httpMetadata: { contentType: 'image/png' },
+    });
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     const job = (await created.json<any>()).data.export;
     await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
       .bind(new Date().toISOString(), frozen.id).run();
-    const replacement = await uploadPending(access, 'replacement-member', null);
-    await testEnv.DB.prepare(`UPDATE media SET created_at = '2026-08-12T11:00:00.000Z' WHERE id = ?`)
-      .bind(replacement.id).run();
+    const finalized = await createApp().request(
+      `/api/event/${access.event.slug}/uploads/${replacement.id}/finalize`,
+      { method: 'POST', headers: writeHeaders(access.guest), body: '{}' },
+      testEnv,
+    );
+    expect(finalized.status).toBe(200);
 
     const ready = await processExport(testEnv, job.id, new Date());
     expect(ready).toMatchObject({ state: 'ready', mediaCount: 1, guestbookEntryCount: 1 });
     const csv = await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!))!.text();
     expect(csv).toContain(`photo_caption,${frozen.id}`);
-    expect(csv).toContain(`,${frozen.id},,\r\n`);
+    expect(csv).toContain(`,${frozen.id},1,photos/001-frozen-member.png\r\n`);
     const manifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
-    expect(manifest).toContain(replacement.id);
-    expect(manifest).not.toContain(frozen.id);
+    expect(manifest).toContain(frozen.id);
+    expect(manifest).not.toContain(replacement.id);
+
+    await testEnv.DB.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`)
+      .bind(job.id).run();
+    const retried = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(retried.status).toBe(202);
+    const retryReady = await processExport(testEnv, job.id, new Date());
+    const retryManifest = await (await testEnv.MEDIA_BUCKET.get(retryReady!.manifestObjectKey!))!.text();
+    const retryCsv = await (await testEnv.MEDIA_BUCKET.get(retryReady!.guestbookCsvObjectKey!))!.text();
+    expect(retryManifest).toBe(manifest);
+    expect(retryCsv).toBe(csv);
   });
 
   it('refuses retry before deleting ready inventory and resets all six Guestbook fields after durable deletion', async () => {

@@ -1,7 +1,7 @@
 import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { GuestbookRepository } from './guestbook';
-import type { ExportPartRecord, ExportRecord } from './types';
+import type { ExportMediaEntryRecord, ExportPartRecord, ExportRecord } from './types';
 
 interface ExportRow {
   id: string;
@@ -42,6 +42,23 @@ interface ExportPartRow {
   media_count: number;
   source_bytes: number;
   created_at: string;
+}
+
+interface ExportMediaEntryRow {
+  export_job_id: string;
+  media_id: string;
+  object_key: string;
+  original_filename: string;
+  mime_type: ExportMediaEntryRecord['mimeType'];
+  declared_byte_size: number;
+  byte_size: number | null;
+  width: number | null;
+  height: number | null;
+  guest_name: string;
+  caption: string | null;
+  publication_status: ExportMediaEntryRecord['publicationStatus'];
+  created_at: string;
+  published_at: string | null;
 }
 
 export interface ReadyExportPart {
@@ -124,6 +141,25 @@ function mapPart(row: ExportPartRow): ExportPartRecord {
     mediaCount: row.media_count,
     sourceBytes: row.source_bytes,
     createdAt: row.created_at,
+  };
+}
+
+function mapMediaEntry(row: ExportMediaEntryRow): ExportMediaEntryRecord {
+  return {
+    exportJobId: row.export_job_id,
+    id: row.media_id,
+    objectKey: row.object_key,
+    originalFilename: row.original_filename,
+    mimeType: row.mime_type,
+    declaredByteSize: row.declared_byte_size,
+    byteSize: row.byte_size,
+    width: row.width,
+    height: row.height,
+    guestName: row.guest_name,
+    caption: row.caption,
+    publicationStatus: row.publication_status,
+    createdAt: row.created_at,
+    publishedAt: row.published_at,
   };
 }
 
@@ -225,6 +261,23 @@ export class ExportsRepository {
     try {
       const results = await this.db.batch([
         first,
+        this.db.prepare(`
+          INSERT INTO export_media_entries (
+            export_job_id, media_id, object_key, original_filename, mime_type,
+            declared_byte_size, byte_size, width, height, guest_name, caption,
+            publication_status, created_at, published_at
+          )
+          SELECT ?1, id, object_key, original_filename, mime_type,
+            declared_byte_size, byte_size, width, height, guest_name, caption,
+            publication_status, created_at, published_at
+          FROM media
+          WHERE event_id = ?2 AND upload_state = 'stored' AND deleted_at IS NULL
+            AND created_at <= ?3 AND EXISTS (
+              SELECT 1 FROM export_jobs
+              WHERE id = ?1 AND event_id = ?2 AND snapshot_at = ?3 AND state = 'queued'
+            )
+          ORDER BY created_at ASC, id ASC
+        `).bind(input.id, input.eventId, input.snapshotAt),
         ...new GuestbookRepository(this.db).snapshotStatements({
           exportJobId: input.id,
           eventId: input.eventId,
@@ -278,10 +331,45 @@ export class ExportsRepository {
     return result.results.map(mapPart);
   }
 
+  async listMediaEntries(
+    exportJobId: string,
+    cursor?: { createdAt: string; mediaId: string },
+    limit = 100,
+  ): Promise<{
+      entries: ExportMediaEntryRecord[];
+      nextCursor: { createdAt: string; mediaId: string } | null;
+    }> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Export media page size must be between 1 and 100.');
+    }
+    const result = await this.db.prepare(`
+      SELECT * FROM export_media_entries
+      WHERE export_job_id = ?1
+        ${cursor ? `AND (created_at > ?2 OR (created_at = ?2 AND media_id > ?3))` : ''}
+      ORDER BY created_at ASC, media_id ASC
+      LIMIT ?${cursor ? 4 : 2}
+    `).bind(
+      exportJobId,
+      ...(cursor ? [cursor.createdAt, cursor.mediaId] : []),
+      limit + 1,
+    ).all<ExportMediaEntryRow>();
+    const rows = result.results.slice(0, limit);
+    const last = rows.at(-1);
+    return {
+      entries: rows.map(mapMediaEntry),
+      nextCursor: result.results.length > limit && last
+        ? { createdAt: last.created_at, mediaId: last.media_id }
+        : null,
+    };
+  }
+
   async claimRunning(id: string, startedAt: string): Promise<ExportRunClaim> {
     const result = await this.db.prepare(`
       UPDATE export_jobs SET state = 'running', started_at = ?, error_code = NULL
-      WHERE id = ? AND state = 'queued'
+      WHERE id = ? AND state = 'queued' AND EXISTS (
+        SELECT 1 FROM events
+        WHERE events.id = export_jobs.event_id AND events.deleted_at IS NULL
+      )
     `).bind(startedAt, id).run();
     const job = await this.getById(id);
     // A Workflow step may retry after its callback throws. Its event timestamp
@@ -291,6 +379,24 @@ export class ExportsRepository {
     return job?.state === 'running' && job.startedAt === startedAt
       ? { owned: true, resumed: (result.meta.changes ?? 0) !== 1, job }
       : { owned: false, job };
+  }
+
+  async assertOwnedRunActive(id: string, startedAt: string): Promise<void> {
+    const row = await this.db.prepare(`
+      SELECT e.id AS event_id, e.deleted_at, j.state, j.started_at
+      FROM export_jobs j
+      LEFT JOIN events e ON e.id = j.event_id
+      WHERE j.id = ?
+    `).bind(id).first<{
+      event_id: string | null;
+      deleted_at: string | null;
+      state: ExportRecord['state'];
+      started_at: string | null;
+    }>();
+    if (!row || row.event_id === null || row.deleted_at !== null) throw new Error('EXPORT_EVENT_DELETED');
+    if (row.state !== 'running' || row.started_at !== startedAt) {
+      throw new Error('EXPORT_RUN_NOT_OWNED');
+    }
   }
 
   async markReady(
@@ -334,7 +440,10 @@ export class ExportsRepository {
       // later failure rolls this transition back with every part mutation.
       this.db.prepare(`
         UPDATE export_jobs SET state = 'ready', error_code = ?
-        WHERE id = ? AND state = 'running'
+        WHERE id = ? AND state = 'running' AND EXISTS (
+          SELECT 1 FROM events
+          WHERE events.id = export_jobs.event_id AND events.deleted_at IS NULL
+        )
       `).bind(readyClaim, id),
       this.db.prepare(`
         DELETE FROM export_parts WHERE export_job_id = ? AND EXISTS (
@@ -378,6 +487,14 @@ export class ExportsRepository {
     ];
     const results = await this.db.batch(statements);
     if ((results[0]?.meta.changes ?? 0) !== 1 || (results.at(-1)?.meta.changes ?? 0) !== 1) {
+      const event = await this.db.prepare(`
+        SELECT e.id AS event_id, e.deleted_at FROM export_jobs j
+        LEFT JOIN events e ON e.id = j.event_id
+        WHERE j.id = ?
+      `).bind(id).first<{ event_id: string | null; deleted_at: string | null }>();
+      if (!event || event.event_id === null || event.deleted_at !== null) {
+        throw new Error('EXPORT_EVENT_DELETED');
+      }
       throw new Error('Export job was not running.');
     }
     return (await this.getById(id))!;

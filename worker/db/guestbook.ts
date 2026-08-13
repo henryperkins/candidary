@@ -477,7 +477,10 @@ export class GuestbookRepository {
           AND media.caption IS NOT NULL
           AND length(trim(media.caption)) > 0
       )
-      WHERE changes() = 1
+      WHERE EXISTS (
+        SELECT 1 FROM export_jobs
+        WHERE id = ?1 AND event_id = ?2 AND snapshot_at = ?3 AND state = 'queued'
+      )
       ORDER BY created_at ASC, source_rank DESC, source_id ASC
     `).bind(input.exportJobId, input.eventId, input.snapshotAt)];
   }
