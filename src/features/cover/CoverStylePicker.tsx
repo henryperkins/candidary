@@ -22,6 +22,10 @@ const STYLE_DESCRIPTIONS: Record<EventCoverEffectId, string> = {
   monochrome: 'Black and white',
 };
 
+export function coverStyleName(effect: EventCoverEffectId): string {
+  return STYLE_NAMES[effect];
+}
+
 interface CoverStylePickerProps {
   value: EventCoverEffectId;
   onChange(effect: EventCoverEffectId): void;
@@ -43,25 +47,30 @@ export function CoverStylePicker({
     <ul>
       {EVENT_COVER_EFFECTS.map((effect) => {
         const preview = thumbnail(effect);
-        const name = STYLE_NAMES[effect];
+        const name = coverStyleName(effect);
         return <li key={effect} data-thumbnail-state={preview.status}>
           <label>
-            <input
-              type="radio"
-              name="cover-style"
-              value={effect}
-              checked={value === effect}
-              disabled={disabled}
-              onChange={() => onChange(effect)}
-            />
+            <span className="cover-style-picker__choice-heading">
+              <input
+                type="radio"
+                name="cover-style"
+                value={effect}
+                checked={value === effect}
+                disabled={disabled}
+                onChange={() => onChange(effect)}
+              />
+              <span className="cover-style-picker__name">{name}</span>
+            </span>
             {preview.status === 'ready'
               ? <img src={preview.url} alt="" aria-hidden="true" />
               : <span className="cover-style-picker__placeholder" aria-hidden="true" />}
-            <span className="cover-style-picker__name">{name}</span>
             <span className="cover-style-picker__note">{STYLE_DESCRIPTIONS[effect]}</span>
           </label>
           {preview.status === 'loading' && <span className="cover-style-picker__state">
             Loading {name} preview
+          </span>}
+          {preview.status === 'idle' && <span className="cover-style-picker__state">
+            Preview not ready
           </span>}
           {preview.status === 'error' && <div className="cover-style-picker__state cover-style-picker__state--error">
             <span>Preview unavailable. Try this preview again.</span>
@@ -69,6 +78,7 @@ export function CoverStylePicker({
               type="button"
               className="button button--secondary"
               aria-label={`Retry ${name} preview`}
+              disabled={disabled}
               onClick={() => onRetry(effect)}
             >
               Retry

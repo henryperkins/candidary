@@ -34,7 +34,9 @@ export function ManagerCoverPreparationStatus({
   }
 
   if (live.status === 'applied') {
-    return <p className="cover-preparation" role="status">Your new cover is live.</p>;
+    return <p className="cover-preparation cover-preparation--success" role="status">
+      Your new cover is live.
+    </p>;
   }
 
   if (live.status === 'conflict') {

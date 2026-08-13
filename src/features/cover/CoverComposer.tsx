@@ -1,8 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import type {
-  KeyboardEvent as ReactKeyboardEvent,
-  PointerEvent as ReactPointerEvent,
-} from 'react';
+import { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, Ref } from 'react';
 
 import { MAX_COVER_MANUAL_ZOOM } from '../../../shared/constants';
 
@@ -21,12 +18,15 @@ export interface CoverFocusValue {
   zoom: number;
 }
 
+export interface CoverComposerHandle {
+  applyCanvasDrag(value: CoverFocusValue): void;
+}
+
 interface CoverComposerProps {
+  ref?: Ref<CoverComposerHandle>;
   value: CoverFocusValue;
   /** The draft's server-calculated ceiling, never the absolute 2.0. */
   safeZoomMaximum: number;
-  /** The uncropped natural preview; positioning is applied locally. */
-  previewUrl: string;
   /** Empty when the selected crop can produce no 2x profile at all. */
   available2xProfiles: readonly string[];
   manual: boolean;
@@ -40,14 +40,10 @@ function percent(value: number): number {
   return Math.round(value * 100);
 }
 
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
 export function CoverComposer({
+  ref,
   value,
   safeZoomMaximum,
-  previewUrl,
   available2xProfiles,
   manual,
   onChange,
@@ -55,8 +51,6 @@ export function CoverComposer({
   onReset,
   disabled = false,
 }: CoverComposerProps) {
-  const surfaceRef = useRef<HTMLDivElement>(null);
-  const dragOriginRef = useRef<{ x: number; y: number; from: CoverFocusValue } | null>(null);
   const [summary, setSummary] = useState('');
   const settleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Nothing is announced until the host has actually done something. Without
@@ -84,24 +78,13 @@ export function CoverComposer({
     onChange(next);
   }
 
-  const ceiling = Math.min(safeZoomMaximum, MAX_COVER_MANUAL_ZOOM);
+  useImperativeHandle(ref, () => ({
+    applyCanvasDrag(next) {
+      if (!disabled) change(next);
+    },
+  }), [disabled, onChange]);
 
-  // A delta from where the drag started, so the subject follows the pointer.
-  // Jumping the focal point to wherever the surface was first touched would
-  // move the crop before the host had asked for anything.
-  function move(event: ReactPointerEvent<HTMLDivElement>) {
-    const origin = dragOriginRef.current;
-    if (!origin || disabled || !manual) return;
-    const surface = surfaceRef.current;
-    if (!surface) return;
-    const bounds = surface.getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) return;
-    change({
-      ...origin.from,
-      x: clamp01(origin.from.x - (event.clientX - origin.x) / bounds.width),
-      y: clamp01(origin.from.y - (event.clientY - origin.y) / bounds.height),
-    });
-  }
+  const ceiling = Math.min(safeZoomMaximum, MAX_COVER_MANUAL_ZOOM);
 
   function rangeKey(
     event: ReactKeyboardEvent<HTMLInputElement>,
@@ -124,34 +107,14 @@ export function CoverComposer({
   }
 
   return <div className="cover-composer">
-    <div
-      ref={surfaceRef}
-      className="cover-composer__surface"
-      // Not a two-pointer surface. Browser pinch and page zoom stay native, and
-      // the viewport never sets `user-scalable=no`.
-      onPointerDown={(event) => {
-        if (disabled || !manual) return;
-        dragOriginRef.current = { x: event.clientX, y: event.clientY, from: value };
-        event.currentTarget.setPointerCapture(event.pointerId);
-      }}
-      onPointerMove={move}
-      onPointerUp={(event) => {
-        dragOriginRef.current = null;
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }}
-    >
-      <img
-        src={previewUrl}
-        alt=""
-        aria-hidden="true"
-        draggable={false}
-        style={{
-          objectPosition: `${percent(value.x)}% ${percent(value.y)}%`,
-          transform: `scale(${value.zoom})`,
-          transformOrigin: `${percent(value.x)}% ${percent(value.y)}%`,
-        }}
-      />
-    </div>
+    <p className="cover-composer__mode">
+      {manual ? 'Manual framing' : 'Automatic framing'}
+    </p>
+    <p className="cover-composer__instruction">
+      {manual
+        ? 'Drag the preview or use the controls below.'
+        : 'Drag the preview to reposition it, or choose Adjust framing for precise controls.'}
+    </p>
 
     {available2xProfiles.length === 0 && <p className="cover-composer__note">
       {/* Non-blocking: the photo is valid at every 1x profile, and zoom can
@@ -167,13 +130,25 @@ export function CoverComposer({
           disabled={disabled}
           onClick={onAdjust}
         >
-          Adjust focus
+          Adjust framing
         </button>
       : <div className="cover-composer__controls">
+      <button
+        type="button"
+        className="button button--secondary"
+        disabled={disabled}
+        onClick={() => { interactedRef.current = true; onReset(); }}
+      >
+        Reset to automatic
+      </button>
       <label>
-        <span>Horizontal focus</span>
+        <span className="cover-composer__range-heading">
+          <span>Left or right</span>
+          <output aria-hidden="true">{percent(value.x)}% from left</output>
+        </span>
         <input
           type="range"
+          aria-label="Left or right"
           min={0}
           max={100}
           step={1}
@@ -192,9 +167,13 @@ export function CoverComposer({
         />
       </label>
       <label>
-        <span>Vertical focus</span>
+        <span className="cover-composer__range-heading">
+          <span>Up or down</span>
+          <output aria-hidden="true">{percent(value.y)}% from top</output>
+        </span>
         <input
           type="range"
+          aria-label="Up or down"
           min={0}
           max={100}
           step={1}
@@ -213,9 +192,13 @@ export function CoverComposer({
         />
       </label>
       <label>
-        <span>Zoom</span>
+        <span className="cover-composer__range-heading">
+          <span>Zoom</span>
+          <output aria-hidden="true">{percent(value.zoom)}%</output>
+        </span>
         <input
           type="range"
+          aria-label="Zoom"
           min={100}
           max={percent(ceiling)}
           step={5}
@@ -233,16 +216,6 @@ export function CoverComposer({
           )}
         />
       </label>
-      {/* Immediately after the ranges in focus order, so the way back is where
-          a host who has just over-adjusted will reach for it. */}
-      <button
-        type="button"
-        className="button button--secondary"
-        disabled={disabled}
-        onClick={() => { interactedRef.current = true; onReset(); }}
-      >
-        Reset to automatic
-      </button>
       </div>}
 
     <p className="sr-only" role="status">{summary}</p>

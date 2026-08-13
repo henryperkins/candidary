@@ -84,7 +84,10 @@ describe('manager cover preparation status', () => {
     const { rerender } = render(<ManagerCoverPreparationStatus
       reconciler={reconciler(preparation({ status: 'applied', completedSteps: 6 }))}
     />);
-    expect(screen.getByRole('status')).toHaveTextContent('Your new cover is live.');
+    const applied = screen.getByRole('status');
+    expect(applied).toHaveTextContent('Your new cover is live.');
+    expect(applied).toHaveClass('cover-preparation--success');
+    expect(applied).not.toHaveClass('cover-preparation--warning');
 
     rerender(<ManagerCoverPreparationStatus
       reconciler={reconciler(preparation({ status: 'conflict' }))}

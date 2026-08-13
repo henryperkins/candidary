@@ -38,17 +38,18 @@ export function CoverSourcePicker({
 
       <div className="cover-source-picker__upload">
         <label className="cover-source-picker__upload-choice">
-          <input
-            type="radio"
-            name="cover-source"
-            value="upload"
-            checked={value?.kind === 'upload'}
-            disabled={busy}
-            onChange={() => onChoose({ kind: 'upload' })}
-          />
-          <span className="cover-source-picker__name">Upload a photo</span>
+          <span className="cover-source-picker__choice-heading">
+            <input
+              type="radio"
+              name="cover-source"
+              value="upload"
+              checked={value?.kind === 'upload'}
+              disabled={busy}
+              onChange={() => onChoose({ kind: 'upload' })}
+            />
+            <span className="cover-source-picker__name">Upload a photo</span>
+          </span>
         </label>
-        <label className="button button--secondary" htmlFor={fileId}>Choose photo</label>
         <input
           id={fileId}
           className="sr-only cover-source-picker__file"
@@ -67,6 +68,12 @@ export function CoverSourcePicker({
             event.currentTarget.value = '';
           }}
         />
+        <label
+          className="button button--secondary cover-source-picker__file-proxy"
+          htmlFor={fileId}
+        >
+          Choose photo
+        </label>
         <span className="cover-source-picker__note">
           JPEG, PNG, WebP, or HEIC · {Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000)} MB max.
         </span>
@@ -75,16 +82,18 @@ export function CoverSourcePicker({
       <ul className="cover-source-picker__presets">
         {EVENT_COVER_PRESETS.map((preset) => <li key={preset.id}>
           <label>
-            <input
-              type="radio"
-              name="cover-source"
-              value={preset.id}
-              checked={value?.kind === 'preset' && value.presetId === preset.id}
-              disabled={busy}
-              onChange={() => onChoose({ kind: 'preset', presetId: preset.id })}
-            />
+            <span className="cover-source-picker__choice-heading">
+              <input
+                type="radio"
+                name="cover-source"
+                value={preset.id}
+                checked={value?.kind === 'preset' && value.presetId === preset.id}
+                disabled={busy}
+                onChange={() => onChoose({ kind: 'preset', presetId: preset.id })}
+              />
+              <span className="cover-source-picker__name">{preset.name}</span>
+            </span>
             <img src={presetThumbnail(preset.id)} alt="" aria-hidden="true" />
-            <span className="cover-source-picker__name">{preset.name}</span>
             <span className="cover-source-picker__note">Ready for every size</span>
           </label>
         </li>)}
