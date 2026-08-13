@@ -346,8 +346,8 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
     : await repository.setPublication(media.id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), changedAt);
   if (parsed.data.action === 'delete') {
     await context.env.MEDIA_BUCKET.delete([
-      media.objectKey,
-      ...(media.previewObjectKey ? [media.previewObjectKey] : []),
+      result.objectKey,
+      ...(result.previewObjectKey ? [result.previewObjectKey] : []),
     ]);
   }
   return context.json({ data: { media: result }, requestId: context.get('requestId') });

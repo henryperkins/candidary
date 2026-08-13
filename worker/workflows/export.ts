@@ -25,6 +25,7 @@ export async function processExport(
   const baseKey = `events/${job.eventId}/exports/${job.id}/attempt-${job.attempt}`;
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;
   const uploadedKeys: string[] = [];
+  let readyWriteAttempted = false;
   try {
     const snapshot = await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
@@ -63,6 +64,7 @@ export async function processExport(
     });
     uploadedKeys.push(manifestObjectKey);
     const completedAt = now.toISOString();
+    readyWriteAttempted = true;
     return await exports.markReady(
       job.id,
       manifestObjectKey,
@@ -71,6 +73,10 @@ export async function processExport(
       new Date(now.getTime() + 86_400_000).toISOString(),
     );
   } catch (error) {
+    if (readyWriteAttempted) {
+      const current = await exports.getById(job.id);
+      if (current?.state === 'ready') return current;
+    }
     if (uploadedKeys.length) await env.MEDIA_BUCKET.delete(uploadedKeys);
     const code = error instanceof Error && error.message.startsWith('EXPORT_') ? error.message : 'EXPORT_FAILED';
     return await exports.markFailed(job.id, code);

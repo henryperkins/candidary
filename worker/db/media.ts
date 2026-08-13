@@ -623,35 +623,41 @@ export class MediaRepository {
   }
 
   async delete(id: string, deletedAt: string): Promise<MediaRecord> {
-    const current = await this.getById(id);
-    if (!current) throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo no longer exists.', 404);
-    if (current.uploadState === 'deleted') return current;
+    // A schema-14 Worker admitted before the bridge can still finalize a
+    // reservation after this call's first read. Retry that finite state race so
+    // a successful delete response always represents a committed tombstone.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.getById(id);
+      if (!current) throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo no longer exists.', 404);
+      if (current.uploadState === 'deleted') return current;
 
-    const counterType = current.uploadState;
-    const results = await this.db.batch([
-      this.db.prepare(`
-        UPDATE media SET upload_state = 'deleted', deleted_at = ?
-        WHERE id = ? AND upload_state = ? AND deleted_at IS NULL
-      `).bind(deletedAt, id, counterType),
-      this.db.prepare(`
-        UPDATE events SET
-          reserved_media_count = reserved_media_count - ?,
-          reserved_bytes = reserved_bytes - ?,
-          stored_media_count = stored_media_count - ?,
-          stored_bytes = stored_bytes - ?
-        WHERE id = ?
-          AND EXISTS (SELECT 1 FROM media WHERE id = ? AND deleted_at = ?)
-      `).bind(
-        counterType === 'reserved' ? 1 : 0,
-        counterType === 'reserved' ? current.declaredByteSize : 0,
-        counterType === 'stored' ? 1 : 0,
-        counterType === 'stored' ? current.byteSize ?? 0 : 0,
-        current.eventId,
-        id,
-        deletedAt,
-      ),
-    ]);
-    if ((results[0]?.meta.changes ?? 0) !== 1) return (await this.getById(id))!;
-    return (await this.getById(id))!;
+      const counterType = current.uploadState;
+      const results = await this.db.batch([
+        this.db.prepare(`
+          UPDATE media SET upload_state = 'deleted', deleted_at = ?
+          WHERE id = ? AND upload_state = ? AND deleted_at IS NULL
+        `).bind(deletedAt, id, counterType),
+        this.db.prepare(`
+          UPDATE events SET
+            reserved_media_count = reserved_media_count - ?,
+            reserved_bytes = reserved_bytes - ?,
+            stored_media_count = stored_media_count - ?,
+            stored_bytes = stored_bytes - ?
+          WHERE id = ? AND changes() = 1
+        `).bind(
+          counterType === 'reserved' ? 1 : 0,
+          counterType === 'reserved' ? current.declaredByteSize : 0,
+          counterType === 'stored' ? 1 : 0,
+          counterType === 'stored' ? current.byteSize ?? 0 : 0,
+          current.eventId,
+        ),
+      ]);
+      if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(id))!;
+    }
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'This photo changed while it was being deleted. Try again.',
+      409,
+    );
   }
 }

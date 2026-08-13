@@ -84,6 +84,7 @@ export default defineConfig(({ command }) => {
           __CANDIDARY_MIGRATION_MANIFEST_SHA256__: JSON.stringify(
             buildCandidate.migrationManifestSha256,
           ),
+          __CANDIDARY_TEST_LEGACY_R2_SIGNING__: 'false',
         },
       },
     },

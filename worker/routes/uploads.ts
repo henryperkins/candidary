@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { UPLOAD_BATCH_SIZE } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import { mediaUploadReleaseForEnv } from '../../shared/media-upload-release';
 import { AuthService } from '../auth/service';
 import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
@@ -72,6 +73,16 @@ uploadRoutes.post('/event/:slug/uploads/:mediaId/finalize', async (context) => {
   if (!media || media.eventId !== auth.event.id || media.uploaderSessionId !== auth.session.id) {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
+  if (mediaUploadReleaseForEnv(context.env).mode === 'bridge-disabled') {
+    if (media.uploadState === 'stored') {
+      return context.json({ data: { media }, requestId: context.get('requestId') });
+    }
+    throw new ApiError(
+      'UPLOADS_DISABLED',
+      'Photo uploads are briefly paused while storage is upgraded. Try again soon.',
+      409,
+    );
+  }
   const finalized = await finalizeStoredMedia(
     context.env.MEDIA_BUCKET,
     repository,
@@ -87,7 +98,10 @@ uploadRoutes.delete('/event/:slug/uploads/:mediaId', async (context) => {
   if (!media || media.eventId !== auth.event.id || media.uploaderSessionId !== auth.session.id) {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
-  await context.env.MEDIA_BUCKET.delete(media.objectKey);
   const deleted = await repository.delete(media.id, new Date().toISOString());
+  await context.env.MEDIA_BUCKET.delete([
+    deleted.objectKey,
+    ...(deleted.previewObjectKey ? [deleted.previewObjectKey] : []),
+  ]);
   return context.json({ data: { media: deleted }, requestId: context.get('requestId') });
 });

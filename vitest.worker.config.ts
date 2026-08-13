@@ -13,6 +13,7 @@ export default defineConfig({
   define: {
     __CANDIDARY_BUILD_SHA__: JSON.stringify(testBuildSha),
     __CANDIDARY_MIGRATION_MANIFEST_SHA256__: JSON.stringify(testMigrationManifestSha256),
+    __CANDIDARY_TEST_LEGACY_R2_SIGNING__: 'true',
   },
   plugins: [
     cloudflareTest({
@@ -45,6 +46,11 @@ export default defineConfig({
           R2_ACCESS_KEY_ID: 'test-r2-access-key',
           R2_SECRET_ACCESS_KEY: 'test-r2-secret-key',
           R2_BUCKET_NAME: 'candidary-media',
+          // The checked-in bridge config is the production default. The broad
+          // Worker suite still exercises the ordinary schema-14 implementation;
+          // focused bridge tests remove this test-only binding and prove the
+          // exact production-disabled behavior instead.
+          TEST_MEDIA_UPLOAD_RELEASE_MODE: 'worker-ingress',
         },
         d1Databases: ['DB'],
         r2Buckets: ['MEDIA_BUCKET'],

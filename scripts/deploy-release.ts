@@ -20,11 +20,12 @@ import {
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type * as ReleaseEvidenceModule from './release-evidence';
+import type * as ReleaseEvidenceModule from './release-evidence.ts';
 import {
   verifyExactReleaseCandidate,
   type ReleaseCandidateObservationAdapter,
-} from './release-candidate';
+  type VerifiedReleaseCandidate,
+} from './release-candidate.ts';
 
 const releaseEvidenceModulePath = './release-evidence.ts';
 const releaseEvidence: typeof ReleaseEvidenceModule = await import(releaseEvidenceModulePath);
@@ -76,6 +77,13 @@ export interface DeployReleaseAdapters {
 export interface DeployReleaseArguments {
   sha: string;
   manifestPath: string;
+}
+
+export interface VerifiedDeploySnapshot {
+  candidate: VerifiedReleaseCandidate;
+  deployRoot: string;
+  wranglerCliPath: string;
+  deploymentEnvironment: NodeJS.ProcessEnv;
 }
 
 function exactArguments(left: readonly string[], right: readonly string[]): boolean {
@@ -378,6 +386,39 @@ export function runDeployRelease(
   request: DeployReleaseRequest,
   adapters: DeployReleaseAdapters = defaultAdapters,
 ): void {
+  withVerifiedDeploySnapshot(request, (snapshot) => {
+    const plan = buildDeploymentCommandPlan({
+      candidateRoot: snapshot.candidate.candidateRoot,
+      deployRoot: snapshot.deployRoot,
+      sha: snapshot.candidate.sha,
+      nodeExecPath: adapters.nodeExecPath,
+      npmCliPath: resolveNpmCliPath(adapters.npmExecPath, adapters.nodeExecPath),
+      wranglerCliPath: snapshot.wranglerCliPath,
+      prerequisiteEnv: sanitizedPrerequisiteEnvironment(
+        adapters.environment,
+        snapshot.candidate.manifest.bindings!.topology.requiredSecrets,
+      ),
+      deployEnv: snapshot.deploymentEnvironment,
+    });
+    assertDeploymentCommandPlan(plan, {
+      candidateRoot: snapshot.candidate.candidateRoot,
+      deployRoot: snapshot.deployRoot,
+      sha: snapshot.candidate.sha,
+      nodeExecPath: adapters.nodeExecPath,
+      npmCliPath: resolveNpmCliPath(adapters.npmExecPath, adapters.nodeExecPath),
+      wranglerCliPath: snapshot.wranglerCliPath,
+      prerequisiteEnv: plan[0]!.env,
+      deployEnv: snapshot.deploymentEnvironment,
+    });
+    runCommand(plan[3]!, adapters);
+  }, adapters);
+}
+
+export function withVerifiedDeploySnapshot<T>(
+  request: DeployReleaseRequest,
+  action: (snapshot: VerifiedDeploySnapshot) => T,
+  adapters: DeployReleaseAdapters = defaultAdapters,
+): T {
   if (!SHA_PATTERN.test(request.sha)) throw new Error('Reviewed SHA is invalid.');
   const candidateRoot = resolve(request.candidateRoot);
   const rootStat = lstatSync(candidateRoot);
@@ -450,7 +491,7 @@ export function runDeployRelease(
   runCommand(plan[1]!, adapters);
   runCommand(plan[2]!, adapters);
 
-  verifyExactReleaseCandidate({
+  const rebuiltCandidate = verifyExactReleaseCandidate({
     candidateRoot,
     sha: request.sha,
     manifestPath: request.manifestPath,
@@ -461,27 +502,12 @@ export function runDeployRelease(
 
   const deployRoot = createVerifiedDeploySnapshot(candidateRoot, rebuilt);
   try {
-    plan = buildDeploymentCommandPlan({
-      candidateRoot,
+    return action({
+      candidate: rebuiltCandidate,
       deployRoot,
-      sha: request.sha,
-      nodeExecPath: adapters.nodeExecPath,
-      npmCliPath,
       wranglerCliPath,
-      prerequisiteEnv,
-      deployEnv,
+      deploymentEnvironment: deployEnv,
     });
-    assertDeploymentCommandPlan(plan, {
-      candidateRoot,
-      deployRoot,
-      sha: request.sha,
-      nodeExecPath: adapters.nodeExecPath,
-      npmCliPath,
-      wranglerCliPath,
-      prerequisiteEnv,
-      deployEnv,
-    });
-    runCommand(plan[3]!, adapters);
   } finally {
     removeDeploySnapshot(deployRoot);
   }

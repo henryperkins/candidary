@@ -1,14 +1,19 @@
 import { AwsClient } from 'aws4fetch';
 
 import { UPLOAD_URL_TTL_SECONDS, type SupportedImageType } from '../../shared/constants';
-import type { AppEnv } from '../env';
+interface LegacyTestSigningEnv {
+  R2_ACCOUNT_ID: string;
+  R2_BUCKET_NAME: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+}
 
 function encodedKey(key: string): string {
   return key.split('/').map(encodeURIComponent).join('/');
 }
 
 export async function presignUpload(
-  env: AppEnv,
+  env: LegacyTestSigningEnv,
   key: string,
   mimeType: SupportedImageType,
 ): Promise<{ url: string; expiresAt: string }> {
@@ -32,20 +37,4 @@ export async function presignUpload(
     url: signed.url,
     expiresAt: new Date(Date.now() + UPLOAD_URL_TTL_SECONDS * 1000).toISOString(),
   };
-}
-
-export async function presignDownload(env: AppEnv, key: string): Promise<{ url: string; expiresAt: string }> {
-  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
-    throw new Error('R2 presigning credentials are not configured.');
-  }
-  const ttl = 15 * 60;
-  const url = new URL(`https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET_NAME}/${encodedKey(key)}`);
-  url.searchParams.set('X-Amz-Expires', String(ttl));
-  const client = new AwsClient({
-    accessKeyId: env.R2_ACCESS_KEY_ID,
-    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-    service: 's3', region: 'auto',
-  });
-  const signed = await client.sign(url, { method: 'GET', aws: { signQuery: true } });
-  return { url: signed.url, expiresAt: new Date(Date.now() + ttl * 1000).toISOString() };
 }

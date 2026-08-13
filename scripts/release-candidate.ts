@@ -23,7 +23,7 @@ import {
   sha256,
   type CandidateManifest,
   type HashedFile,
-} from './release-evidence';
+} from './release-evidence.ts';
 
 export const PINNED_WRANGLER_VERSION = '4.113.0' as const;
 export const PHASE_2_MIGRATION = '0013_guest_message_hardening.sql' as const;

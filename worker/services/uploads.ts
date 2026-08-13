@@ -6,11 +6,29 @@ import {
   type SupportedImageType,
 } from '../../shared/constants';
 import { ApiError, type ApiErrorCode } from '../../shared/errors';
+import { mediaUploadReleaseForEnv } from '../../shared/media-upload-release';
 import { resolvePhotoIntake } from '../../shared/rsvp';
 import { MediaRepository, type ReserveMediaRecord } from '../db/media';
-import type { AppEnv, AuthenticatedSession } from '../env';
+import type { AppEnv, AuthenticatedSession, MediaUploadReleaseEnv } from '../env';
 import { sanitizeFilename } from '../security/filenames';
-import { presignUpload } from '../storage/presign';
+
+declare const __CANDIDARY_TEST_LEGACY_R2_SIGNING__: boolean;
+
+async function legacyTestUploadTicket(
+  env: AppEnv,
+  key: string,
+  mimeType: SupportedImageType,
+): Promise<{ url: string; expiresAt: string }> {
+  const testEnv = env as MediaUploadReleaseEnv;
+  if (!__CANDIDARY_TEST_LEGACY_R2_SIGNING__
+    || String(testEnv.APP_ORIGIN) !== 'http://localhost'
+    || String(testEnv.R2_ACCOUNT_ID) !== 'local'
+    || testEnv.TEST_MEDIA_UPLOAD_RELEASE_MODE !== 'worker-ingress') {
+    throw new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this release.', 409);
+  }
+  const { presignUpload } = await import('../storage/presign');
+  return presignUpload(env, key, mimeType);
+}
 
 export interface InitiateUploadInput {
   filename: string;
@@ -64,6 +82,16 @@ export class UploadService {
     }
   }
 
+  private assertBridgeAllowsInitiation() {
+    if (mediaUploadReleaseForEnv(this.env).mode === 'bridge-disabled') {
+      throw new ApiError(
+        'UPLOADS_DISABLED',
+        'Photo uploads are briefly paused while storage is upgraded. Try again soon.',
+        409,
+      );
+    }
+  }
+
   private prepareReservation(
     auth: AuthenticatedSession,
     input: InitiateUploadInput,
@@ -101,10 +129,11 @@ export class UploadService {
   }
 
   async initiate(auth: AuthenticatedSession, input: InitiateUploadInput, now = new Date()) {
+    this.assertBridgeAllowsInitiation();
     this.assertCanUpload(auth);
     const repository = new MediaRepository(this.env.DB);
     const media = await repository.reserve(this.prepareReservation(auth, input, now));
-    const signed = await presignUpload(this.env, media.objectKey, media.mimeType);
+    const signed = await legacyTestUploadTicket(this.env, media.objectKey, media.mimeType);
     return { media, uploadUrl: signed.url, uploadUrlExpiresAt: signed.expiresAt };
   }
 
@@ -113,6 +142,7 @@ export class UploadService {
     input: { guestName: string; files: BatchUploadFile[] },
     now = new Date(),
   ): Promise<{ items: BatchUploadResult[] }> {
+    this.assertBridgeAllowsInitiation();
     this.assertCanUpload(auth);
     const guestName = input.guestName.trim();
     if (!guestName || guestName.length > 80) {
@@ -155,7 +185,7 @@ export class UploadService {
         };
         return;
       }
-      const signed = await presignUpload(this.env, result.media.objectKey, result.media.mimeType);
+      const signed = await legacyTestUploadTicket(this.env, result.media.objectKey, result.media.mimeType);
       items[index] = {
         idempotencyKey: file.idempotencyKey,
         status: 'accepted',
