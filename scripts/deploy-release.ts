@@ -385,8 +385,13 @@ export function runDeployRelease(
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error('Candidate root must be one exact directory.');
   }
-  const declaredMigrationCount = (JSON.parse(readFileSync(request.manifestPath, 'utf8')) as CandidateManifest)
-    .migrations?.verification.migrationCount;
+  const declaredManifest = JSON.parse(readFileSync(request.manifestPath, 'utf8')) as CandidateManifest;
+  if (declaredManifest.status !== 'passed' || declaredManifest.candidate === null
+    || declaredManifest.migrations === null || declaredManifest.bindings === null
+    || declaredManifest.artifacts === null) {
+    throw new Error('Only one complete passed candidate manifest is eligible.');
+  }
+  const declaredMigrationCount = declaredManifest.migrations.verification.migrationCount;
   if (declaredMigrationCount !== 14 && declaredMigrationCount !== 15) {
     throw new Error('Deployment candidate is not at a supported historical or post-cutover boundary.');
   }
