@@ -53,6 +53,17 @@ async function failedExportWithArtifacts(
   return { job, keys };
 }
 
+function signerFreeEnv() {
+  return new Proxy(testEnv, {
+    get(target, property, receiver) {
+      if (property === 'R2_ACCESS_KEY_ID' || property === 'R2_SECRET_ACCESS_KEY') {
+        throw new Error(`Export download read retired signer secret ${String(property)}.`);
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+}
+
 describe('manager exports', () => {
   beforeEach(resetDatabase);
 
@@ -300,9 +311,10 @@ describe('manager exports', () => {
     expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookHtmlObjectKey!))!.text())
       .toContain('No guestbook entries were shared at this snapshot.');
 
+    const env = signerFreeEnv();
     const download = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
+    }, env);
     expect(download.status).toBe(200);
     const downloadData = (await download.json<any>()).data;
     expect(downloadData.manifest.url).toContain('/artifact/manifest');
@@ -313,7 +325,7 @@ describe('manager exports', () => {
 
     const denied = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/download`, {
       method: 'POST', headers: writeHeaders(access.guest), body: '{}',
-    }, testEnv);
+    }, env);
     expect(denied.status).toBe(403);
 
     const artifact = await createApp().request(downloadData.parts[0].url, {
@@ -340,6 +352,19 @@ describe('manager exports', () => {
     }, testEnv);
     expect(unsatisfiable.status).toBe(416);
     expect(unsatisfiable.headers.get('content-range')).toMatch(/^bytes \*\//u);
+
+    const other = await eventAccess();
+    const crossEvent = await createApp().request(downloadData.manifest.url, {
+      headers: { cookie: other.manager.cookie },
+    }, env);
+    expect(crossEvent.status).toBe(403);
+
+    await testEnv.MEDIA_BUCKET.delete(ready!.manifestObjectKey!);
+    const missing = await createApp().request(downloadData.manifest.url, {
+      headers: { cookie: access.manager.cookie },
+    }, env);
+    expect(missing.status).toBe(409);
+    expect(await missing.json<any>()).toMatchObject({ code: 'EXPORT_FAILED' });
   });
 
   it('does not stream changed export bytes after the conditional metadata read', async () => {
@@ -522,7 +547,6 @@ describe('manager exports', () => {
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
       { ...testEnv, EXPORT_WORKFLOW: workflow },
     );
-
     expect(response.status).toBe(202);
     expect((await response.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
