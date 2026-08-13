@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { ReactNode } from 'react';
+import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
 import type {
@@ -14,10 +14,16 @@ import type {
   EventCoverPresetId,
   EventCoverProfileId,
 } from '../../../shared/event-cover';
-import { CoverComposer, type CoverFocusValue } from './CoverComposer';
+import { EVENT_COVER_PRESETS } from '../../../shared/event-cover';
+import {
+  CoverComposer,
+  type CoverComposerHandle,
+  type CoverFocusValue,
+} from './CoverComposer';
 import { CoverSourcePicker, type CoverSourceChoice } from './CoverSourcePicker';
 import {
   CoverStylePicker,
+  coverStyleName,
   type CoverStyleThumbnailState,
 } from './CoverStylePicker';
 import type { CoverOperationController, CoverOperationState } from './cover-operation-controller';
@@ -28,7 +34,6 @@ export type CoverStudioStep = 'choose' | 'compose' | 'style' | 'done';
 
 export interface CoverStudioDraft {
   id: string;
-  previewUrl: string;
   /** The focus active when this edit draft opened. */
   initialFocus: CoverFocusValue;
   /** The master's stored proposal used by Adjust and Reset. */
@@ -42,6 +47,12 @@ export interface CoverStudioDraft {
 }
 
 type StudioSource = CoverSourceChoice | { kind: 'none' } | null;
+
+export interface CoverPublishIntent {
+  source: CoverSourceChoice | { kind: 'none' };
+  focus: CoverFocusValue | null;
+  effect: EventCoverEffectId;
+}
 
 export interface CoverStudioProps {
   open: boolean;
@@ -65,11 +76,7 @@ export interface CoverStudioProps {
   onFocusChange(focus: CoverFocusValue): void;
   onResetFocus(): void;
   onEffectChange(effect: EventCoverEffectId): void;
-  onPublish(intent: {
-    source: CoverSourceChoice | { kind: 'none' };
-    focus: CoverFocusValue | null;
-    effect: EventCoverEffectId;
-  }): void;
+  onPublish(intent: CoverPublishIntent): void;
   onDiscardDraft(): void | Promise<void>;
   onClose(): void;
 }
@@ -83,6 +90,13 @@ const STEP_TITLES: Record<CoverStudioStep, string> = {
 
 type CoverStudioViewport = 'default' | 'compact' | 'short';
 type HistorySentinelState = 'disarmed' | 'armed' | 'consumed';
+type CanvasDragOrigin = {
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+  focus: CoverFocusValue;
+  moved: boolean;
+};
 
 function readViewportMode(height: number): CoverStudioViewport {
   if (height <= 420) return 'short';
@@ -95,6 +109,10 @@ function focusableWithin(root: HTMLElement | null): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(
     'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
   ));
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
 }
 
 export function CoverStudio({
@@ -128,6 +146,7 @@ export function CoverStudio({
   const [discarding, setDiscarding] = useState(false);
   const [discardError, setDiscardError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [submittedIntent, setSubmittedIntent] = useState<CoverPublishIntent | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
   const confirmKeepRef = useRef<HTMLButtonElement>(null);
@@ -142,6 +161,10 @@ export function CoverStudio({
   const returnFocusRef = useRef<Element | null>(null);
   const composeRequestedRef = useRef(false);
   const autoClosedRef = useRef(false);
+  const composerRef = useRef<CoverComposerHandle>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const canvasDragRef = useRef<CanvasDragOrigin | null>(null);
+  const [canvasDragging, setCanvasDragging] = useState(false);
   const hostRef = useRef<HTMLDivElement | null>(null);
   if (hostRef.current === null && typeof document !== 'undefined') {
     hostRef.current = document.createElement('div');
@@ -223,6 +246,7 @@ export function CoverStudio({
     if (!open) return;
     setStep('choose');
     setDirty(false);
+    setSubmittedIntent(null);
     setConfirmingDiscard(false);
     setDiscarding(false);
     setDiscardError(null);
@@ -372,12 +396,14 @@ export function CoverStudio({
   if (!open || !hostRef.current) return null;
 
   function choose(next: CoverSourceChoice) {
+    if (editingDisabled) return;
     if (next.kind !== 'upload' || source?.kind !== 'upload') composeRequestedRef.current = false;
     onSourceChange(next);
     setDirty(true);
   }
 
   function advance() {
+    if (editingDisabled) return;
     const next = steps[stepIndex + 1];
     if (!next) return;
     if (next === 'compose' && !composeRequestedRef.current) {
@@ -388,6 +414,7 @@ export function CoverStudio({
   }
 
   function back() {
+    if (editingDisabled) return;
     const previous = steps[stepIndex - 1];
     if (!previous) return;
     pendingBackFocusRef.current = true;
@@ -395,18 +422,21 @@ export function CoverStudio({
   }
 
   function remove() {
+    if (editingDisabled) return;
     onSourceChange({ kind: 'none' });
     setDirty(true);
     setStep('done');
   }
 
   function publish() {
-    if (!source || accessFailure?.phase === 'before_dispatch') return;
-    onPublish({
+    if (!source || editingDisabled || accessFailure?.phase === 'before_dispatch') return;
+    const intent: CoverPublishIntent = {
       source,
       focus: source.kind === 'upload' ? (focus ?? draft?.initialFocus ?? null) : null,
       effect,
-    });
+    };
+    setSubmittedIntent(intent);
+    onPublish(intent);
   }
 
   const effectiveFocus = focus ?? draft?.initialFocus ?? null;
@@ -420,6 +450,93 @@ export function CoverStudio({
     || accessFailure?.phase === 'before_dispatch';
   const preparing = operationState.phase === 'preparing';
   const stepLabel = `Step ${stepIndex + 1} of ${steps.length}`;
+  const editingDisabled = operationState.dispatched;
+  const dragEnabled = step === 'compose'
+    && composeReady
+    && Boolean(draft && effectiveFocus)
+    && !editingDisabled;
+  const currentIntent: CoverPublishIntent | null = source ? {
+    source,
+    focus: source.kind === 'upload' ? (focus ?? draft?.initialFocus ?? null) : null,
+    effect,
+  } : null;
+  const receiptIntent = operationState.dispatched ? submittedIntent : currentIntent;
+  const receipt = receiptIntent ? (() => {
+    if (receiptIntent.source.kind === 'none') return {
+      title: 'Remove the current cover',
+      audience: 'Guests will see the event theme instead.',
+      guarantee: 'The current cover stays live until this change is completely applied. If anything fails, nothing changes.',
+    };
+    const receiptSource = receiptIntent.source;
+    const sourceName = receiptSource.kind === 'upload'
+      ? 'Your photo'
+      : EVENT_COVER_PRESETS.find(({ id }) => id === receiptSource.presetId)?.name
+        ?? receiptSource.presetId;
+    return {
+      title: `${sourceName} · ${coverStyleName(receiptIntent.effect)}`,
+      audience: 'Guests see this at the top of RSVP and photo delivery.',
+      guarantee: 'Your current cover stays live until the new one is completely ready. If anything fails, nothing changes.',
+    };
+  })() : null;
+
+  function releaseCanvasDrag(element: HTMLDivElement, pointerId: number) {
+    const origin = canvasDragRef.current;
+    if (!origin || origin.pointerId !== pointerId) return;
+    if (typeof element.hasPointerCapture === 'function'
+        && element.hasPointerCapture(pointerId)
+        && typeof element.releasePointerCapture === 'function') {
+      element.releasePointerCapture(pointerId);
+    }
+    canvasDragRef.current = null;
+    setCanvasDragging(false);
+  }
+
+  function cancelExistingCanvasDrag(element: HTMLDivElement) {
+    const origin = canvasDragRef.current;
+    if (origin) releaseCanvasDrag(element, origin.pointerId);
+  }
+
+  function canvasPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.isPrimary === false) {
+      cancelExistingCanvasDrag(event.currentTarget);
+      return;
+    }
+    if (!dragEnabled || !effectiveFocus) return;
+    canvasDragRef.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      focus: effectiveFocus,
+      moved: false,
+    };
+  }
+
+  function canvasPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const origin = canvasDragRef.current;
+    if (!origin || origin.pointerId !== event.pointerId) return;
+    if (event.isPrimary === false || !dragEnabled) {
+      releaseCanvasDrag(event.currentTarget, origin.pointerId);
+      return;
+    }
+    const dx = event.clientX - origin.clientX;
+    const dy = event.clientY - origin.clientY;
+    if (!origin.moved && Math.hypot(dx, dy) < 3) return;
+    const guest = event.currentTarget.querySelector<HTMLElement>('.event-appearance-canvas__guest');
+    const bounds = guest?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    if (!origin.moved) {
+      origin.moved = true;
+      if (typeof event.currentTarget.setPointerCapture === 'function') {
+        event.currentTarget.setPointerCapture(origin.pointerId);
+      }
+      setCanvasDragging(true);
+    }
+    composerRef.current?.applyCanvasDrag({
+      x: clamp01(origin.focus.x - dx / bounds.width),
+      y: clamp01(origin.focus.y - dy / bounds.height),
+      zoom: origin.focus.zoom,
+    });
+  }
 
   return createPortal(<div className="cover-studio-shell">
     <div className="cover-studio__backdrop" onClick={requestClose} data-testid="cover-studio-backdrop" />
@@ -438,11 +555,21 @@ export function CoverStudio({
         <button type="button" className="cover-studio__close" onClick={requestClose}>
           {dispatched ? 'Close' : 'Cancel'}
         </button>
-        <p className="cover-studio__step">{stepLabel}</p>
         <h2 tabIndex={-1} ref={headingRef}>{STEP_TITLES[step]}</h2>
+        <p className="cover-studio__step">{stepLabel}</p>
       </header>
 
-      {canvas && <div className="cover-studio__canvas" inert={confirmingDiscard}>{canvas}</div>}
+      {canvas && <div
+        ref={canvasRef}
+        className="cover-studio__canvas"
+        inert={confirmingDiscard}
+        data-drag-enabled={dragEnabled ? 'true' : 'false'}
+        data-dragging={canvasDragging ? 'true' : 'false'}
+        onPointerDown={canvasPointerDown}
+        onPointerMove={canvasPointerMove}
+        onPointerUp={(event) => releaseCanvasDrag(event.currentTarget, event.pointerId)}
+        onPointerCancel={(event) => releaseCanvasDrag(event.currentTarget, event.pointerId)}
+      >{canvas}</div>}
 
       <div className="cover-studio__controls" inert={confirmingDiscard}>
         {error && <p
@@ -457,11 +584,15 @@ export function CoverStudio({
         {step === 'choose' && <CoverSourcePicker
           value={source && source.kind !== 'none' ? source : null}
           onChoose={choose}
-          onUpload={(file) => { setDirty(true); onUpload(file); }}
+          onUpload={(file) => {
+            if (editingDisabled) return;
+            setDirty(true);
+            onUpload(file);
+          }}
           onRemove={remove}
           presetThumbnail={presetThumbnail}
           canRemove={canRemove}
-          busy={composeState.status === 'loading'}
+          busy={composeState.status === 'loading' || editingDisabled}
         />}
 
         {step === 'compose' && composeState.status !== 'ready' && <div className="cover-studio__compose-state">
@@ -481,24 +612,43 @@ export function CoverStudio({
         </div>}
 
         {step === 'compose' && composeReady && draft && effectiveFocus && <CoverComposer
+          ref={composerRef}
           value={effectiveFocus}
           safeZoomMaximum={draft.master.safeZoomMaximum}
-          previewUrl={draft.previewUrl}
           available2xProfiles={available2xProfiles}
           manual={focusMode === 'manual'}
-          onAdjust={() => onFocusChange(draft.automaticFocus)}
-          onChange={(next) => { onFocusChange(next); setDirty(true); }}
-          onReset={() => { onResetFocus(); setDirty(true); }}
+          disabled={editingDisabled}
+          onAdjust={() => { if (!editingDisabled) onFocusChange(draft.automaticFocus); }}
+          onChange={(next) => {
+            if (editingDisabled) return;
+            onFocusChange(next);
+            setDirty(true);
+          }}
+          onReset={() => {
+            if (editingDisabled) return;
+            onResetFocus();
+            setDirty(true);
+          }}
         />}
 
         {step === 'style' && <CoverStylePicker
           value={effect}
-          onChange={(next) => { onEffectChange(next); setDirty(true); }}
-          onRetry={onEffectChange}
+          disabled={editingDisabled}
+          onChange={(next) => {
+            if (editingDisabled) return;
+            onEffectChange(next);
+            setDirty(true);
+          }}
+          onRetry={(next) => { if (!editingDisabled) onEffectChange(next); }}
           thumbnail={styleThumbnail}
         />}
 
         {step === 'done' && <div className="cover-studio__done">
+          {receipt && <div className="cover-studio__receipt">
+            <p className="cover-studio__receipt-title">{receipt.title}</p>
+            <p>{receipt.audience}</p>
+            <p>{receipt.guarantee}</p>
+          </div>}
           {accessFailure && <p role="alert">
             {accessFailure.phase === 'before_dispatch'
               ? 'Manager access must be restored before this cover can be sent.'
@@ -520,7 +670,12 @@ export function CoverStudio({
       </div>
 
       <footer className="cover-studio__footer" inert={confirmingDiscard}>
-        {stepIndex > 0 && <button type="button" className="button button--secondary" onClick={back}>
+        {stepIndex > 0 && <button
+          type="button"
+          className="button button--secondary"
+          disabled={editingDisabled}
+          onClick={back}
+        >
           Back
         </button>}
         {step === 'done'
@@ -536,7 +691,7 @@ export function CoverStudio({
               ref={continueRef}
               type="button"
               className="button button--primary"
-              disabled={!source || (step === 'compose' && !composeReady)}
+              disabled={editingDisabled || !source || (step === 'compose' && !composeReady)}
               onClick={advance}
             >
               Continue
