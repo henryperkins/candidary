@@ -144,7 +144,9 @@ export function CoverComposer({
       <label>
         <span className="cover-composer__range-heading">
           <span>Left or right</span>
-          <output aria-hidden="true">{percent(value.x)}% from left</output>
+          <span className="cover-composer__range-value" aria-hidden="true">
+            {percent(value.x)}% from left
+          </span>
         </span>
         <input
           type="range"
@@ -169,7 +171,9 @@ export function CoverComposer({
       <label>
         <span className="cover-composer__range-heading">
           <span>Up or down</span>
-          <output aria-hidden="true">{percent(value.y)}% from top</output>
+          <span className="cover-composer__range-value" aria-hidden="true">
+            {percent(value.y)}% from top
+          </span>
         </span>
         <input
           type="range"
@@ -194,7 +198,9 @@ export function CoverComposer({
       <label>
         <span className="cover-composer__range-heading">
           <span>Zoom</span>
-          <output aria-hidden="true">{percent(value.zoom)}%</output>
+          <span className="cover-composer__range-value" aria-hidden="true">
+            {percent(value.zoom)}%
+          </span>
         </span>
         <input
           type="range"

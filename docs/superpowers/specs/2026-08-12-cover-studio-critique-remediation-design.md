@@ -1,7 +1,7 @@
 # Cover Studio Critique Remediation Design
 
 **Date:** 2026-08-12
-**Status:** Approved direction; implementation not started
+**Status:** Implemented on 2026-08-12 from the approved direction
 **Source critique:** `.impeccable/critique/2026-08-12T20-58-02Z__src-features-cover-coverstudio-tsx.md`
 **Supersedes:** Nothing. This is a narrow corrective addendum to `2026-08-03-event-appearance-cover-studio-design.md`.
 

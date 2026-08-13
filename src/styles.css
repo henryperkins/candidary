@@ -1174,7 +1174,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .cover-composer__controls { display: grid; gap: 14px; margin-top: 16px; }
 .cover-composer__controls label { display: grid; gap: 6px; }
 .cover-composer__range-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
-.cover-composer__range-heading output { color: var(--muted); font-variant-numeric: tabular-nums; }
+.cover-composer__range-value { color: var(--muted); font-variant-numeric: tabular-nums; }
 .cover-composer__controls input[type='range'] { min-height: 44px; accent-color: var(--chestnut); }
 .cover-composer__controls .button { min-height: 44px; }
 

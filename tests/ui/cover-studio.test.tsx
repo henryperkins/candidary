@@ -177,6 +177,7 @@ function Harness({
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -585,6 +586,20 @@ describe('cover studio', () => {
 
     expect(document.querySelector('.cover-composer__surface')).not.toBeInTheDocument();
     expect(document.querySelector('.cover-composer img')).not.toBeInTheDocument();
+  });
+
+  it('keeps each framing label associated with only its range control', () => {
+    render(<Harness draft={DRAFT} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    for (const name of ['Left or right', 'Up or down', 'Zoom']) {
+      const slider = screen.getByRole('slider', { name });
+      const label = slider.closest('label');
+      expect(label).not.toBeNull();
+      expect(label?.querySelectorAll('button, input, meter, output, progress, select, textarea'))
+        .toHaveLength(1);
+    }
   });
 
   it('promotes the live canvas drag only after 3px and announces the settled framing', async () => {
