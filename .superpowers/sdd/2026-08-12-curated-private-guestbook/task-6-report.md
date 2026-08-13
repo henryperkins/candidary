@@ -6,6 +6,8 @@ Implemented and locally verified in the isolated worktree on `codex/curated-priv
 
 Implementation commit: `5961213` (`feat: add immutable guestbook export artifacts`)
 
+Review-fix commit: `4e022e0` (`fix: serialize export workflow ownership`)
+
 No push, deployment, remote D1 migration, remote state change, release certification, browser baseline update, or physical-device claim was made.
 
 ## Files
@@ -71,6 +73,44 @@ The Worker test harness printed its existing warning that local secret environme
 ## Impeccable detector
 
 The required detector was run exactly once against `src/components/ManagerExportPanel.tsx` and `src/styles.css`. It exited 1 on pre-existing global `src/styles.css` findings, including thick side borders and design-system literal advisories throughout the unchanged stylesheet. It surfaced no changed-panel finding. No CSS, detector configuration, sidecar, or unrelated global finding was edited.
+
+## Review-fix round 1
+
+### Disposition
+
+1. Accepted: `processExport()` did not verify ownership of the queued-to-running transition. `ExportsRepository.claimRunning()` now returns a discriminated ownership result, and only its owner proceeds. A duplicate invocation returns the current record without uploading, failing, or otherwise processing the attempt; an already-Ready invocation remains an idempotent return.
+2. Accepted: the old `markReady()` batch could delete and replace part rows before its final guarded state update lost. The batch now acquires a transaction-local Ready claim in its first statement, guards every part deletion/insertion with that claim, and finalizes inventory only while still owning it. D1 batch atomicity keeps the temporary claim invisible and rolls the whole sequence back on statement failure.
+3. Accepted: create, get, list, and retry serialized the internal `ExportRecord`, exposing durable object keys and internal artifact digests. These endpoints now use an explicit Manager projection allowlist; `ExportView` no longer declares `manifestObjectKey`. Signed download descriptors remain separately authorized and unchanged.
+
+### Additional RED evidence
+
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts`
+  - Exit 1; 18 tests total: 2 failed, 16 passed.
+  - The duplicate workflow regression showed a non-owner changing an already-Running job to Failed.
+  - The lost-transition regression showed stale `markReady()` inventory replacing the winner's durable part row.
+  - The already-Ready idempotency regression passed in the same run.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts`
+  - Exit 1; 19 tests total: 1 failed, 18 passed.
+  - The Manager response allowlist failed because the raw record exposed event/internal timestamps, error state, object keys, artifact byte counts, and SHA-256 digests.
+
+### Additional GREEN evidence
+
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts -t "queued-to-running|already-Ready"`
+  - 2 passed, 16 skipped.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts -t "does not mutate winner parts"`
+  - 1 passed, 17 skipped.
+- `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts`
+  - 1 file passed; 19 tests passed after all three fixes.
+- Final combined verification:
+  - `npx vitest run --config vitest.config.ts tests/unit/guestbook-export.test.ts tests/unit/export.test.ts` -- 2 files, 12 tests passed.
+  - `npx vitest run --config vitest.worker.config.ts tests/worker/export-api.test.ts tests/worker/cleanup.test.ts tests/worker/guestbook-repository.test.ts` -- 3 files, 123 tests passed.
+  - `npm run typecheck` -- exit 0.
+  - `npm run lint` -- exit 0 with zero lint warnings.
+  - `git diff --check` -- exit 0.
+
+Latest focused total: 135 passing tests, zero focused failures. The Worker harness emitted only its expected missing-local-secret warning.
+
+The Impeccable detector was not rerun during this review-fix round, as required. No Task 8 fixture or browser/baseline file was changed.
 
 ## Concerns and evidence boundaries
 
