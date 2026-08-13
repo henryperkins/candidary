@@ -117,6 +117,71 @@ The browser gate required investigation rather than snapshot updates:
   separately. The one final fresh full suite then passed with the project totals
   above. No snapshot was updated anywhere in Task 9.
 
+## Final review export and purge remediation
+
+The independent whole-branch review initially returned **CHANGES REQUIRED**
+with 0 Critical and 2 Important findings after Task 9:
+
+1. new-format exports froze only the media count and then re-read live media,
+   so a count-equal replacement could change the archive membership after
+   creation; and
+2. event purge could delete the event R2 prefix and cascade export rows while
+   a claimed Export Workflow was still able to write its deterministic attempt
+   prefix.
+
+Commit `d34976cd7c9f833baf415470cb5d2d6e525f944f` (`fix: freeze export
+media and fence event purge`) resolves both findings:
+
+- migration 0015 now stores the exact export-time photo membership and required
+  rendering metadata in `export_media_entries`, intentionally without a live
+  `media` foreign key; the only foreign key is the owning export job with
+  `ON DELETE CASCADE`;
+- new-format workflows page those immutable rows by `(created_at, media_id)` in
+  bounded 100-row reads, while legacy pre-0015 jobs retain the live-reader
+  compatibility path;
+- deleted frozen members remain members and fail with
+  `EXPORT_SOURCE_MISSING` only if their frozen object bytes are unavailable;
+  later reservations and count-equal replacements cannot substitute; retry
+  renders the identical manifest and private CSV;
+- claim and Ready transitions require a nondeleted event, queued jobs become
+  terminal when purge fences are installed, and purge remains at `fences`
+  while any export is Running. A Running owner must first clean/settle its
+  deterministic attempt before the event prefix or relational inventory is
+  removed.
+
+TDD evidence captured four focused RED failures before implementation: the
+snapshot table was absent, deletion made the immutable export fail, a
+post-snapshot reservation substituted for the frozen member, and purge advanced
+past fences during a Running export. The corresponding focused cases passed
+4/4 after the repair. Fresh post-repair verification then passed:
+
+- affected Worker files: 4 files, 128 tests;
+- complete Worker suite: 47 files, 1,132 tests;
+- complete unit/UI suite: 76 files, 1,425 tests;
+- release-topology focus: 7 files, 61 tests;
+- build, TypeScript (including E2E), lint, generated binding check, and Git
+  whitespace checks.
+
+One first full unit run under an unrelated CPU-heavy process exited with broad
+5-second timeouts in UI and release-verifier files before Worker tests began.
+Those exact UI files passed 141/141 and the exact release-verifier files passed
+104/104 in isolation; after the unrelated process ended, the fresh normal full
+unit/UI run passed 1,425/1,425. No timeout or production behavior was changed.
+
+The post-repair fresh-D1 verifier ran at:
+
+`C:\Users\htper\AppData\Local\Temp\candidary-release-guestbook-review-68ead0a11987432885874ae123ee450b`
+
+Its retained `migration-verification.json` reports 15 migrations, zero foreign
+key violations, `integrity: ok`, and all three terminal-schema checks true.
+
+The subsequent read-only bounded re-review inspected exact commit `d34976c`
+and returned **APPROVE — 0 Critical, 0 Important**. It independently confirmed
+the atomic snapshot, bounded frozen-row reader, legacy compatibility, retry
+immutability, live-event claim/Ready predicates, and queued/running purge
+fences. Its fresh focused command passed 10 relevant tests across 3 files, with
+112 unrelated tests skipped and 0 failed; the reviewer made no file changes.
+
 ## Fresh D1 evidence
 
 Successful explicit UUID run root:
@@ -135,16 +200,16 @@ Exact report values:
 
 The active migration is
 `0015_curated_private_guestbook.sql`, SHA-256
-`04b065de5493fdb4353ffe8bbc93faf826271e1208563f9d2c8222973485a716`.
+`044c402b334edd0e56b4d07252def2a3b5f8589b5c0a6edbca31f470b5372d28`.
 This proves a fresh local schema only; it does not prove any remote database
 state.
 
 ## Whole-branch inventory
 
 Range inspected:
-`911f8df9df96fbc882e0d3c1361894df488d3435..a0b03e82260932bd9e8a0b86d9466929cd8d1404`.
+`911f8df9df96fbc882e0d3c1361894df488d3435..d34976cd7c9f833baf415470cb5d2d6e525f944f`.
 
-- 32 commits; 128 tracked files changed; 10,188 insertions and 736 deletions.
+- 34 commits; 133 tracked files changed; 10,746 insertions and 751 deletions.
 - Migration inventory is contiguous from `0001_core.sql` through
   `0015_curated_private_guestbook.sql`; all 15 names and SHA-256 hashes were
   inspected, and fresh-D1 verification matched a 15-entry ledger.
@@ -174,14 +239,14 @@ Range inspected:
 | §7 Guest experience | `Guestbook.tsx`, guestbook state, `EventPage.tsx`, upload/RSVP name ownership, API client, and styling implement placement, attribution, draft/idempotency safety, owned/private and shared reading, refresh, pagination, focus, and reduced motion. Guestbook UI/unit, Worker messages, core journey, accessibility, guest-responsive, theming, and final full E2E gates passed. | Browser evidence is local Chromium with stubbed APIs; it does not establish durable identity, native-device behavior, or production sessions. |
 | §8 Host experience | `ManagerGuestbookPanel.tsx`, manager state/Page integration, summary/list/mutation routes, lazy loading, badge/views/filters, row-local actions, Undo, polling, refresh, focus/scroll, and gallery-off behavior are covered by Manager UI, Worker, responsive, accessibility, and visual tests. | No bulk moderation was added, consistent with the design. No live concurrent-host rehearsal was performed. |
 | §9 API contracts | Existing guest message routes, Manager summary/list routes, state-guarded note mutations, existing media publication mutations, envelopes, bounded limits, authenticated cursors, cross-event refusal, and conflicts are exercised in Worker/API and cursor tests. | Exact authorization/runtime behavior is locally simulated; no deployed endpoint was called. |
-| §10 D1 schema and repository behavior | Migration 0015, prompt constraints, bounded rate/purge storage, legacy-nullable export metadata, immutable export rows, indexes, snapshot transaction, >1,000 legacy snapshot coverage, and retry immutability are covered by migration, repository, messages, export, cleanup, and fresh-D1 tests. | The reviewed implementation uses a bounded `guest_message_rate_events` ledger plus cleanup rather than the prose's literal single current-window row; Task 1 preserved this reviewed schema and Task 3 proves the same fixed-window/cap/privacy behavior. No remote D1 evidence. |
+| §10 D1 schema and repository behavior | Migration 0015, prompt constraints, bounded rate/purge storage, legacy-nullable export metadata, immutable Guestbook and media export rows, bounded keyset indexes, one snapshot transaction, >1,000 legacy Guestbook snapshot coverage, and retry immutability are covered by migration, repository, messages, export, cleanup, and fresh-D1 tests. | The reviewed implementation uses a bounded `guest_message_rate_events` ledger plus cleanup rather than the prose's literal single current-window row; Task 1 preserved this reviewed schema and Task 3 proves the same fixed-window/cap/privacy behavior. No remote D1 evidence. |
 | §11 Submission protection and capacity | Dedicated generated Cloudflare limiter binding, domain-separated persisted HMAC scopes, guarded D1 creation/replay/conflict logic, fixed windows, retained-note cap, purge receipts, and bounded cleanup are covered by security and Worker tests. | Miniflare does not instantiate the native Rate Limit service; the Worker suite uses a generated-`RateLimit`-compatible fixture. Native edge shedding and eventual-consistency behavior remain a runtime gate. |
-| §12 Export artifacts | Immutable snapshot rows, deterministic photo mapping, self-contained `guestbook.html`, formula-hardened `guestbook-private.csv`, distinct signed descriptors, notes/photos/mixed/private/empty/legacy cases, Workflow ownership/retry/Ready atomicity, expiry and purge are covered by renderer units plus export/cleanup/repository Worker tests. Browser tests exercise semantic screen and print-media rendering. | No OS print dialog, manual common-browser file opening, or common spreadsheet application opened the CSV. No remote R2 object was written. |
+| §12 Export artifacts | Immutable Guestbook and exact photo-membership snapshot rows, deterministic photo mapping, self-contained `guestbook.html`, formula-hardened `guestbook-private.csv`, distinct signed descriptors, notes/photos/mixed/private/empty/legacy cases, Workflow ownership/retry/Ready atomicity, event-purge fencing, expiry, and cleanup are covered by renderer units plus export/cleanup/repository Worker tests. Browser tests exercise semantic screen and print-media rendering. | Frozen source bytes remain in private R2 rather than D1; deleting those bytes makes generation fail safely instead of substituting a live row. No OS print dialog, manual common-browser file opening, common spreadsheet application, or remote R2 write was used. |
 | §13 Error handling and resilience | Guest draft/feed failures, conflicts/limits, Manager section/row failures, export snapshot/generation/retry/cleanup failures, disconnects, and network loss are represented across UI, Worker, and browser recovery tests; full local suites passed. | Stubbed/local failure injection is not production degraded-network rehearsal. |
 | §14 Privacy, authorization, observability | Authenticated domain-separated cursors, canonical session ownership, exact event/manager/CSRF boundaries, allowlisted serializers, no object keys/digests/session IDs in responses, and security documentation/tests passed. | No production log/metric stream or live authorization audit was inspected, so operational redaction/metrics are source- and test-proven only. |
 | §15 Accessibility and visual behavior | Native semantics, live regions, focus/scroll stability, 44-pixel targets, `dir="auto"`, RTL/Unicode/max text, 320/390 widths, zoom-equivalent layouts, reduced motion, Axe/contrast, printable HTML screen/print media, and zero-tolerance snapshots are exercised by the final browser suite and Task 8's inspected baselines. | Local Chromium automation does not prove VoiceOver, TalkBack, physical iPhone/Android, camera picker, QR, or device-specific 200%/400% behavior. |
-| §16 Testing and acceptance | Migration/repository, Worker/API, export/cleanup, client/unit, build, binding, fresh-D1, and complete browser gates are green at the verification head. Final unit/Worker total is 2,556 tests; final browser total is 468 cases with 121 intentional cross-project skips. | The design's manual common-browser print and common-spreadsheet CSV checks remain open, as do immutable candidate, remote migration, deploy, runtime, and physical-device release gates. |
-| §17 Implementation boundaries | The branch is decomposed into the approved task slices with focused RED/GREEN evidence, review-fix commits, explicit path-scoped commits, and separate reports. Task 9 fixes were committed independently and did not broaden product scope. | No push, deploy, remote migration, secret provisioning, release-candidate creation, or device-proof claim was made. |
+| §16 Testing and acceptance | Migration/repository, Worker/API, export/cleanup, client/unit, build, binding, fresh-D1, and complete browser gates are green at the verification head. Final unit/Worker total is 2,557 tests; final browser total is 468 cases with 121 intentional cross-project skips. | The design's manual common-browser print and common-spreadsheet CSV checks remain open, as do immutable candidate, remote migration, deploy, runtime, and physical-device release gates. |
+| §17 Implementation boundaries | The branch is decomposed into the approved task slices with focused RED/GREEN evidence, review-fix commits, explicit path-scoped commits, and separate reports. Task 9 and final-review fixes were committed independently and did not broaden product scope. | No push, deploy, remote migration, secret provisioning, release-candidate creation, or device-proof claim was made. |
 
 ## Remaining release and acceptance gates
 
@@ -200,10 +265,10 @@ that result:
 
 ## Git and retained evidence
 
-Before authoring this ignored report, `git diff --check`,
-`git diff --cached --check`, staged/unstaged quiet checks, and
-`git status --short` were all clean at
-`a0b03e82260932bd9e8a0b86d9466929cd8d1404`.
+Before the post-review report update, `git diff --check`,
+`git diff --cached --check`, scoped staging checks, and
+`git status --short` were clean at
+`d34976cd7c9f833baf415470cb5d2d6e525f944f`.
 
 Task 9 command logs and failure traces are retained under:
 
