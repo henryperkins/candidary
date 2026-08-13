@@ -32,6 +32,10 @@
     {
       "binding": "MEDIA_BUCKET",
       "bucket_name": "candidary-media"
+    },
+    {
+      "binding": "CANONICAL_MEDIA_BUCKET",
+      "bucket_name": "candidary-media-canonical-v2"
     }
   ],
   "images": {
@@ -56,6 +60,14 @@
       "namespace_id": "1002",
       "simple": {
         "limit": 30,
+        "period": 60
+      }
+    },
+    {
+      "name": "GUEST_MESSAGE_RATE_LIMIT",
+      "namespace_id": "1003",
+      "simple": {
+        "limit": 120,
         "period": 60
       }
     }
@@ -83,8 +95,6 @@
   "vars": {
     "APP_ORIGIN": "https://candidary.app",
     "ALTERNATE_ORIGINS": "https://candidary.online",
-    "R2_ACCOUNT_ID": "a77e479f6736120eadd99973dbeb705e",
-    "R2_BUCKET_NAME": "candidary-media",
     "EMAIL_FROM": "hello@candidary.app"
   },
   "secrets": {
@@ -96,8 +106,7 @@
       "ENTRY_HMAC_KEY",
       "ENTRY_ENCRYPTION_KEY",
       "RSVP_LOOKUP_HMAC_KEY",
-      "R2_ACCESS_KEY_ID",
-      "R2_SECRET_ACCESS_KEY"
+      "GUEST_MESSAGE_HMAC_KEY"
     ]
   },
   "observability": {

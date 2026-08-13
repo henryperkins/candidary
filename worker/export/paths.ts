@@ -1,4 +1,4 @@
-import type { MediaRecord } from '../db/types';
+import type { ExportableMediaRecord } from '../db/types';
 
 function safeBasename(filename: string): string {
   const dot = filename.lastIndexOf('.');
@@ -13,7 +13,7 @@ function safeBasename(filename: string): string {
   return `${stem}${extension}`;
 }
 
-export function exportPath(media: MediaRecord, index: number): string {
+export function exportPath(media: ExportableMediaRecord, index: number): string {
   return `photos/${String(index + 1).padStart(3, '0')}-${safeBasename(media.originalFilename)}`;
 }
 

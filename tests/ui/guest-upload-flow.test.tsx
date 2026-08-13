@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useState } from 'react';
 
 import { GuestUploadFlow } from '../../src/features/uploads/GuestUploadFlow';
 import type { UploadQueueItem, UploadTransport } from '../../src/features/uploads/upload-queue';
@@ -279,6 +280,36 @@ describe('mobile guest photo delivery', () => {
     render(<GuestUploadFlow event={event} slug="alex-jordan" transport={transport()} />);
     expect(screen.getByText('Sending as Avery')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Edit name' })).toBeVisible();
+  });
+
+  it('uses the controlled remembered name and reports edits immediately', async () => {
+    const onGuestNameChange = vi.fn();
+    function ControlledUpload({ externalName = 'Taylor' }: { externalName?: string }) {
+      const [guestName, setGuestName] = useState(externalName);
+      return <GuestUploadFlow
+        event={event}
+        slug="alex-jordan"
+        transport={transport()}
+        guestName={guestName}
+        onGuestNameChange={(name) => { setGuestName(name); onGuestNameChange(name); }}
+      />;
+    }
+    const view = render(<ControlledUpload />);
+
+    expect(screen.getByText('Sending as Taylor')).toBeVisible();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Edit name' }));
+    await userEvent.setup().clear(screen.getByLabelText('Your name'));
+    await userEvent.setup().type(screen.getByLabelText('Your name'), 'Avery');
+    expect(onGuestNameChange).toHaveBeenLastCalledWith('Avery');
+
+    view.rerender(<GuestUploadFlow
+      event={event}
+      slug="alex-jordan"
+      transport={transport()}
+      guestName="Morgan"
+      onGuestNameChange={onGuestNameChange}
+    />);
+    expect(screen.getByText('Sending as Morgan')).toBeVisible();
   });
 
   // iOS Safari with "Block All Cookies" throws on the storage access itself rather than returning

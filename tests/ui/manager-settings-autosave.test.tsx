@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn(() => Promise.resolve('data:image/png;base64,x')) } }));
 
 import { resolveEventTheme } from '../../shared/event-theme';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { createAppRouter } from '../../src/app/router';
 
 function json(data: unknown, status = 200) {
@@ -22,7 +23,7 @@ function errorJson(body: Record<string, unknown>, status: number) {
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.',
+  welcomeMessage: 'Welcome.', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
@@ -367,7 +368,7 @@ describe('manager settings autosave guards', () => {
     const user = typist();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await waitFor(() => expect(releaseSettings).not.toBeNull());
 
     const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
@@ -456,7 +457,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
 
     const prompt = await screen.findByRole('region', { name: /not saved yet/i });
@@ -482,7 +483,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
     const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     expect(within(prompt).getByText(/may still finish saving after you leave/u)).toBeVisible();
@@ -551,7 +552,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await waitFor(() => expect(releaseFailure).not.toBeNull());
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /gallery/i }));
@@ -570,7 +571,7 @@ describe('manager settings autosave guards', () => {
 
     // Returning to the confirmed value resolves the failed domain without a
     // request. Recovery—not section navigation—is what retires the notice.
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Manager notice' }))
       .not.toBeInTheDocument());
   });
@@ -590,7 +591,7 @@ describe('manager settings autosave guards', () => {
     await openSettings(user);
     expect(added.mock.calls.filter(([type]) => type === 'beforeunload')).toHaveLength(0);
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await waitFor(() => expect(added.mock.calls.filter(([type]) => type === 'beforeunload').length)
       .toBeGreaterThan(0));
     await waitFor(() => expect(removed.mock.calls.filter(([type]) => type === 'beforeunload').length)
@@ -706,7 +707,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
     await waitFor(() => expect(releases).toHaveLength(2));
 
@@ -714,11 +715,11 @@ describe('manager settings autosave guards', () => {
     releases[1]!();
     releases[0]!();
 
-    await waitFor(() => expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText('Review guestbook notes before sharing')).not.toBeChecked());
     // The settings response carried the pre-change theme; it must not travel.
     expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
     // And the theme response carried the pre-change switch; that must not travel either.
-    expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
+    expect(screen.getByLabelText('Review guestbook notes before sharing')).not.toBeChecked();
   });
 
   it('keeps intake paused when a settings response arrives after entry disable', async () => {
@@ -756,7 +757,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await waitFor(() => expect(releaseSettings).not.toBeNull());
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: 'Share' }));
@@ -853,16 +854,16 @@ describe('manager settings autosave guards', () => {
     await user.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(releaseCover).not.toBeNull());
 
-    await user.click(screen.getByLabelText('Review notes before sharing'));
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
     await user.click(screen.getByRole('radio', { name: 'Garden Party' }));
-    await waitFor(() => expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText('Review guestbook notes before sharing')).not.toBeChecked());
 
     releaseCover!();
 
     // The cover response owns the cover and nothing else.
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Cover Studio' })).not.toBeInTheDocument());
     expect(screen.getByText(/No cover is currently shown/u)).toBeVisible();
-    expect(screen.getByLabelText('Review notes before sharing')).not.toBeChecked();
+    expect(screen.getByLabelText('Review guestbook notes before sharing')).not.toBeChecked();
     expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#245c46' });
   });
 });

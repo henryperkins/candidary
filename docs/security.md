@@ -137,17 +137,18 @@ Every cell in every generated CSV passes through `csvCell()` in `shared/csv.ts`.
 
 ## Key rotation limits
 
-`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `LOGIN_HMAC_KEY` protect credentials that can be reissued, so rotating one costs an ordinary sign-out. Three keys are different in kind, because they protect data already written down:
+`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `LOGIN_HMAC_KEY` protect credentials that can be reissued, so rotating one costs an ordinary sign-out. Four keys are different in kind, because they protect data already written down:
 
 - `ENTRY_HMAC_KEY` digests the credential printed on every invitation. Rotating it without re-digesting `event_entry_credentials` makes every printed QR stop working.
 - `ENTRY_ENCRYPTION_KEY` encrypts the same credential for redisplay. Rotating it without re-encrypting makes the share link unrecoverable, though the printed code keeps working.
 - `RSVP_LOOKUP_HMAC_KEY` keys every stored name digest and every rate-limit scope. Rotating it without recomputing `rsvp_invitees.lookup_digest` makes every household unreachable by lookup.
+- `GUEST_MESSAGE_HMAC_KEY` domain-separates Guestbook session/IP window digests and durable request HMACs in purge receipts. Receipts survive ordinary deletion until event purge, so rotation requires a coordinated re-HMAC migration or an explicit receipt-invalidation decision.
 
-Rotating an internal guest grant or a management link is a routine operation and must never touch these three keys.
+Rotating an internal guest grant or a management link is a routine operation and must never touch these four keys.
 
 ## Data lifecycle
 
-Event dates anchor immutable access and purge timestamps. Explicit deletion first marks the event inaccessible, revokes guest, session, and household RSVP credentials, and disables the printed entry; it then removes the event's R2 prefix, and only afterwards deletes `media`, `guest_messages`, and the event row so the remaining cascades run. If object deletion fails, the failure propagates and the event stays soft-deleted so a later scheduled pass retries the same row — D1 is never hard-deleted ahead of objects nothing could then discover. The daily scheduled handler uses the same deny-first behavior for retention purges, and also sweeps expired or revoked RSVP sessions and rate windows older than one 15-minute bucket in bounded passes. Export snapshots include every stored, non-deleted original as of their recorded snapshot, regardless of publication status.
+Event dates anchor immutable access and purge timestamps. Explicit deletion first marks the event inaccessible, revokes guest, session, and household RSVP credentials, and disables the printed entry; it then removes the event's R2 prefix and Guestbook export objects, and only afterwards deletes `media`, `guest_messages`, Guestbook snapshot/receipt rows, and the event so the remaining cascades run. Guestbook rate events are bounded scratch; purge receipts retain only the minimum non-content idempotency tuple until event purge and are never exposed over HTTP. If object deletion fails, the event stays soft-deleted so a later scheduled pass retries it. Ready Guestbook HTML and private CSV inherit the export's 24-hour object expiry, while immutable snapshot rows remain for an authorized retry.
 
 Archiving a household is irreversible in v1. It revokes that household's RSVP sessions, removes it from lookup and from active totals, and keeps its marked rows in the host list and CSV export until the event is purged.
 
@@ -159,6 +160,7 @@ Archiving a household is irreversible in v1. It revokes that household's RSVP se
 - Treat management links as bearer credentials. An event with no account bound to it still has no recovery path.
 - Rate limit and Turnstile-protect registration, sign-in, and password-reset requests alongside event creation.
 - Verify the `RSVP_LOOKUP_RATE_LIMIT` binding and its 30-per-minute rule before an event goes live; the D1 budgets are defense in depth, not a replacement for it.
+- Verify `GUEST_MESSAGE_RATE_LIMIT` uses its isolated target namespace and 120-per-60-second rule; never reuse the host-auth or RSVP counter.
 - Review live logs after deployment and confirm that no line carries a raw credential, ciphertext, submitted name, RSVP body, or CSV row.
 - Outbound mail requires a domain onboarded to Cloudflare Email Service and the Workers Paid plan; sends to arbitrary recipients fail without both.
 - Run dependency, secret, and configuration review before every production release.

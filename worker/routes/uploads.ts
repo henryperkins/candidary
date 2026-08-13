@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 
-import { UPLOAD_BATCH_SIZE } from '../../shared/constants';
+import { MAX_IMAGE_BYTES, UPLOAD_BATCH_SIZE } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { MediaRepository } from '../db/media';
@@ -9,7 +9,7 @@ import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
 import { UploadService } from '../services/uploads';
-import { finalizeStoredMedia } from '../storage/media';
+import { deleteMediaObjectAliases, receiveMediaUpload } from '../storage/media';
 
 const fileSchema = z.object({
   filename: z.string().min(1).max(255),
@@ -72,12 +72,17 @@ uploadRoutes.post('/event/:slug/uploads/:mediaId/finalize', async (context) => {
   if (!media || media.eventId !== auth.event.id || media.uploaderSessionId !== auth.session.id) {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
-  const finalized = await finalizeStoredMedia(
-    context.env.MEDIA_BUCKET,
-    repository,
-    media,
+  if (media.uploadState === 'stored') {
+    return context.json({ data: { media }, requestId: context.get('requestId') });
+  }
+  // New Workers never start an unbounded R2 write from this legacy handshake.
+  // The browser queue interprets this domain conflict by replaying bytes through
+  // the authenticated, buffer-before-claim PUT ingress above.
+  throw new ApiError(
+    'UPLOAD_FINALIZE_CONFLICT',
+    'This upload needs its photo bytes again before it can be secured.',
+    409,
   );
-  return context.json({ data: { media: finalized }, requestId: context.get('requestId') });
 });
 
 uploadRoutes.delete('/event/:slug/uploads/:mediaId', async (context) => {
@@ -87,7 +92,74 @@ uploadRoutes.delete('/event/:slug/uploads/:mediaId', async (context) => {
   if (!media || media.eventId !== auth.event.id || media.uploaderSessionId !== auth.session.id) {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
-  await context.env.MEDIA_BUCKET.delete(media.objectKey);
   const deleted = await repository.delete(media.id, new Date().toISOString());
+  await deleteMediaObjectAliases(
+    context.env.MEDIA_BUCKET,
+    context.env.CANONICAL_MEDIA_BUCKET,
+    repository,
+    media,
+  ).catch(() => undefined);
   return context.json({ data: { media: deleted }, requestId: context.get('requestId') });
+});
+
+uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
+  // Authentication, origin, and CSRF all complete before the body is read.
+  const auth = await guestForSlug(context);
+  const repository = new MediaRepository(context.env.DB);
+  const media = await repository.getById(context.req.param('mediaId'));
+  if (!media || media.eventId !== auth.event.id || media.uploaderSessionId !== auth.session.id) {
+    throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
+  }
+  if (media.uploadState === 'stored') {
+    return context.json({ data: { media }, requestId: context.get('requestId') });
+  }
+  if (media.uploadState !== 'reserved' || media.deletedAt !== null) {
+    throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer receive bytes.', 409);
+  }
+  const promotion = await repository.getPromotion(media.id);
+  const canBufferExactRetry = promotion?.state === 'copying'
+    && promotion.sourceEtag?.startsWith('buffer:') === true;
+  if (!promotion || (promotion.state !== 'pending' && !canBufferExactRetry)) {
+    throw new ApiError(
+      'UPLOAD_FINALIZE_CONFLICT',
+      'This upload is already being secured. Wait a moment and try again.',
+      409,
+    );
+  }
+  if (Date.parse(media.reservationExpiresAt) <= Date.now()) {
+    throw new ApiError('UPLOAD_RESERVATION_EXPIRED', 'This upload reservation expired. Choose the file again.', 409);
+  }
+
+  const lengthHeader = context.req.header('content-length');
+  if (!lengthHeader) {
+    throw new ApiError('VALIDATION_FAILED', 'This upload needs to say how large the photo is.', 411);
+  }
+  const contentLength = Number(lengthHeader);
+  if (!Number.isSafeInteger(contentLength) || contentLength < 1) {
+    throw new ApiError('VALIDATION_FAILED', 'That upload could not be read. Try again.', 422);
+  }
+  if (contentLength > MAX_IMAGE_BYTES || contentLength !== media.declaredByteSize) {
+    throw new ApiError('VALIDATION_FAILED', 'That photo is a different size than the one reserved.', 422);
+  }
+  if ((context.req.header('content-type') ?? '') !== media.mimeType) {
+    throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded image type does not match its reservation.', 415);
+  }
+
+  // The whole bounded request is received before D1 grants an R2 writer. A
+  // client-paused HTTP body therefore cannot outlive a cleanup lease or land an
+  // object after purge. The post-buffer CAS inside receiveMediaUpload rechecks
+  // every mutable reservation/event/fence predicate.
+  const bytes = await context.req.raw.arrayBuffer();
+  if (bytes.byteLength !== contentLength) {
+    throw new ApiError('VALIDATION_FAILED', 'That upload did not finish. Choose the photo again.', 422);
+  }
+  const stored = await receiveMediaUpload(
+    context.env.CANONICAL_MEDIA_BUCKET,
+    repository,
+    media,
+    auth.session.id,
+    bytes,
+    context.req.header('content-type') ?? '',
+  );
+  return context.json({ data: { media: stored }, requestId: context.get('requestId') });
 });

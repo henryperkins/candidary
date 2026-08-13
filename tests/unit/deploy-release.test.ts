@@ -23,6 +23,14 @@ import {
   type DeployCommand,
   type DeployReleaseAdapters,
 } from '../../scripts/deploy-release';
+import {
+  POST_CUTOVER_PRODUCTION_TRIGGER_NAMES,
+  productionTopologySha256,
+} from '../../scripts/migrate-release';
+import {
+  CUTOVER_DISABLED_CAPABILITIES,
+  LEGACY_MEDIA_SCANNER_CONTRACT,
+} from '../../scripts/media-cutover-release-contract';
 
 const SHA = 'a'.repeat(40);
 const OTHER_SHA = 'c'.repeat(40);
@@ -46,6 +54,7 @@ const migrationNames = [
   '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql',
   '0014_event_cover_invariants.sql',
+  '0015_curated_private_guestbook.sql',
 ] as const;
 
 afterEach(async () => {
@@ -84,21 +93,50 @@ interface Fixture {
   writeManifest(manifest?: CandidateManifest): Promise<void>;
 }
 
-async function candidateFixture(): Promise<Fixture> {
+interface PostCutoverMigrationEvidenceFixture {
+  path: string;
+  evidence: Record<string, unknown>;
+  write(evidence?: Record<string, unknown>): Promise<void>;
+}
+
+async function candidateFixture(migrationCount: 14 | 15 = 14): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'candidary-deploy-test-'));
   roots.push(root);
   await put(root, 'config/release.json', '{"guestJourneyVersion":1}\n');
-  for (const [index, name] of migrationNames.entries()) {
+  if (migrationCount === 15) {
+    const mediaUploadReleaseBytes = `${canonicalJson({
+      kind: 'candidary.media-upload-release',
+      schemaVersion: 2,
+      mode: 'canonical-cutover-disabled',
+      capabilities: { ...CUTOVER_DISABLED_CAPABILITIES },
+    })}\n`;
+    const scannerBytes = `${canonicalJson(LEGACY_MEDIA_SCANNER_CONTRACT)}\n`;
+    await put(root, 'config/media-upload-release.json', mediaUploadReleaseBytes);
+    await put(root, 'config/legacy-media-scanner.json', scannerBytes);
+    await put(
+      root,
+      'config/legacy-media-scanner.json.sha256',
+      `${sha256(scannerBytes)}  legacy-media-scanner.json\n`,
+    );
+  }
+  for (const [index, name] of migrationNames.slice(0, migrationCount).entries()) {
     await put(root, `migrations/${name}`, `select ${index + 1};\n`);
   }
   await put(root, 'dist/candidary/index.js', `worker-${SHA}\n`);
   await put(root, 'dist/client/index.html', '<!doctype html><title>Candidary</title>\n');
 
+  const historicalRequiredSecrets = [
+    'TOKEN_HMAC_KEY', 'SESSION_HMAC_KEY', 'GUEST_TOKEN_ENCRYPTION_KEY',
+    'LOGIN_HMAC_KEY', 'ENTRY_HMAC_KEY', 'ENTRY_ENCRYPTION_KEY',
+    'RSVP_LOOKUP_HMAC_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY',
+  ];
   const generatedConfig = {
+    name: 'candidary',
     main: 'index.js',
     compatibility_date: '2026-07-21',
     compatibility_flags: ['nodejs_compat'],
-    workers_dev: true,
+    workers_dev: false,
+    preview_urls: false,
     assets: {
       binding: 'ASSETS',
       directory: '../client',
@@ -107,9 +145,51 @@ async function candidateFixture(): Promise<Fixture> {
     },
     version_metadata: { binding: 'CF_VERSION_METADATA' },
     d1_databases: [{
-      binding: 'DB', database_name: 'redacted', database_id: 'redacted', migrations_dir: '../../migrations',
+      binding: 'DB', database_name: 'candidary-core',
+      database_id: '60bec5de-c8c7-41b5-a26b-2d3f7d184c71', migrations_dir: '../../migrations',
     }],
+    r2_buckets: [
+      { binding: 'MEDIA_BUCKET', bucket_name: 'candidary-media' },
+      ...(migrationCount === 15 ? [{
+        binding: 'CANONICAL_MEDIA_BUCKET',
+        bucket_name: 'candidary-media-canonical-v2',
+      }] : []),
+    ],
+    images: { binding: 'IMAGES' },
+    send_email: [{ name: 'EMAIL' }],
+    ratelimits: [
+      { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '1001', simple: { limit: 20, period: 60 } },
+      { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '1002', simple: { limit: 30, period: 60 } },
+      ...(migrationCount === 15 ? [{
+        name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '1003', simple: { limit: 120, period: 60 },
+      }] : []),
+    ],
+    workflows: [
+      { name: 'candidary-export', binding: 'EXPORT_WORKFLOW', class_name: 'ExportWorkflow' },
+      { name: 'candidary-cover-render', binding: 'COVER_RENDER_WORKFLOW', class_name: 'CoverRenderWorkflow' },
+      { name: 'candidary-cover-backfill', binding: 'COVER_BACKFILL_WORKFLOW', class_name: 'CoverBackfillWorkflow' },
+    ],
+    triggers: { crons: ['17 3 * * *', '47 * * * *'] },
+    vars: {
+      APP_ORIGIN: 'https://candidary.app',
+      ALTERNATE_ORIGINS: 'https://candidary.online',
+      ...(migrationCount === 14 ? {
+        R2_ACCOUNT_ID: 'f'.repeat(32),
+        R2_BUCKET_NAME: 'candidary-media',
+      } : {}),
+      EMAIL_FROM: 'hello@candidary.app',
+    },
+    secrets: {
+      required: migrationCount === 15
+        ? [
+          ...historicalRequiredSecrets.filter((name) =>
+            name !== 'R2_ACCESS_KEY_ID' && name !== 'R2_SECRET_ACCESS_KEY'),
+          'GUEST_MESSAGE_HMAC_KEY',
+        ]
+        : historicalRequiredSecrets,
+    },
     observability: { enabled: true },
+    placement: { mode: 'smart' },
   };
   await put(root, 'dist/candidary/wrangler.json', JSON.stringify(generatedConfig));
   const packageLock = `${canonicalJson({
@@ -218,6 +298,103 @@ async function candidateFixture(): Promise<Fixture> {
   return { root, manifestPath, sidecarPath, npmCliPath, wranglerCliPath, manifest, writeManifest };
 }
 
+async function postCutoverMigrationEvidence(
+  fixture: Fixture,
+): Promise<PostCutoverMigrationEvidenceFixture> {
+  if (fixture.manifest.candidate === null || fixture.manifest.migrations === null
+    || fixture.manifest.bindings === null || fixture.manifest.artifacts === null) {
+    throw new Error('Post-cutover deploy fixture requires a complete candidate.');
+  }
+  const evidenceRunId = '22222222-2222-4222-8222-222222222222';
+  const ledger = fixture.manifest.migrations.manifest.map((migration) => migration.path.split('/').at(-1)!);
+  const terminalMigration = fixture.manifest.migrations.manifest.at(-1)!;
+  const evidence: Record<string, unknown> = {
+    kind: 'candidary.production-migration-evidence',
+    schemaVersion: 2,
+    status: 'passed',
+    runId: evidenceRunId,
+    candidate: {
+      sha: SHA,
+      approvedMainSha: SHA,
+      manifestSha256: sha256(readFileSync(fixture.manifestPath)),
+      artifactTreeSha256: fixture.manifest.artifacts.secondTreeSha256,
+      bindingTopologySha256: fixture.manifest.bindings.sourceTopologySha256,
+    },
+    production: {
+      topologySha256: productionTopologySha256(fixture.root),
+      accountId: 'f'.repeat(32),
+      databaseName: 'candidary-core',
+      databaseId: '60bec5de-c8c7-41b5-a26b-2d3f7d184c71',
+    },
+    authorizationSha256: '5'.repeat(64),
+    bridge: {
+      sha: OTHER_SHA,
+      deploymentEvidenceSha256: 'a'.repeat(64),
+      versionId: '22222222-2222-4222-8222-222222222299',
+      r2SigningTokenId: 'c580e42d532fea4f8cf3897a9c637346',
+      revocationEvidenceSha256: 'b'.repeat(64),
+      revocationReceiptSha256: 'c'.repeat(64),
+      statusObservationSha256: 'd'.repeat(64),
+    },
+    mediaUploadReleaseConfigSha256: sha256(readFileSync(resolve(
+      fixture.root,
+      'config/media-upload-release.json',
+    ))),
+    legacyMediaScannerConfigSha256: sha256(readFileSync(resolve(
+      fixture.root,
+      'config/legacy-media-scanner.json',
+    ))),
+    canonicalMediaBucketProvisioningEvidenceSha256: 'e'.repeat(64),
+    migration: {
+      name: '0015_curated_private_guestbook.sql',
+      sha256: terminalMigration.sha256,
+      bundleSha256: '6'.repeat(64),
+    },
+    before: {
+      ledger: ledger.slice(0, 14),
+      schemaSha256: '7'.repeat(64),
+    },
+    after: {
+      ledger,
+      pendingMigrations: [],
+      schemaSha256: '8'.repeat(64),
+      integrity: 'ok',
+      foreignKeyRows: 0,
+      triggerNames: [...POST_CUTOVER_PRODUCTION_TRIGGER_NAMES],
+      zeroCounts: {
+        legacyRows: 0,
+        blockingJobs: 0,
+        incompleteActiveSets: 0,
+        uploadsWithoutActiveSet: 0,
+      },
+    },
+    rollback: {
+      bookmarkSha256: '9'.repeat(64),
+      bookmarkRecordedAt: '2026-08-10T11:55:00.000Z',
+      rollbackOwner: 'database-owner',
+    },
+    observedAt: '2026-08-10T12:05:00.000Z',
+  };
+  const path = resolve(
+    fixture.root,
+    'output/production-migration',
+    SHA,
+    evidenceRunId,
+    'post-cutover-migration-evidence.json',
+  );
+  const write = async (value: Record<string, unknown> = evidence): Promise<void> => {
+    const bytes = `${canonicalJson(value)}\n`;
+    await put(fixture.root, path.slice(fixture.root.length + 1), bytes);
+    await put(
+      fixture.root,
+      `${path.slice(fixture.root.length + 1)}.sha256`,
+      `${sha256(bytes)}  post-cutover-migration-evidence.json\n`,
+    );
+  };
+  await write();
+  return { path, evidence, write };
+}
+
 interface AdapterOptions {
   resolvedCommit?: string;
   headSha?: string;
@@ -263,8 +440,100 @@ function fakeAdapters(fixture: Fixture, options: AdapterOptions = {}) {
 }
 
 describe('guarded release deployment', () => {
+  it('preserves the historical 14-migration deployment contract without post-cutover evidence', async () => {
+    const fixture = await candidateFixture(14);
+    const run = fakeAdapters(fixture);
+    expect(() => runDeployRelease({
+      candidateRoot: fixture.root, sha: SHA, manifestPath: fixture.manifestPath,
+    }, run.adapters)).not.toThrow();
+    expect(run.commands.map((command) => command.id)).toEqual([
+      'npm-ci', 'build', 'verify-pwa-build', 'deploy',
+    ]);
+  });
+
+  it('refuses a 15-migration deployment without exact post-cutover migration evidence', async () => {
+    const fixture = await candidateFixture(15);
+    const run = fakeAdapters(fixture);
+    expect(() => runDeployRelease({
+      candidateRoot: fixture.root, sha: SHA, manifestPath: fixture.manifestPath,
+    }, run.adapters)).toThrow(/migration evidence|post-cutover/iu);
+    expect(run.commands).toHaveLength(0);
+  });
+
+  it('requires canonical migration-closure proof before a 15-migration deployment', async () => {
+    const fixture = await candidateFixture(15);
+    const migrationEvidence = await postCutoverMigrationEvidence(fixture);
+    const deploymentRequest = {
+      candidateRoot: fixture.root,
+      sha: SHA,
+      manifestPath: fixture.manifestPath,
+      migrationEvidencePath: migrationEvidence.path,
+    } as Parameters<typeof runDeployRelease>[0];
+    const run = fakeAdapters(fixture);
+    expect(() => runDeployRelease(deploymentRequest, run.adapters)).not.toThrow();
+    expect(run.commands.map((command) => command.id)).toEqual([
+      'npm-ci', 'build', 'verify-pwa-build', 'deploy',
+    ]);
+
+    const mutations: Array<(evidence: Record<string, unknown>) => void> = [
+      (evidence) => {
+        (evidence.candidate as Record<string, unknown>).bindingTopologySha256 = '0'.repeat(64);
+      },
+      (evidence) => {
+        ((evidence.after as Record<string, unknown>).ledger as string[]).pop();
+      },
+      (evidence) => {
+        (evidence.migration as Record<string, unknown>).sha256 = '0'.repeat(64);
+      },
+      (evidence) => {
+        (evidence.after as Record<string, unknown>).pendingMigrations = ['0015_curated_private_guestbook.sql'];
+      },
+    ];
+    for (const mutate of mutations) {
+      const mutatedFixture = await candidateFixture(15);
+      const mutatedEvidence = await postCutoverMigrationEvidence(mutatedFixture);
+      const value = structuredClone(mutatedEvidence.evidence);
+      mutate(value);
+      await mutatedEvidence.write(value);
+      const mutatedRun = fakeAdapters(mutatedFixture);
+      expect(() => runDeployRelease({
+        candidateRoot: mutatedFixture.root,
+        sha: SHA,
+        manifestPath: mutatedFixture.manifestPath,
+        migrationEvidencePath: mutatedEvidence.path,
+      } as Parameters<typeof runDeployRelease>[0], mutatedRun.adapters)).toThrow();
+      expect(mutatedRun.commands).toHaveLength(0);
+    }
+  });
+
+  it('accepts Candidate A migration evidence for a distinct compatible copy-only or live candidate', async () => {
+    const candidateA = await candidateFixture(15);
+    const laterCandidate = await candidateFixture(15);
+    const migrationEvidence = await postCutoverMigrationEvidence(candidateA);
+    const candidateAEvidence = structuredClone(migrationEvidence.evidence);
+    const candidateAIdentity = candidateAEvidence.candidate as Record<string, unknown>;
+    candidateAIdentity.sha = OTHER_SHA;
+    candidateAIdentity.approvedMainSha = OTHER_SHA;
+    candidateAIdentity.manifestSha256 = '1'.repeat(64);
+    candidateAIdentity.artifactTreeSha256 = '2'.repeat(64);
+    await migrationEvidence.write(candidateAEvidence);
+    const run = fakeAdapters(laterCandidate);
+
+    expect(() => runDeployRelease({
+      candidateRoot: laterCandidate.root,
+      sha: SHA,
+      manifestPath: laterCandidate.manifestPath,
+      migrationEvidencePath: migrationEvidence.path,
+    } as Parameters<typeof runDeployRelease>[0], run.adapters)).not.toThrow();
+    expect(run.commands.map((command) => command.id)).toEqual([
+      'npm-ci', 'build', 'verify-pwa-build', 'deploy',
+    ]);
+  });
+
   it('requires one exact SHA and existing candidate manifest argument', async () => {
     const fixture = await candidateFixture();
+    const postCutover = await candidateFixture(15);
+    const migrationEvidence = await postCutoverMigrationEvidence(postCutover);
     expect(() => parseDeployReleaseArgs([])).toThrow();
     expect(() => parseDeployReleaseArgs(['--sha', 'HEAD', '--manifest', fixture.manifestPath])).toThrow();
     expect(() => parseDeployReleaseArgs(['--sha', SHA.slice(0, 39), '--manifest', fixture.manifestPath])).toThrow();
@@ -274,6 +543,32 @@ describe('guarded release deployment', () => {
       sha: SHA,
       manifestPath: fixture.manifestPath,
     });
+    expect(parseDeployReleaseArgs([
+      '--migration-evidence', migrationEvidence.path,
+      '--manifest', postCutover.manifestPath,
+      '--sha', SHA,
+    ])).toEqual({
+      sha: SHA,
+      manifestPath: postCutover.manifestPath,
+      migrationEvidencePath: migrationEvidence.path,
+    });
+  });
+
+  it('schema-validates the manifest before selecting its migration boundary', async () => {
+    const fixture = await candidateFixture();
+    await writeFile(fixture.manifestPath, JSON.stringify({
+      status: 'passed',
+      candidate: {},
+      migrations: {},
+      bindings: {},
+      artifacts: {},
+    }), 'utf8');
+    const run = fakeAdapters(fixture);
+
+    expect(() => runDeployRelease({
+      candidateRoot: fixture.root, sha: SHA, manifestPath: fixture.manifestPath,
+    }, run.adapters)).toThrow(/candidate manifest has unknown or missing keys/iu);
+    expect(run.commands).toHaveLength(0);
   });
 
   it('rejects sidecar, failed-manifest, journey, and current-migration mismatches before deploy', async () => {

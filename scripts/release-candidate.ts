@@ -23,11 +23,18 @@ import {
   sha256,
   type CandidateManifest,
   type HashedFile,
-} from './release-evidence';
+} from './release-evidence.ts';
+import {
+  MEDIA_UPLOAD_RELEASE_CONFIG_PATH,
+  verifyMediaUploadReleaseContract,
+  type MediaUploadReleaseContractV2,
+  type VerifiedCanonicalArtifact,
+} from './media-cutover-release-contract.ts';
 
 export const PINNED_WRANGLER_VERSION = '4.113.0' as const;
 export const PHASE_2_MIGRATION = '0013_guest_message_hardening.sql' as const;
 export const PHASE_3_MIGRATION = '0014_event_cover_invariants.sql' as const;
+export const POST_CUTOVER_MIGRATION = '0015_curated_private_guestbook.sql' as const;
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const MIGRATION_NAME_PATTERN = /^\d{4}_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/u;
@@ -37,7 +44,7 @@ export interface ReleaseCandidateVerificationRequest {
   sha: string;
   manifestPath: string;
   approvedBaseSha: string;
-  expectedMigrationCount: 13 | 14;
+  expectedMigrationCount: 13 | 14 | 15;
 }
 
 export interface ReleaseCandidateObservationAdapter {
@@ -56,7 +63,7 @@ export interface VerifiedReleaseCandidate {
   manifestSha256: string;
   manifest: CandidateManifest;
   migrations: HashedFile[];
-  migrationCount: 13 | 14;
+  migrationCount: 13 | 14 | 15;
   artifactTreeSha256: string;
   wranglerVersion: typeof PINNED_WRANGLER_VERSION;
   wranglerCliPath: string;
@@ -237,7 +244,9 @@ export function verifyExactReleaseCandidate(
   }
   const requiredLastMigration = request.expectedMigrationCount === 13
     ? PHASE_2_MIGRATION
-    : PHASE_3_MIGRATION;
+    : request.expectedMigrationCount === 14
+      ? PHASE_3_MIGRATION
+      : POST_CUTOVER_MIGRATION;
   if (basename(migrationInventory.files.at(-1)?.path ?? '') !== requiredLastMigration) {
     throw new Error('Candidate migration boundary does not match the required release phase.');
   }
@@ -343,10 +352,12 @@ export function buildPhase2BootstrapBundle(input: {
   through: typeof PHASE_2_MIGRATION;
   outputPath: string;
 }): MigrationBundle {
-  if (input.verifiedPhase2Candidate.migrationCount !== 13 || input.through !== PHASE_2_MIGRATION) {
+  if ((input.verifiedPhase2Candidate.migrationCount !== 13
+    && input.verifiedPhase2Candidate.migrationCount !== 15)
+    || input.through !== PHASE_2_MIGRATION) {
     throw new Error(`Phase-2 bootstrap must run through ${PHASE_2_MIGRATION}.`);
   }
-  const migrations = input.verifiedPhase2Candidate.migrations.map((file) => basename(file.path));
+  const migrations = input.verifiedPhase2Candidate.migrations.slice(0, 13).map((file) => basename(file.path));
   if (migrations.length !== 13 || migrations.at(-1) !== PHASE_2_MIGRATION) {
     throw new Error('Phase-2 bootstrap candidate has the wrong migration boundary.');
   }
@@ -371,6 +382,51 @@ export function buildPhase2BootstrapBundle(input: {
       chunks,
     ),
     migrations,
+  };
+}
+
+export function verifyMediaCutoverReleaseCandidateContract(
+  candidate: VerifiedReleaseCandidate,
+  expectedMode: MediaUploadReleaseContractV2['mode'],
+): VerifiedCanonicalArtifact<MediaUploadReleaseContractV2> {
+  if (candidate.migrationCount !== 15) {
+    throw new Error('Media cutover runtime contracts require the exact 15-migration candidate boundary.');
+  }
+  const verified = verifyMediaUploadReleaseContract(
+    resolve(candidate.candidateRoot, MEDIA_UPLOAD_RELEASE_CONFIG_PATH),
+    expectedMode,
+  );
+  if (!within(realpathSync(candidate.candidateRoot), realpathSync(verified.path))) {
+    throw new Error('Media cutover runtime contract escaped the exact candidate checkout.');
+  }
+  return verified;
+}
+
+export function buildPostCutoverMigrationBundle(input: {
+  verifiedCandidate: VerifiedReleaseCandidate;
+  expectedLedger: readonly string[];
+  outputPath: string;
+}): MigrationBundle & { migrationsHash: string } {
+  if (input.verifiedCandidate.migrationCount !== 15) {
+    throw new Error(`Post-cutover bundle must end at ${POST_CUTOVER_MIGRATION}.`);
+  }
+  const expected = input.verifiedCandidate.migrations.slice(0, 13).map((file) => basename(file.path));
+  if (canonicalJson(input.expectedLedger) !== canonicalJson(expected)) {
+    throw new Error('Expected staging ledger does not match the historical Phase-2 boundary.');
+  }
+  const files = input.verifiedCandidate.migrations.slice(13);
+  const names = files.map((file) => basename(file.path));
+  if (canonicalJson(names) !== canonicalJson([PHASE_3_MIGRATION, POST_CUTOVER_MIGRATION])) {
+    throw new Error('Post-cutover candidate does not contain the exact 0014/0015 suffix.');
+  }
+  const chunks: Array<string | Uint8Array> = [];
+  for (const [index, file] of files.entries()) {
+    appendMigration(chunks, canonicalMigrationBytes(input.verifiedCandidate, file), names[index]!);
+  }
+  return {
+    ...writeExclusiveBundle(input.verifiedCandidate.candidateRoot, input.outputPath, chunks),
+    migrations: names,
+    migrationsHash: sha256(canonicalJson(files)),
   };
 }
 
@@ -401,6 +457,40 @@ export function buildAtomicMigrationBundle(input: {
   return {
     ...writeExclusiveBundle(input.verifiedCandidate.candidateRoot, input.outputPath, chunks),
     migrations: [PHASE_3_MIGRATION],
+    migrationHash: migration.sha256,
+  };
+}
+
+export function buildPostCutoverAtomicMigrationBundle(input: {
+  verifiedCandidate: VerifiedReleaseCandidate;
+  expectedLedger: readonly string[];
+  migration: typeof POST_CUTOVER_MIGRATION;
+  outputPath: string;
+}): MigrationBundle & { migrationHash: string } {
+  if (input.verifiedCandidate.migrationCount !== 15
+    || input.migration !== POST_CUTOVER_MIGRATION) {
+    throw new Error(`Post-cutover production bundle must contain only ${POST_CUTOVER_MIGRATION}.`);
+  }
+  const expected = input.verifiedCandidate.migrations.slice(0, -1)
+    .map((file) => basename(file.path));
+  if (canonicalJson(input.expectedLedger) !== canonicalJson(expected)
+    || expected.at(-1) !== PHASE_3_MIGRATION) {
+    throw new Error('Expected production ledger does not match the historical Phase-3 boundary.');
+  }
+  const migration = input.verifiedCandidate.migrations.at(-1)!;
+  if (!MIGRATION_NAME_PATTERN.test(basename(migration.path))
+    || basename(migration.path) !== POST_CUTOVER_MIGRATION) {
+    throw new Error('Candidate does not contain the sole expected post-cutover migration.');
+  }
+  const chunks: Array<string | Uint8Array> = [];
+  appendMigration(
+    chunks,
+    canonicalMigrationBytes(input.verifiedCandidate, migration),
+    POST_CUTOVER_MIGRATION,
+  );
+  return {
+    ...writeExclusiveBundle(input.verifiedCandidate.candidateRoot, input.outputPath, chunks),
+    migrations: [POST_CUTOVER_MIGRATION],
     migrationHash: migration.sha256,
   };
 }

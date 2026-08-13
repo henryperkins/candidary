@@ -2,6 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { GuestEventView, RsvpHouseholdView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { GuestBeforeStart } from '../../src/features/guest/GuestBeforeStart';
 
 /* The event's zone is deliberately not the one this suite runs in, and not UTC
@@ -13,6 +14,7 @@ const event: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We cannot wait to celebrate with you.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: false,

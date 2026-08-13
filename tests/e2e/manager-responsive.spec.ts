@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 import { MANAGER_MEDIA_PAGE_SIZE, MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
+import type { ManagerGuestbookItem } from '../../shared/contracts';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { LONG_FILENAME, UNBROKEN_NOTE, makeMedia } from './fixtures/ui-data';
 import {
@@ -15,7 +16,7 @@ import {
 } from './helpers/geometry';
 
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
-const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
+const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Guestbook', 'Share', 'Settings'] as const;
 // The compact rail band: 761 opens it and 1100 is the last width before the wide rails return.
 const RAIL_WIDTHS = [761, 768, 780, 860, 1024, 1100];
 // 1134 is the first width the old fixed tracks fit inside; everything under it pushed the page sideways.
@@ -34,14 +35,14 @@ const NOTE = {
   id: 'message-a',
   guestName: 'Rowan',
   body: 'To a lifetime of noticing the little things.',
-  moderationStatus: 'approved' as const,
+  moderationStatus: 'pending' as const,
   createdAt: '2026-09-19T20:00:00Z',
 };
 // A count renders only when there is something to count, so both counted destinations carry one.
 const mediaPages = { first: { media: makeMedia(2), nextCursor: null } };
 const managerFixture = { mediaPages, messages: [NOTE], event: { storedMediaCount: 2 } };
 
-// The Intake and Notes buttons carry a count, so their accessible name is not the destination alone.
+// The Intake and Guestbook buttons carry a count, so their accessible name is not the destination alone.
 function destination(page: Page, name: string) {
   return page.locator('.manager-nav nav button').filter({ hasText: name });
 }
@@ -202,33 +203,34 @@ test('the lifecycle facts each stay on one line for an event at capacity', async
 });
 
 // Six destinations across 390px leave each one 65px, and the badge is placed for one or two digits, so
-// on a phone the pill covers the icon it belongs to. Below 761 it is a dot and the figure moves into
-// the accessible name; from 761 the rail has the room and prints the number. Either way the count has
-// to reach a host, so this measures both halves of that promise on both sides of the breakpoint.
-test('an inactive section count reaches the host on both sides of the rail', async ({ page }) => {
+// on a phone the pill covers the icon it belongs to. Below 761 it is a dot and the figure is carried by
+// the destination's own `aria-label`; from 761 the rail has the room and prints the number. Either way
+// the count has to reach a host, so this measures both halves of that promise across the breakpoint.
+test('manager navigation keeps the unresolved Guestbook count reaching the host on both sides of the rail', async ({ page }) => {
   await openManager(page);
-  const notes = destination(page, 'Notes');
-  const count = notes.locator('.manager-nav__count');
+  const guestbook = destination(page, 'Guestbook');
+  const count = guestbook.locator('.manager-nav__count');
 
   for (const width of [320, 390, 760, 761, 1101]) {
     await page.setViewportSize({ width, height: 900 });
-    await expect(notes, `Notes is the inactive destination at ${width}`).toHaveAttribute('aria-pressed', 'false');
-    // The number is in the destination's name at every width, which is the half that has to survive.
-    await expect(notes, `Notes count announced at ${width}`).toHaveAccessibleName(/1 note\b/u);
+    await expect(guestbook, `Guestbook is the inactive destination at ${width}`).toHaveAttribute('aria-pressed', 'false');
+    // The figure is in the destination's own name at every width, which is the half that has to
+    // survive the badge becoming a dot.
+    await expect(guestbook, `Guestbook count announced at ${width}`).toHaveAccessibleName(/Guestbook 1\b/u);
 
-    await expect(count, `Notes badge rendered at ${width}`).toBeVisible();
+    await expect(count, `Guestbook badge rendered at ${width}`).toBeVisible();
     const box = await measureTarget(count);
-    expect(box.width, `Notes badge width at ${width}`).toBeGreaterThan(0);
-    expect(box.height, `Notes badge height at ${width}`).toBeGreaterThan(0);
+    expect(box.width, `Guestbook badge width at ${width}`).toBeGreaterThan(0);
+    expect(box.height, `Guestbook badge height at ${width}`).toBeGreaterThan(0);
 
     const fontSize = await count.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
     if (width >= 761) {
-      await expect(count, `Notes badge prints its digits at ${width}`).toHaveText('1');
-      expect(fontSize, `Notes count text size at ${width}`).toBeGreaterThanOrEqual(MIN_COUNT_TEXT);
+      await expect(count, `Guestbook badge prints its digits at ${width}`).toHaveText('1');
+      expect(fontSize, `Guestbook count text size at ${width}`).toBeGreaterThanOrEqual(MIN_COUNT_TEXT);
     } else {
       // A dot, not a number: no glyph is drawn, and it stays clear of the icon it marks.
-      expect(fontSize, `Notes badge draws no text at ${width}`).toBe(0);
-      expect(box.width, `Notes badge is a dot at ${width}`).toBeLessThanOrEqual(12);
+      expect(fontSize, `Guestbook badge draws no text at ${width}`).toBe(0);
+      expect(box.width, `Guestbook badge is a dot at ${width}`).toBeLessThanOrEqual(12);
     }
   }
 });
@@ -317,7 +319,7 @@ test('changing manager section returns the host to the top of the new section', 
     .toBeGreaterThan(0);
 });
 
-test('a long unbroken guest note stays inside the manager at every width', async ({ page }) => {
+test('a long unbroken guestbook note stays inside the manager at every width', async ({ page }) => {
   await stubManagerRoutes(page, {
     mediaPages,
     messages: [{ ...NOTE, body: UNBROKEN_NOTE }],
@@ -325,8 +327,9 @@ test('a long unbroken guest note stays inside the manager at every width', async
   });
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await destination(page, 'Notes').click();
-  const note = page.locator('.manager-messages p');
+  await destination(page, 'Guestbook').click();
+  await expect(page.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
+  const note = page.locator('.manager-guestbook__entry > p');
   await expect(note).toHaveText(UNBROKEN_NOTE);
 
   for (const width of [320, 900]) {
@@ -423,8 +426,8 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     expect(actionRow.scrollWidth, `card controls fit their row at ${width}`)
       .toBeLessThanOrEqual(actionRow.clientWidth + 1);
 
-    await destination(page, 'Notes').click();
-    await expectTouchTargets(page, '.manager-messages .button', `note control at ${width}`);
+    await destination(page, 'Guestbook').click();
+    await expectTouchTargets(page, '.manager-guestbook__entry .button', `Guestbook control at ${width}`);
 
     await destination(page, 'Share').click();
     const panel = page.locator(width < 761 ? '.manager-export-panel--share' : '.manager-export-panel--utility');
@@ -435,4 +438,104 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
 
     await expectContained(page, width);
   }
+});
+
+const RTL_GUESTBOOK_BODY = `${'ذكرى جميلة من هذا اليوم — '.repeat(18)}🌿`.slice(0, 500);
+const RTL_MANAGER_NOTE: ManagerGuestbookItem = {
+  id: 'guestbook-rtl',
+  source: 'guest_note',
+  guestName: 'ليلى'.repeat(20),
+  body: RTL_GUESTBOOK_BODY,
+  createdAt: '2026-09-19T20:00:00Z',
+  state: 'pending',
+  visibility: 'author_only',
+};
+
+test('Manager Guestbook contains maximum Unicode content at phone, desktop, and zoom-equivalent widths', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    mediaPages,
+    guestbook: { items: [RTL_MANAGER_NOTE] },
+  });
+  await page.goto(managerUrl);
+
+  for (const { width, height, label } of [
+    { width: 320, height: 844, label: '320 phone and 400% zoom equivalent' },
+    { width: 390, height: 844, label: '390 phone' },
+    { width: 1280, height: 900, label: 'representative desktop' },
+    { width: 640, height: 450, label: '200% zoom equivalent' },
+  ]) {
+    await page.setViewportSize({ width, height });
+    await destination(page, 'Guestbook').click();
+    await expect(page.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
+    const entry = page.locator('.manager-guestbook__entry');
+    await expect(entry.locator('h3')).toHaveAttribute('dir', 'auto');
+    await expect(entry.locator('> p')).toHaveAttribute('dir', 'auto');
+    const body = await measureOverflow(entry.locator('> p'));
+    expect(body.scrollWidth, `${label} body wraps`).toBeLessThanOrEqual(body.clientWidth + 1);
+    for (const control of await page.locator('.manager-guestbook button:visible').all()) {
+      const target = await measureTarget(control);
+      expect(target.width, `${label} control width`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${label} control height`).toBeGreaterThanOrEqual(44);
+    }
+    await expectContained(page, width);
+  }
+});
+
+test('keyboard-only Manager moderation keeps focus and scroll stable after confirmation', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let releaseAction!: () => void;
+  const actionGate = new Promise<void>((resolve) => { releaseAction = resolve; });
+  const pendingNotes = Array.from({ length: 5 }, (_, index): ManagerGuestbookItem => ({
+    ...RTL_MANAGER_NOTE,
+    id: `guestbook-pending-${index + 1}`,
+    guestName: `Guest ${index + 1}`,
+  }));
+  await stubManagerRoutes(page, {
+    mediaPages,
+    guestbook: { items: pendingNotes, actionGate },
+  });
+  await page.goto(managerUrl);
+  const guestbook = destination(page, 'Guestbook');
+  await guestbook.focus();
+  await page.keyboard.press('Enter');
+  const panel = page.getByRole('region', { name: 'Guestbook from the day' });
+  await expect(panel).toBeVisible();
+  const share = panel.getByRole('button', { name: 'Share', exact: true }).first();
+  await share.focus();
+  await page.keyboard.press('Enter');
+  await expect(panel.getByRole('button', { name: 'Sharing…' })).toBeVisible();
+  await page.evaluate(() => window.scrollTo({ top: 450, behavior: 'instant' }));
+  const scrollDuringRequest = await page.evaluate(() => window.scrollY);
+  expect(scrollDuringRequest).toBeGreaterThan(100);
+  releaseAction();
+  await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(4);
+  await expect(page.getByText('Guestbook entry updated.')).toBeAttached();
+  await expect(panel.getByRole('button', { name: 'Share', exact: true }).first()).toBeFocused();
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollDuringRequest);
+});
+
+test('gallery-off keeps published captions out of Shared and labels them in Hidden', async ({ page }) => {
+  const caption: ManagerGuestbookItem = {
+    id: 'caption-gallery-off',
+    source: 'photo_caption',
+    mediaId: 'media-gallery-off',
+    guestName: 'Avery',
+    body: 'A caption held private while the gallery is off.',
+    createdAt: '2026-09-19T19:00:00Z',
+    state: 'published',
+    visibility: 'author_only',
+    previewAvailable: true,
+  };
+  await stubManagerRoutes(page, {
+    event: { galleryVisible: false },
+    mediaPages,
+    guestbook: { items: [caption] },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Guestbook').click();
+  await expect(page.getByText('Photo captions are not visible to guests while the gallery is off.')).toBeVisible();
+  await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(0);
+  await page.getByRole('button', { name: /Hidden/u }).click();
+  await expect(page.getByText('Published · gallery off')).toBeVisible();
+  await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(1);
 });

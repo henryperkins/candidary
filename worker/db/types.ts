@@ -20,6 +20,7 @@ export interface EventRecord {
   name: string;
   eventDate: string;
   welcomeMessage: string;
+  guestbookPrompt: string;
   themeConfig: EventThemeConfigV1;
   coverObjectKey: string | null;
   uploadsEnabled: boolean;
@@ -466,6 +467,7 @@ export interface MediaRecord {
   eventId: string;
   uploaderSessionId: string;
   objectKey: string;
+  objectBucketGeneration: 'legacy' | 'canonical';
   originalFilename: string;
   mimeType: SupportedImageType;
   declaredByteSize: number;
@@ -484,6 +486,28 @@ export interface MediaRecord {
   deletedAt: string | null;
 }
 
+export type ExportableMediaRecord = Pick<
+  MediaRecord,
+  | 'id'
+  | 'objectKey'
+  | 'objectBucketGeneration'
+  | 'originalFilename'
+  | 'mimeType'
+  | 'declaredByteSize'
+  | 'byteSize'
+  | 'width'
+  | 'height'
+  | 'guestName'
+  | 'caption'
+  | 'publicationStatus'
+  | 'createdAt'
+  | 'publishedAt'
+>;
+
+export interface ExportMediaEntryRecord extends ExportableMediaRecord {
+  exportJobId: string;
+}
+
 export interface ExportRecord {
   id: string;
   eventId: string;
@@ -500,6 +524,34 @@ export interface ExportRecord {
   startedAt: string | null;
   completedAt: string | null;
   expiresAt: string | null;
+  guestbookHtmlObjectKey: string | null;
+  guestbookHtmlBytes: number | null;
+  guestbookHtmlSha256: string | null;
+  guestbookCsvObjectKey: string | null;
+  guestbookCsvBytes: number | null;
+  guestbookCsvSha256: string | null;
+  guestbookEntryCount: number | null;
+  guestbookSharedCount: number | null;
+  guestbookEventName: string | null;
+  guestbookEventDate: string | null;
+  guestbookEventTimezone: string | null;
+  guestbookPrompt: string | null;
+  guestbookGalleryVisible: boolean | null;
+}
+
+export interface ExportGuestbookEntryRecord {
+  exportJobId: string;
+  source: 'guest_note' | 'photo_caption';
+  sourceId: string;
+  sourceRank: 0 | 1;
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  sourceState: 'pending' | 'approved' | 'rejected' | 'unpublished' | 'published' | 'hidden';
+  guestVisibility: 'shared' | 'author_only';
+  includedInKeepsake: boolean;
+  mediaId: string | null;
+  originalFilename: string | null;
 }
 
 export interface ExportPartRecord {

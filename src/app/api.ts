@@ -19,6 +19,8 @@ export class ClientApiError extends Error {
     public readonly fieldErrors?: Record<string, string>,
     public readonly details?: ApiErrorDetails,
     public readonly status?: number,
+    public readonly requestId?: string,
+    public readonly retryAfterMs?: number | null,
   ) {
     super(message);
   }
@@ -51,9 +53,17 @@ async function unwrap<T>(response: Response): Promise<T> {
       payload.fieldErrors,
       payload.details,
       response.status,
+      payload.requestId,
+      retryAfterMilliseconds(response.headers.get('retry-after')),
     );
   }
   return payload.data;
+}
+
+function retryAfterMilliseconds(value: string | null): number | null {
+  if (!value || !/^(?:0|[1-9][0-9]*)$/u.test(value)) return null;
+  const milliseconds = Number(value) * 1_000;
+  return Number.isSafeInteger(milliseconds) ? milliseconds : null;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -110,15 +120,12 @@ export async function apiEnvelope<T>(
       payload.message ?? 'Something went wrong.',
       payload.fieldErrors,
       payload.details,
+      response.status,
+      payload.requestId,
+      retryAfterMilliseconds(response.headers.get('retry-after')),
     );
   }
-  const retryAfter = response.headers.get('retry-after');
-  let retryAfterMs: number | null = null;
-  if (retryAfter && /^(?:0|[1-9][0-9]*)$/u.test(retryAfter)) {
-    const seconds = Number(retryAfter);
-    const milliseconds = seconds * 1_000;
-    if (Number.isSafeInteger(milliseconds)) retryAfterMs = milliseconds;
-  }
+  const retryAfterMs = retryAfterMilliseconds(response.headers.get('retry-after'));
   return {
     status: response.status,
     data: payload.data,
@@ -140,6 +147,9 @@ export async function apiBytes(path: string, init: RequestInit): Promise<ArrayBu
       payload.message ?? 'Something went wrong.',
       payload.fieldErrors,
       payload.details,
+      response.status,
+      payload.requestId,
+      retryAfterMilliseconds(response.headers.get('retry-after')),
     );
   }
   return response.arrayBuffer();

@@ -19,6 +19,19 @@ export const MANAGER_MEDIA_PAGE_SIZE = 24;
 export const MANAGER_MEDIA_MAX_PAGE_SIZE = 50;
 export const MANAGER_BULK_SELECTION_MAX = 50;
 export const GUEST_MESSAGE_PAGE_SIZE = 50;
+export const DEFAULT_GUESTBOOK_PROMPT = 'Share a wish, memory, or moment from the day.';
+export const MAX_EVENT_GUEST_NOTES = 1_000;
+export const MAX_GUEST_NOTES_PER_SESSION_WINDOW = 5;
+export const MAX_GUEST_NOTES_PER_IP_WINDOW = 120;
+export const GUEST_NOTE_WINDOW_MS = 900_000;
+export const MAX_GUESTBOOK_PROMPT_LENGTH = 160;
+export const MANAGER_GUESTBOOK_DEFAULT_PAGE_SIZE = 25;
+export const MANAGER_GUESTBOOK_MAX_PAGE_SIZE = 50;
+
+export const GUESTBOOK_SOURCE_RANK = {
+  guest_note: 0,
+  photo_caption: 1,
+} as const;
 // Four date digits are not enough to make an event date plausible. In
 // particular, a partially typed year such as 0202 must never become durable.
 export const MIN_EVENT_CALENDAR_YEAR = 1900;

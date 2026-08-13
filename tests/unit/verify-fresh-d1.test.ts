@@ -61,16 +61,18 @@ const eventColumnNames = [
   'event_timezone', 'rsvp_enabled', 'rsvp_deadline_at', 'rsvp_roster_version',
   'event_start_at', 'photos_open_from',
   'cover_config', 'cover_revision', 'cover_render_set_id',
+  'guestbook_prompt',
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// verifier refuses a candidate whose ledger is not exactly fourteen.
+// post-cutover verifier refuses a candidate whose ledger is not exactly fifteen.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
+  '0015_curated_private_guestbook.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -98,6 +100,20 @@ const triggerRows = migrationFileNames.flatMap((name) => {
   }));
 }).sort((left, right) => left.name.localeCompare(right.name));
 
+const promotionMigrationSql = readFileSync(
+  join(process.cwd(), 'migrations', '0015_curated_private_guestbook.sql'),
+  'utf8',
+);
+const promotionTableMatch = promotionMigrationSql.match(
+  /CREATE TABLE media_object_promotions \([\s\S]*?\n\);/u,
+);
+if (promotionTableMatch === null) throw new Error('Fixture is missing media_object_promotions SQL.');
+const promotionTableRows = [{
+  name: 'media_object_promotions',
+  // sqlite_master keeps the CREATE statement but omits the trailing semicolon.
+  sql: promotionTableMatch[0].slice(0, -1),
+}];
+
 
 const rosterColumnNames = [
   'event_id', 'idempotency_key', 'request_digest', 'receipt_json', 'created_at',
@@ -107,6 +123,125 @@ const certificationColumnNames = [
   'worker_version_id', 'build_sha', 'guest_journey_version',
   'migration_manifest_sha256', 'evidence_manifest_sha256',
   'physical_evidence_refs_json', 'certified_at',
+];
+
+const guestbookTableRows = [
+  { name: 'export_guestbook_entries' },
+  { name: 'export_media_entries' },
+  { name: 'guest_message_purge_receipts' },
+  { name: 'guest_message_rate_events' },
+  { name: 'legacy_media_scan_quarantine' },
+  { name: 'legacy_media_scan_state' },
+  { name: 'media_object_promotions' },
+  { name: 'media_object_write_tombstones' },
+];
+
+const guestbookColumns: Record<string, string[]> = {
+  export_guestbook_entries: [
+    'export_job_id', 'source', 'source_id', 'source_rank', 'guest_name', 'body', 'created_at',
+    'source_state', 'guest_visibility', 'included_in_keepsake', 'media_id', 'original_filename',
+  ],
+  export_jobs: [
+    'id', 'event_id', 'state', 'snapshot_at', 'object_key', 'media_count', 'total_bytes', 'attempt',
+    'error_code', 'created_at', 'started_at', 'completed_at', 'expires_at', 'manifest_object_key',
+    'part_count', 'guestbook_html_object_key', 'guestbook_html_bytes', 'guestbook_html_sha256',
+    'guestbook_csv_object_key', 'guestbook_csv_bytes', 'guestbook_csv_sha256', 'guestbook_entry_count',
+    'guestbook_shared_count', 'guestbook_event_name', 'guestbook_event_date', 'guestbook_event_timezone',
+    'guestbook_prompt', 'guestbook_gallery_visible',
+  ],
+  export_media_entries: [
+    'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
+    'mime_type', 'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption',
+    'publication_status', 'created_at', 'published_at',
+  ],
+  guest_message_purge_receipts: [
+    'event_id', 'guest_session_id', 'idempotency_key', 'request_hmac', 'purged_at',
+  ],
+  guest_message_rate_events: [
+    'id', 'event_id', 'session_scope_digest', 'ip_scope_digest', 'window_started_at', 'created_at',
+  ],
+  legacy_media_scan_quarantine: [
+    'object_key', 'first_observed_at', 'last_observed_at', 'observation_count',
+  ],
+  legacy_media_scan_state: [
+    'singleton', 'cursor', 'epoch', 'epoch_started_at', 'epoch_discovered_count',
+    'epoch_error_count', 'epoch_max_hourly_growth', 'last_observed_at',
+    'last_observed_inventory_count', 'last_error_at', 'last_completed_at',
+    'last_completed_started_at', 'last_completed_discovered_count',
+    'last_completed_error_count', 'last_completed_max_hourly_growth', 'updated_at',
+  ],
+  media: [
+    'id', 'event_id', 'uploader_session_id', 'object_key', 'original_filename', 'mime_type',
+    'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption', 'upload_state',
+    'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
+    'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
+  ],
+  media_object_promotions: [
+    'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
+    'final_bucket_generation', 'final_object_key', 'source_etag', 'source_mime_type',
+    'source_byte_size', 'source_sha256', 'source_width', 'source_height', 'final_etag',
+    'target_verified_at', 'source_writable_until', 'state', 'final_pointer_committed',
+    'claim_token', 'lease_expires_at', 'source_absent_since', 'created_at', 'updated_at',
+  ],
+  media_object_write_tombstones: [
+    'bucket_generation', 'object_key', 'event_id', 'media_id', 'object_kind',
+    'suppression_started_at', 'last_observed_at', 'last_observed_present', 'next_check_at',
+    'created_at', 'updated_at',
+  ],
+};
+
+const guestbookColumnRows = Object.entries(guestbookColumns).flatMap(([tbl, names]) =>
+  names.map((col, cid) => ({ tbl, cid, col })),
+);
+
+const guestbookForeignKeyRows = [
+  { tbl: 'export_guestbook_entries', parent: 'export_jobs', col: 'export_job_id', on_delete: 'CASCADE' },
+  { tbl: 'export_media_entries', parent: 'export_jobs', col: 'export_job_id', on_delete: 'CASCADE' },
+  { tbl: 'guest_message_purge_receipts', parent: 'events', col: 'event_id', on_delete: 'CASCADE' },
+  { tbl: 'guest_message_rate_events', parent: 'events', col: 'event_id', on_delete: 'CASCADE' },
+  { tbl: 'media_object_promotions', parent: 'events', col: 'event_id', on_delete: 'RESTRICT' },
+  { tbl: 'media_object_promotions', parent: 'media', col: 'media_id', on_delete: 'RESTRICT' },
+];
+
+const guestbookIndexRows = [
+  { tbl: 'export_guestbook_entries', idx: 'guestbook_export_render_order', uniq: 0, partial: 0 },
+  { tbl: 'export_guestbook_entries', idx: 'sqlite_autoindex_export_guestbook_entries_1', uniq: 1, partial: 0 },
+  { tbl: 'export_jobs', idx: 'export_jobs_expiry', uniq: 0, partial: 0 },
+  { tbl: 'export_jobs', idx: 'export_jobs_one_active_per_event', uniq: 1, partial: 1 },
+  { tbl: 'export_jobs', idx: 'sqlite_autoindex_export_jobs_1', uniq: 1, partial: 0 },
+  { tbl: 'export_media_entries', idx: 'export_media_entries_order', uniq: 0, partial: 0 },
+  { tbl: 'export_media_entries', idx: 'sqlite_autoindex_export_media_entries_1', uniq: 1, partial: 0 },
+  { tbl: 'guest_message_purge_receipts', idx: 'sqlite_autoindex_guest_message_purge_receipts_1', uniq: 1, partial: 0 },
+  { tbl: 'guest_message_rate_events', idx: 'guestbook_rate_event_ip_window', uniq: 0, partial: 0 },
+  { tbl: 'guest_message_rate_events', idx: 'guestbook_rate_event_session_window', uniq: 0, partial: 0 },
+  { tbl: 'guest_message_rate_events', idx: 'sqlite_autoindex_guest_message_rate_events_1', uniq: 1, partial: 0 },
+  { tbl: 'guest_messages', idx: 'guest_messages_event_status', uniq: 0, partial: 0 },
+  { tbl: 'guest_messages', idx: 'guest_messages_session_idempotency', uniq: 1, partial: 0 },
+  { tbl: 'guest_messages', idx: 'guestbook_notes_event_feed', uniq: 0, partial: 0 },
+  { tbl: 'guest_messages', idx: 'guestbook_notes_event_owner', uniq: 0, partial: 0 },
+  { tbl: 'guest_messages', idx: 'sqlite_autoindex_guest_messages_1', uniq: 1, partial: 0 },
+  { tbl: 'legacy_media_scan_quarantine', idx: 'sqlite_autoindex_legacy_media_scan_quarantine_1', uniq: 1, partial: 0 },
+  { tbl: 'media_object_promotions', idx: 'media_object_promotions_event_state', uniq: 0, partial: 0 },
+  { tbl: 'media_object_promotions', idx: 'media_object_promotions_schedule', uniq: 0, partial: 0 },
+  { tbl: 'media_object_promotions', idx: 'sqlite_autoindex_media_object_promotions_1', uniq: 1, partial: 0 },
+  { tbl: 'media_object_promotions', idx: 'sqlite_autoindex_media_object_promotions_2', uniq: 1, partial: 0 },
+  { tbl: 'media_object_write_tombstones', idx: 'media_object_write_tombstones_event', uniq: 0, partial: 0 },
+  { tbl: 'media_object_write_tombstones', idx: 'media_object_write_tombstones_schedule', uniq: 0, partial: 0 },
+  { tbl: 'media_object_write_tombstones', idx: 'sqlite_autoindex_media_object_write_tombstones_1', uniq: 1, partial: 0 },
+];
+
+const guestbookSchemaRows = [
+  { name: 'events', checks: '1' },
+  { name: 'export_guestbook_entries', checks: '1|1|1|1|1|1|1|1' },
+  { name: 'export_jobs', checks: '1|1|1|1|1|1' },
+  { name: 'export_media_entries', checks: '1|1|1|1|1|1' },
+  { name: 'guest_message_purge_receipts', checks: '1' },
+  { name: 'guest_message_rate_events', checks: '' },
+  { name: 'legacy_media_scan_quarantine', checks: '1|1' },
+  { name: 'legacy_media_scan_state', checks: '1|1|1|1|1|1|1|1|1' },
+  { name: 'media', checks: '1' },
+  { name: 'media_object_promotions', checks: '1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1' },
+  { name: 'media_object_write_tombstones', checks: '1|1|1|1|1|1|1' },
 ];
 
 type ColumnRow = {
@@ -141,6 +276,10 @@ function terminalRows() {
   });
   Object.assign(events[27]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
   Object.assign(events[28]!, { type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 });
+  Object.assign(events[29]!, {
+    type: 'TEXT', notnull: 1,
+    dflt_value: "'Share a wish, memory, or moment from the day.'", pk: 0,
+  });
 
   const roster = columns(rosterColumnNames);
   Object.assign(roster[0]!, { type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 });
@@ -173,6 +312,12 @@ function invariantOutput(ledgerNames: string[]): unknown[] {
     resultEnvelope(structuredClone(coverIndexRows)),
     resultEnvelope(structuredClone(partialUniqueRows)),
     resultEnvelope(structuredClone(triggerRows)),
+    resultEnvelope(structuredClone(guestbookTableRows)),
+    resultEnvelope(structuredClone(guestbookColumnRows)),
+    resultEnvelope(structuredClone(guestbookForeignKeyRows)),
+    resultEnvelope(structuredClone(guestbookIndexRows)),
+    resultEnvelope(structuredClone(guestbookSchemaRows)),
+    resultEnvelope(structuredClone(promotionTableRows)),
   ];
 }
 
@@ -382,6 +527,9 @@ describe('fresh local D1 verification', () => {
       // The stored `none` literal drifting is a silent data-shape change: every
       // row created afterwards would read as an unparseable cover config.
       (output) => { (output[3] as { results: ColumnRow[] }).results[26]!.dflt_value = "'{}'"; },
+      // The Guestbook prompt is persisted event metadata and must retain its
+      // non-null approved default on a fresh post-cutover database.
+      (output) => { (output[3] as { results: ColumnRow[] }).results[29]!.dflt_value = "'Changed'"; },
       // A cover table missing, and one that should not exist.
       (output) => { (output[6] as { results: unknown[] }).results.pop(); },
       (output) => { (output[6] as { results: unknown[] }).results.push({ name: 'event_cover_extra' }); },
@@ -419,12 +567,109 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly fourteen migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly fifteen migrations', async () => {
     const candidate = await fixture();
-    const fifteen = [...candidate.ledgerNames, '0015_unexpected.sql'];
+    const fourteen = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
-    output[0]!.results = fifteen.map((name, index) => ({ id: index + 1, name }));
-    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), fifteen)).toThrow();
+    output[0]!.results = fourteen.map((name, index) => ({ id: index + 1, name }));
+    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), fourteen)).toThrow();
+  });
+
+  it('fails closed on any post-cutover Guestbook schema inventory drift', async () => {
+    const candidate = await fixture();
+    const mutations: Array<(output: unknown[]) => void> = [
+      (output) => { (output[12] as { results: unknown[] }).results.pop(); },
+      (output) => {
+        const rows = (output[13] as { results: Array<{ tbl: string; col: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.tbl === 'export_jobs' && row.col === 'guestbook_prompt'), 1);
+      },
+      (output) => {
+        const rows = (output[13] as { results: Array<{ tbl: string; col: string }> }).results;
+        rows.find((row) => row.tbl === 'export_media_entries' && row.col === 'publication_status')!.col = 'status';
+      },
+      (output) => {
+        const rows = (output[14] as { results: Array<{ on_delete: string }> }).results;
+        rows[0]!.on_delete = 'RESTRICT';
+      },
+      (output) => {
+        const rows = (output[15] as { results: Array<{ idx: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.idx === 'guestbook_notes_event_feed'), 1);
+      },
+      (output) => {
+        const rows = (output[16] as { results: Array<{ name: string; checks: string }> }).results;
+        const row = rows.find((entry) => entry.name === 'export_jobs')!;
+        row.checks = row.checks.replace('1|1|1', '1|0|1');
+      },
+      (output) => {
+        const rows = (output[13] as { results: Array<{ tbl: string; col: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.tbl === 'media_object_promotions'
+          && row.col === 'source_writable_until'), 1);
+      },
+      (output) => {
+        const rows = (output[14] as { results: Array<{ tbl: string; col: string; on_delete: string }> }).results;
+        rows.find((row) => row.tbl === 'media_object_promotions' && row.col === 'media_id')!
+          .on_delete = 'CASCADE';
+      },
+      (output) => {
+        const rows = (output[15] as { results: Array<{ idx: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.idx === 'media_object_promotions_schedule'), 1);
+      },
+      (output) => {
+        const rows = (output[16] as { results: Array<{ name: string; checks: string }> }).results;
+        rows.find((row) => row.name === 'media_object_promotions')!.checks =
+          '1|1|1|1|1|1|1|1|1|1|1|1|1|1|0';
+      },
+      (output) => {
+        const rows = (output[17] as { results: Array<{ sql: string }> }).results;
+        rows[0]!.sql = rows[0]!.sql.replace(
+          'source_writable_until TEXT NOT NULL',
+          'source_writable_until TEXT',
+        );
+      },
+    ];
+    for (const mutate of mutations) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      mutate(output);
+      expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+  });
+
+  it('fails closed when the 0015 events Guestbook prompt CHECK expression drifts', async () => {
+    const candidate = await fixture();
+    const output = structuredClone(invariantOutput(candidate.ledgerNames));
+    const rows = (output[16] as { results: Array<{ name: string; checks: string }> }).results;
+    const events = rows.find((row) => row.name === 'events')!;
+
+    expect(() => parseWranglerInvariantOutput(
+      JSON.stringify(output),
+      candidate.ledgerNames,
+    )).not.toThrow();
+
+    events.checks = '0';
+    expect(() => parseWranglerInvariantOutput(
+      JSON.stringify(output),
+      candidate.ledgerNames,
+    )).toThrow(/events CHECK inventory has drifted/u);
+  });
+
+  it('pins both migration-window promotion trigger bodies by digest', async () => {
+    const candidate = await fixture();
+    for (const name of [
+      'media_object_promotion_inventory_insert',
+      'media_object_promotion_inventory_update',
+    ]) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      const rows = (output[11] as { results: Array<{ name: string; sql: string }> }).results;
+      const trigger = rows.find((row) => row.name === name)!;
+      trigger.sql = trigger.sql.replace(
+        'updated_at = excluded.updated_at',
+        'updated_at = excluded.created_at',
+      );
+      expect(() => parseWranglerInvariantOutput(
+        JSON.stringify(output),
+        candidate.ledgerNames,
+      )).toThrow(/trigger body/iu);
+    }
   });
 
   it('keeps the reported terminal schema at exactly three keys', async () => {

@@ -4,15 +4,35 @@ import {
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_PURGE_FENCES_PER_PASS,
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
+  GUEST_NOTE_WINDOW_MS,
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import type { AppEnv } from '../env';
+import {
+  assertLegacyMediaCopyEnabled,
+  eventRelationalPurgeEnabled,
+  legacyMediaCopyEnabled,
+  legacyPointerCutoverEnabled,
+  workerIngressEnabled,
+} from '../media-upload-release';
+import { legacyMediaScannerContract } from '../legacy-media-scanner-contract';
 import { ExportsRepository } from '../db/exports';
+import {
+  LegacyMediaScanRepository,
+  type LegacyMediaScanObservation,
+} from '../db/legacy-media-scan';
 import { MediaRepository } from '../db/media';
+import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
+import { inspectImageHeader } from '../security/image-metadata';
 import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
 import { STALE_DISPATCH_CLAIM_MS } from '../services/event-cover-publication';
+import {
+  cleanupInactiveMediaPromotion,
+  cleanupPendingMediaPromotion,
+  promoteLegacyStoredMediaObject,
+} from '../storage/media';
 import {
   BACKFILL_RESTART_WINDOW_MS,
   COVER_BACKFILL_BINDING,
@@ -46,15 +66,22 @@ export async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<vo
 }
 
 export async function cleanupExpiredReservations(env: AppEnv, now = new Date()): Promise<number> {
+  // Candidate A deliberately preserves every schema-15 reservation for the
+  // bridge/rollback window. It must not race an old Worker finalization that
+  // was admitted before the bridge took traffic.
+  if (!legacyMediaCopyEnabled()) return 0;
   const media = new MediaRepository(env.DB);
   let cleaned = 0;
   for (;;) {
     const expired = await media.listExpiredReservations(now.toISOString());
     if (!expired.length) break;
     for (const item of expired) {
-      await env.MEDIA_BUCKET.delete(item.objectKey);
-      await media.failReservation(item.id);
-      cleaned += 1;
+      // D1 wins first. If a concurrent finalizer already moved the row to
+      // stored, failReservation returns that winner and no object is touched.
+      // A failed row retains its durable promotion + permanent tombstones;
+      // the promotion handoff and forever janitor own every later exact delete.
+      const transitioned = await media.failReservation(item.id);
+      if (transitioned.uploadState === 'failed') cleaned += 1;
     }
     if (expired.length < 100) break;
   }
@@ -63,14 +90,590 @@ export async function cleanupExpiredReservations(env: AppEnv, now = new Date()):
 
 export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Promise<number> {
   const repository = new ExportsRepository(env.DB);
-  const expired = await repository.expireReady(now.toISOString());
+  const timestamp = now.toISOString();
+  const expired = await repository.listExpiredReady(timestamp);
+  let cleaned = 0;
   for (const job of expired) {
     const parts = await repository.listParts(job.id);
-    const keys = [job.objectKey, job.manifestObjectKey, ...parts.map(({ objectKey }) => objectKey)]
+    const keys = [
+      job.objectKey,
+      job.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      job.guestbookHtmlObjectKey,
+      job.guestbookCsvObjectKey,
+    ]
       .filter((key): key is string => Boolean(key));
     if (keys.length) await env.MEDIA_BUCKET.delete(keys);
+    if (await repository.markExpired(job.id, timestamp)) cleaned += 1;
   }
-  return expired.length;
+  return cleaned;
+}
+
+export const LEGACY_STORED_MEDIA_PROMOTION_LIMIT = 25;
+export const MEDIA_PROMOTION_LEASE_MS = 20 * 60 * 1000;
+export const MEDIA_WRITE_TOMBSTONE_LIMIT = 500;
+export const MEDIA_WRITE_TOMBSTONE_RECHECK_MS = 60 * 60 * 1000;
+export const LEGACY_MEDIA_SCAN_LIMIT = 1000;
+
+export interface MediaPromotionSummary {
+  inspected: number;
+  verified: number;
+  promoted: number;
+  pending: number;
+}
+
+export interface MediaWriteTombstoneSummary {
+  inspected: number;
+  suppressed: number;
+  protected: number;
+  observedPresent: number;
+  observedAbsent: number;
+  failed: number;
+  tracked: number;
+}
+
+export interface LegacyMediaScanSummary {
+  inspected: number;
+  inventoried: number;
+  preserved: number;
+  quarantined: number;
+  wrapped: boolean;
+  epoch: number;
+  health: {
+    lastCompletedAt: string | null;
+    completedEpochErrors: number | null;
+    completedEpochMaxHourlyGrowth: number | null;
+    overdueSuppressed: number;
+    dueClassification: number;
+    lastCompletedWithinSla: boolean;
+    growthWithinCeiling: boolean;
+    completedEpochErrorFree: boolean;
+    suppressedBacklogClear: boolean;
+    readyForCanonicalLive: boolean;
+  };
+}
+
+export interface CleanupSummary {
+  mediaPromotion: MediaPromotionSummary;
+  mediaWriteTombstones: MediaWriteTombstoneSummary;
+  legacyMediaScan: LegacyMediaScanSummary;
+}
+
+export interface LegacyMediaMaintenanceSummary {
+  legacyMediaScan: LegacyMediaScanSummary;
+  mediaWriteTombstones: MediaWriteTombstoneSummary;
+}
+
+type ClassifiedLegacyMediaKey =
+  | { action: 'inventory'; eventId: string; mediaId: string; objectKind: 'source' | 'preview' | 'export' | 'cover' }
+  | { action: 'quarantine' };
+
+const OPAQUE_OBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+
+function classifyLegacyMediaKey(objectKey: string): ClassifiedLegacyMediaKey {
+  const parts = objectKey.split('/');
+  if (parts[0] !== 'events' || parts.length < 3 || !OPAQUE_OBJECT_ID.test(parts[1] ?? '')) {
+    return { action: 'quarantine' };
+  }
+  const eventId = parts[1]!;
+  if (parts[2] === legacyMediaScannerContract.namespaces.cover.segment
+    && parts.length >= 4
+    && parts.slice(3).every((part) => part.length > 0 && part !== '.' && part !== '..')) {
+    // Ownership is intentionally event-wide: old HTTP cover writers can PUT
+    // before row-level inventory, so a live event protects every strict key.
+    return { action: 'inventory', eventId, mediaId: eventId, objectKind: 'cover' };
+  }
+  if (parts.length >= 6
+    && parts[2] === legacyMediaScannerContract.namespaces.exports.segment
+    && OPAQUE_OBJECT_ID.test(parts[3] ?? '')
+    && /^attempt-[1-9][0-9]*$/u.test(parts[4] ?? '')
+    && parts.slice(5).every((part) => part.length > 0 && part !== '.' && part !== '..')) {
+    return { action: 'inventory', eventId, mediaId: parts[3]!, objectKind: 'export' };
+  }
+  if (parts.length === 4
+    && legacyMediaScannerContract.namespaces.guestMedia.segments.includes(parts[2] as 'uploads' | 'media' | 'previews')
+    && parts[2] !== 'previews'
+    && OPAQUE_OBJECT_ID.test(parts[3] ?? '')) {
+    return { action: 'inventory', eventId, mediaId: parts[3]!, objectKind: 'source' };
+  }
+  if (parts.length === 5
+    && parts[2] === 'media'
+    && parts[3] === 'final'
+    && OPAQUE_OBJECT_ID.test(parts[4] ?? '')) {
+    // A canonical-looking key in the old bucket is still an old writable alias.
+    return { action: 'inventory', eventId, mediaId: parts[4]!, objectKind: 'source' };
+  }
+  if (parts.length === 4 && parts[2] === 'previews' && parts[3]?.endsWith('.webp')) {
+    const mediaId = parts[3].slice(0, -'.webp'.length);
+    if (OPAQUE_OBJECT_ID.test(mediaId)) {
+      return { action: 'inventory', eventId, mediaId, objectKind: 'preview' };
+    }
+  }
+  return { action: 'quarantine' };
+}
+
+export async function observeLegacyMediaScanner(
+  env: AppEnv,
+  now = new Date(),
+): Promise<LegacyMediaScanObservation> {
+  return new LegacyMediaScanRepository(env.DB).getObservation(
+    now.toISOString(),
+    legacyMediaScannerContract.throughput.expectedLegacyGrowthCeilingPerHour,
+    legacyMediaScannerContract.throughput.fullEpochSlaHours,
+  );
+}
+
+/**
+ * Lists the legacy guest-media namespaces forever. A completed pass only wraps
+ * the durable cursor; it never proves that an old admitted write cannot arrive.
+ */
+export async function scanLegacyMediaNamespace(
+  env: AppEnv,
+  now = new Date(),
+  limit = LEGACY_MEDIA_SCAN_LIMIT,
+): Promise<LegacyMediaScanSummary> {
+  const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
+  const observedAt = now.toISOString();
+  const scan = new LegacyMediaScanRepository(env.DB);
+  const tombstones = new MediaObjectWriteTombstoneRepository(env.DB);
+  let state = await scan.getState();
+  let inspected = 0;
+  let inventoried = 0;
+  const preserved = 0;
+  let quarantined = 0;
+  let wrapped = false;
+
+  try {
+    for (let pageNumber = 0;
+      pageNumber < legacyMediaScannerContract.throughput.scanPagesPerInvocation;
+      pageNumber += 1) {
+    let page: R2Objects;
+    try {
+      page = await env.MEDIA_BUCKET.list({
+        prefix: legacyMediaScannerContract.prefix,
+        cursor: state.cursor ?? undefined,
+        limit: boundedLimit,
+      });
+    } catch (error) {
+      // Resetting a rejected opaque cursor is safe because the scanner is
+      // intentionally cyclic. Do not advance an epoch or claim completion.
+      await scan.resetCursor(state.cursor, observedAt);
+      throw error;
+    }
+
+    inspected += page.objects.length;
+    for (const object of page.objects) {
+      const classified = classifyLegacyMediaKey(object.key);
+      if (classified.action === 'quarantine') {
+        await scan.recordQuarantine(object.key, observedAt);
+        quarantined += 1;
+        continue;
+      }
+      await tombstones.ensure({
+        bucketGeneration: 'legacy',
+        objectKey: object.key,
+        eventId: classified.eventId,
+        mediaId: classified.mediaId,
+        objectKind: classified.objectKind,
+        recordedAt: observedAt,
+        allowSuppressed: true,
+      });
+      // Cursor advancement is allowed only after this key either proves a
+      // current owner or has durably entered one-way suppression. The same
+      // owner predicates used by the janitor cover guest, export, and live
+      // cover namespaces; an ambiguous response is resolved by a fresh reread.
+      let decided: boolean;
+      try {
+        decided = await tombstones.beginSuppression(object.key, observedAt, 'legacy');
+      } catch (error) {
+        const durable = await tombstones.get(object.key, 'legacy');
+        if (durable?.suppressionStartedAt !== null && durable !== null) {
+          decided = true;
+        } else {
+          throw error;
+        }
+      }
+      if (!decided) {
+        const durable = await tombstones.get(object.key, 'legacy');
+        if (!durable) throw new Error('Legacy scanner inventory disappeared.');
+        decided = durable.suppressionStartedAt !== null;
+        if (!decided && !await tombstones.hasCurrentOwner(object.key, 'legacy', observedAt)) {
+          throw new Error('Legacy scanner could not durably classify object ownership.');
+        }
+      }
+      inventoried += 1;
+    }
+
+    if (page.truncated && !page.cursor) {
+      throw new Error('Legacy media scanner received a truncated page without a cursor.');
+    }
+    wrapped = !page.truncated;
+      const invocationComplete = wrapped
+        || pageNumber + 1 === legacyMediaScannerContract.throughput.scanPagesPerInvocation;
+      state = await scan.advance(
+        state.cursor,
+        page.truncated ? page.cursor : null,
+        observedAt,
+        invocationComplete ? await scan.countPermanentInventory() : undefined,
+      );
+      if (wrapped) break;
+    }
+  } catch (error) {
+    await scan.recordError(observedAt);
+    throw error;
+  }
+
+  const observation = await observeLegacyMediaScanner(env, now);
+  return {
+    inspected,
+    inventoried,
+    preserved,
+    quarantined,
+    wrapped,
+    epoch: state.epoch,
+    health: {
+      lastCompletedAt: observation.lastCompletedAt,
+      completedEpochErrors: observation.lastCompletedErrorCount,
+      completedEpochMaxHourlyGrowth: observation.lastCompletedMaxHourlyGrowth,
+      overdueSuppressed: observation.overdueSuppressedCount,
+      dueClassification: observation.dueClassificationCount,
+      lastCompletedWithinSla: observation.lastCompletedWithinSla,
+      growthWithinCeiling: observation.growthWithinCeiling,
+      completedEpochErrorFree: observation.completedEpochErrorFree,
+      suppressedBacklogClear: observation.suppressedBacklogClear,
+      readyForCanonicalLive: observation.readyForCanonicalLive,
+    },
+  };
+}
+
+export async function maintainLegacyMediaObjects(
+  env: AppEnv,
+  now = new Date(),
+): Promise<LegacyMediaMaintenanceSummary> {
+  // Start both bounded phases so a transient scanner-list failure cannot stop
+  // already-known permanent tombstones from receiving their recurring pass.
+  // Newly discovered keys are eligible no later than the next hourly run.
+  const [legacyMediaScan, mediaWriteTombstones] = await Promise.allSettled([
+    scanLegacyMediaNamespace(env, now),
+    cleanupMediaObjectWriteTombstones(env, now),
+  ]);
+  if (legacyMediaScan.status === 'rejected') throw legacyMediaScan.reason;
+  if (mediaWriteTombstones.status === 'rejected') throw mediaWriteTombstones.reason;
+  return {
+    legacyMediaScan: legacyMediaScan.value,
+    mediaWriteTombstones: mediaWriteTombstones.value,
+  };
+}
+
+export async function cleanupMediaObjectWriteTombstones(
+  env: AppEnv,
+  now = new Date(),
+  limit = MEDIA_WRITE_TOMBSTONE_LIMIT,
+): Promise<MediaWriteTombstoneSummary> {
+  const repository = new MediaObjectWriteTombstoneRepository(env.DB);
+  const timestamp = now.toISOString();
+  const nextCheckAt = new Date(now.getTime() + MEDIA_WRITE_TOMBSTONE_RECHECK_MS).toISOString();
+  const configuredTotal = legacyMediaScannerContract.throughput.tombstonesPerInvocation;
+  const configuredPass = limit === configuredTotal;
+  const suppressedQuota = configuredPass
+    ? legacyMediaScannerContract.throughput.suppressedTombstoneQuota
+    : limit;
+  const classificationQuota = configuredPass
+    ? legacyMediaScannerContract.throughput.classificationTombstoneQuota
+    : limit;
+  const candidates = (await repository.listDue(
+    timestamp,
+    suppressedQuota,
+    classificationQuota,
+  )).slice(0, limit);
+  let suppressed = 0;
+  let protectedCount = 0;
+  let observedPresent = 0;
+  let observedAbsent = 0;
+  let failed = 0;
+
+  for (const candidate of candidates) {
+    let suppressionCommitted = candidate.suppressionStartedAt !== null;
+    if (!suppressionCommitted) {
+      try {
+        suppressionCommitted = await repository.beginSuppression(
+          candidate.objectKey,
+          timestamp,
+          candidate.bucketGeneration,
+        );
+      } catch {
+        // The D1 response may be lost after committing the one-way transition.
+        // Only a fresh durable reread authorizes the R2 delete in that case.
+        const current = await repository.get(candidate.objectKey, candidate.bucketGeneration);
+        suppressionCommitted = current?.suppressionStartedAt != null;
+      }
+      if (suppressionCommitted) suppressed += 1;
+    }
+
+    if (!suppressionCommitted) {
+      protectedCount += 1;
+      await repository.defer(
+        candidate.objectKey,
+        timestamp,
+        nextCheckAt,
+        candidate.bucketGeneration,
+      );
+      continue;
+    }
+
+    try {
+      const bucket = candidate.bucketGeneration === 'canonical'
+        ? env.CANONICAL_MEDIA_BUCKET
+        : env.MEDIA_BUCKET;
+      await bucket.delete(candidate.objectKey);
+      const present = await bucket.head(candidate.objectKey) !== null;
+      if (!await repository.recordObservation({
+        bucketGeneration: candidate.bucketGeneration,
+        objectKey: candidate.objectKey,
+        observedAt: timestamp,
+        present,
+        nextCheckAt,
+      })) throw new Error('Suppressed media write tombstone disappeared.');
+      if (present) observedPresent += 1;
+      else observedAbsent += 1;
+    } catch {
+      failed += 1;
+      // A killed invocation or ambiguous R2 response never retires discovery.
+      // Rotation only schedules another exact delete/HEAD attempt.
+      await repository.defer(
+        candidate.objectKey,
+        timestamp,
+        nextCheckAt,
+        candidate.bucketGeneration,
+      );
+    }
+  }
+
+  return {
+    inspected: candidates.length,
+    suppressed,
+    protected: protectedCount,
+    observedPresent,
+    observedAbsent,
+    failed,
+    tracked: await repository.count(),
+  };
+}
+
+export async function promoteLegacyStoredMedia(
+  env: AppEnv,
+  now = new Date(),
+  limit = LEGACY_STORED_MEDIA_PROMOTION_LIMIT,
+  clock: () => Date = () => now,
+): Promise<MediaPromotionSummary> {
+  assertLegacyMediaCopyEnabled();
+  const repository = new MediaRepository(env.DB);
+  const pointerCutover = legacyPointerCutoverEnabled();
+  const candidates = await repository.listPromotionWork(
+    now.toISOString(),
+    limit,
+    pointerCutover,
+  );
+  let verified = 0;
+  let promoted = 0;
+  for (const candidate of candidates) {
+    try {
+      if (candidate.state === 'target_verified') {
+        if (!candidate.claimToken) continue;
+        if (pointerCutover) {
+          let committed = false;
+          try {
+            committed = await repository.commitPromotionPointer(
+              candidate.mediaId,
+              candidate.claimToken,
+              clock().toISOString(),
+            );
+          } catch (error) {
+            const [media, durable] = await Promise.all([
+              repository.getById(candidate.mediaId),
+              repository.getPromotion(candidate.mediaId),
+            ]);
+            if (!(media?.uploadState === 'stored'
+              && media.deletedAt === null
+              && media.objectBucketGeneration === 'canonical'
+              && media.objectKey === candidate.finalObjectKey
+              && durable?.state === 'cleanup_pending'
+              && durable.claimToken === candidate.claimToken
+              && durable.finalPointerCommitted)) throw error;
+            committed = true;
+          }
+          if (committed) {
+            promoted += 1;
+            const cleanup = await repository.getPromotion(candidate.mediaId);
+            if (cleanup) {
+              await cleanupPendingMediaPromotion(env.MEDIA_BUCKET, repository, cleanup, clock());
+            }
+            continue;
+          }
+        }
+        if (await repository.parkInactiveVerifiedPromotionCleanup(
+          candidate.mediaId,
+          candidate.claimToken,
+          clock().toISOString(),
+        )) {
+          await repository.handoffPromotionToPermanentSuppression(
+            candidate.mediaId,
+            candidate.claimToken,
+            clock().toISOString(),
+          );
+        }
+        continue;
+      }
+      if (candidate.state === 'copying' && candidate.sourceEtag?.startsWith('buffer:')) {
+        const media = await repository.getById(candidate.mediaId);
+        if (await repository.ingressPromotionIsInactive(candidate.mediaId)) {
+          if (candidate.claimToken
+            && await repository.parkInactivePromotionCleanup(
+              candidate.mediaId,
+              candidate.claimToken,
+              clock().toISOString(),
+            )) {
+            await repository.handoffPromotionToPermanentSuppression(
+              candidate.mediaId,
+              candidate.claimToken,
+              clock().toISOString(),
+            );
+          }
+          continue;
+        }
+        const final = candidate.sourceSha256 && candidate.sourceMimeType
+          && candidate.sourceByteSize !== null
+          ? await env.CANONICAL_MEDIA_BUCKET.get(candidate.finalObjectKey)
+          : null;
+        if (final?.body
+          && final.size === candidate.sourceByteSize
+          && final.httpMetadata?.contentType === candidate.sourceMimeType
+          && candidate.sourceSha256) {
+          const digest = await crypto.subtle.digest(
+            'SHA-256',
+            await new Response(final.body).arrayBuffer(),
+          );
+          const actual = [...new Uint8Array(digest)]
+            .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+          if (actual === candidate.sourceSha256) {
+            if (workerIngressEnabled()
+              && media?.uploadState === 'reserved'
+              && media.deletedAt === null) {
+              const header = await env.CANONICAL_MEDIA_BUCKET.get(candidate.finalObjectKey, {
+                range: { offset: 0, length: Math.min(final.size, 65_536) },
+              });
+              if (header?.body) {
+                const metadata = inspectImageHeader(new Uint8Array(
+                  await new Response(header.body).arrayBuffer(),
+                ));
+                if (await repository.adoptPresentIngressFinal(
+                  candidate.mediaId,
+                  actual,
+                  final.size,
+                  metadata.width,
+                  metadata.height,
+                  final.etag,
+                  clock().toISOString(),
+                )) promoted += 1;
+              }
+            }
+          }
+        }
+        // An absent/unknown internal PUT outcome is intentionally permanent,
+        // but rotation prevents a bounded page of these rows starving work.
+        if (candidate.sourceSha256) {
+          await repository.rotateAmbiguousIngressPromotion(
+            candidate.mediaId,
+            candidate.sourceSha256,
+            clock().toISOString(),
+          );
+        } else {
+          await repository.touchPromotion(candidate.mediaId, clock().toISOString());
+        }
+        continue;
+      }
+      if (candidate.state === 'cleanup_pending') {
+        await cleanupPendingMediaPromotion(env.MEDIA_BUCKET, repository, candidate, now);
+        continue;
+      }
+      const claimedAt = clock();
+      const claimToken = crypto.randomUUID();
+      const leaseExpiresAt = new Date(claimedAt.getTime() + MEDIA_PROMOTION_LEASE_MS);
+      const active = await repository.claimPromotion(
+        candidate.mediaId,
+        claimToken,
+        claimedAt.toISOString(),
+        leaseExpiresAt.toISOString(),
+      );
+      if (active) {
+        if (await promoteLegacyStoredMediaObject(
+          env.MEDIA_BUCKET,
+          env.CANONICAL_MEDIA_BUCKET,
+          repository,
+          active,
+          clock,
+        ) === 'verified') {
+          verified += 1;
+          if (!pointerCutover) continue;
+          const verifiedPromotion = await repository.getPromotion(candidate.mediaId);
+          if (verifiedPromotion?.state === 'target_verified' && verifiedPromotion.claimToken
+            && await repository.commitPromotionPointer(
+              candidate.mediaId,
+              verifiedPromotion.claimToken,
+              clock().toISOString(),
+            )) {
+            promoted += 1;
+            const cleanup = await repository.getPromotion(candidate.mediaId);
+            if (cleanup) {
+              await cleanupPendingMediaPromotion(env.MEDIA_BUCKET, repository, cleanup, clock());
+            }
+          }
+        }
+        continue;
+      }
+      const inactive = await repository.claimInactivePromotion(
+        candidate.mediaId,
+        claimToken,
+        claimedAt.toISOString(),
+        leaseExpiresAt.toISOString(),
+      );
+      if (inactive) {
+        await cleanupInactiveMediaPromotion(env.MEDIA_BUCKET, repository, inactive, claimedAt);
+      }
+    } catch {
+      // The durable row remains either pending, copying under a finite lease,
+      // or cleanup_pending. One R2/D1 failure cannot suppress the rest of this
+      // bounded page or erase purge's only recovery fence.
+      try {
+        await repository.touchPromotion(candidate.mediaId, clock().toISOString());
+      } catch {
+        // The original durable failure remains authoritative; telemetry stays
+        // aggregate-only and the next pass may encounter the same row.
+      }
+    }
+  }
+  return {
+    inspected: candidates.length,
+    verified,
+    promoted,
+    pending: await repository.countPromotions(),
+  };
+}
+
+async function deleteEventExportInventory(env: AppEnv, eventId: string): Promise<void> {
+  const repository = new ExportsRepository(env.DB);
+  const jobs = await repository.listForEvent(eventId);
+  for (const job of jobs) {
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      job.objectKey,
+      job.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      job.guestbookHtmlObjectKey,
+      job.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+    if (keys.length) await env.MEDIA_BUCKET.delete(keys);
+  }
 }
 
 // Each pass deletes at most this many rows per table, and the sweep repeats until a
@@ -199,6 +802,35 @@ async function sweepRsvpScratch(
     sessions: results[0]?.meta.changes ?? 0,
     rateLimits: results[1]?.meta.changes ?? 0,
   };
+}
+
+// Guest-message quota rows are scratch; purge receipts are deliberately not.
+// Each statement has a hard page bound and the pass cap prevents one scheduled
+// invocation from turning a pathological backlog into an unbounded delete.
+const GUEST_MESSAGE_SCRATCH_BATCH = 100;
+const GUEST_MESSAGE_SCRATCH_MAX_PASSES = 50;
+
+export async function cleanupGuestMessageRateEvents(
+  env: AppEnv,
+  now = new Date(),
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - GUEST_NOTE_WINDOW_MS).toISOString();
+  let total = 0;
+  for (let pass = 0; pass < GUEST_MESSAGE_SCRATCH_MAX_PASSES; pass += 1) {
+    const deleted = await env.DB.prepare(`
+      DELETE FROM guest_message_rate_events
+      WHERE rowid IN (
+        SELECT rowid FROM guest_message_rate_events
+        WHERE window_started_at < ?
+        ORDER BY window_started_at, created_at, id
+        LIMIT ?
+      )
+    `).bind(cutoff, GUEST_MESSAGE_SCRATCH_BATCH).run();
+    const changes = deleted.meta.changes ?? 0;
+    total += changes;
+    if (changes < GUEST_MESSAGE_SCRATCH_BATCH) break;
+  }
+  return total;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1469,6 +2101,13 @@ export async function reconcileEventCoverPurge(
     env.DB.prepare(`
       UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?
     `).bind(timestamp, eventId),
+    // A queued export has not written anything and can be made terminal before
+    // its Workflow claims it. A running export remains the owner of its attempt
+    // cleanup; the purge waits below until that owner records a terminal state.
+    env.DB.prepare(`
+      UPDATE export_jobs SET state = 'failed', error_code = 'EXPORT_EVENT_DELETED'
+      WHERE event_id = ? AND state = 'queued'
+    `).bind(eventId),
     // Timestamp equality is not proof: a0ee's age escape hatch wrote the exact
     // same shape after unknown + failed termination. Before publishing the v2
     // marker, quarantine every *already blocked* row regardless of dated shape.
@@ -1628,6 +2267,13 @@ export async function reconcileEventCoverPurge(
     ),
   ]);
 
+  if (!eventRelationalPurgeEnabled()) {
+    // Candidate A is the rollback-safe quarantine: deletion immediately revokes
+    // every capability above, but it cannot sweep objects or erase relational
+    // discovery until the separately reviewed canonical-live candidate lands.
+    return { ...summary, phase: 'fences', remainder: true };
+  }
+
   const progress = await env.DB.prepare(
     'SELECT phase FROM event_cover_purge_progress WHERE event_id = ?',
   ).bind(eventId).first<{ phase: string }>();
@@ -1636,10 +2282,42 @@ export async function reconcileEventCoverPurge(
     return { ...summary, phase: 'complete', remainder: false };
   }
 
+  const runningExports = await env.DB.prepare(`
+    SELECT count(*) AS count FROM export_jobs
+    WHERE event_id = ? AND state = 'running'
+  `).bind(eventId).first<{ count: number }>();
+  if ((runningExports?.count ?? 0) > 0) {
+    // This also upgrades a purge that older code had already advanced to R2:
+    // no event prefix is safe to sweep while an export attempt can still write.
+    await env.DB.prepare(`
+      UPDATE event_cover_purge_progress
+      SET phase = 'fences', updated_at = ? WHERE event_id = ?
+    `).bind(timestamp, eventId).run();
+    return { ...summary, phase: 'fences', remainder: true };
+  }
+
   let phase = progress.phase;
   if (phase === 'fences') {
     const settled = await settleEventCoverFences(env, eventId, now, platform, summary);
     if (!settled) return { ...summary, phase: 'fences', remainder: true };
+  }
+
+  const mediaRepository = new MediaRepository(env.DB);
+  if (
+    await mediaRepository.eventHasPromotionFence(eventId)
+    || await mediaRepository.eventHasWritableMediaAlias(eventId, timestamp)
+  ) {
+    // This fresh guard runs even if an older pass had already recorded r2 or
+    // relational. A live presigned PUT or promotion owner can still land bytes
+    // after a prefix-zero observation, so no persisted phase may bypass it.
+    await env.DB.prepare(`
+      UPDATE event_cover_purge_progress
+      SET phase = 'fences', updated_at = ? WHERE event_id = ?
+    `).bind(timestamp, eventId).run();
+    return { ...summary, phase: 'fences', remainder: true };
+  }
+
+  if (phase === 'fences') {
     await env.DB.prepare(`
       UPDATE event_cover_purge_progress SET phase = 'r2', updated_at = ? WHERE event_id = ?
     `).bind(timestamp, eventId).run();
@@ -1647,13 +2325,20 @@ export async function reconcileEventCoverPurge(
   }
 
   if (phase === 'r2') {
+    // Durable export inventory is authoritative. Delete those exact keys before
+    // the broader event sweep removes media and cover objects.
+    await deleteEventExportInventory(env, eventId);
     // The existing prefix already covers all four cover key shapes — raw,
     // masters, previews, rendered — because every one of them is built beneath
     // `events/{eventId}/cover/`. `cleanup.test.ts` asserts that rather than
     // assuming it.
     await deletePrefix(env.MEDIA_BUCKET, `events/${eventId}/`);
-    const remaining = await env.MEDIA_BUCKET.list({ prefix: `events/${eventId}/` });
-    if (remaining.objects.length > 0) {
+    await deletePrefix(env.CANONICAL_MEDIA_BUCKET, `events/${eventId}/`);
+    const [legacyRemaining, canonicalRemaining] = await Promise.all([
+      env.MEDIA_BUCKET.list({ prefix: `events/${eventId}/` }),
+      env.CANONICAL_MEDIA_BUCKET.list({ prefix: `events/${eventId}/` }),
+    ]);
+    if (legacyRemaining.objects.length > 0 || canonicalRemaining.objects.length > 0) {
       return { ...summary, phase: 'r2', remainder: true };
     }
     await env.DB.prepare(`
@@ -1767,6 +2452,7 @@ export async function resumeDeletedEventPurges(
   env: AppEnv,
   now = new Date(),
 ): Promise<number> {
+  if (!eventRelationalPurgeEnabled()) return 0;
   // Least-recently-attempted first. A stalled purge must rotate behind events
   // that have never had a chance to start, and the ID is the stable tie-break.
   const purged = await env.DB.prepare(`
@@ -1779,10 +2465,36 @@ export async function resumeDeletedEventPurges(
   return purged.results.length;
 }
 
-export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<void> {
+export async function scheduledCleanup(
+  env: AppEnv,
+  now = new Date(),
+  observe?: (summary: CleanupSummary) => void,
+): Promise<void> {
   await cleanupAuthScratch(env, now);
   await cleanupRsvpScratch(env, now);
+  await cleanupGuestMessageRateEvents(env, now);
   await cleanupExpiredReservations(env, now);
+  const mediaPromotionPromise = legacyMediaCopyEnabled()
+    ? promoteLegacyStoredMedia(env, now)
+    : new MediaRepository(env.DB).countPromotions().then((pending) => ({
+        inspected: 0,
+        verified: 0,
+        promoted: 0,
+        pending,
+      }));
+  const maintenancePromise = maintainLegacyMediaObjects(env, now);
+  const [mediaPromotionResult, maintenanceResult] = await Promise.allSettled([
+    mediaPromotionPromise,
+    maintenancePromise,
+  ]);
+  if (mediaPromotionResult.status === 'rejected') throw mediaPromotionResult.reason;
+  if (maintenanceResult.status === 'rejected') throw maintenanceResult.reason;
+  const mediaPromotion = mediaPromotionResult.value;
+  const { legacyMediaScan, mediaWriteTombstones } = maintenanceResult.value;
+  // The first janitor pass is deliberately independent of promotion. A second
+  // bounded latency pass preserves the prior same-run cleanup behavior for
+  // aliases whose suppression was handed off while that first pass ran.
+  await cleanupMediaObjectWriteTombstones(env, now);
   await cleanupExpiredExports(env, now);
   // Global before per-instance recovery: a job whose exact legacy source is no
   // longer current has nothing left to restart, and current blockers rotate so
@@ -1821,4 +2533,5 @@ export async function scheduledCleanup(env: AppEnv, now = new Date()): Promise<v
   // objects no later pass would look for.
   //
   await resumeDeletedEventPurges(env, now);
+  observe?.({ mediaPromotion, mediaWriteTombstones, legacyMediaScan });
 }

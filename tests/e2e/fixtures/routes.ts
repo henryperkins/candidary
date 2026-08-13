@@ -6,6 +6,8 @@ import type {
   EventThemePresetId,
   EventView,
   GuestEventView,
+  GuestGuestbookItem,
+  ManagerGuestbookItem,
   PhotoIntakeState,
   RsvpHouseholdDetail,
   RsvpHouseholdListPage,
@@ -46,6 +48,7 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We would love to see the day through your eyes.',
+  guestbookPrompt: 'Share a wish, memory, or moment from the day.',
   cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: true,
@@ -218,6 +221,12 @@ interface GuestRouteOptions {
   gallery?: ReturnType<typeof makeMedia>;
   contributions?: ReturnType<typeof makeMedia>;
   messages?: GuestMessage[];
+  guestbook?: {
+    shared?: GuestGuestbookItem[];
+    ownUnshared?: GuestGuestbookItem[];
+    nextCursor?: string | null;
+    ownUnsharedNextCursor?: string | null;
+  };
   cover?: Buffer;
   coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
   household?: RsvpHouseholdView | null;
@@ -289,6 +298,11 @@ interface ManagerRouteOptions {
   // Keyed by the cursor the client sends back; `first` answers a request that carries no cursor.
   mediaPages: Record<string, { media: ReturnType<typeof makeMedia>; nextCursor: string | null }>;
   messages?: GuestMessage[];
+  guestbook?: {
+    items?: ManagerGuestbookItem[];
+    summary?: GuestbookSummaryFixture;
+    actionGate?: Promise<void>;
+  };
   exports?: unknown[];
   cover?: Buffer;
   coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
@@ -299,6 +313,89 @@ interface ManagerRouteOptions {
     households?: RsvpHouseholdListPage;
     detail?: RsvpHouseholdDetail;
     preview?: RsvpImportPreview;
+  };
+}
+
+export interface GuestbookSummaryFixture {
+  needsReviewCount: number;
+  sharedCount: number;
+  hiddenCount: number;
+  deletedCount: number;
+  galleryVisible: boolean;
+}
+
+function guestItemFromMessage(message: GuestMessage): GuestGuestbookItem {
+  if (message.kind === 'caption' && message.mediaId) {
+    const state = message.moderationStatus === 'pending'
+      ? 'unpublished'
+      : message.moderationStatus === 'approved' ? 'published' : 'hidden';
+    return {
+      id: message.id,
+      source: 'photo_caption',
+      kind: 'caption',
+      mediaId: message.mediaId,
+      guestName: message.guestName,
+      body: message.body,
+      createdAt: message.createdAt,
+      state,
+      moderationStatus: message.moderationStatus,
+      visibility: state === 'published' ? 'shared' : 'author_only',
+      previewAvailable: true,
+      isOwn: true,
+    } as GuestGuestbookItem;
+  }
+  return {
+    id: message.id,
+    source: 'guest_note',
+    kind: 'message',
+    mediaId: null,
+    guestName: message.guestName,
+    body: message.body,
+    createdAt: message.createdAt,
+    state: message.moderationStatus,
+    moderationStatus: message.moderationStatus,
+    visibility: message.moderationStatus === 'approved' ? 'shared' : 'author_only',
+    isOwn: true,
+  } as GuestGuestbookItem;
+}
+
+function managerItemFromMessage(message: GuestMessage): ManagerGuestbookItem {
+  const guestItem = guestItemFromMessage(message);
+  if (guestItem.source === 'photo_caption') {
+    return {
+      id: guestItem.id,
+      source: guestItem.source,
+      mediaId: guestItem.mediaId,
+      guestName: guestItem.guestName,
+      body: guestItem.body,
+      createdAt: guestItem.createdAt,
+      state: guestItem.state,
+      visibility: guestItem.visibility,
+      previewAvailable: guestItem.previewAvailable,
+    };
+  }
+  return {
+    id: guestItem.id,
+    source: guestItem.source,
+    guestName: guestItem.guestName,
+    body: guestItem.body,
+    createdAt: guestItem.createdAt,
+    state: guestItem.state,
+    visibility: guestItem.visibility,
+  };
+}
+
+function managerSummary(
+  items: readonly ManagerGuestbookItem[],
+  galleryVisible: boolean,
+): GuestbookSummaryFixture {
+  return {
+    needsReviewCount: items.filter((item) => item.state === 'pending' || item.state === 'unpublished').length,
+    sharedCount: items.filter((item) => item.visibility === 'shared').length,
+    hiddenCount: items.filter((item) => item.visibility === 'author_only'
+      && item.state !== 'pending' && item.state !== 'unpublished').length,
+    deletedCount: items.filter((item) => item.state === 'deleted').length,
+    galleryVisible,
   };
 }
 
@@ -409,6 +506,11 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
   const gallery = options.gallery ?? makeMedia(1);
   const contributions = options.contributions ?? gallery;
   const messages = [...(options.messages ?? [])];
+  const defaultGuestbook = messages.map(guestItemFromMessage);
+  const sharedGuestbook = [...(options.guestbook?.shared
+    ?? defaultGuestbook.filter((item) => item.visibility === 'shared'))];
+  const ownGuestbook = [...(options.guestbook?.ownUnshared
+    ?? defaultGuestbook.filter((item) => item.visibility === 'author_only'))];
   const submittedMessages = new Map<string, GuestMessage>();
   const coverSlotAttempts = new Map<'webp' | 'jpeg', number>();
   const base = `**/api/event/${event.slug}`;
@@ -474,9 +576,30 @@ export async function stubGuestRoutes(page: Page, options: GuestRouteOptions = {
         submittedMessages.set(payload.idempotencyKey, message);
         messages.push(message);
       }
+      const item = guestItemFromMessage(message);
+      if (!replayed) {
+        if (item.visibility === 'shared') sharedGuestbook.unshift(item);
+        else ownGuestbook.unshift(item);
+      }
       await route.fulfill({
         status: replayed ? 200 : 201,
-        json: { data: { message, replayed: Boolean(replayed) }, requestId: 'request-a' },
+        json: { data: { item, message, replayed: Boolean(replayed) }, requestId: 'request-a' },
+      });
+      return;
+    }
+    const contract = new URL(route.request().url()).searchParams.get('contract');
+    if (contract === '2') {
+      await route.fulfill({
+        json: {
+          data: {
+            items: sharedGuestbook,
+            nextCursor: options.guestbook?.nextCursor ?? null,
+            ownUnshared: ownGuestbook,
+            ownUnsharedCount: ownGuestbook.length,
+            ownUnsharedNextCursor: options.guestbook?.ownUnsharedNextCursor ?? null,
+          },
+          requestId: 'request-a',
+        },
       });
       return;
     }
@@ -807,6 +930,10 @@ export async function stubRsvpRosterBatchRoutes(
 export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions) {
   const audit = coverAudit();
   let event = { ...EVENT_FIXTURE, ...options.event };
+  let guestbookItems = [...(options.guestbook?.items
+    ?? (options.messages ?? []).map(managerItemFromMessage))];
+  const currentGuestbookSummary = () => options.guestbook?.summary
+    ?? managerSummary(guestbookItems, event.galleryVisible);
   const base = `**/api/manage/events/${event.id}`;
   const scenario = options.coverScenario;
   const coverSlotAttempts = new Map<'webp' | 'jpeg', number>();
@@ -1063,7 +1190,25 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       return route.fulfill({ json: { data: { draft: draftView('ready') }, requestId: 'request-a' } });
     },
   );
-  await page.route(`${base}/media*`, (route) => {
+  await page.route(`${base}/media**`, async (route) => {
+    if (route.request().method() === 'PATCH') {
+      const mediaId = new URL(route.request().url()).pathname.split('/').at(-1)!;
+      const payload = route.request().postDataJSON() as { action: 'publish' | 'hide' };
+      const current = guestbookItems.find((item) => item.source === 'photo_caption' && item.mediaId === mediaId);
+      if (!current || current.source !== 'photo_caption') {
+        await route.fulfill({ status: 404, json: { code: 'MEDIA_NOT_FOUND', message: 'Photo not found.' } });
+        return;
+      }
+      await options.guestbook?.actionGate;
+      const item: ManagerGuestbookItem = {
+        ...current,
+        state: payload.action === 'publish' ? 'published' : 'hidden',
+        visibility: payload.action === 'publish' && event.galleryVisible ? 'shared' : 'author_only',
+      };
+      guestbookItems = guestbookItems.map((candidate) => candidate.id === current.id ? item : candidate);
+      await route.fulfill({ json: { data: { item }, requestId: 'request-a' } });
+      return;
+    }
     // `cursor=` is a 422, so the client omits the parameter for the first page.
     const cursor = new URL(route.request().url()).searchParams.get('cursor') ?? 'first';
     const mediaPage = options.mediaPages[cursor] ?? { media: [], nextCursor: null };
@@ -1109,6 +1254,54 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   await page.route(`${base}/messages`, (route) => route.fulfill({
     json: { data: { messages: options.messages ?? [] }, requestId: 'request-a' },
   }));
+  await page.route(`${base}/guestbook/summary`, (route) => route.fulfill({
+    json: { data: { summary: currentGuestbookSummary() }, requestId: 'request-a' },
+  }));
+  await page.route(`${base}/guestbook?*`, (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const view = query.get('view') ?? 'shared';
+    const source = query.get('source') ?? 'all';
+    const galleryVisible = currentGuestbookSummary().galleryVisible;
+    const items = guestbookItems.filter((item) => {
+      if (source !== 'all' && item.source !== source) return false;
+      if (view === 'needs-review') return item.state === 'pending' || item.state === 'unpublished';
+      if (view === 'deleted') return item.state === 'deleted';
+      if (view === 'shared') return item.visibility === 'shared';
+      return item.visibility === 'author_only'
+        && item.state !== 'pending' && item.state !== 'unpublished'
+        && !(item.source === 'photo_caption' && item.state === 'published' && galleryVisible);
+    });
+    return route.fulfill({ json: {
+      data: { items, nextCursor: null, summary: currentGuestbookSummary() },
+      requestId: 'request-a',
+    } });
+  });
+  await page.route(new RegExp(`/api/manage/events/${event.id}/messages/[^/?]+$`, 'u'), async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
+    const payload = route.request().postDataJSON() as {
+      action: 'approve' | 'reject' | 'delete' | 'restore' | 'purge';
+    };
+    const current = guestbookItems.find((item) => item.source === 'guest_note' && item.id === id);
+    if (!current || current.source !== 'guest_note') {
+      await route.fulfill({ status: 404, json: { code: 'MESSAGE_NOT_FOUND', message: 'Note not found.' } });
+      return;
+    }
+    if (payload.action === 'purge') {
+      await options.guestbook?.actionGate;
+      guestbookItems = guestbookItems.filter((item) => item.id !== id);
+      await route.fulfill({ json: { data: { purged: { source: 'guest_note', id } }, requestId: 'request-a' } });
+      return;
+    }
+    const state = payload.action === 'approve' ? 'approved'
+      : payload.action === 'reject' || payload.action === 'restore' ? 'rejected'
+        : 'deleted';
+    await options.guestbook?.actionGate;
+    const item: ManagerGuestbookItem = state === 'deleted'
+      ? { ...current, state, visibility: 'host_only' }
+      : { ...current, state, visibility: state === 'approved' ? 'shared' : 'author_only' };
+    guestbookItems = guestbookItems.map((candidate) => candidate.id === id ? item : candidate);
+    await route.fulfill({ json: { data: { item }, requestId: 'request-a' } });
+  });
   await page.route(`${base}/exports`, (route) => route.fulfill({
     json: { data: { exports: options.exports ?? [] }, requestId: 'request-a' },
   }));

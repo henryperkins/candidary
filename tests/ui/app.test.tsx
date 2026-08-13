@@ -18,7 +18,11 @@ vi.mock('../../src/app/management-link', async (importOriginal) => ({
 }));
 vi.mock('qrcode', () => ({ default: { toDataURL: qrToDataURL } }));
 
-import { MANAGER_BULK_SELECTION_MAX, MANAGER_MEDIA_PAGE_SIZE } from '../../shared/constants';
+import {
+  DEFAULT_GUESTBOOK_PROMPT,
+  MANAGER_BULK_SELECTION_MAX,
+  MANAGER_MEDIA_PAGE_SIZE,
+} from '../../shared/constants';
 import type { GuestEventView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
@@ -420,12 +424,16 @@ describe('public Candidary experience', () => {
 // notes disclosure rather than the gallery or the household one beside it.
 const GUEST_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'We would love to see the day through your eyes.', uploadsEnabled: true,
+  welcomeMessage: 'We would love to see the day through your eyes.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT, uploadsEnabled: true,
   cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   galleryVisible: false, moderationRequired: true, phase: 'photos-primary',
   rsvpState: 'disabled', rsvpAccess: 'unavailable', rsvpDeadlineAt: null, rsvpDeadlineDate: null,
   eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
   lifecycleRecheckAfterMs: null,
+};
+const EMPTY_GUESTBOOK = {
+  items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null,
 };
 
 describe('guest event experience', () => {
@@ -438,7 +446,11 @@ describe('guest event experience', () => {
         publicationStatus: 'published', uploadState: 'stored', width: 800, height: 600,
       }] });
       if (url.endsWith('/contributions')) return json({ media: [] });
-      if (url.endsWith('/messages')) return json({ items: [{ id: 'note-a', kind: 'message', guestName: 'Sam', body: 'To many happy years.', createdAt: '2026-09-19T20:00:00Z', moderationStatus: 'approved' }] });
+      if (url.endsWith('/messages?contract=2')) return json({ ...EMPTY_GUESTBOOK, items: [{
+        id: 'note-a', source: 'guest_note', kind: 'message', guestName: 'Sam',
+        body: 'To many happy years.', createdAt: '2026-09-19T20:00:00Z', state: 'approved',
+        visibility: 'shared', isOwn: false, moderationStatus: 'approved', mediaId: null,
+      }] });
       throw new Error(`Unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -452,7 +464,7 @@ describe('guest event experience', () => {
     await user.click(screen.getByText(/Shared gallery/, { selector: 'span' }));
     expect(await screen.findByAltText('Golden hour')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     expect(screen.getByText('To many happy years.')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -461,13 +473,13 @@ describe('guest event experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
-      if (url.endsWith('/messages')) return json({ items: [] });
+      if (url.endsWith('/messages?contract=2')) return json(EMPTY_GUESTBOOK);
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
-    await userEvent.setup().click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await userEvent.setup().click(screen.getByText(/Guestbook/, { selector: 'span' }));
     // A placeholder is not a name: it disappears on the first keystroke and is not announced as one.
     const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
     expect(note).toBeVisible();
@@ -490,28 +502,32 @@ describe('guest event experience', () => {
         postCount += 1;
         return pendingPost;
       }
-      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      if (url.endsWith('/messages?contract=2')) return json(EMPTY_GUESTBOOK);
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
     await user.type(note, 'What a perfect evening.');
     const send = screen.getByRole('button', { name: 'Send note' });
     await user.click(send);
-    expect(send).toBeDisabled();
-    await user.click(send);
+    const confirm = screen.getByRole('button', { name: 'Confirm and send' });
+    await user.click(confirm);
     expect(postCount).toBe(1);
 
     resolvePost(await json({
-      message: {
+      item: {
         id: 'message-a',
+        source: 'guest_note',
         kind: 'message',
         guestName: 'Avery',
         body: 'What a perfect evening.',
+        state: 'pending',
+        visibility: 'author_only',
+        isOwn: true,
         moderationStatus: 'pending',
         createdAt: '2026-09-19T20:00:00.000Z',
         mediaId: null,
@@ -519,12 +535,12 @@ describe('guest event experience', () => {
       replayed: false,
     }, 201));
     expect(await screen.findByText(
-      'Your note was sent to the host for review. Only you can see it here for now.',
+      'Safely sent to Maya & Theo.',
     )).toBeVisible();
     expect(note).toHaveValue('');
     expect(screen.getByText('What a perfect evening.')).toBeVisible();
     expect(screen.getByText('Awaiting host review')).toBeVisible();
-    expect(screen.getByText('Only you can see this until the host shares it.')).toBeVisible();
+    expect(screen.getByText('Only this guest session and the hosts can see it until it is shared.')).toBeVisible();
   });
 
   it('preserves a failed draft and reuses its idempotency key on retry', async () => {
@@ -536,11 +552,15 @@ describe('guest event experience', () => {
         attempts.push(JSON.parse(String(init.body)) as { idempotencyKey: string; body: string });
         if (attempts.length === 1) return Promise.reject(new TypeError('network dropped'));
         return json({
-          message: {
+          item: {
             id: 'message-a',
+            source: 'guest_note',
             kind: 'message',
             guestName: null,
             body: 'Keep these words.',
+            state: 'pending',
+            visibility: 'author_only',
+            isOwn: true,
             moderationStatus: 'pending',
             createdAt: '2026-09-19T20:00:00.000Z',
             mediaId: null,
@@ -548,22 +568,23 @@ describe('guest event experience', () => {
           replayed: true,
         });
       }
-      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      if (url.endsWith('/messages?contract=2')) return json(EMPTY_GUESTBOOK);
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
     await user.type(note, 'Keep these words.');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('was not sent');
     expect(note).toHaveValue('Keep these words.');
-    await user.click(screen.getByRole('button', { name: 'Send note again' }));
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText(
-      'Your note was sent to the host for review. Only you can see it here for now.',
+      'Safely sent to Maya & Theo.',
     )).toBeVisible();
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.idempotencyKey).toBe(attempts[1]?.idempotencyKey);
@@ -584,11 +605,15 @@ describe('guest event experience', () => {
           }, 409);
         }
         return json({
-          message: {
+          item: {
             id: 'message-a',
+            source: 'guest_note',
             kind: 'message',
             guestName: null,
             body: 'The final words.',
+            state: 'pending',
+            visibility: 'author_only',
+            isOwn: true,
             moderationStatus: 'pending',
             createdAt: '2026-09-19T20:00:00.000Z',
             mediaId: null,
@@ -596,23 +621,24 @@ describe('guest event experience', () => {
           replayed: false,
         }, 201);
       }
-      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      if (url.endsWith('/messages?contract=2')) return json(EMPTY_GUESTBOOK);
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     await user.type(
       await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' }),
       'The final words.',
     );
     await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('changed after an earlier send attempt');
-    await user.click(screen.getByRole('button', { name: 'Send note again' }));
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText(
-      'Your note was sent to the host for review. Only you can see it here for now.',
+      'Safely sent to Maya & Theo.',
     )).toBeVisible();
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
@@ -622,14 +648,14 @@ describe('guest event experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
-      if (url.endsWith('/messages')) return json({ items: [], nextCursor: null });
+      if (url.endsWith('/messages?contract=2')) return json(EMPTY_GUESTBOOK);
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
     const user = userEvent.setup();
-    const summary = screen.getByText(/Guest notes/, { selector: 'span' });
+    const summary = screen.getByText(/Guestbook/, { selector: 'span' });
     await user.click(summary);
     await user.type(await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' }), 'Still here.');
     await user.click(summary);
@@ -643,11 +669,11 @@ describe('guest event experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
-      if (url.endsWith('/messages')) {
+      if (url.endsWith('/messages?contract=2')) {
         reads += 1;
         return reads === 1
           ? errorJson({ code: 'INTERNAL_ERROR', message: 'Notes are unavailable.', requestId: 'r' }, 503)
-          : json({ items: [], nextCursor: null });
+          : json(EMPTY_GUESTBOOK);
       }
       throw new Error(`Unexpected request ${url}`);
     }));
@@ -655,17 +681,17 @@ describe('guest event experience', () => {
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText(/Guest notes/, { selector: 'span' }));
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Notes are unavailable.');
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('No notes or photo captions have been shared yet.')).toBeVisible();
+    expect(await screen.findByText('No entries have been shared yet.')).toBeVisible();
     expect(reads).toBe(2);
   });
 });
 
 const MANAGED_EVENT = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.',
+  welcomeMessage: 'Welcome.', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
@@ -697,6 +723,9 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+    if (url.endsWith('/guestbook/summary')) return json({ summary: {
+      needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+    } });
     if (url.includes('/media')) {
       mediaRequests.push(url);
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
@@ -745,6 +774,20 @@ describe('manager experience', () => {
       expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
     },
   );
+
+  it('uses the Guestbook summary for initial navigation without eagerly loading entries', async () => {
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    expect(within(navigation).getByRole('button', { name: 'Guestbook' })).toBeVisible();
+    const requested = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requested.filter((url) => url.endsWith('/guestbook/summary'))).toHaveLength(1);
+    expect(requested.some((url) => url.endsWith('/messages'))).toBe(false);
+    expect(requested.some((url) => /\/guestbook(?:\?|$)/u.test(url))).toBe(false);
+  });
 
   it('keeps appearance inside Settings between its form and account controls', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
@@ -2445,6 +2488,7 @@ describe('guest event phase composition', () => {
     name: 'Maya & Theo',
     eventDate: '2026-09-19',
     welcomeMessage: 'Come celebrate with us.',
+    guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
     cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
     uploadsEnabled: true,
     galleryVisible: false,
@@ -2816,7 +2860,7 @@ describe('guest event phase composition', () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input)).filter((path) => path.includes('/rsvp/'))).toEqual([]);
   });
 
-  it('hides an already-mounted RSVP section with every secondary section after photo delivery', async () => {
+  it('keeps only the complete receipt and Guestbook after delivery, then opens and focuses it without motion', async () => {
     class SuccessfulXmlHttpRequest {
       status = 200;
       upload = new EventTarget();
@@ -2835,6 +2879,21 @@ describe('guest event phase composition', () => {
       }
     }
     vi.stubGlobal('XMLHttpRequest', SuccessfulXmlHttpRequest);
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/api/event/maya-theo')) return json({ event: guestEvent, role: 'guest' });
@@ -2849,6 +2908,9 @@ describe('guest event phase composition', () => {
         })) }, 201);
       }
       if (path.includes('/uploads/') && path.endsWith('/finalize')) return json({ media: { uploadState: 'stored' } });
+      if (path.endsWith('/messages?contract=2')) {
+        return errorJson({ code: 'INTERNAL_ERROR', message: 'The book is resting. Try again.', requestId: 'guestbook-r' }, 503);
+      }
       throw new Error(`Unexpected request ${path}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -2868,5 +2930,16 @@ describe('guest event phase composition', () => {
     expect(screen.queryByText('View or change RSVP')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Find my invitation' })).not.toBeInTheDocument();
     expect(screen.queryByText('More from the event')).not.toBeInTheDocument();
+    expect(screen.queryByText('Shared gallery')).not.toBeInTheDocument();
+    expect(screen.queryByText('My deliveries')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Leave a guestbook note' })).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: 'Leave a guestbook note' }));
+
+    const heading = await screen.findByRole('heading', { name: 'Leave a note for Maya & Theo' });
+    expect(heading).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
+    expect(await screen.findByRole('alert')).toHaveTextContent('The book is resting. Try again.');
+    expect(screen.getByRole('textbox', { name: 'Your note for Maya & Theo' })).toBeEnabled();
   });
 });

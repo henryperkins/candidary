@@ -35,6 +35,31 @@ const { canonicalJson, collectMigrationManifest, sha256 } = releaseEvidence;
 // `String.raw` so the SQL keeps its literal backslashes: `\_` is a literal
 // underscore to SQLite's LIKE, and an ordinary escape sequence to JavaScript.
 const COVER_TABLES = String.raw`name LIKE 'event\_cover\_%' ESCAPE '\'`;
+const GUESTBOOK_SCHEMA_TABLES = [
+  'export_guestbook_entries',
+  'export_media_entries',
+  'guest_message_purge_receipts',
+  'guest_message_rate_events',
+  'legacy_media_scan_quarantine',
+  'legacy_media_scan_state',
+  'media_object_promotions',
+  'media_object_write_tombstones',
+] as const;
+const GUESTBOOK_SCHEMA_TABLE_LIST = GUESTBOOK_SCHEMA_TABLES
+  .map((name) => `'${name}'`).join(',');
+const GUESTBOOK_COLUMN_TABLE_LIST = [...GUESTBOOK_SCHEMA_TABLES, 'export_jobs', 'media']
+  .map((name) => `'${name}'`).join(',');
+const GUESTBOOK_INDEX_TABLE_LIST = [
+  ...GUESTBOOK_SCHEMA_TABLES,
+  'export_jobs',
+  'guest_messages',
+].map((name) => `'${name}'`).join(',');
+const GUESTBOOK_CHECK_TABLE_LIST = [
+  ...GUESTBOOK_SCHEMA_TABLES,
+  'events',
+  'export_jobs',
+  'media',
+].map((name) => `'${name}'`).join(',');
 
 /**
  * Read-only, and appended to rather than reordered.
@@ -74,9 +99,103 @@ SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN (
   'event_cover_receipts_one_preparing_per_event',
   'event_cover_render_sets_one_active_per_event'
 ) ORDER BY name;
-SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name;`;
+SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name;
+SELECT name FROM sqlite_master
+  WHERE type = 'table' AND name IN (${GUESTBOOK_SCHEMA_TABLE_LIST}) ORDER BY name;
+SELECT m.name AS tbl, p.cid, p.name AS col
+  FROM sqlite_master m JOIN pragma_table_info(m.name) p
+  WHERE m.type = 'table' AND m.name IN (${GUESTBOOK_COLUMN_TABLE_LIST}) ORDER BY m.name, p.cid;
+SELECT m.name AS tbl, f."table" AS parent, f."from" AS col, f.on_delete AS on_delete
+  FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f
+  WHERE m.type = 'table' AND m.name IN (${GUESTBOOK_SCHEMA_TABLE_LIST}) ORDER BY m.name, f."from";
+SELECT m.name AS tbl, i.name AS idx, i."unique" AS uniq, i.partial AS partial
+  FROM sqlite_master m JOIN pragma_index_list(m.name) i
+  WHERE m.type = 'table' AND m.name IN (${GUESTBOOK_INDEX_TABLE_LIST}) ORDER BY m.name, i.name;
+SELECT name,
+  CASE name
+    WHEN 'events' THEN
+      (instr(sql, 'length(trim(guestbook_prompt)) BETWEEN 1 AND 160') > 0) || ''
+    WHEN 'export_guestbook_entries' THEN
+      (instr(sql, 'source IN (''guest_note'', ''photo_caption'')') > 0) || '|' ||
+      (instr(sql, 'source_rank IN (0, 1)') > 0) || '|' ||
+      (instr(sql, '(source = ''guest_note'' AND source_state IN (''pending'', ''approved'', ''rejected''))') > 0) || '|' ||
+      (instr(sql, '(source = ''photo_caption'' AND source_state IN (''unpublished'', ''published'', ''hidden''))') > 0) || '|' ||
+      (instr(sql, 'guest_visibility IN (''shared'', ''author_only'')') > 0) || '|' ||
+      (instr(sql, 'included_in_keepsake IN (0, 1)') > 0) || '|' ||
+      (instr(sql, '(source = ''guest_note'' AND source_rank = 0 AND media_id IS NULL AND original_filename IS NULL)') > 0) || '|' ||
+      (instr(sql, '(source = ''photo_caption'' AND source_rank = 1 AND media_id = source_id)') > 0)
+    WHEN 'export_jobs' THEN
+      (instr(sql, 'guestbook_html_bytes IS NULL OR guestbook_html_bytes >= 0') > 0) || '|' ||
+      (instr(sql, 'guestbook_csv_bytes IS NULL OR guestbook_csv_bytes >= 0') > 0) || '|' ||
+      (instr(sql, 'guestbook_entry_count IS NULL OR guestbook_entry_count >= 0') > 0) || '|' ||
+      (instr(sql, 'guestbook_shared_count >= 0 AND guestbook_shared_count <= guestbook_entry_count') > 0) || '|' ||
+      (instr(sql, 'guestbook_prompt IS NULL OR length(trim(guestbook_prompt)) BETWEEN 1 AND 160') > 0) || '|' ||
+      (instr(sql, 'guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)') > 0)
+    WHEN 'export_media_entries' THEN
+      (instr(sql, 'object_bucket_generation IN (''legacy'', ''canonical'')') > 0) || '|' ||
+      (instr(sql, 'declared_byte_size >= 0') > 0) || '|' ||
+      (instr(sql, 'byte_size IS NULL OR byte_size >= 0') > 0) || '|' ||
+      (instr(sql, 'width IS NULL OR width > 0') > 0) || '|' ||
+      (instr(sql, 'height IS NULL OR height > 0') > 0) || '|' ||
+      (instr(sql, 'publication_status IN (''unpublished'', ''published'', ''hidden'')') > 0)
+    WHEN 'guest_message_purge_receipts' THEN
+      (instr(sql, 'length(idempotency_key) BETWEEN 1 AND 128') > 0) || ''
+    WHEN 'legacy_media_scan_quarantine' THEN
+      (instr(sql, 'length(object_key) > 0') > 0) || '|' ||
+      (instr(sql, 'observation_count > 0') > 0)
+    WHEN 'legacy_media_scan_state' THEN
+      (instr(sql, 'singleton = 1') > 0) || '|' ||
+      (instr(sql, 'epoch >= 0') > 0) || '|' ||
+      (instr(sql, 'epoch_discovered_count >= 0') > 0) || '|' ||
+      (instr(sql, 'epoch_error_count >= 0') > 0) || '|' ||
+      (instr(sql, 'epoch_max_hourly_growth >= 0') > 0) || '|' ||
+      (instr(sql, 'last_observed_inventory_count >= 0') > 0) || '|' ||
+      (instr(sql, 'last_completed_discovered_count IS NULL OR last_completed_discovered_count >= 0') > 0) || '|' ||
+      (instr(sql, 'last_completed_error_count IS NULL OR last_completed_error_count >= 0') > 0) || '|' ||
+      (instr(sql, 'last_completed_max_hourly_growth IS NULL OR last_completed_max_hourly_growth >= 0') > 0)
+    WHEN 'media' THEN
+      (instr(sql, 'object_bucket_generation IN (''legacy'', ''canonical'')') > 0) || ''
+    WHEN 'media_object_promotions' THEN
+      (instr(sql, 'source_bucket_generation = ''legacy''') > 0) || '|' ||
+      (instr(sql, 'final_bucket_generation = ''canonical''') > 0) || '|' ||
+      (instr(sql, 'source_byte_size IS NULL OR source_byte_size > 0') > 0) || '|' ||
+      (instr(sql, 'source_sha256 IS NULL OR length(source_sha256) = 64') > 0) || '|' ||
+      (instr(sql, 'source_width IS NULL OR source_width > 0') > 0) || '|' ||
+      (instr(sql, 'source_height IS NULL OR source_height > 0') > 0) || '|' ||
+      (instr(sql, 'state IN (''pending'', ''copying'', ''target_verified'', ''cleanup_pending'')') > 0) || '|' ||
+      (instr(sql, 'final_pointer_committed IN (0, 1)') > 0) || '|' ||
+      (instr(sql, 'source_absent_since IS NULL OR state = ''cleanup_pending''') > 0) || '|' ||
+      (instr(sql, '(state = ''pending''') > 0) || '|' ||
+      (instr(sql, 'claim_token IS NULL AND lease_expires_at IS NULL') > 0) || '|' ||
+      (instr(sql, 'source_etag IS NULL AND source_mime_type IS NULL') > 0) || '|' ||
+      (instr(sql, 'source_byte_size IS NULL AND source_sha256 IS NULL') > 0) || '|' ||
+      (instr(sql, 'source_width IS NULL AND source_height IS NULL') > 0) || '|' ||
+      (instr(sql, 'final_etag IS NULL AND target_verified_at IS NULL') > 0) || '|' ||
+      (instr(sql, 'OR (state = ''copying''') > 0) || '|' ||
+      (instr(sql, 'claim_token IS NOT NULL AND lease_expires_at IS NOT NULL') > 0) || '|' ||
+      (instr(sql, 'OR (state = ''target_verified''') > 0) || '|' ||
+      (instr(sql, 'final_etag IS NOT NULL AND target_verified_at IS NOT NULL') > 0) || '|' ||
+      (instr(sql, 'OR (state = ''cleanup_pending''') > 0) || '|' ||
+      (instr(sql, 'claim_token IS NOT NULL AND lease_expires_at IS NULL') > 0) || '|' ||
+      (instr(sql, '(final_pointer_committed = 1') > 0) || '|' ||
+      (instr(sql, '(final_pointer_committed = 0') > 0)
+    WHEN 'media_object_write_tombstones' THEN
+      (instr(sql, 'bucket_generation IN (''legacy'', ''canonical'')') > 0) || '|' ||
+      (instr(sql, 'length(object_key) > 0') > 0) || '|' ||
+      (instr(sql, 'object_kind IN (''source'', ''final'', ''preview'', ''export'', ''cover'')') > 0) || '|' ||
+      (instr(sql, 'last_observed_present IS NULL OR last_observed_present IN (0, 1)') > 0) || '|' ||
+      (instr(sql, 'last_observed_at IS NULL AND last_observed_present IS NULL') > 0) || '|' ||
+      (instr(sql, 'last_observed_at IS NOT NULL') > 0) || '|' ||
+      (instr(sql, 'suppression_started_at IS NOT NULL') > 0)
+    ELSE ''
+  END AS checks
+FROM sqlite_master
+WHERE type = 'table' AND name IN (${GUESTBOOK_CHECK_TABLE_LIST})
+ORDER BY name;
+SELECT name, sql FROM sqlite_master
+  WHERE type = 'table' AND name = 'media_object_promotions';`;
 
-const INVARIANT_STATEMENT_COUNT = 12;
+const INVARIANT_STATEMENT_COUNT = 18;
 
 /**
  * Pinned, not derived.
@@ -86,16 +205,17 @@ const INVARIANT_STATEMENT_COUNT = 12;
  * file that is not checked in is never seen, and a correctly numbered extra file
  * that *is* checked in would simply be accepted as the next entry.
  *
- * Fourteen after Phase 3: `0013_guest_message_hardening.sql`
- * is a guest-message column and index, unrelated to covers. It is deliberately
- * is unrelated to covers; `0014_event_cover_invariants.sql` is the phase-3
- * migration. Count and exact trigger hashes move together in this candidate.
+ * Fifteen after the post-Phase-3 Guestbook cutover: `0014` closes the Cover
+ * Studio invariants and `0015_curated_private_guestbook.sql` is the new active
+ * terminal migration. Count, terminal event metadata, and exact trigger hashes
+ * move together in this candidate.
  */
-const EXPECTED_MIGRATION_COUNT = 14;
+const EXPECTED_MIGRATION_COUNT = 15;
 
 /**
- * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the nine
- * large invariant bodies cannot drift behind a name-only schema check.
+ * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
+ * existing invariant bodies and all fifteen 0015 bodies cannot drift behind a
+ * name-only schema check.
  * Normalization collapses whitespace and nothing else.
  */
 const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
@@ -110,7 +230,22 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   event_cover_source_pointer_update: '047746e2f68a3b5560756f3d750cc45aa78688349f922bcab86102775dea99fd',
   events_rsvp_deadline_insert: 'b96be8b8983ad7ed6d354e1bb3da6959cca61c89c09d83d796d22649d079b110',
   events_rsvp_deadline_update: '9154c51a32504396624c7d36205c11a573e53847e7a944cc2062e627ada682d5',
+  legacy_media_scan_quarantine_permanent: '0b5ca1981e323706e28954b7197abe32276afcff737edae1484087f1058cb7aa',
+  legacy_media_scan_state_permanent: '1665fa34a1ed318164fc0e7e29c2b50aa5550837b4a0249ee173b289ecc2a8b3',
+  media_object_promotion_inventory_insert: 'ec75363b45f7be245506e400dca3329e06abe7f388334a6c13b01d64d237579e',
+  media_object_promotion_inventory_update: '3523593400afa87a2ba6ac0432deee1686d944cfd4b2aa6a35fba2e5cbb69ea6',
+  media_object_promotion_reservation_capability_guard: 'f7473c9ffeee90d78349f46bf91bc20e70da52bc7bb49f41f176ba0ce1f3848a',
+  media_object_promotion_verified_delete_guard: 'a79214e3498655ddfb022849cea069eea5f2921caab045e7fab2151d10d60246',
+  media_object_promotion_verified_proof_immutable: '9f5ca9c55883615e9456ba100488a7ad412f611ed3fad6bac14c8c987936f026',
+  media_object_write_tombstone_guard_insert: '04b87d3211dbe8be03775cc8d7d9a41c64729191b01bfbc9846e5fc1c74f1072',
+  media_object_write_tombstone_guard_update: '0911c3fdccd55ee858031b20927346ca94b5e9c2d06155622ec239aff8a7b208',
+  media_object_write_tombstone_immutable: '7d193fa0096335ef5fd436ddfbeface89161b1495adfc3ac2a9207d711570c2d',
+  media_object_write_tombstone_inventory_insert: '2abaf6e5fde190f5a4d229494f06c3fcde4fbf4b5e9d8098e5df3e56f056fc7c',
+  media_object_write_tombstone_inventory_update: 'a48894d8a612135cd7669ed54fb2b064b88244e2dc0daec29c8d1ec782612187',
+  media_object_write_tombstone_permanent: '22bf8b47ebd7e82a8799c230b0c710d77fd1463814bb7c220410a653c226d2db',
   media_stamp_stored_at_compat: '921740a4d74caa9802c6d862070ca3fa52f2765a5fc845adcf848c5bb0ee44c4',
+  media_stored_legacy_guard_insert: '0ee130fcf9ac0a1d86d7c3ccf0a5de60218e3df16ced25b12882d913fa76939c',
+  media_stored_legacy_guard_update: '694f541afe7e73a49623d6794c085893eeb6d26f90fe6f2e131d53ea704465d5',
 };
 
 const EXPECTED_COVER_TABLES = [
@@ -243,6 +378,195 @@ const EXPECTED_PARTIAL_UNIQUE_SQL: Record<string, string> = {
     + " WHERE state = 'active'",
 };
 
+const EXPECTED_GUESTBOOK_TABLES = [...GUESTBOOK_SCHEMA_TABLES].sort();
+
+const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
+  export_guestbook_entries: [
+    'export_job_id', 'source', 'source_id', 'source_rank', 'guest_name', 'body', 'created_at',
+    'source_state', 'guest_visibility', 'included_in_keepsake', 'media_id', 'original_filename',
+  ],
+  export_jobs: [
+    'id', 'event_id', 'state', 'snapshot_at', 'object_key', 'media_count', 'total_bytes', 'attempt',
+    'error_code', 'created_at', 'started_at', 'completed_at', 'expires_at', 'manifest_object_key',
+    'part_count', 'guestbook_html_object_key', 'guestbook_html_bytes', 'guestbook_html_sha256',
+    'guestbook_csv_object_key', 'guestbook_csv_bytes', 'guestbook_csv_sha256', 'guestbook_entry_count',
+    'guestbook_shared_count', 'guestbook_event_name', 'guestbook_event_date', 'guestbook_event_timezone',
+    'guestbook_prompt', 'guestbook_gallery_visible',
+  ],
+  export_media_entries: [
+    'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
+    'mime_type', 'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption',
+    'publication_status', 'created_at', 'published_at',
+  ],
+  guest_message_purge_receipts: [
+    'event_id', 'guest_session_id', 'idempotency_key', 'request_hmac', 'purged_at',
+  ],
+  guest_message_rate_events: [
+    'id', 'event_id', 'session_scope_digest', 'ip_scope_digest', 'window_started_at', 'created_at',
+  ],
+  legacy_media_scan_quarantine: [
+    'object_key', 'first_observed_at', 'last_observed_at', 'observation_count',
+  ],
+  legacy_media_scan_state: [
+    'singleton', 'cursor', 'epoch', 'epoch_started_at', 'epoch_discovered_count',
+    'epoch_error_count', 'epoch_max_hourly_growth', 'last_observed_at',
+    'last_observed_inventory_count', 'last_error_at', 'last_completed_at',
+    'last_completed_started_at', 'last_completed_discovered_count',
+    'last_completed_error_count', 'last_completed_max_hourly_growth', 'updated_at',
+  ],
+  media: [
+    'id', 'event_id', 'uploader_session_id', 'object_key', 'original_filename', 'mime_type',
+    'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption', 'upload_state',
+    'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
+    'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
+  ],
+  media_object_promotions: [
+    'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
+    'final_bucket_generation', 'final_object_key', 'source_etag', 'source_mime_type',
+    'source_byte_size', 'source_sha256', 'source_width', 'source_height', 'final_etag',
+    'target_verified_at', 'source_writable_until', 'state', 'final_pointer_committed',
+    'claim_token', 'lease_expires_at', 'source_absent_since', 'created_at', 'updated_at',
+  ],
+  media_object_write_tombstones: [
+    'bucket_generation', 'object_key', 'event_id', 'media_id', 'object_kind',
+    'suppression_started_at', 'last_observed_at', 'last_observed_present', 'next_check_at',
+    'created_at', 'updated_at',
+  ],
+};
+
+const EXPECTED_GUESTBOOK_FOREIGN_KEYS = [
+  'export_guestbook_entries.export_job_id -> export_jobs CASCADE',
+  'export_media_entries.export_job_id -> export_jobs CASCADE',
+  'guest_message_purge_receipts.event_id -> events CASCADE',
+  'guest_message_rate_events.event_id -> events CASCADE',
+  'media_object_promotions.event_id -> events RESTRICT',
+  'media_object_promotions.media_id -> media RESTRICT',
+];
+
+const EXPECTED_GUESTBOOK_INDEXES = [
+  'export_guestbook_entries.guestbook_export_render_order unique=0 partial=0',
+  'export_guestbook_entries.sqlite_autoindex_export_guestbook_entries_1 unique=1 partial=0',
+  'export_jobs.export_jobs_expiry unique=0 partial=0',
+  'export_jobs.export_jobs_one_active_per_event unique=1 partial=1',
+  'export_jobs.sqlite_autoindex_export_jobs_1 unique=1 partial=0',
+  'export_media_entries.export_media_entries_order unique=0 partial=0',
+  'export_media_entries.sqlite_autoindex_export_media_entries_1 unique=1 partial=0',
+  'guest_message_purge_receipts.sqlite_autoindex_guest_message_purge_receipts_1 unique=1 partial=0',
+  'guest_message_rate_events.guestbook_rate_event_ip_window unique=0 partial=0',
+  'guest_message_rate_events.guestbook_rate_event_session_window unique=0 partial=0',
+  'guest_message_rate_events.sqlite_autoindex_guest_message_rate_events_1 unique=1 partial=0',
+  'guest_messages.guest_messages_event_status unique=0 partial=0',
+  'guest_messages.guest_messages_session_idempotency unique=1 partial=0',
+  'guest_messages.guestbook_notes_event_feed unique=0 partial=0',
+  'guest_messages.guestbook_notes_event_owner unique=0 partial=0',
+  'guest_messages.sqlite_autoindex_guest_messages_1 unique=1 partial=0',
+  'legacy_media_scan_quarantine.sqlite_autoindex_legacy_media_scan_quarantine_1 unique=1 partial=0',
+  'media_object_promotions.media_object_promotions_event_state unique=0 partial=0',
+  'media_object_promotions.media_object_promotions_schedule unique=0 partial=0',
+  'media_object_promotions.sqlite_autoindex_media_object_promotions_1 unique=1 partial=0',
+  'media_object_promotions.sqlite_autoindex_media_object_promotions_2 unique=1 partial=0',
+  'media_object_write_tombstones.media_object_write_tombstones_event unique=0 partial=0',
+  'media_object_write_tombstones.media_object_write_tombstones_schedule unique=0 partial=0',
+  'media_object_write_tombstones.sqlite_autoindex_media_object_write_tombstones_1 unique=1 partial=0',
+];
+
+const EXPECTED_GUESTBOOK_CHECKS: Record<string, string> = {
+  events: '1',
+  export_guestbook_entries: '1|1|1|1|1|1|1|1',
+  export_jobs: '1|1|1|1|1|1',
+  export_media_entries: '1|1|1|1|1|1',
+  guest_message_purge_receipts: '1',
+  guest_message_rate_events: '',
+  legacy_media_scan_quarantine: '1|1',
+  legacy_media_scan_state: '1|1|1|1|1|1|1|1|1',
+  media: '1',
+  media_object_promotions: '1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1',
+  media_object_write_tombstones: '1|1|1|1|1|1|1',
+};
+
+const EXPECTED_MEDIA_OBJECT_PROMOTIONS_SQL = `
+CREATE TABLE media_object_promotions (
+  media_id TEXT PRIMARY KEY REFERENCES media(id) ON DELETE RESTRICT,
+  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+  source_bucket_generation TEXT NOT NULL DEFAULT 'legacy'
+    CHECK (source_bucket_generation = 'legacy'),
+  source_object_key TEXT NOT NULL,
+  final_bucket_generation TEXT NOT NULL DEFAULT 'canonical'
+    CHECK (final_bucket_generation = 'canonical'),
+  final_object_key TEXT NOT NULL UNIQUE,
+  source_etag TEXT,
+  source_mime_type TEXT,
+  source_byte_size INTEGER CHECK (source_byte_size IS NULL OR source_byte_size > 0),
+  source_sha256 TEXT CHECK (source_sha256 IS NULL OR length(source_sha256) = 64),
+  source_width INTEGER CHECK (source_width IS NULL OR source_width > 0),
+  source_height INTEGER CHECK (source_height IS NULL OR source_height > 0),
+  final_etag TEXT,
+  target_verified_at TEXT,
+  source_writable_until TEXT NOT NULL,
+  state TEXT NOT NULL
+    CHECK (state IN ('pending', 'copying', 'target_verified', 'cleanup_pending')),
+  final_pointer_committed INTEGER NOT NULL DEFAULT 0
+    CHECK (final_pointer_committed IN (0, 1)),
+  claim_token TEXT,
+  lease_expires_at TEXT,
+  source_absent_since TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (source_absent_since IS NULL OR state = 'cleanup_pending'),
+  CHECK (
+    (state = 'pending'
+      AND final_pointer_committed = 0
+      AND claim_token IS NULL AND lease_expires_at IS NULL
+      AND source_absent_since IS NULL
+      AND source_etag IS NULL AND source_mime_type IS NULL
+      AND source_byte_size IS NULL AND source_sha256 IS NULL
+      AND source_width IS NULL AND source_height IS NULL
+      AND final_etag IS NULL AND target_verified_at IS NULL)
+    OR (state = 'copying'
+      AND final_pointer_committed = 0
+      AND claim_token IS NOT NULL AND lease_expires_at IS NOT NULL
+      AND source_absent_since IS NULL
+      AND final_etag IS NULL AND target_verified_at IS NULL
+      AND (
+        (source_etag IS NULL AND source_mime_type IS NULL
+          AND source_byte_size IS NULL AND source_sha256 IS NULL
+          AND source_width IS NULL AND source_height IS NULL)
+        OR (source_etag IS NOT NULL AND source_mime_type IS NOT NULL
+          AND source_byte_size IS NOT NULL AND source_sha256 IS NOT NULL
+          AND source_width IS NOT NULL AND source_height IS NOT NULL)
+      ))
+    OR (state = 'target_verified'
+      AND final_pointer_committed = 0
+      AND claim_token IS NOT NULL AND lease_expires_at IS NULL
+      AND source_absent_since IS NULL
+      AND source_etag IS NOT NULL AND source_mime_type IS NOT NULL
+      AND source_byte_size IS NOT NULL AND source_sha256 IS NOT NULL
+      AND source_width IS NOT NULL AND source_height IS NOT NULL
+      AND final_etag IS NOT NULL AND target_verified_at IS NOT NULL)
+    OR (state = 'cleanup_pending'
+      AND claim_token IS NOT NULL AND lease_expires_at IS NULL
+      AND (
+        (final_pointer_committed = 1
+          AND source_etag IS NOT NULL AND source_mime_type IS NOT NULL
+          AND source_byte_size IS NOT NULL AND source_sha256 IS NOT NULL
+          AND source_width IS NOT NULL AND source_height IS NOT NULL
+          AND final_etag IS NOT NULL AND target_verified_at IS NOT NULL)
+        OR (final_pointer_committed = 0
+          AND (
+            (source_etag IS NULL AND source_mime_type IS NULL
+              AND source_byte_size IS NULL AND source_sha256 IS NULL
+              AND source_width IS NULL AND source_height IS NULL
+              AND final_etag IS NULL AND target_verified_at IS NULL)
+            OR (source_etag IS NOT NULL AND source_mime_type IS NOT NULL
+              AND source_byte_size IS NOT NULL AND source_sha256 IS NOT NULL
+              AND source_width IS NOT NULL AND source_height IS NOT NULL
+              AND final_etag IS NOT NULL AND target_verified_at IS NOT NULL)
+          ))
+      ))
+  )
+)
+`.replace(/\s+/gu, ' ').trim();
+
 const EXPECTED_COLUMN_NAMES = {
   events: [
     'id', 'slug', 'name', 'event_date', 'welcome_message', 'cover_object_key',
@@ -254,6 +578,8 @@ const EXPECTED_COLUMN_NAMES = {
     'event_start_at', 'photos_open_from',
     // 0012, appended so every earlier ordinal is unmoved.
     'cover_config', 'cover_revision', 'cover_render_set_id',
+    // 0015, appended without relabeling the historical Phase-3 schema.
+    'guestbook_prompt',
   ],
   rsvpRosterBatchReceipts: [
     'event_id', 'idempotency_key', 'request_digest', 'receipt_json', 'created_at',
@@ -296,6 +622,13 @@ const EXPECTED_TERMINAL_COLUMNS: Record<keyof typeof EXPECTED_COLUMN_NAMES, Expe
     },
     { name: 'cover_revision', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
     { name: 'cover_render_set_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+    {
+      name: 'guestbook_prompt',
+      type: 'TEXT',
+      notnull: 1,
+      dflt_value: "'Share a wish, memory, or moment from the day.'",
+      pk: 0,
+    },
   ],
   rsvpRosterBatchReceipts: [
     { name: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 },
@@ -678,13 +1011,87 @@ function assertPartialUniquePredicates(values: unknown[]): void {
   }
 }
 
+function assertGuestbookTables(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => textField(value, ['name'], `Guestbook table ${index + 1}`).name!),
+    EXPECTED_GUESTBOOK_TABLES,
+    'Guestbook table set',
+  );
+}
+
+function assertGuestbookColumns(values: unknown[]): void {
+  const seen = new Map<string, string[]>();
+  for (const [index, value] of values.entries()) {
+    const row = exactRecord(value, ['tbl', 'cid', 'col'], `Guestbook column ${index + 1}`);
+    if (typeof row.tbl !== 'string' || typeof row.col !== 'string'
+      || !Number.isSafeInteger(row.cid) || row.cid !== (seen.get(row.tbl)?.length ?? 0)) {
+      throw new TypeError(`Guestbook column ${index + 1} contains an invalid value.`);
+    }
+    const list = seen.get(row.tbl) ?? [];
+    list.push(row.col);
+    seen.set(row.tbl, list);
+  }
+  assertExactList([...seen.keys()].sort(), Object.keys(EXPECTED_GUESTBOOK_COLUMNS).sort(), 'Guestbook column table set');
+  for (const [table, columns] of seen) {
+    assertExactList(columns, EXPECTED_GUESTBOOK_COLUMNS[table]!, `${table} column sequence`);
+  }
+}
+
+function assertGuestbookForeignKeys(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = textField(value, ['tbl', 'parent', 'col', 'on_delete'], `Guestbook foreign key ${index + 1}`);
+      return `${row.tbl}.${row.col} -> ${row.parent} ${row.on_delete}`;
+    }),
+    EXPECTED_GUESTBOOK_FOREIGN_KEYS,
+    'Guestbook foreign-key set',
+  );
+}
+
+function assertGuestbookIndexes(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(value, ['tbl', 'idx', 'uniq', 'partial'], `Guestbook index ${index + 1}`);
+      if (typeof row.tbl !== 'string' || typeof row.idx !== 'string'
+        || (row.uniq !== 0 && row.uniq !== 1) || (row.partial !== 0 && row.partial !== 1)) {
+        throw new TypeError(`Guestbook index ${index + 1} contains an invalid value.`);
+      }
+      return `${row.tbl}.${row.idx} unique=${row.uniq} partial=${row.partial}`;
+    }),
+    EXPECTED_GUESTBOOK_INDEXES,
+    'Guestbook index set',
+  );
+}
+
+function assertGuestbookChecks(values: unknown[]): void {
+  const expectedNames = Object.keys(EXPECTED_GUESTBOOK_CHECKS).sort();
+  const rows = values.map((value, index) => textField(value, ['name', 'checks'], `Guestbook checks ${index + 1}`));
+  assertExactList(rows.map((row) => row.name!), expectedNames, 'Guestbook check table set');
+  for (const row of rows) {
+    if (row.checks !== EXPECTED_GUESTBOOK_CHECKS[row.name!]) {
+      throw new Error(`${row.name} CHECK inventory has drifted.`);
+    }
+  }
+}
+
+function assertMediaObjectPromotionsSql(values: unknown[]): void {
+  if (values.length !== 1) {
+    throw new Error('media_object_promotions table SQL returned the wrong row count.');
+  }
+  const row = textField(values[0], ['name', 'sql'], 'media_object_promotions table SQL');
+  if (row.name !== 'media_object_promotions'
+    || row.sql!.replace(/\s+/gu, ' ').trim() !== EXPECTED_MEDIA_OBJECT_PROMOTIONS_SQL) {
+    throw new Error('media_object_promotions normalized table SQL has drifted.');
+  }
+}
+
 function assertTriggers(values: unknown[]): void {
   const rows = values.map((value, index) => textField(value, ['name', 'sql'], `Trigger ${index + 1}`));
   assertExactList(rows.map((row) => row.name!), Object.keys(EXPECTED_TRIGGER_SQL_SHA256), 'Trigger set');
   for (const row of rows) {
     const normalized = row.sql!.replace(/\s+/gu, ' ').trim();
     if (sha256(normalized) !== EXPECTED_TRIGGER_SQL_SHA256[row.name!]) {
-      throw new Error(`${row.name} SQL has drifted.`);
+      throw new Error(`${row.name} trigger body SQL has drifted.`);
     }
   }
 }
@@ -731,6 +1138,12 @@ export function parseWranglerInvariantOutput(
   assertCoverIndexes(results[9]!);
   assertPartialUniquePredicates(results[10]!);
   assertTriggers(results[11]!);
+  assertGuestbookTables(results[12]!);
+  assertGuestbookColumns(results[13]!);
+  assertGuestbookForeignKeys(results[14]!);
+  assertGuestbookIndexes(results[15]!);
+  assertGuestbookChecks(results[16]!);
+  assertMediaObjectPromotionsSql(results[17]!);
 
   // `terminalSchema` deliberately keeps its three keys. `exactRecord` rejects
   // unknown fields, the literal recurs in four test files, and

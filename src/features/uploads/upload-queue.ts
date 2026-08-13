@@ -28,6 +28,7 @@ export interface UploadQueueItem {
 
 export type ReservationResult =
   | { id: string; status: 'accepted'; reservation: UploadReservation }
+  | { id: string; status: 'delivered' }
   | { id: string; status: 'rejected'; error: string };
 
 export interface UploadTransport {
@@ -102,7 +103,11 @@ export async function runUploadQueue(
   for (const candidate of candidates) {
     if (reservationRequestFailed || signal?.aborted) continue;
     const result = resultsById.get(candidate.id);
-    if (result?.status === 'accepted') {
+    if (result?.status === 'delivered') {
+      current = current.map((item) => item.id === candidate.id
+        ? { ...item, state: 'delivered', progress: 100, reservation: undefined, error: undefined }
+        : item);
+    } else if (result?.status === 'accepted') {
       current = current.map((item) => item.id === candidate.id
         ? { ...item, state: 'queued', reservation: result.reservation, error: undefined }
         : item);

@@ -80,17 +80,24 @@ test.describe('mobile event-theme visual evidence', () => {
     await expect(page).toHaveScreenshot('guest-default-cover-390.png');
   });
 
-  test('Candidary Default Notes use the corrected form and divider', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 1300 });
+  test('Candidary Default Guestbook uses inherited event tokens for maximum RTL content', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 1600 });
     await stubGuestRoutes(page, {
-      event: { theme: eventTheme('candidary-default') },
-      messages: [TEST_NOTE],
+      event: {
+        theme: eventTheme('candidary-default'),
+        guestbookPrompt: `${'احتفظوا بهذه الذكرى الجميلة — '.repeat(8)}🌿`.slice(0, 160),
+      },
+      messages: [{
+        ...TEST_NOTE,
+        guestName: 'ليلى'.repeat(20),
+        body: `${'في هذا اليوم رأينا المحبة في كل تفصيل صغير — '.repeat(18)}✨`.slice(0, 500),
+      }],
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+    await page.locator('.event-extra summary').filter({ hasText: 'Guestbook' }).click();
     await expect(page.locator('.notes-feed li')).toHaveCount(1);
     await settle(page);
-    await expect(page.locator('.guest-secondary')).toHaveScreenshot('guest-default-notes-390.png');
+    await expect(page.locator('.guest-secondary')).toHaveScreenshot('guest-default-guestbook-390.png');
   });
 
   test('Garden Party cover preserves the guest first fold', async ({ page }) => {

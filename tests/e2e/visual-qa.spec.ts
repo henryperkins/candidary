@@ -24,7 +24,7 @@ const previewBytes = readFileSync('public/assets/candidary-hero.png');
 // with both a real thumbnail and the worst filename a phone produces.
 const KEEPER = { name: LONG_FILENAME.replace(/\.HEIC$/u, '.png'), mimeType: 'image/png', buffer: previewBytes };
 const REJECT = { name: 'guest-list.txt', mimeType: 'text/plain', buffer: Buffer.from('not a photo') };
-const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
+const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Guestbook', 'Share', 'Settings'] as const;
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
 const RSVP_PRIMARY = {
   uploadsEnabled: false,
@@ -223,6 +223,21 @@ test('the manager guest list holds its totals, filters, and household rows', asy
   expect(await page.evaluate(() => window.scrollY), 'the panel is laid out without scrolling').toBe(0);
   await settle(page);
   await expect(page.locator('.rsvp-manager')).toHaveScreenshot('manager-rsvp-390.png');
+});
+
+test('the Manager Guestbook holds its global chrome, filters, row state, and actions at 390', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    mediaPages: MEDIA_PAGES,
+    messages: [{ ...TEST_NOTE, moderationStatus: 'pending' }],
+  });
+  await page.setViewportSize({ width: 390, height: 1400 });
+  await page.goto(managerUrl);
+  await destination(page, 'Guestbook').click();
+  await expect(page.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
+  const guestbook = page.getByRole('region', { name: 'Guestbook from the day' });
+  await expect(guestbook.getByRole('button', { name: 'Share', exact: true })).toBeVisible();
+  await settle(page);
+  await expect(page.locator('.manager-main')).toHaveScreenshot('manager-guestbook-390.png');
 });
 
 test('the manager rail holds its labels at 768', async ({ page }) => {

@@ -1,19 +1,19 @@
 import { strToU8, Zip, ZipPassThrough, zipSync } from 'fflate';
 
-import type { MediaRecord } from '../db/types';
+import type { ExportableMediaRecord } from '../db/types';
 import { buildMediaCsv } from './csv';
 import { exportPath } from './paths';
 
 export { exportPath } from './paths';
 
-export function buildExportZip(entries: Array<{ media: MediaRecord; bytes: Uint8Array }>): Uint8Array {
+export function buildExportZip(entries: Array<{ media: ExportableMediaRecord; bytes: Uint8Array }>): Uint8Array {
   const files: Record<string, Uint8Array> = {};
   entries.forEach((entry, index) => { files[exportPath(entry.media, index)] = entry.bytes; });
   files['media.csv'] = strToU8(buildMediaCsv(entries.map(({ media }) => media)));
   return zipSync(files, { level: 0 });
 }
 
-export function buildExportZipStream(entries: Array<{ media: MediaRecord; body: ReadableStream<Uint8Array> }>): ReadableStream<Uint8Array> {
+export function buildExportZipStream(entries: Array<{ media: ExportableMediaRecord; body: ReadableStream<Uint8Array> }>): ReadableStream<Uint8Array> {
   const transform = new TransformStream<Uint8Array, Uint8Array>();
   const writer = transform.writable.getWriter();
   let writes: Promise<void> = Promise.resolve();

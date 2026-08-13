@@ -1,10 +1,11 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AccountsRepository } from '../../worker/db/accounts';
 import { NotificationOutboxRepository } from '../../worker/db/notification-outbox';
 import { EmailService } from '../../worker/services/email';
 import { NotificationService } from '../../worker/services/notifications';
+import { MediaObjectWriteTombstoneRepository } from '../../worker/db/media-write-tombstones';
 import worker from '../../worker/index';
 import { eventAccess, resetDatabase, testEnv } from './helpers';
 
@@ -45,6 +46,9 @@ function inDays(days: number): string {
 }
 
 beforeEach(resetDatabase);
+afterEach(() => {
+  delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+});
 
 describe('lifecycle scheduling', () => {
   // The scan these replace is gone: eligibility now comes from the outbox row that
@@ -437,7 +441,8 @@ describe('durable notification outbox', () => {
     });
   });
 
-  it('uses cron execution time for notification authorization and records scheduled time separately', async () => {
+  it('runs permanent legacy maintenance on the hourly handler in Candidate A while promotion stays disabled', async () => {
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = false;
     const { account, eventId } = await hostedEvent();
     const scheduledAt = new Date('2026-07-21T12:00:00.000Z');
     const executedAt = new Date('2026-07-21T12:10:00.000Z');
@@ -449,6 +454,17 @@ describe('durable notification outbox', () => {
     });
     const send = vi.spyOn(EmailService.prototype, 'send').mockResolvedValue({ delivered: true });
     const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const orphanKey = 'events/hard-purged/uploads/hourly-tombstone';
+    const discoveredKey = 'events/hard-purged/previews/hourly-discovered.webp';
+    await new MediaObjectWriteTombstoneRepository(testEnv.DB).ensure({
+      objectKey: orphanKey,
+      eventId: 'hard-purged',
+      mediaId: 'hourly-tombstone',
+      objectKind: 'source',
+      recordedAt: '2026-07-21T11:00:00.000Z',
+    });
+    await testEnv.MEDIA_BUCKET.put(orphanKey, new Uint8Array([1]));
+    await testEnv.MEDIA_BUCKET.put(discoveredKey, new Uint8Array([2]));
     const scheduled: Promise<unknown>[] = [];
     const clock = vi.useFakeTimers();
     clock.setSystemTime(executedAt);
@@ -457,6 +473,18 @@ describe('durable notification outbox', () => {
       testEnv,
       { waitUntil: (promise: Promise<unknown>) => scheduled.push(promise), passThroughOnException() {} } as unknown as ExecutionContext);
     await Promise.all(scheduled);
+    const second: Promise<unknown>[] = [];
+    clock.setSystemTime(new Date(executedAt.getTime() + 60 * 60 * 1_000));
+    worker.scheduled!({
+      cron: '47 * * * *',
+      scheduledTime: scheduledAt.getTime() + 60 * 60 * 1_000,
+    } as ScheduledController,
+    testEnv,
+    {
+      waitUntil: (promise: Promise<unknown>) => second.push(promise),
+      passThroughOnException() {},
+    } as unknown as ExecutionContext);
+    await Promise.all(second);
     clock.useRealTimers();
 
     expect(send).not.toHaveBeenCalled();
@@ -469,5 +497,16 @@ describe('durable notification outbox', () => {
       scheduledAt: scheduledAt.toISOString(),
       executedAt: executedAt.toISOString(),
     }));
+    expect(logged.mock.calls.map(([entry]) => JSON.parse(String(entry)))).toContainEqual(expect.objectContaining({
+      event: 'cleanup_completed',
+      scheduledAt: scheduledAt.toISOString(),
+      executedAt: executedAt.toISOString(),
+      mediaPromotion: expect.objectContaining({ inspected: 0, promoted: 0 }),
+      mediaWriteTombstones: expect.objectContaining({ inspected: expect.any(Number) }),
+    }));
+    expect(await testEnv.MEDIA_BUCKET.head(orphanKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(discoveredKey)).toBeNull();
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB).get(discoveredKey, 'legacy'))
+      .toMatchObject({ suppressionStartedAt: expect.any(String) });
   });
 });

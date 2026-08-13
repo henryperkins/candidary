@@ -13,7 +13,8 @@ import {
 import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
-import { MediaRepository } from '../db/media';
+import { managerMediaView, MediaRepository } from '../db/media';
+import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { requestOrigin } from '../origins';
 import { canonicalTimeZone, isIanaTimeZone } from '../../shared/event-time';
@@ -24,6 +25,7 @@ import {
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
+  MAX_GUESTBOOK_PROMPT_LENGTH,
   MIN_EVENT_CALENDAR_YEAR,
 } from '../../shared/constants';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
@@ -31,6 +33,7 @@ import { resolveEventSchedule } from '../http/event-schedule';
 import { eventStartTime, selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { deleteEventData } from '../workflows/cleanup';
+import { deleteMediaObjectAliases } from '../storage/media';
 
 const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 
@@ -42,6 +45,7 @@ const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 const settingsSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   welcomeMessage: z.string().trim().min(1).max(500).optional(),
+  guestbookPrompt: z.string().trim().min(1).max(MAX_GUESTBOOK_PROMPT_LENGTH),
   galleryVisible: z.boolean(),
   moderationRequired: z.boolean(),
   eventTimezone: z.string().min(1).max(64).refine(isIanaTimeZone, 'Choose a valid time zone.'),
@@ -345,12 +349,20 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
     ? await repository.delete(media.id, changedAt)
     : await repository.setPublication(media.id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), changedAt);
   if (parsed.data.action === 'delete') {
-    await context.env.MEDIA_BUCKET.delete([
-      media.objectKey,
-      ...(media.previewObjectKey ? [media.previewObjectKey] : []),
-    ]);
+    await deleteMediaObjectAliases(
+      context.env.MEDIA_BUCKET,
+      context.env.CANONICAL_MEDIA_BUCKET,
+      repository,
+      media,
+    ).catch(() => undefined);
   }
-  return context.json({ data: { media: result }, requestId: context.get('requestId') });
+  const item = parsed.data.action === 'delete'
+    ? null
+    : await new GuestbookRepository(context.env.DB).captionItemById(result.id);
+  return context.json({
+    data: { media: managerMediaView(result), item },
+    requestId: context.get('requestId'),
+  });
 });
 
 manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
@@ -365,7 +377,10 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
     publicationTarget(parsed.data.action),
     new Date().toISOString(),
   );
-  return context.json({ data: { changed }, requestId: context.get('requestId') });
+  return context.json({
+    data: { changed: changed.map(managerMediaView) },
+    requestId: context.get('requestId'),
+  });
 });
 
 // Only the management link rotates as a link now. The guest side is reached

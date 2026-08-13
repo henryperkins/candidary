@@ -29,27 +29,33 @@ import {
   sha256,
   type CandidateManifest,
   type HashedFile,
-} from './release-evidence';
+} from './release-evidence.ts';
 import {
   PHASE_2_MIGRATION,
   PHASE_3_MIGRATION,
+  POST_CUTOVER_MIGRATION,
   buildAtomicMigrationBundle,
   buildPhase2BootstrapBundle,
+  buildPostCutoverMigrationBundle,
   verifyExactReleaseCandidate,
   type ReleaseCandidateVerificationRequest,
   type VerifiedReleaseCandidate,
-} from './release-candidate';
+} from './release-candidate.ts';
 import {
+  POST_CUTOVER_PRODUCTION_TRIGGER_NAMES,
   PRODUCTION_TRIGGER_NAMES,
   type ZeroLegacyObservation,
-} from './migrate-release';
+} from './migrate-release.ts';
 import {
+  MEDIA_CUTOVER_READINESS_QUERY,
   assertStagingConformanceArtifact,
   verifyStagingConformanceArtifactFile,
   writeStagingConformanceArtifact,
-  type StagingArtifactBindings,
-  type StagingConformanceArtifactV1,
-} from './staging-release-evidence';
+  type AnyStagingArtifactBindings,
+  type StagingConformanceArtifact,
+} from './staging-release-evidence.ts';
+
+export { MEDIA_CUTOVER_READINESS_QUERY } from './staging-release-evidence.ts';
 
 const APPROVED_BASE_SHA = '0b92387d2e237d568d2514373dcc3044e7960d4b';
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -71,6 +77,11 @@ export const REQUIRED_STAGING_SECRET_NAMES = [
   'TOKEN_HMAC_KEY',
 ] as const;
 
+export const POST_CUTOVER_REQUIRED_STAGING_SECRET_NAMES = [
+  ...REQUIRED_STAGING_SECRET_NAMES,
+  'GUEST_MESSAGE_HMAC_KEY',
+] as const;
+
 export type StagingPurpose = 'workflow-conformance' | 'cutover';
 export type StagingRemoteMode = 'initialize' | 'deploy' | 'migrate';
 export type StagingMode = StagingRemoteMode | 'finalize' | 'verify';
@@ -82,7 +93,7 @@ interface EnabledIdentity {
 
 export interface StagingTargetDescriptorV1 {
   kind: 'candidary.staging-target';
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   purpose: StagingPurpose;
   accountId: string;
   worker: {
@@ -123,6 +134,12 @@ export interface StagingTargetDescriptorV1 {
       binding: 'RSVP_LOOKUP_RATE_LIMIT';
       namespaceId: string;
       limit: 30;
+      period: 60;
+    };
+    guestMessage?: EnabledIdentity & {
+      binding: 'GUEST_MESSAGE_RATE_LIMIT';
+      namespaceId: string;
+      limit: 120;
       period: 60;
     };
   };
@@ -171,6 +188,21 @@ export interface ReviewAuthorizationV1 {
   expiresAt: string;
 }
 
+export interface ReviewAuthorizationV2 {
+  kind: 'candidary.post-cutover-review-authorization';
+  schemaVersion: 2;
+  approvedMainSha: string;
+  phase2Sha: string;
+  phase2ManifestSha256: string;
+  candidateSha: string;
+  candidateManifestSha256: string;
+  reviewer: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+export type ReviewAuthorization = ReviewAuthorizationV1 | ReviewAuthorizationV2;
+
 export interface StagingAuthorizationV1 {
   kind: 'candidary.staging-authorization';
   schemaVersion: 1;
@@ -192,6 +224,17 @@ export interface StagingAuthorizationV1 {
   expiresAt: string;
   cleanupOwner: string;
 }
+
+export interface StagingAuthorizationV2 extends Omit<StagingAuthorizationV1, 'schemaVersion' | 'expectedSchemaSha256s'> {
+  schemaVersion: 2;
+  expectedSchemaSha256s: {
+    workflowConformancePhase2: string;
+    cutoverPhase2: string;
+    cutoverPostCutover: string;
+  };
+}
+
+export type StagingAuthorization = StagingAuthorizationV1 | StagingAuthorizationV2;
 
 export interface StagingDatabaseObservation {
   empty: boolean;
@@ -224,7 +267,7 @@ export interface StagingCommand {
 export interface StagingObservationContext {
   candidate: VerifiedReleaseCandidate;
   target: StagingTargetDescriptorV1;
-  authorization: StagingAuthorizationV1;
+  authorization: StagingAuthorization;
   ownedRoot: string;
 }
 
@@ -355,6 +398,7 @@ const PRODUCTION_IDENTITIES = new Set([
   'candidary-cover-backfill',
   '1001',
   '1002',
+  '1003',
   'hello@candidary.app',
   'https://candidary.app',
   'https://candidary.online',
@@ -371,8 +415,8 @@ function stagingIdentity(value: unknown, label: string): string {
 }
 
 function parseRate<
-  Binding extends 'HOST_AUTH_RATE_LIMIT' | 'RSVP_LOOKUP_RATE_LIMIT',
-  Limit extends 20 | 30,
+  Binding extends 'HOST_AUTH_RATE_LIMIT' | 'RSVP_LOOKUP_RATE_LIMIT' | 'GUEST_MESSAGE_RATE_LIMIT',
+  Limit extends 20 | 30 | 120,
 >(
   value: unknown,
   bindingName: Binding,
@@ -422,7 +466,8 @@ export function parseStagingTargetDescriptor(
     'assets', 'email', 'rateLimits', 'workflows', 'crons', 'vars', 'requiredSecretNames',
     'observability', 'placement', 'expiresAt', 'cleanupOwner',
   ], 'Staging target descriptor');
-  if (item.kind !== 'candidary.staging-target' || item.schemaVersion !== 1
+  if (item.kind !== 'candidary.staging-target'
+    || (item.schemaVersion !== 1 && item.schemaVersion !== 2)
     || (item.purpose !== 'workflow-conformance' && item.purpose !== 'cutover')) {
     throw new Error('Staging target identity or purpose is invalid.');
   }
@@ -433,7 +478,11 @@ export function parseStagingTargetDescriptor(
   const images = binding(item.images, 'IMAGES', ['identity'], 'Staging Images');
   const assets = binding(item.assets, 'ASSETS', ['identity'], 'Staging assets');
   const email = binding(item.email, 'EMAIL', ['destinationAddress'], 'Staging Email');
-  const rateLimits = exactRecord(item.rateLimits, ['hostAuth', 'rsvpLookup'], 'Staging rate limits');
+  const rateLimits = exactRecord(
+    item.rateLimits,
+    item.schemaVersion === 2 ? ['hostAuth', 'rsvpLookup', 'guestMessage'] : ['hostAuth', 'rsvpLookup'],
+    'Staging rate limits',
+  );
   const workflows = exactRecord(item.workflows, ['export', 'render', 'backfill'], 'Staging Workflows');
   const variables = exactRecord(item.vars, [
     'APP_ORIGIN', 'ALTERNATE_ORIGINS', 'R2_ACCOUNT_ID', 'R2_BUCKET_NAME', 'EMAIL_FROM',
@@ -445,7 +494,10 @@ export function parseStagingTargetDescriptor(
   const workersDev = booleanValue(worker.workersDev, 'Staging workersDev');
   const previewUrls = booleanValue(worker.previewUrls, 'Staging previewUrls');
   const requiredSecretNames = exactStrings(item.requiredSecretNames, 'Staging required secret names').sort();
-  if (canonicalJson(requiredSecretNames) !== canonicalJson([...REQUIRED_STAGING_SECRET_NAMES])) {
+  const expectedSecrets = item.schemaVersion === 2
+    ? POST_CUTOVER_REQUIRED_STAGING_SECRET_NAMES
+    : REQUIRED_STAGING_SECRET_NAMES;
+  if (canonicalJson(requiredSecretNames) !== canonicalJson([...expectedSecrets].sort())) {
     throw new Error('Staging required secret-name set is incomplete or foreign.');
   }
   if (d1.binding !== 'DB') throw new Error('Staging D1 binding is invalid.');
@@ -454,7 +506,7 @@ export function parseStagingTargetDescriptor(
   if (expiresAt <= now) throw new Error('Staging target is expired.');
 
   const parsed: StagingTargetDescriptorV1 = {
-    kind: 'candidary.staging-target', schemaVersion: 1, purpose,
+    kind: 'candidary.staging-target', schemaVersion: item.schemaVersion, purpose,
     accountId: patternValue(item.accountId, ACCOUNT_PATTERN, 'Staging accountId'),
     worker: {
       name: stagingIdentity(worker.name, 'Staging Worker name'), routes,
@@ -484,6 +536,14 @@ export function parseStagingTargetDescriptor(
     rateLimits: {
       hostAuth: parseRate(rateLimits.hostAuth, 'HOST_AUTH_RATE_LIMIT', 20, 'hostAuth rate limit'),
       rsvpLookup: parseRate(rateLimits.rsvpLookup, 'RSVP_LOOKUP_RATE_LIMIT', 30, 'RSVP rate limit'),
+      ...(item.schemaVersion === 2 ? {
+        guestMessage: parseRate(
+          rateLimits.guestMessage,
+          'GUEST_MESSAGE_RATE_LIMIT',
+          120,
+          'Guestbook message rate limit',
+        ),
+      } : {}),
     },
     workflows: {
       export: parseWorkflow(workflows.export, 'EXPORT_WORKFLOW', 'ExportWorkflow', 'export Workflow') as StagingTargetDescriptorV1['workflows']['export'],
@@ -515,7 +575,8 @@ export function parseStagingTargetDescriptor(
     }
     if (crons.length !== 0) throw new Error('Workflow-conformance target cannot enable cron triggers.');
     if (parsed.assets.enabled || parsed.email.enabled
-      || parsed.rateLimits.hostAuth.enabled || parsed.rateLimits.rsvpLookup.enabled) {
+      || parsed.rateLimits.hostAuth.enabled || parsed.rateLimits.rsvpLookup.enabled
+      || parsed.rateLimits.guestMessage?.enabled) {
       throw new Error('Workflow-conformance public assets, Email, and rate limits must be explicitly disabled.');
     }
   }
@@ -531,41 +592,47 @@ export function stagingTargetSha256(value: StagingTargetDescriptorV1): string {
   return sha256(`${canonicalJson(parseStagingTargetDescriptor(value, '1970-01-01T00:00:00.000Z'))}\n`);
 }
 
-function parseReviewAuthorization(value: unknown, now: string): ReviewAuthorizationV1 {
+function parseReviewAuthorization(value: unknown, now: string): ReviewAuthorization {
   const item = exactRecord(value, [
     'kind', 'schemaVersion', 'approvedMainSha', 'phase2Sha', 'phase2ManifestSha256',
     'candidateSha', 'candidateManifestSha256', 'reviewer', 'issuedAt', 'expiresAt',
   ], 'Review authorization');
-  if (item.kind !== 'candidary.phase-3-review-authorization' || item.schemaVersion !== 1) {
+  const historical = item.kind === 'candidary.phase-3-review-authorization' && item.schemaVersion === 1;
+  const postCutover = item.kind === 'candidary.post-cutover-review-authorization' && item.schemaVersion === 2;
+  if (!historical && !postCutover) {
     throw new Error('Review authorization identity is invalid.');
   }
   const issuedAt = isoInstant(item.issuedAt, 'Review authorization issuedAt');
   const expiresAt = isoInstant(item.expiresAt, 'Review authorization expiresAt');
   if (issuedAt > now || now >= expiresAt) throw new Error('Review authorization is not currently valid.');
   return {
-    kind: 'candidary.phase-3-review-authorization', schemaVersion: 1,
+    kind: historical
+      ? 'candidary.phase-3-review-authorization'
+      : 'candidary.post-cutover-review-authorization',
+    schemaVersion: historical ? 1 : 2,
     approvedMainSha: patternValue(item.approvedMainSha, SHA_PATTERN, 'approvedMainSha'),
     phase2Sha: patternValue(item.phase2Sha, SHA_PATTERN, 'phase2Sha'),
     phase2ManifestSha256: patternValue(item.phase2ManifestSha256, SHA256_PATTERN, 'phase2ManifestSha256'),
     candidateSha: patternValue(item.candidateSha, SHA_PATTERN, 'candidateSha'),
     candidateManifestSha256: patternValue(item.candidateManifestSha256, SHA256_PATTERN, 'candidateManifestSha256'),
     reviewer: owner(item.reviewer, 'reviewer'), issuedAt, expiresAt,
-  };
+  } as ReviewAuthorization;
 }
 
-function parseStagingAuthorization(value: unknown, now: string): StagingAuthorizationV1 {
+function parseStagingAuthorization(value: unknown, now: string): StagingAuthorization {
   const item = exactRecord(value, [
     'kind', 'schemaVersion', 'runId', 'reviewAuthorizationSha256', 'allowedCandidateShas',
     'targetSha256s', 'allowedModes', 'cutoverCrons', 'expectedSchemaSha256s',
     'issuedAt', 'expiresAt', 'cleanupOwner',
   ], 'Staging authorization');
-  if (item.kind !== 'candidary.staging-authorization' || item.schemaVersion !== 1) {
+  if (item.kind !== 'candidary.staging-authorization'
+    || (item.schemaVersion !== 1 && item.schemaVersion !== 2)) {
     throw new Error('Staging authorization identity is invalid.');
   }
   const targets = exactRecord(item.targetSha256s, ['workflowConformance', 'cutover'], 'Authorized targets');
-  const schemas = exactRecord(item.expectedSchemaSha256s, [
-    'workflowConformancePhase2', 'cutoverPhase2', 'cutoverPhase3',
-  ], 'Authorized staging schemas');
+  const schemas = exactRecord(item.expectedSchemaSha256s, item.schemaVersion === 2
+    ? ['workflowConformancePhase2', 'cutoverPhase2', 'cutoverPostCutover']
+    : ['workflowConformancePhase2', 'cutoverPhase2', 'cutoverPhase3'], 'Authorized staging schemas');
   const issuedAt = isoInstant(item.issuedAt, 'Staging authorization issuedAt');
   const expiresAt = isoInstant(item.expiresAt, 'Staging authorization expiresAt');
   if (issuedAt > now || now >= expiresAt) throw new Error('Staging authorization is not currently valid.');
@@ -575,7 +642,7 @@ function parseStagingAuthorization(value: unknown, now: string): StagingAuthoriz
     throw new Error('Staging authorization modes are incomplete or unknown.');
   }
   return {
-    kind: 'candidary.staging-authorization', schemaVersion: 1,
+    kind: 'candidary.staging-authorization', schemaVersion: item.schemaVersion,
     runId: patternValue(item.runId, UUID_PATTERN, 'Staging runId'),
     reviewAuthorizationSha256: patternValue(item.reviewAuthorizationSha256, SHA256_PATTERN, 'review digest'),
     allowedCandidateShas: exactStrings(item.allowedCandidateShas, 'allowed candidate SHAs')
@@ -586,13 +653,17 @@ function parseStagingAuthorization(value: unknown, now: string): StagingAuthoriz
     },
     allowedModes: modes as StagingMode[],
     cutoverCrons: exactStrings(item.cutoverCrons, 'authorized cutover crons'),
-    expectedSchemaSha256s: {
+    expectedSchemaSha256s: item.schemaVersion === 2 ? {
+      workflowConformancePhase2: patternValue(schemas.workflowConformancePhase2, SHA256_PATTERN, 'workflow schema digest'),
+      cutoverPhase2: patternValue(schemas.cutoverPhase2, SHA256_PATTERN, 'cutover Phase-2 schema digest'),
+      cutoverPostCutover: patternValue(schemas.cutoverPostCutover, SHA256_PATTERN, 'cutover post-cutover schema digest'),
+    } : {
       workflowConformancePhase2: patternValue(schemas.workflowConformancePhase2, SHA256_PATTERN, 'workflow schema digest'),
       cutoverPhase2: patternValue(schemas.cutoverPhase2, SHA256_PATTERN, 'cutover Phase-2 schema digest'),
       cutoverPhase3: patternValue(schemas.cutoverPhase3, SHA256_PATTERN, 'cutover Phase-3 schema digest'),
     },
     issuedAt, expiresAt, cleanupOwner: owner(item.cleanupOwner, 'Staging authorization cleanupOwner'),
-  };
+  } as StagingAuthorization;
 }
 
 function exactRegularFile(path: string, label: string): string {
@@ -742,7 +813,11 @@ export function buildStagingOverlay(
   if (target.email.enabled) {
     source.send_email = [{ name: target.email.binding, destination_address: target.email.destinationAddress }];
   }
-  source.ratelimits = [target.rateLimits.hostAuth, target.rateLimits.rsvpLookup]
+  source.ratelimits = [
+    target.rateLimits.hostAuth,
+    target.rateLimits.rsvpLookup,
+    ...(target.rateLimits.guestMessage ? [target.rateLimits.guestMessage] : []),
+  ]
     .filter((rate) => rate.enabled)
     .map((rate) => ({
       name: rate.binding,
@@ -907,7 +982,7 @@ function migrationNames(candidate: VerifiedReleaseCandidate, count = candidate.m
 
 function expectedPhase2Schema(
   target: StagingTargetDescriptorV1,
-  authorization: StagingAuthorizationV1,
+  authorization: StagingAuthorization,
 ): string {
   return target.purpose === 'workflow-conformance'
     ? authorization.expectedSchemaSha256s.workflowConformancePhase2
@@ -918,7 +993,7 @@ function assertPhase2State(
   observation: StagingDatabaseObservation,
   candidate: VerifiedReleaseCandidate,
   target: StagingTargetDescriptorV1,
-  authorization: StagingAuthorizationV1,
+  authorization: StagingAuthorization,
 ): void {
   const names = migrationNames(candidate, 13);
   if (names.at(-1) !== PHASE_2_MIGRATION || !sameStrings(observation.ledger, names)) {
@@ -945,13 +1020,30 @@ function assertPhase3State(
   }
 }
 
+function assertPostCutoverState(
+  observation: StagingDatabaseObservation,
+  candidate: VerifiedReleaseCandidate,
+  authorization: StagingAuthorizationV2,
+): void {
+  if (!sameStrings(observation.ledger, migrationNames(candidate, 15))
+    || observation.ledger.at(-1) !== POST_CUTOVER_MIGRATION) {
+    throw new Error('Staging post-cutover ledger is incomplete or out of order.');
+  }
+  if (observation.schemaSha256 !== authorization.expectedSchemaSha256s.cutoverPostCutover) {
+    throw new Error('Staging post-cutover schema fingerprint does not match authorization.');
+  }
+  if (!sameStrings(observation.triggerNames, [...POST_CUTOVER_PRODUCTION_TRIGGER_NAMES])) {
+    throw new Error('Staging post-cutover trigger set is incomplete or unexpected.');
+  }
+}
+
 function sameDatabase(left: StagingDatabaseObservation, right: StagingDatabaseObservation): boolean {
   return canonicalJson(left) === canonicalJson(right);
 }
 
 function validateCandidateBinding(
   candidate: VerifiedReleaseCandidate,
-  review: ReviewAuthorizationV1,
+  review: ReviewAuthorization,
 ): void {
   if (review.approvedMainSha !== APPROVED_BASE_SHA) {
     throw new Error('Review authorization approved main is not the pinned integration base.');
@@ -960,13 +1052,16 @@ function validateCandidateBinding(
     if (candidate.sha !== review.phase2Sha || candidate.manifestSha256 !== review.phase2ManifestSha256) {
       throw new Error('Review authorization does not bind the exact Phase-2 proof candidate.');
     }
-  } else if (candidate.migrationCount === 14) {
+  } else if ((review.schemaVersion === 1 && candidate.migrationCount === 14)
+    || (review.schemaVersion === 2 && candidate.migrationCount === 15)) {
     if (candidate.sha !== review.candidateSha
       || candidate.manifestSha256 !== review.candidateManifestSha256) {
-      throw new Error('Review authorization does not bind the exact Phase-3 candidate.');
+      throw new Error('Review authorization does not bind the exact final candidate.');
     }
   } else {
-    throw new Error('Staging candidate must contain exactly thirteen or fourteen migrations.');
+    throw new Error(review.schemaVersion === 2
+      ? 'Post-cutover staging candidate must contain exactly fifteen migrations.'
+      : 'Historical staging candidate must contain exactly thirteen or fourteen migrations.');
   }
 }
 
@@ -974,8 +1069,8 @@ interface ValidatedInputs {
   candidate: VerifiedReleaseCandidate;
   target: StagingTargetDescriptorV1;
   targetSha256: string;
-  review: ReviewAuthorizationV1;
-  authorization: StagingAuthorizationV1;
+  review: ReviewAuthorization;
+  authorization: StagingAuthorization;
   verificationRequest: ReleaseCandidateVerificationRequest;
 }
 
@@ -991,6 +1086,9 @@ function validateInputs(
   const review = parseReviewAuthorization(reviewInput.value, now);
   const authorizationInput = readCanonicalInput<unknown>(request.candidateRoot, request.authorizationPath, 'Staging authorization');
   const authorization = parseStagingAuthorization(authorizationInput.value, now);
+  if (target.schemaVersion !== review.schemaVersion || target.schemaVersion !== authorization.schemaVersion) {
+    throw new Error('Staging target, review, and authorization schema versions must match.');
+  }
   const targetSha = stagingTargetSha256(target);
   const authorizedTargetSha = target.purpose === 'workflow-conformance'
     ? authorization.targetSha256s.workflowConformance
@@ -1004,7 +1102,11 @@ function validateInputs(
     || target.cleanupOwner !== authorization.cleanupOwner) {
     throw new Error('Staging authorization does not bind this review, candidate, target, mode, and cleanup owner.');
   }
-  const expectedCount = request.sha === review.phase2Sha ? 13 : request.sha === review.candidateSha ? 14 : null;
+  const expectedCount = request.sha === review.phase2Sha
+    ? 13
+    : request.sha === review.candidateSha
+      ? (review.schemaVersion === 2 ? 15 : 14)
+      : null;
   if (expectedCount === null) throw new Error('Requested staging SHA is not named by review authorization.');
   const verificationRequest: ReleaseCandidateVerificationRequest = {
     candidateRoot: request.candidateRoot,
@@ -1071,16 +1173,18 @@ export function runStagingRelease(
   if (request.mode !== 'initialize' && request.through !== undefined) {
     throw new Error('--through is valid only for staging initialization.');
   }
-  if (request.mode === 'initialize' && inputs.candidate.migrationCount !== 13) {
-    throw new Error('Staging initialization requires the exact Phase-2 candidate.');
+  if (request.mode === 'initialize'
+    && inputs.candidate.migrationCount !== 13) {
+    throw new Error('Staging initialization requires the exact authorized candidate boundary.');
   }
   if (request.mode === 'migrate'
-    && (inputs.target.purpose !== 'cutover' || inputs.candidate.migrationCount !== 14)) {
-    throw new Error('Staging migration requires the cutover target and exact Phase-3 candidate.');
+    && (inputs.target.purpose !== 'cutover'
+      || inputs.candidate.migrationCount !== (inputs.target.schemaVersion === 2 ? 15 : 14))) {
+    throw new Error('Staging migration requires the cutover target and exact authorized final candidate.');
   }
   if (request.mode === 'deploy' && inputs.target.purpose === 'workflow-conformance'
-    && inputs.candidate.migrationCount !== 14) {
-    throw new Error('Workflow-conformance deployment requires the exact Phase-3 candidate.');
+    && inputs.candidate.migrationCount !== (inputs.target.schemaVersion === 2 ? 15 : 14)) {
+    throw new Error('Workflow-conformance deployment requires the exact authorized final candidate.');
   }
 
   const candidate = reprepareAndVerify(inputs, adapters);
@@ -1127,12 +1231,18 @@ export function runStagingRelease(
       const before = databaseObservation(adapters.observeDatabase(context));
       assertPhase2State(before, candidate, inputs.target, inputs.authorization);
       const ownedCandidate = { ...candidate, candidateRoot: owned.root };
-      const bundle = buildAtomicMigrationBundle({
-        verifiedCandidate: ownedCandidate,
-        expectedLedger: before.ledger,
-        migration: PHASE_3_MIGRATION,
-        outputPath: resolve(owned.root, 'phase3-migration.sql'),
-      });
+      const bundle = inputs.target.schemaVersion === 2
+        ? buildPostCutoverMigrationBundle({
+          verifiedCandidate: ownedCandidate,
+          expectedLedger: before.ledger,
+          outputPath: resolve(owned.root, 'post-cutover-migrations.sql'),
+        })
+        : buildAtomicMigrationBundle({
+          verifiedCandidate: ownedCandidate,
+          expectedLedger: before.ledger,
+          migration: PHASE_3_MIGRATION,
+          outputPath: resolve(owned.root, 'phase3-migration.sql'),
+        });
       if (adapters.hashFile(bundle.outputPath) !== bundle.sha256) {
         throw new Error('Staging Phase-3 bundle drifted before invocation.');
       }
@@ -1143,13 +1253,25 @@ export function runStagingRelease(
         throw new Error('Atomic staging migration failed; rollback was verified.');
       }
       const after = databaseObservation(adapters.observeDatabase(context));
-      assertPhase3State(after, candidate, inputs.authorization);
+      if (inputs.authorization.schemaVersion === 2) {
+        assertPostCutoverState(after, candidate, inputs.authorization);
+      } else {
+        assertPhase3State(after, candidate, inputs.authorization);
+      }
       return {
         mode: 'migrate', candidateSha: candidate.sha, purpose: inputs.target.purpose,
         targetSha256: inputs.targetSha256, ledger: after.ledger, bundleSha256: bundle.sha256,
       };
     }
 
+    const deploymentDatabase = databaseObservation(adapters.observeDatabase(context));
+    if (candidate.migrationCount === 13) {
+      assertPhase2State(deploymentDatabase, candidate, inputs.target, inputs.authorization);
+    } else if (inputs.authorization.schemaVersion === 2) {
+      assertPostCutoverState(deploymentDatabase, candidate, inputs.authorization);
+    } else {
+      assertPhase3State(deploymentDatabase, candidate, inputs.authorization);
+    }
     verifySecrets(adapters.listSecretNames(context), inputs.target.requiredSecretNames);
     const exitCode = adapters.run(command('deploy', candidate, owned, owned.configPath));
     if (exitCode !== 0) throw new Error('Exact staging Worker deployment failed.');
@@ -1198,7 +1320,7 @@ interface LoadedCandidateManifest {
   root: string;
   digest: string;
   manifest: CandidateManifest;
-  migrationCount: 13 | 14;
+  migrationCount: 13 | 14 | 15;
 }
 
 function loadCandidateManifestInput(path: string): LoadedCandidateManifest {
@@ -1219,7 +1341,7 @@ function loadCandidateManifestInput(path: string): LoadedCandidateManifest {
     throw new Error('Candidate manifest is not one canonical complete passed artifact.');
   }
   const migrationCount = parsed.migrations.verification.migrationCount;
-  if (migrationCount !== 13 && migrationCount !== 14) {
+  if (migrationCount !== 13 && migrationCount !== 14 && migrationCount !== 15) {
     throw new Error('Candidate manifest is not at a supported release boundary.');
   }
   const runDirectory = dirname(inputPath);
@@ -1251,16 +1373,16 @@ function verifyLoadedCandidate(
 
 function deriveBundleBindings(
   phase2: VerifiedReleaseCandidate,
-  phase3: VerifiedReleaseCandidate,
+  finalCandidate: VerifiedReleaseCandidate,
   runId: string,
-): { bootstrapSha256: string; phase3MigrationSha256: string; phase3BundleSha256: string } {
+): { bootstrapSha256: string; finalMigrationsSha256: string; finalBundleSha256: string } {
   const phase2Path = resolve(
     phase2.candidateRoot,
     'output/staging', phase2.sha, runId, '.derived-phase2-bootstrap.sql',
   );
   const phase3Path = resolve(
-    phase3.candidateRoot,
-    'output/staging', phase3.sha, runId, '.derived-phase3-migration.sql',
+    finalCandidate.candidateRoot,
+    'output/staging', finalCandidate.sha, runId, '.derived-final-migrations.sql',
   );
   let phase2Created = false;
   let phase3Created = false;
@@ -1271,17 +1393,25 @@ function deriveBundleBindings(
       outputPath: phase2Path,
     });
     phase2Created = true;
-    const migration = buildAtomicMigrationBundle({
-      verifiedCandidate: phase3,
-      expectedLedger: phase2.migrations.map((file) => basename(file.path)),
-      migration: PHASE_3_MIGRATION,
-      outputPath: phase3Path,
-    });
+    const migration = finalCandidate.migrationCount === 15
+      ? buildPostCutoverMigrationBundle({
+        verifiedCandidate: finalCandidate,
+        expectedLedger: phase2.migrations.map((file) => basename(file.path)),
+        outputPath: phase3Path,
+      })
+      : buildAtomicMigrationBundle({
+        verifiedCandidate: finalCandidate,
+        expectedLedger: phase2.migrations.map((file) => basename(file.path)),
+        migration: PHASE_3_MIGRATION,
+        outputPath: phase3Path,
+      });
     phase3Created = true;
     return {
       bootstrapSha256: bootstrap.sha256,
-      phase3MigrationSha256: migration.migrationHash,
-      phase3BundleSha256: migration.sha256,
+      finalMigrationsSha256: ('migrationHash' in migration
+        ? migration.migrationHash
+        : migration.migrationsHash)!,
+      finalBundleSha256: migration.sha256,
     };
   } finally {
     if (phase2Created) rmSync(phase2Path, { force: true });
@@ -1291,52 +1421,81 @@ function deriveBundleBindings(
 
 function stagingBindings(
   phase2: VerifiedReleaseCandidate,
-  phase3: VerifiedReleaseCandidate,
-  review: ReviewAuthorizationV1,
+  finalCandidate: VerifiedReleaseCandidate,
+  review: ReviewAuthorization,
   reviewDigest: string,
-  authorization: StagingAuthorizationV1,
+  authorization: StagingAuthorization,
   authorizationDigest: string,
   derived: ReturnType<typeof deriveBundleBindings>,
-): StagingArtifactBindings {
-  return {
-    candidateSha: phase3.sha,
+): AnyStagingArtifactBindings {
+  const common = {
+    candidateSha: finalCandidate.sha,
     phase2Sha: phase2.sha,
     approvedMainSha: review.approvedMainSha,
     phase2ManifestSha256: phase2.manifestSha256,
-    candidateManifestSha256: phase3.manifestSha256,
+    candidateManifestSha256: finalCandidate.manifestSha256,
     phase2MigrationManifestSha256: phase2.manifest.candidate!.migrationManifestSha256,
-    phase3MigrationManifestSha256: phase3.manifest.candidate!.migrationManifestSha256,
     reviewAuthorizationSha256: reviewDigest,
     stagingAuthorizationSha256: authorizationDigest,
     workflowTargetSha256: authorization.targetSha256s.workflowConformance,
     cutoverTargetSha256: authorization.targetSha256s.cutover,
     bootstrapSha256: derived.bootstrapSha256,
-    phase3MigrationSha256: derived.phase3MigrationSha256,
-    phase3BundleSha256: derived.phase3BundleSha256,
+  };
+  return authorization.schemaVersion === 2 ? {
+    ...common, schemaVersion: 2,
+    postCutoverMigrationManifestSha256: finalCandidate.manifest.candidate!.migrationManifestSha256,
+    postCutoverMigrationsSha256: derived.finalMigrationsSha256,
+    postCutoverBundleSha256: derived.finalBundleSha256,
+  } : {
+    ...common,
+    phase3MigrationManifestSha256: finalCandidate.manifest.candidate!.migrationManifestSha256,
+    phase3MigrationSha256: derived.finalMigrationsSha256,
+    phase3BundleSha256: derived.finalBundleSha256,
   };
 }
 
 function validateLocalEvidenceInputs(
   phase2: VerifiedReleaseCandidate,
-  phase3: VerifiedReleaseCandidate,
+  finalCandidate: VerifiedReleaseCandidate,
   reviewInput: CanonicalInput<unknown>,
   authorizationInput: CanonicalInput<unknown>,
   now: string,
-): { review: ReviewAuthorizationV1; authorization: StagingAuthorizationV1 } {
+): { review: ReviewAuthorization; authorization: StagingAuthorization } {
   const review = parseReviewAuthorization(reviewInput.value, now);
   const authorization = parseStagingAuthorization(authorizationInput.value, now);
   validateCandidateBinding(phase2, review);
-  validateCandidateBinding(phase3, review);
+  validateCandidateBinding(finalCandidate, review);
+  if (review.schemaVersion !== authorization.schemaVersion
+    || (review.schemaVersion === 1 && finalCandidate.migrationCount !== 14)
+    || (review.schemaVersion === 2 && finalCandidate.migrationCount !== 15)) {
+    throw new Error('Staging evidence schema version does not match its final candidate boundary.');
+  }
   if (reviewInput.digest !== authorization.reviewAuthorizationSha256
     || !authorization.allowedCandidateShas.includes(phase2.sha)
-    || !authorization.allowedCandidateShas.includes(phase3.sha)) {
+    || !authorization.allowedCandidateShas.includes(finalCandidate.sha)) {
     throw new Error('Staging evidence authorization does not bind both exact source candidates.');
   }
   return { review, authorization };
 }
 
-function actualArtifactBindings(artifact: StagingConformanceArtifactV1): StagingArtifactBindings {
-  return {
+function actualArtifactBindings(artifact: StagingConformanceArtifact): AnyStagingArtifactBindings {
+  return artifact.schemaVersion === 2 ? {
+    schemaVersion: 2,
+    candidateSha: artifact.candidateSha,
+    phase2Sha: artifact.sources.phase2.sha,
+    approvedMainSha: artifact.approvedMainSha,
+    phase2ManifestSha256: artifact.sources.phase2.manifestSha256,
+    candidateManifestSha256: artifact.sources.postCutover.manifestSha256,
+    phase2MigrationManifestSha256: artifact.sources.phase2.migrationManifestSha256,
+    postCutoverMigrationManifestSha256: artifact.sources.postCutover.migrationManifestSha256,
+    reviewAuthorizationSha256: artifact.authorizations.reviewSha256,
+    stagingAuthorizationSha256: artifact.authorizations.stagingSha256,
+    workflowTargetSha256: artifact.targets.workflowConformanceSha256,
+    cutoverTargetSha256: artifact.targets.cutoverSha256,
+    bootstrapSha256: artifact.migrations.bootstrapSha256,
+    postCutoverMigrationsSha256: artifact.migrations.postCutoverMigrationsSha256,
+    postCutoverBundleSha256: artifact.migrations.postCutoverBundleSha256,
+  } : {
     candidateSha: artifact.candidateSha,
     phase2Sha: artifact.sources.phase2.sha,
     approvedMainSha: artifact.approvedMainSha,
@@ -1369,7 +1528,8 @@ export function finalizeStagingRelease(
   }
   const phase2Loaded = loadCandidateManifestInput(request.phase2ManifestPath);
   const phase3Loaded = loadCandidateManifestInput(request.manifestPath);
-  if (phase2Loaded.migrationCount !== 13 || phase3Loaded.migrationCount !== 14
+  if (phase2Loaded.migrationCount !== 13
+    || (phase3Loaded.migrationCount !== 14 && phase3Loaded.migrationCount !== 15)
     || phase3Loaded.manifest.candidate!.gitSha !== request.sha) {
     throw new Error('Staging finalization source manifests are at the wrong release boundaries.');
   }
@@ -1388,6 +1548,8 @@ export function finalizeStagingRelease(
   const workflow = parseStagingTargetDescriptor(workflowInput.value);
   const cutover = parseStagingTargetDescriptor(cutoverInput.value);
   if (workflow.purpose !== 'workflow-conformance' || cutover.purpose !== 'cutover'
+    || workflow.schemaVersion !== authorization.schemaVersion
+    || cutover.schemaVersion !== authorization.schemaVersion
     || workflowInput.digest !== authorization.targetSha256s.workflowConformance
     || cutoverInput.digest !== authorization.targetSha256s.cutover) {
     throw new Error('Staging finalization target descriptors do not match authorization.');
@@ -1413,7 +1575,7 @@ export function finalizeStagingRelease(
 export function verifyFinalStagingRelease(
   request: StagingVerifyRequest,
   adapters: StagingLocalEvidenceAdapters = localEvidenceAdapters,
-): { artifact: StagingConformanceArtifactV1; sha256: string } {
+): { artifact: StagingConformanceArtifact; sha256: string } {
   const artifactPath = exactRegularFile(request.artifactPath, 'Staging conformance artifact');
   const sidecarPath = exactRegularFile(request.sidecarPath, 'Staging conformance sidecar');
   if (realpathSync(sidecarPath) !== realpathSync(`${artifactPath}.sha256`)) {
@@ -1421,7 +1583,8 @@ export function verifyFinalStagingRelease(
   }
   const phase2Loaded = loadCandidateManifestInput(request.phase2ManifestPath);
   const phase3Loaded = loadCandidateManifestInput(request.manifestPath);
-  if (phase2Loaded.migrationCount !== 13 || phase3Loaded.migrationCount !== 14) {
+  if (phase2Loaded.migrationCount !== 13
+    || (phase3Loaded.migrationCount !== 14 && phase3Loaded.migrationCount !== 15)) {
     throw new Error('Staging verification source manifests are at the wrong release boundaries.');
   }
   const phase2 = verifyLoadedCandidate(phase2Loaded, adapters);
@@ -1584,6 +1747,32 @@ function numeric(row: Record<string, unknown>, field: string): number {
   return value as number;
 }
 
+export interface MediaCutoverReadinessObservation {
+  liveLegacyCount: number;
+  unverifiedLiveLegacyCount: number;
+}
+
+export function parseMediaCutoverReadinessRows(
+  value: unknown,
+): MediaCutoverReadinessObservation {
+  if (!Array.isArray(value) || value.length !== 1) {
+    throw new Error('Media cutover readiness must contain one primary D1 row.');
+  }
+  const row = exactRecord(value[0], [
+    'live_legacy_count', 'unverified_live_legacy_count',
+  ], 'Media cutover readiness row');
+  return {
+    liveLegacyCount: numeric(row, 'live_legacy_count'),
+    unverifiedLiveLegacyCount: numeric(row, 'unverified_live_legacy_count'),
+  };
+}
+
+export function observeMediaCutoverReadiness(
+  context: StagingObservationContext,
+): MediaCutoverReadinessObservation {
+  return parseMediaCutoverReadinessRows(d1Rows(context, MEDIA_CUTOVER_READINESS_QUERY));
+}
+
 function observeStagingDatabase(context: StagingObservationContext): StagingDatabaseObservation {
   const tables = d1Rows(context, "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name;");
   const hasLedger = tables.some((row) => row.type === 'table' && row.name === 'd1_migrations');
@@ -1609,7 +1798,6 @@ function observeStagingDatabase(context: StagingObservationContext): StagingData
     foreignKeyRows: foreignKeyRows as 0,
     triggerNames: tables.filter((row) => row.type === 'trigger')
       .map((row) => textValue(row.name, 'trigger name'))
-      .filter((name) => PRODUCTION_TRIGGER_NAMES.includes(name as typeof PRODUCTION_TRIGGER_NAMES[number]))
       .sort(),
     zeroCounts: counts ? {
       legacyRows: numeric(counts, 'legacyRows'),

@@ -28,7 +28,7 @@ import {
 const TOUCH_MINIMUM = 44;
 const NARROW = [320, 390] as const;
 const MANAGER_WIDTHS = [320, 390, 768] as const;
-const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Notes', 'Share', 'Settings'] as const;
+const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Guestbook', 'Share', 'Settings'] as const;
 
 const RSVP_PRIMARY: Partial<GuestEventView> = {
   uploadsEnabled: false,
@@ -102,7 +102,7 @@ test('the largest household reflows at 320 and 390 without a sideways page', asy
   await page.getByLabel('Full name').fill('Taylor Morgan');
   await page.getByRole('button', { name: 'Find my invitation' }).click();
   await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
-  await expect(page.getByRole('group'))
+  await expect(page.locator('.rsvp-household form').getByRole('group'))
     .toHaveCount(MAX_NAMED_INVITEES_PER_HOUSEHOLD + MAX_PLUS_ONES_PER_HOUSEHOLD);
 
   for (const width of NARROW) {

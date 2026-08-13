@@ -37,7 +37,7 @@ const WRANGLER_VERSION = '4.113.0' as const;
 const PRODUCTION_DATABASE_ID = '60bec5de-c8c7-41b5-a26b-2d3f7d184c71' as const;
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/u;
 
-const REQUIRED_SECRET_NAMES = [
+const HISTORICAL_REQUIRED_SECRET_NAMES = [
   'ENTRY_ENCRYPTION_KEY',
   'ENTRY_HMAC_KEY',
   'GUEST_TOKEN_ENCRYPTION_KEY',
@@ -47,6 +47,11 @@ const REQUIRED_SECRET_NAMES = [
   'RSVP_LOOKUP_HMAC_KEY',
   'SESSION_HMAC_KEY',
   'TOKEN_HMAC_KEY',
+] as const;
+
+const POST_CUTOVER_REQUIRED_SECRET_NAMES = [
+  ...HISTORICAL_REQUIRED_SECRET_NAMES,
+  'GUEST_MESSAGE_HMAC_KEY',
 ] as const;
 
 export interface CandidateObservationAdapter {
@@ -69,7 +74,7 @@ export interface VerifiedCandidate {
   readonly wranglerVersion: typeof WRANGLER_VERSION;
 }
 
-export interface StagingTargetAuthorization {
+export interface HistoricalStagingTargetAuthorization {
   readonly schemaVersion: 1;
   readonly authorization: 'approved';
   readonly accountId: string;
@@ -78,6 +83,21 @@ export interface StagingTargetAuthorization {
   readonly rsvpRateLimitNamespaceId: '2002';
   readonly target: StagingTarget;
 }
+
+export interface PostCutoverStagingTargetAuthorization {
+  readonly schemaVersion: 2;
+  readonly authorization: 'approved';
+  readonly accountId: string;
+  readonly databaseId: string;
+  readonly hostAuthRateLimitNamespaceId: '2001';
+  readonly rsvpRateLimitNamespaceId: '2002';
+  readonly guestMessageRateLimitNamespaceId: '2003';
+  readonly target: StagingTarget;
+}
+
+export type StagingTargetAuthorization =
+  | HistoricalStagingTargetAuthorization
+  | PostCutoverStagingTargetAuthorization;
 
 export interface OwnedDeployRoot {
   readonly root: string;
@@ -278,14 +298,17 @@ function assertPlainRecord(value: unknown, label: string): Record<string, unknow
 export function assertStagingTargetAuthorization(value: unknown): StagingTargetAuthorization {
   const record = assertPlainRecord(value, 'Staging target authorization');
   const keys = Object.keys(record).sort();
-  const expected = [
+  const historicalKeys = [
     'accountId', 'authorization', 'databaseId', 'hostAuthRateLimitNamespaceId',
     'rsvpRateLimitNamespaceId', 'schemaVersion', 'target',
   ].sort();
+  const postCutoverKeys = [...historicalKeys, 'guestMessageRateLimitNamespaceId'].sort();
+  const expected = record.schemaVersion === 2 ? postCutoverKeys : historicalKeys;
   if (canonicalJson(keys) !== canonicalJson(expected)) {
     throw new Error('Staging target authorization has an unknown or missing field.');
   }
-  if (record.schemaVersion !== 1 || record.authorization !== 'approved') {
+  if ((record.schemaVersion !== 1 && record.schemaVersion !== 2)
+    || record.authorization !== 'approved') {
     throw new Error('Staging target authorization is not approved.');
   }
   if (typeof record.accountId !== 'string' || !ACCOUNT_ID_PATTERN.test(record.accountId)) {
@@ -296,7 +319,8 @@ export function assertStagingTargetAuthorization(value: unknown): StagingTargetA
     throw new Error('Staging database ID is invalid or production.');
   }
   if (record.hostAuthRateLimitNamespaceId !== '2001'
-    || record.rsvpRateLimitNamespaceId !== '2002') {
+    || record.rsvpRateLimitNamespaceId !== '2002'
+    || (record.schemaVersion === 2 && record.guestMessageRateLimitNamespaceId !== '2003')) {
     throw new Error('Staging rate-limit namespace IDs are not approved.');
   }
   assertSafeStagingTarget(record.target);
@@ -347,6 +371,11 @@ export function buildStagingWranglerConfig(
       namespace_id: authorization.rsvpRateLimitNamespaceId,
       simple: { limit: 30, period: 60 },
     },
+    ...(authorization.schemaVersion === 2 ? [{
+      name: 'GUEST_MESSAGE_RATE_LIMIT',
+      namespace_id: authorization.guestMessageRateLimitNamespaceId,
+      simple: { limit: 120, period: 60 },
+    }] : []),
   ];
   source.vars = {
     APP_ORIGIN: STAGING_ORIGIN,
@@ -408,13 +437,19 @@ export function assertSafeStagingWranglerConfig(
     EMAIL_FROM: 'hello@staging.candidary.invalid',
   })) throw new Error('Staging variables are unsafe.');
   const secrets = assertPlainRecord(config.secrets, 'Staging secret declaration');
+  const expectedSecrets = authorization.schemaVersion === 2
+    ? POST_CUTOVER_REQUIRED_SECRET_NAMES
+    : HISTORICAL_REQUIRED_SECRET_NAMES;
   if (canonicalJson(stringArray(secrets.required, 'Required secrets').sort())
-    !== canonicalJson([...REQUIRED_SECRET_NAMES].sort())) {
+    !== canonicalJson([...expectedSecrets].sort())) {
     throw new Error('Staging secret-name set is incomplete or foreign.');
   }
   const expectedRateLimits = [
     { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '2001', simple: { limit: 20, period: 60 } },
     { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '2002', simple: { limit: 30, period: 60 } },
+    ...(authorization.schemaVersion === 2 ? [{
+      name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '2003', simple: { limit: 120, period: 60 },
+    }] : []),
   ];
   if (canonicalJson(config.ratelimits) !== canonicalJson(expectedRateLimits)) {
     throw new Error('Staging rate-limit bindings are unsafe.');

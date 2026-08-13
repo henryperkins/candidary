@@ -178,7 +178,7 @@ async function previewResponse(context: Context<AppBindings>) {
     if (!guestCanRead) throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
   }
 
-  const object = await getOrCreatePreview(context.env, media, repository);
+  const object = await getOrCreatePreview(context.env, media);
   return new Response(object.body, {
     headers: {
       'Content-Type': object.httpMetadata?.contentType ?? 'image/webp',
@@ -201,7 +201,10 @@ contentRoutes.get('/media/:mediaId/original', async (context) => {
     eventId: media.eventId,
     deniedMessage: 'Only the event host can download original photos.',
   });
-  const object = await context.env.MEDIA_BUCKET.get(media.objectKey);
+  const bucket = media.objectBucketGeneration === 'canonical'
+    ? context.env.CANONICAL_MEDIA_BUCKET
+    : context.env.MEDIA_BUCKET;
+  const object = await bucket.get(media.objectKey);
   if (!object?.body) throw new ApiError('UPLOAD_OBJECT_MISSING', 'This original photo is temporarily unavailable.', 404);
   const filename = encodeURIComponent(media.originalFilename);
   return new Response(object.body, {

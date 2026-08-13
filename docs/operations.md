@@ -4,21 +4,23 @@
 
 Two triggers share one handler and are selected by `controller.cron`.
 
-The hourly `47 * * * *` handler delivers lifecycle email from the outbox. It is
-independent of retention cleanup: neither can abort the other.
+The hourly `47 * * * *` handler delivers lifecycle email from the outbox and runs one bounded media
+promotion pass. Those promises have independent failure boundaries: promotion cannot abort
+notification delivery, and one promotion row cannot abort the rest of its pass.
 
 The daily `17 3 * * *` handler performs these idempotent phases in order:
 
 1. Sweep expired and consumed pending registrations, expired login challenges, and rate-limit buckets older than the enforcement window, in repeated bounded passes until each table is drained.
 2. Sweep expired or revoked RSVP sessions and lookup rate windows older than one 15-minute bucket, in the same bounded 100-row passes capped at 50 per run. Both statements report counts only; neither can name a household, a guest, or a scope.
 3. Delete objects for upload reservations older than fifteen minutes and release event counters.
-4. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
-5. Resolve globally bounded backfill jobs whose exact legacy source is no longer current, rotating still-current blockers fairly rather than letting the oldest 100 starve newer work.
-6. Recover stale initial backfill creates with the same stored Workflow ID, then confirm their existing generation/fence.
-7. Reconcile retryable backfill jobs with platform status. Guarded Worker transitions own resume and restart. A successful `unknown` or unmapped status changes nothing. A failed lookup remains classified `unknown`, but after the exact D1/fence/generation/currentness/capacity/checkpoint claim succeeds the Worker replays its deterministic ID through idempotent `createBatch`; a retained ID is skipped, an absent ID is created, and an invalid ID is rejected.
-8. Close eligible backfill and verification runs. The Worker re-derives the four zero-legacy predicates inside the status-changing statement; no operator payload writes `verified_at`.
-9. Sweep cover drafts, previews, retired sets/masters/originals, receipts, fences, jobs, and closed runs in bounded classes, deleting R2 before the inventory row that named an object.
-10. Resume retention-due or already soft-deleted event purges. Cover fences are coordinated before R2, and cover children are deleted before the event. A failed purge remains selected on later passes rather than stranding objects.
+4. Run the same bounded durable media promotion pass used by the hourly trigger.
+5. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
+6. Resolve globally bounded backfill jobs whose exact legacy source is no longer current, rotating still-current blockers fairly rather than letting the oldest 100 starve newer work.
+7. Recover stale initial backfill creates with the same stored Workflow ID, then confirm their existing generation/fence.
+8. Reconcile retryable backfill jobs with platform status. Guarded Worker transitions own resume and restart. A successful `unknown` or unmapped status changes nothing. A failed lookup remains classified `unknown`, but after the exact D1/fence/generation/currentness/capacity/checkpoint claim succeeds the Worker replays its deterministic ID through idempotent `createBatch`; a retained ID is skipped, an absent ID is created, and an invalid ID is rejected.
+9. Close eligible backfill and verification runs. The Worker re-derives the four zero-legacy predicates inside the status-changing statement; no operator payload writes `verified_at`.
+10. Sweep cover drafts, previews, retired sets/masters/originals, receipts, fences, jobs, and closed runs in bounded classes, deleting R2 before the inventory row that named an object.
+11. Resume retention-due or already soft-deleted event purges. Cover fences are coordinated before R2, and cover children are deleted before the event. A failed purge remains selected on later passes rather than stranding objects.
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 
@@ -89,17 +91,62 @@ contains no Worker version ID, so it cannot be used to claim deployment or weddi
 
 A finalized `stored` media row is a private host delivery. Its `publication_status` is independently `unpublished`, `published`, or `hidden`; changing publication never changes private retention or export eligibility. Originals are never guest-readable. Cached previews use separate R2 keys and can be regenerated without changing the original.
 
-One event permits 10,000 photos, 100 GiB of originals, and 20 MB per photo. Guests reserve metadata in ordered batches of 20 with one aggregate event-counter write, then transfer at most two files concurrently per device. Capacity failures are per-file; accepted siblings remain valid.
+One event permits 10,000 photos, 100 GiB of originals, and 20 MB per photo. Guests reserve metadata in ordered batches of 20 with one aggregate event-counter write, then transfer at most two files concurrently per device. Capacity failures are per-file; accepted siblings remain valid. In canonical-live mode each reservation returns an authenticated same-origin content URL, never an R2 presigned URL.
 
-An expired PUT URL is refreshed against the same reservation. If cleanup or finalization already marked that reservation failed, retry reopens the same media row and reacquires quota before issuing a replacement URL. A transient confirmation failure resumes finalization without sending the original bytes again.
+An expired same-origin content URL is refreshed against the same reservation. The Worker reauthorizes
+the session and CSRF token immediately before accepting bytes, validates exact declared size, MIME,
+header signature, and dimensions, creates the deterministic canonical object only if absent, re-reads
+the complete object, and commits the canonical D1 generation. A transient confirmation failure can
+observe the already Stored row without sending the bytes again.
+
+### Distinct-bucket media cutover
+
+Migration 0015 records `legacy` or `canonical` generation on every media and export pointer. The legacy
+bucket remains readable only for recorded legacy rows; new canonical-live uploads write through the
+authenticated Worker to the distinct canonical bucket. Content, preview, export, delete, and cleanup
+paths choose the bucket from the recorded generation and never probe a fallback bucket.
+
+The three runtime modes are exact. Candidate A (`canonical-cutover-disabled`) disables ingress, legacy
+copy, pointer cutover, and relational purge. Copy-only (`canonical-copy-only`) enables only legacy
+copy. Candidate B (`canonical-live`) enables all four. All three keep single/batch presigning, replay
+presigning, reserved finalization, and export-download presigning false.
+
+Copy-only claims a live legacy Stored row, conditionally reads its exact ETag, and validates MIME,
+size, image header, width, height, and SHA-256. It writes the deterministic canonical key create-only,
+then re-reads and hashes the complete canonical object before persisting immutable
+`target_verified` proof. Copy-only never changes the media pointer. The one primary readiness query
+must report zero live legacy rows lacking that exact proof before Candidate B is eligible to cut over
+pointers.
+
+Candidate B performs the exact proof-bound D1 pointer CAS and clears any legacy preview pointer. It
+then hands legacy-source cleanup to permanent write tombstones. `source_writable_until` schedules
+work but is never evidence that old writes are finished. The legacy bucket scanner and tombstone
+janitor continue forever; completed scans wrap into another epoch so an arbitrarily late admitted
+legacy write is rediscovered and suppressed.
+
+After the first canonical pointer, rollback is limited to a reviewed schema-15 dual-bucket Candidate
+A-compatible version with ingress, promotion, and purge disabled. Never route the old Worker or schema
+14 again, and never restore a raw pre-0015 D1 state. Token revocation, TTL expiry, waiting, repeated
+HEAD requests, or a bucket lock cannot replace the permanent scanner/tombstone protocol.
 
 Closed gallery, delivery-history, and notes sections do not fetch their data or previews. The manager's visible Live intake refreshes event counts and private media every five seconds; polling pauses outside Intake and while the document is hidden.
 
 ## Export jobs
 
-Only one queued or running export exists per event. A request snapshots every stored, non-deleted original at `snapshot_at`, regardless of publication. The Workflow partitions source payload at 2 GiB, streams numbered store-mode ZIP archives through multipart R2 upload, and creates `candidary-export-manifest.csv` covering every file and part.
+Only one queued or running export exists per event. A request snapshots every stored, non-deleted
+original at `snapshot_at`, regardless of publication, but fails with `EXPORT_MEDIA_UPGRADE_REQUIRED`
+while any eligible stored row still uses a noncanonical key. Retry after scheduled promotion closes
+that inventory; do not bypass the gate or snapshot a writable alias. The Workflow partitions source
+payload at 2 GiB, streams numbered store-mode ZIP archives through multipart R2 upload, and creates
+`candidary-export-manifest.csv` covering every file and part.
 
-Each retry increments `attempt`, uses a new attempt prefix, and clears prior persisted part rows. Partial attempt objects are deleted after a failure. Ready objects expire after 24 hours; manager download URLs expire after 15 minutes.
+Each retry increments `attempt`, uses a new deterministic Workflow ID/prefix, and clears prior persisted part rows in D1 before establishing or adopting that exact Workflow. Only after the new attempt is recoverable are captured prior-attempt objects deleted. Ready objects expire after 24 hours; managers read them through authenticated same-origin conditional/ranged streaming rather than presigned download URLs.
+
+Post-cutover exports also freeze Guestbook snapshot metadata and entries. They produce a guest-visible
+printable HTML keepsake and a separate private CSV archive; the private CSV may include author-only
+content and is never a guest download. Both objects share the 24-hour Ready expiry and are deleted
+from the durable object inventory before the job becomes Expired. Event purge removes the objects,
+dependent snapshot rows, notes/captions, and finally the event in that order.
 
 Investigate:
 
@@ -243,8 +290,11 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `TOKEN_REVOKED`, `SESSION_EXPIRED`, `EVENT_EXPIRED`, `EVENT_DELETED` — use a current link or confirm lifecycle state.
 - `FILE_TYPE_UNSUPPORTED`, `FILE_TOO_LARGE` — a selected or stored object failed type/signature/20 MB validation.
 - `EVENT_MEDIA_LIMIT`, `EVENT_STORAGE_LIMIT` — the 10,000-photo or 100-GiB event quota is full.
-- `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh.
 - `MESSAGE_SUBMISSION_CONFLICT` — a successful guest-note key was reused with different words. The client replaces the key and offers the preserved note for another send.
+- `MESSAGE_PURGED` — a permanently deleted note was retried with its original key; it cannot be restored or recreated.
+- `MESSAGE_EVENT_LIMIT` — the event has reached its retained standalone-note cap. Existing Guestbook content remains readable and manageable.
+- `EVENT_PHASE_CONFLICT` — the event phase no longer accepts a new note. Preserve the draft and keep the existing book readable.
+- `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh the affected surface. For a stale Manager Guestbook action, refetch the row or first page instead of replaying the mutation.
 - `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
@@ -260,7 +310,24 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `RSVP_ROSTER_BATCH_CONFLICT` — the event roster or an explicitly targeted household changed after preview, and nothing was written. The typed details identify changed, archived, or missing targets; refresh them and preview the preserved draft again.
 - `RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT` — a committed manager batch key was reused for different canonical content. Keep the original key only for an unchanged retry; changed staged work needs a fresh preview and key.
 - `RATE_LIMITED` on a lookup — the edge budget (30/IP/minute, `Retry-After: 60`) or a D1 budget (20/event/IP or 8/event/name per 15 minutes, `Retry-After: 900`) is spent. The body is deliberately generic.
-- `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED` — inspect the active job and its persisted parts.
+- `RATE_LIMITED` on a Guestbook submission — either the isolated edge budget (120/event/trusted-IP/minute) or a durable session/IP window is spent. Honor `Retry-After`, preserve the draft, and never log a raw IP or digest.
+- `EXPORT_MEDIA_UPGRADE_REQUIRED` — one or more stored originals still point at the legacy bucket. Copy-only may already have verified the canonical bytes, but export remains closed until the reviewed canonical-live pointer cutover completes. Never bypass the canonical-generation snapshot rule.
+- `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED`, `EXPORT_LIMIT_EXCEEDED`, `EXPORT_SNAPSHOT_CHANGED` — inspect the active job, immutable Guestbook snapshot metadata, and persisted object inventory.
+
+These source/config and runbook updates are local implementation evidence only. Production secret
+provisioning, remote migration, deployment, runtime certification, policy/legal approval, and
+physical-device proof remain separate unauthorized gates.
+
+For production secrets, use the non-traffic `wrangler versions secret put <NAME> --name candidary`
+workflow documented in `deployment.md`; never use `wrangler secret put` during a release window,
+because it immediately deploys a new version. A 15-migration Worker release additionally requires
+the exact canonical `post-cutover-migration-evidence.json` emitted after the guarded sole-0015
+production migration. Secret-version creation, migration evidence, Worker deployment, and runtime
+certification remain separate records and authorities.
+
+The active schema-v2 Worker requires eight application secrets and no R2 access-key secret. Do not
+reintroduce `R2_ACCESS_KEY_ID` or `R2_SECRET_ACCESS_KEY`; the old signer token is revocation evidence,
+not a credential for Candidate A, copy-only, or Candidate B.
 
 Cover codes are Manager-only. None is reachable from a guest load, which is why all ten classify as
 `retry` in `shared/load-failure.ts` — none of `latest-link`, `ended-event`, or `sign-in` describes a

@@ -8,6 +8,7 @@ import type {
   RsvpHouseholdListPage,
   RsvpSummary,
 } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { ManagerRsvpPanel } from '../../src/components/ManagerRsvpPanel';
 
@@ -31,6 +32,7 @@ const event: EventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,

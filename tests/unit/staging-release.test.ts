@@ -27,21 +27,32 @@ import {
   PHASE_3_MIGRATION,
   buildAtomicMigrationBundle,
   buildPhase2BootstrapBundle,
+  buildPostCutoverMigrationBundle,
   type VerifiedReleaseCandidate,
 } from '../../scripts/release-candidate';
-import { PRODUCTION_TRIGGER_NAMES, type ZeroLegacyObservation } from '../../scripts/migrate-release';
+import {
+  POST_CUTOVER_PRODUCTION_TRIGGER_NAMES,
+  PRODUCTION_TRIGGER_NAMES,
+  type ZeroLegacyObservation,
+} from '../../scripts/migrate-release';
 import {
   REQUIRED_STAGING_SECRET_NAMES,
+  MEDIA_CUTOVER_READINESS_QUERY,
   buildStagingOverlay,
   createOwnedStagingDeployRoot,
   parseStagingReleaseArgsV1,
+  parseMediaCutoverReadinessRows,
   finalizeStagingRelease,
   parseStagingTargetDescriptor,
   runStagingRelease,
   stagingTargetSha256,
   verifyFinalStagingRelease,
+  type ReviewAuthorization,
   type ReviewAuthorizationV1,
+  type ReviewAuthorizationV2,
+  type StagingAuthorization,
   type StagingAuthorizationV1,
+  type StagingAuthorizationV2,
   type StagingCommand,
   type StagingDatabaseObservation,
   type StagingDeploymentObservation,
@@ -54,10 +65,14 @@ import {
   STAGING_ROUTE_CASE_IDS,
   STAGING_WORKFLOW_CASE_IDS,
   type StagingConformanceArtifactV1,
+  type StagingConformanceArtifactV2,
 } from '../../scripts/staging-release-evidence';
+
+const POST_CUTOVER_TRIGGER_NAMES = POST_CUTOVER_PRODUCTION_TRIGGER_NAMES;
 
 const PHASE_2_SHA = 'c'.repeat(40);
 const PHASE_3_SHA = 'a'.repeat(40);
+const POST_CUTOVER_SHA = 'd'.repeat(40);
 const TREE = 'b'.repeat(40);
 const BASE = '0b92387d2e237d568d2514373dcc3044e7960d4b';
 const ACCOUNT = 'f'.repeat(32);
@@ -71,6 +86,7 @@ const migrations = [
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql',
   '0012_event_cover_storage.sql', PHASE_2_MIGRATION, PHASE_3_MIGRATION,
+  '0015_curated_private_guestbook.sql',
 ] as const;
 
 beforeEach(() => {
@@ -167,7 +183,24 @@ function target(purpose: 'workflow-conformance' | 'cutover'): StagingTargetDescr
   };
 }
 
-function candidateFixture(count: 13 | 14, sha: string): VerifiedReleaseCandidate {
+function postCutoverTarget(purpose: 'workflow-conformance' | 'cutover'): Record<string, unknown> {
+  const historical = target(purpose);
+  const enabled = purpose === 'cutover';
+  return {
+    ...historical,
+    schemaVersion: 2,
+    rateLimits: {
+      ...historical.rateLimits,
+      guestMessage: {
+        binding: 'GUEST_MESSAGE_RATE_LIMIT', enabled,
+        namespaceId: enabled ? '2003' : '2103', limit: 120, period: 60,
+      },
+    },
+    requiredSecretNames: [...historical.requiredSecretNames, 'GUEST_MESSAGE_HMAC_KEY'],
+  };
+}
+
+function candidateFixture(count: 13 | 14 | 15, sha: string): VerifiedReleaseCandidate {
   const root = tempRoot();
   put(root, 'dist/candidary/index.js', 'export default {};\n');
   put(root, 'dist/candidary/wrangler.json', `${canonicalJson(generatedConfig())}\n`);
@@ -259,8 +292,8 @@ interface ReleaseInputs {
   targetPath: string;
   reviewPath: string;
   authorizationPath: string;
-  review: ReviewAuthorizationV1;
-  authorization: StagingAuthorizationV1;
+  review: ReviewAuthorization;
+  authorization: StagingAuthorization;
 }
 
 function writeInput(root: string, name: string, value: unknown): { path: string; digest: string } {
@@ -312,6 +345,55 @@ function inputs(count: 13 | 14, purpose: 'workflow-conformance' | 'cutover'): Re
   };
 }
 
+interface PostCutoverReleaseInputs extends Omit<ReleaseInputs, 'review' | 'authorization'> {
+  review: ReviewAuthorizationV2;
+  authorization: StagingAuthorizationV2;
+}
+
+function postCutoverInputs(
+  count: 13 | 14 | 15,
+  purpose: 'workflow-conformance' | 'cutover',
+): PostCutoverReleaseInputs {
+  const candidate = candidateFixture(count, count === 13 ? PHASE_2_SHA : POST_CUTOVER_SHA);
+  const workflowTarget = parseStagingTargetDescriptor(postCutoverTarget('workflow-conformance'), NOW);
+  const cutoverTarget = parseStagingTargetDescriptor(postCutoverTarget('cutover'), NOW);
+  const review: ReviewAuthorizationV2 = {
+    kind: 'candidary.post-cutover-review-authorization', schemaVersion: 2,
+    approvedMainSha: BASE, phase2Sha: PHASE_2_SHA,
+    phase2ManifestSha256: count === 13 ? candidate.manifestSha256 : '8'.repeat(64),
+    candidateSha: POST_CUTOVER_SHA,
+    candidateManifestSha256: count === 15 ? candidate.manifestSha256 : '9'.repeat(64),
+    reviewer: 'release-reviewer', issuedAt: '2026-08-10T11:00:00.000Z',
+    expiresAt: '2026-08-11T12:00:00.000Z',
+  };
+  const reviewInput = writeInput(candidate.candidateRoot, 'post-cutover-review.json', review);
+  const authorization: StagingAuthorizationV2 = {
+    kind: 'candidary.staging-authorization', schemaVersion: 2, runId: RUN_ID,
+    reviewAuthorizationSha256: reviewInput.digest,
+    allowedCandidateShas: [PHASE_2_SHA, POST_CUTOVER_SHA],
+    targetSha256s: {
+      workflowConformance: stagingTargetSha256(workflowTarget),
+      cutover: stagingTargetSha256(cutoverTarget),
+    },
+    allowedModes: ['initialize', 'deploy', 'migrate', 'finalize', 'verify'], cutoverCrons: [],
+    expectedSchemaSha256s: {
+      workflowConformancePhase2: '3'.repeat(64), cutoverPhase2: '4'.repeat(64),
+      cutoverPostCutover: '5'.repeat(64),
+    },
+    issuedAt: '2026-08-10T11:01:00.000Z', expiresAt: '2026-08-11T12:00:00.000Z',
+    cleanupOwner: 'staging-owner',
+  };
+  const authorizationInput = writeInput(candidate.candidateRoot, 'post-cutover-authorization.json', authorization);
+  const descriptor = purpose === 'workflow-conformance' ? workflowTarget : cutoverTarget;
+  const targetInput = writeInput(candidate.candidateRoot, `post-cutover-${purpose}.json`, descriptor);
+  return {
+    candidate, workflowTarget, cutoverTarget, targetPath: targetInput.path,
+    reviewPath: reviewInput.path, authorizationPath: authorizationInput.path,
+    review,
+    authorization,
+  };
+}
+
 const zeroCounts: ZeroLegacyObservation = {
   legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0, uploadsWithoutActiveSet: 0,
 };
@@ -323,7 +405,10 @@ function database(
   return {
     empty: ledger.length === 0, applicationObjectCount: ledger.length === 0 ? 0 : 1,
     ledger: [...ledger], schemaSha256, integrity: 'ok', foreignKeyRows: 0,
-    triggerNames: ledger.length === 14 ? [...PRODUCTION_TRIGGER_NAMES] : [], zeroCounts,
+    triggerNames: ledger.length >= 15
+      ? [...POST_CUTOVER_TRIGGER_NAMES]
+      : ledger.length >= 14 ? [...PRODUCTION_TRIGGER_NAMES] : [],
+    zeroCounts,
   };
 }
 
@@ -340,7 +425,11 @@ function adapters(
       now: () => NOW,
       verifyCandidate() { holder.verifies += 1; return source.candidate; },
       prepareCandidate() { /* command-free fake for the unit boundary */ },
-      listSecretNames: () => options.secretNames ?? [...REQUIRED_STAGING_SECRET_NAMES],
+      listSecretNames: () => options.secretNames
+        ?? parseStagingTargetDescriptor(
+          JSON.parse(readFileSync(source.targetPath, 'utf8')) as unknown,
+          NOW,
+        ).requiredSecretNames,
       observeDatabase: () => observations[Math.min(observationIndex++, observations.length - 1)]!,
       observeDeployment: () => options.deployment ?? {
         versionId: '1000000a-0000-4000-8000-000000000099',
@@ -372,6 +461,19 @@ function request(source: ReleaseInputs, mode: 'initialize' | 'deploy' | 'migrate
 }
 
 describe('staging target and CLI contract', () => {
+  it('parses and overlays the post-cutover three-limiter/new-secret target', () => {
+    const descriptor = postCutoverTarget('cutover');
+    const parsed = parseStagingTargetDescriptor(descriptor, NOW);
+    const overlay = buildStagingOverlay(generatedConfig(), parsed, []);
+    expect(overlay.config.ratelimits).toEqual([
+      { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '2001', simple: { limit: 20, period: 60 } },
+      { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '2002', simple: { limit: 30, period: 60 } },
+      { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '2003', simple: { limit: 120, period: 60 } },
+    ]);
+    expect((overlay.config.secrets as { required: string[] }).required)
+      .toContain('GUEST_MESSAGE_HMAC_KEY');
+  });
+
   it('accepts a closed staging descriptor and rejects unknown fields, production reuse, and public conformance ingress', () => {
     const valid = target('workflow-conformance');
     expect(parseStagingTargetDescriptor(valid, NOW)).toEqual(valid);
@@ -404,6 +506,155 @@ describe('staging target and CLI contract', () => {
 });
 
 describe('closed staging overlay and remote modes', () => {
+  it('rejects a schema-v2 target paired with historical schema-v1 authorization and a 14-migration candidate', () => {
+    const source = inputs(14, 'cutover');
+    const descriptor = parseStagingTargetDescriptor(postCutoverTarget('cutover'), NOW);
+    source.targetPath = writeInput(source.candidate.candidateRoot, 'substituted-v2-target.json', descriptor).path;
+    source.authorization.targetSha256s.cutover = stagingTargetSha256(descriptor);
+    source.authorizationPath = writeInput(
+      source.candidate.candidateRoot, 'substituted-v1-authorization.json', source.authorization,
+    ).path;
+    const run = adapters(source, [database(migrations.slice(0, 14), '5'.repeat(64))], {
+      secretNames: [...descriptor.requiredSecretNames],
+    });
+    expect(() => runStagingRelease(request(source, 'deploy'), run.value)).toThrow(/schema|version|post-cutover/u);
+    expect(run.commands).toHaveLength(0);
+  });
+
+  it('accepts a schema-v2 authorization only for the exact 15-migration post-cutover candidate', () => {
+    const historical = postCutoverInputs(14, 'cutover');
+    const historicalRun = adapters(historical, [database(migrations.slice(0, 14), '5'.repeat(64))], {
+      secretNames: [...historical.cutoverTarget.requiredSecretNames],
+    });
+    expect(() => runStagingRelease(request(historical, 'deploy'), historicalRun.value))
+      .toThrow();
+    expect(historicalRun.commands).toHaveLength(0);
+
+    const current = postCutoverInputs(15, 'cutover');
+    const currentRun = adapters(current, [database(migrations, '5'.repeat(64))], {
+      secretNames: [...current.cutoverTarget.requiredSecretNames],
+    });
+    expect(() => runStagingRelease(request(current, 'deploy'), currentRun.value)).not.toThrow();
+    expect(currentRun.commands).toHaveLength(1);
+  });
+
+  it('executes the guarded schema-v2 phase2 initialize/deploy then candidate migrate/deploy sequence', () => {
+    const initialize = postCutoverInputs(13, 'cutover');
+    const empty = database([], initialize.authorization.expectedSchemaSha256s.cutoverPhase2);
+    const phase2State = database(
+      migrations.slice(0, 13),
+      initialize.authorization.expectedSchemaSha256s.cutoverPhase2,
+    );
+    const initializeRun = adapters(initialize, [empty, phase2State]);
+    expect(runStagingRelease(request(initialize, 'initialize'), initializeRun.value)).toMatchObject({
+      mode: 'initialize', candidateSha: PHASE_2_SHA, ledger: migrations.slice(0, 13),
+    });
+    expect(initializeRun.commands).toHaveLength(1);
+
+    const phase2Deploy = postCutoverInputs(13, 'cutover');
+    const phase2DeployRun = adapters(phase2Deploy, [phase2State]);
+    expect(runStagingRelease(request(phase2Deploy, 'deploy'), phase2DeployRun.value)).toMatchObject({
+      mode: 'deploy', candidateSha: PHASE_2_SHA, trafficPercent: 100,
+    });
+    expect(phase2DeployRun.commands[0]!.args).toContain(PHASE_2_SHA);
+
+    const migrate = postCutoverInputs(15, 'cutover');
+    const postCutoverState = database(
+      migrations,
+      migrate.authorization.expectedSchemaSha256s.cutoverPostCutover,
+    );
+    let migrationBundle = '';
+    const migrateRun = adapters(migrate, [phase2State, postCutoverState]);
+    const originalRun = migrateRun.value.run;
+    migrateRun.value.run = (command) => {
+      migrationBundle = readFileSync(command.inputPath, 'utf8');
+      return originalRun(command);
+    };
+    expect(runStagingRelease(request(migrate, 'migrate'), migrateRun.value)).toMatchObject({
+      mode: 'migrate', candidateSha: POST_CUTOVER_SHA, ledger: migrations,
+    });
+    expect(migrationBundle).toContain(PHASE_3_MIGRATION);
+    expect(migrationBundle).toContain('0015_curated_private_guestbook.sql');
+
+    const finalDeploy = postCutoverInputs(15, 'cutover');
+    const finalDeployRun = adapters(finalDeploy, [postCutoverState]);
+    expect(runStagingRelease(request(finalDeploy, 'deploy'), finalDeployRun.value)).toMatchObject({
+      mode: 'deploy', candidateSha: POST_CUTOVER_SHA, trafficPercent: 100,
+    });
+    expect(finalDeployRun.commands[0]!.args).toContain(POST_CUTOVER_SHA);
+  });
+
+  it('fails closed on missing or unexpected triggers at each guarded schema boundary', () => {
+    for (const triggerNames of [
+      PRODUCTION_TRIGGER_NAMES.slice(0, -1),
+      [...PRODUCTION_TRIGGER_NAMES, 'unexpected_pre_cutover_trigger'],
+    ]) {
+      const historical = inputs(14, 'cutover');
+      const state = {
+        ...database(migrations.slice(0, 14), '5'.repeat(64)),
+        triggerNames,
+      };
+      const run = adapters(historical, [state]);
+      expect(() => runStagingRelease(request(historical, 'deploy'), run.value)).toThrow(/trigger/iu);
+      expect(run.commands).toHaveLength(0);
+    }
+
+    for (const triggerNames of [
+      POST_CUTOVER_TRIGGER_NAMES.slice(0, -1),
+      [...POST_CUTOVER_TRIGGER_NAMES, 'unexpected_post_cutover_trigger'],
+    ]) {
+      const postCutover = postCutoverInputs(15, 'cutover');
+      const state = {
+        ...database(migrations, postCutover.authorization.expectedSchemaSha256s.cutoverPostCutover),
+        triggerNames,
+      };
+      const run = adapters(postCutover, [state], {
+        secretNames: [...postCutover.cutoverTarget.requiredSecretNames],
+      });
+      expect(() => runStagingRelease(request(postCutover, 'deploy'), run.value)).toThrow(/trigger/iu);
+      expect(run.commands).toHaveLength(0);
+    }
+  });
+
+  it('keeps schema-v2 phase2 and final candidates within their allowed remote modes', () => {
+    const workflowPhase2 = postCutoverInputs(13, 'workflow-conformance');
+    const workflowRun = adapters(workflowPhase2, [
+      database(migrations.slice(0, 13), workflowPhase2.authorization.expectedSchemaSha256s.workflowConformancePhase2),
+    ]);
+    expect(() => runStagingRelease(request(workflowPhase2, 'deploy'), workflowRun.value))
+      .toThrow(/workflow|final candidate/iu);
+    expect(workflowRun.commands).toHaveLength(0);
+
+    const initializeFinal = postCutoverInputs(15, 'cutover');
+    const initializeFinalRun = adapters(initializeFinal, [database([], '4'.repeat(64))]);
+    expect(() => runStagingRelease(request(initializeFinal, 'initialize'), initializeFinalRun.value))
+      .toThrow(/initialization|boundary/iu);
+    expect(initializeFinalRun.commands).toHaveLength(0);
+
+    const migratePhase2 = postCutoverInputs(13, 'cutover');
+    const migratePhase2Run = adapters(migratePhase2, [
+      database(migrations.slice(0, 13), migratePhase2.authorization.expectedSchemaSha256s.cutoverPhase2),
+    ]);
+    expect(() => runStagingRelease(request(migratePhase2, 'migrate'), migratePhase2Run.value))
+      .toThrow(/migration|final candidate/iu);
+    expect(migratePhase2Run.commands).toHaveLength(0);
+  });
+
+  it('rejects a schema-v1 target and authorization paired with a 15-migration candidate', () => {
+    const source = inputs(14, 'cutover');
+    const candidate = candidateFixture(15, PHASE_3_SHA);
+    source.candidate = candidate;
+    source.targetPath = writeInput(candidate.candidateRoot, 'historical-cutover.json', source.cutoverTarget).path;
+    source.reviewPath = writeInput(candidate.candidateRoot, 'historical-review.json', {
+      ...source.review, candidateManifestSha256: candidate.manifestSha256,
+    }).path;
+    source.authorization.reviewAuthorizationSha256 = sha256(readFileSync(source.reviewPath));
+    source.authorizationPath = writeInput(candidate.candidateRoot, 'historical-authorization.json', source.authorization).path;
+    const run = adapters(source, [database(migrations, '5'.repeat(64))]);
+    expect(() => runStagingRelease(request(source, 'deploy'), run.value)).toThrow(/historical|fourteen|boundary/u);
+    expect(run.commands).toHaveLength(0);
+  });
+
   it('replaces or disables every production-capable surface', () => {
     for (const purpose of ['workflow-conformance', 'cutover'] as const) {
       const descriptor = target(purpose);
@@ -459,7 +710,7 @@ describe('closed staging overlay and remote modes', () => {
 
   it('deploys from the owned root with exact tag, secret names, metadata, topology, and 100% cutover traffic', () => {
     const source = inputs(14, 'cutover');
-    const run = adapters(source, [database(migrations, '5'.repeat(64))]);
+    const run = adapters(source, [database(migrations.slice(0, 14), '5'.repeat(64))]);
     const result = runStagingRelease(request(source, 'deploy'), run.value);
     expect(run.commands).toHaveLength(1);
     expect(run.commands[0]!.args).toEqual([
@@ -470,18 +721,19 @@ describe('closed staging overlay and remote modes', () => {
     expect(() => readFileSync(run.commands[0]!.cwd)).toThrow();
 
     const secrets = inputs(14, 'cutover');
-    const refused = adapters(secrets, [database(migrations, '5'.repeat(64))], { secretNames: [] });
+    const refused = adapters(secrets, [database(migrations.slice(0, 14), '5'.repeat(64))], { secretNames: [] });
     expect(() => runStagingRelease(request(secrets, 'deploy'), refused.value)).toThrow(/secret/u);
     expect(refused.commands).toHaveLength(0);
   });
 
   it('migrates cutover from exactly 0013 to 0014 and proves rollback on a failed import', () => {
     const source = inputs(14, 'cutover');
+    if (source.authorization.schemaVersion !== 1) throw new Error('Expected the historical v1 fixture');
     const before = database(migrations.slice(0, 13), source.authorization.expectedSchemaSha256s.cutoverPhase2);
-    const after = database(migrations, source.authorization.expectedSchemaSha256s.cutoverPhase3);
+    const after = database(migrations.slice(0, 14), source.authorization.expectedSchemaSha256s.cutoverPhase3);
     const run = adapters(source, [before, after]);
     expect(runStagingRelease(request(source, 'migrate'), run.value)).toMatchObject({
-      mode: 'migrate', ledger: [...migrations],
+      mode: 'migrate', ledger: [...migrations.slice(0, 14)],
     });
     expect(run.commands[0]!.args.join(' ')).not.toMatch(/migrations apply|npx/iu);
 
@@ -583,7 +835,7 @@ describe('staging finalization and independent verification', () => {
         workflowConformanceSha256: workflowInput.digest, cutoverSha256: cutoverInput.digest,
       },
       migrations: {
-        phase2Ledger: [...migrations.slice(0, 13)], phase3Ledger: [...migrations],
+        phase2Ledger: [...migrations.slice(0, 13)], phase3Ledger: [...migrations.slice(0, 14)],
         bootstrapSha256: bootstrap.sha256, phase3MigrationSha256: phase3Bundle.migrationHash,
         phase3BundleSha256: phase3Bundle.sha256, triggerNames: [...PRODUCTION_TRIGGER_NAMES],
         zeroCounts, integrity: 'ok', foreignKeyRows: 0,
@@ -613,7 +865,8 @@ describe('staging finalization and independent verification', () => {
     };
     const evidenceInput = writeInput(phase3.candidateRoot, 'final-evidence.json', artifact);
     const localAdapters = {
-      verifyCandidate(value: { expectedMigrationCount: 13 | 14 }) {
+      verifyCandidate(value: { expectedMigrationCount: 13 | 14 | 15 }) {
+        if (value.expectedMigrationCount === 15) throw new Error('Historical staging evidence cannot use post-cutover candidates.');
         return value.expectedMigrationCount === 13 ? phase2 : phase3;
       },
     };
@@ -629,6 +882,112 @@ describe('staging finalization and independent verification', () => {
       manifestPath: phase3.manifestPath, phase2ManifestPath: phase2.manifestPath,
       reviewAuthorizationPath: reviewInput.path, authorizationPath: authorizationInput.path,
     }, localAdapters)).toMatchObject({ sha256: written.sha256, artifact });
+
+    const postCutover = candidateFixture(15, POST_CUTOVER_SHA);
+    const postWorkflow = parseStagingTargetDescriptor(postCutoverTarget('workflow-conformance'), NOW);
+    const postCutoverTargetDescriptor = parseStagingTargetDescriptor(postCutoverTarget('cutover'), NOW);
+    const postReview = {
+      kind: 'candidary.post-cutover-review-authorization', schemaVersion: 2,
+      approvedMainSha: BASE, phase2Sha: PHASE_2_SHA,
+      phase2ManifestSha256: phase2.manifestSha256,
+      candidateSha: POST_CUTOVER_SHA, candidateManifestSha256: postCutover.manifestSha256,
+      reviewer: 'release-reviewer', issuedAt: '2026-08-10T11:00:00.000Z',
+      expiresAt: '2026-08-11T12:00:00.000Z',
+    } as const;
+    const postReviewInput = writeInput(postCutover.candidateRoot, 'post-final-review.json', postReview);
+    const postAuthorization = {
+      kind: 'candidary.staging-authorization', schemaVersion: 2, runId: RUN_ID,
+      reviewAuthorizationSha256: postReviewInput.digest,
+      allowedCandidateShas: [PHASE_2_SHA, POST_CUTOVER_SHA],
+      targetSha256s: {
+        workflowConformance: stagingTargetSha256(postWorkflow),
+        cutover: stagingTargetSha256(postCutoverTargetDescriptor),
+      },
+      allowedModes: ['initialize', 'deploy', 'migrate', 'finalize', 'verify'], cutoverCrons: [],
+      expectedSchemaSha256s: {
+        workflowConformancePhase2: '3'.repeat(64), cutoverPhase2: '4'.repeat(64),
+        cutoverPostCutover: '5'.repeat(64),
+      },
+      issuedAt: '2026-08-10T11:01:00.000Z', expiresAt: '2026-08-11T12:00:00.000Z',
+      cleanupOwner: 'staging-owner',
+    } as const;
+    const postAuthorizationInput = writeInput(postCutover.candidateRoot, 'post-final-authorization.json', postAuthorization);
+    const postWorkflowInput = writeInput(postCutover.candidateRoot, 'post-final-workflow.json', postWorkflow);
+    const postCutoverInput = writeInput(postCutover.candidateRoot, 'post-final-cutover.json', postCutoverTargetDescriptor);
+    const postBundlePath = resolve(postCutover.candidateRoot, 'output/precompute-post-cutover.sql');
+    const postBundle = buildPostCutoverMigrationBundle({
+      verifiedCandidate: postCutover, expectedLedger: migrations.slice(0, 13), outputPath: postBundlePath,
+    });
+    rmSync(postBundlePath);
+    const postArtifact: StagingConformanceArtifactV2 = {
+      ...artifact,
+      schemaVersion: 2,
+      candidateSha: POST_CUTOVER_SHA,
+      sources: {
+        phase2: artifact.sources.phase2,
+        postCutover: {
+          sha: POST_CUTOVER_SHA, manifestSha256: postCutover.manifestSha256,
+          migrationManifestSha256: postCutover.manifest.candidate!.migrationManifestSha256,
+        },
+      },
+      authorizations: { reviewSha256: postReviewInput.digest, stagingSha256: postAuthorizationInput.digest },
+      targets: {
+        workflowConformanceSha256: postWorkflowInput.digest, cutoverSha256: postCutoverInput.digest,
+      },
+      migrations: {
+        phase2Ledger: [...migrations.slice(0, 13)], postCutoverLedger: [...migrations],
+        bootstrapSha256: bootstrap.sha256, postCutoverMigrationsSha256: postBundle.migrationsHash,
+        postCutoverBundleSha256: postBundle.sha256, triggerNames: [...POST_CUTOVER_TRIGGER_NAMES],
+        zeroCounts, integrity: 'ok', foreignKeyRows: 0,
+      },
+      deployments: {
+        workflowConformance: { ...artifact.deployments.workflowConformance, tagSha: POST_CUTOVER_SHA, metadataSha: POST_CUTOVER_SHA },
+        phase2Cutover: artifact.deployments.phase2Cutover,
+        postCutoverCutover: { ...artifact.deployments.phase3Cutover, tagSha: POST_CUTOVER_SHA, metadataSha: POST_CUTOVER_SHA },
+      },
+    };
+    const postEvidenceInput = writeInput(postCutover.candidateRoot, 'post-final-evidence.json', postArtifact);
+    const postAdapters = {
+      verifyCandidate(value: { expectedMigrationCount: 13 | 14 | 15 }) {
+        return value.expectedMigrationCount === 13 ? phase2 : postCutover;
+      },
+    };
+    expect(() => finalizeStagingRelease({
+      sha: POST_CUTOVER_SHA, manifestPath: phase3.manifestPath, phase2ManifestPath: phase2.manifestPath,
+      workflowTargetPath: postWorkflowInput.path, cutoverTargetPath: postCutoverInput.path,
+      reviewAuthorizationPath: postReviewInput.path, authorizationPath: postAuthorizationInput.path,
+      evidenceInputPath: postEvidenceInput.path, runId: RUN_ID,
+    }, postAdapters)).toThrow(/boundar|bind|candidate|schema/u);
+    const postWritten = finalizeStagingRelease({
+      sha: POST_CUTOVER_SHA, manifestPath: postCutover.manifestPath, phase2ManifestPath: phase2.manifestPath,
+      workflowTargetPath: postWorkflowInput.path, cutoverTargetPath: postCutoverInput.path,
+      reviewAuthorizationPath: postReviewInput.path, authorizationPath: postAuthorizationInput.path,
+      evidenceInputPath: postEvidenceInput.path, runId: RUN_ID,
+    }, postAdapters);
+    expect(verifyFinalStagingRelease({
+      artifactPath: postWritten.path, sidecarPath: `${postWritten.path}.sha256`,
+      manifestPath: postCutover.manifestPath, phase2ManifestPath: phase2.manifestPath,
+      reviewAuthorizationPath: postReviewInput.path, authorizationPath: postAuthorizationInput.path,
+    }, postAdapters)).toMatchObject({ sha256: postWritten.sha256, artifact: postArtifact });
+  });
+});
+
+describe('media cutover readiness observation', () => {
+  it('uses one primary D1 query and parses only its exact two counts', () => {
+    expect(MEDIA_CUTOVER_READINESS_QUERY.match(/\bSELECT\b/gu)).toHaveLength(3);
+    expect(MEDIA_CUTOVER_READINESS_QUERY.match(/;/gu)).toHaveLength(1);
+    expect(MEDIA_CUTOVER_READINESS_QUERY).toContain("p.state = 'target_verified'");
+    expect(MEDIA_CUTOVER_READINESS_QUERY).toContain("m.object_bucket_generation = 'legacy'");
+    expect(parseMediaCutoverReadinessRows([{
+      live_legacy_count: 18,
+      unverified_live_legacy_count: 0,
+    }])).toEqual({ liveLegacyCount: 18, unverifiedLiveLegacyCount: 0 });
+    expect(() => parseMediaCutoverReadinessRows([])).toThrow(/readiness|row/iu);
+    expect(() => parseMediaCutoverReadinessRows([{
+      live_legacy_count: 18,
+      unverified_live_legacy_count: 0,
+      extra: 1,
+    }])).toThrow(/readiness|field/iu);
   });
 });
 
@@ -654,6 +1013,7 @@ describe('repository-pinned Wrangler path resolution', () => {
     }
     const artifacts = collectDeployableArtifacts(candidateRoot);
     const migrationManifest = collectMigrationManifest(candidateRoot);
+    const historicalMigrationFiles = migrationManifest.files.slice(0, 14);
     expect(migrationManifest).toEqual(repositoryMigrations);
     const candidate = {
       candidateRoot, sha: PHASE_3_SHA, tree: TREE, approvedBaseSha: BASE,
@@ -665,9 +1025,9 @@ describe('repository-pinned Wrangler path resolution', () => {
           client: artifacts.client, firstTreeSha256: artifacts.treeSha256,
           secondTreeSha256: artifacts.treeSha256, dryRunWorkerSha256: artifacts.worker.sha256,
         },
-        migrations: { manifest: migrationManifest.files },
+        migrations: { manifest: historicalMigrationFiles },
       } as unknown as CandidateManifest,
-      migrations: migrationManifest.files, migrationCount: 14,
+      migrations: historicalMigrationFiles, migrationCount: 14,
       artifactTreeSha256: artifacts.treeSha256, wranglerVersion: '4.113.0',
       wranglerCliPath: resolve(repositoryRoot, 'node_modules/wrangler/bin/wrangler.js'),
     } satisfies VerifiedReleaseCandidate;
@@ -744,7 +1104,14 @@ INSERT INTO "d1_migrations" (name) VALUES ('${PHASE_2_MIGRATION}');\n`);
         '--command', "SELECT name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name;",
         '--persist-to', faultPersist, '--json',
       ], { cwd: owned.root, encoding: 'utf8' });
-      for (const triggerName of PRODUCTION_TRIGGER_NAMES) expect(faultTriggers).not.toContain(triggerName);
+      for (const triggerName of PRODUCTION_TRIGGER_NAMES.filter((name) => name.startsWith('event_cover_'))) {
+        expect(faultTriggers).not.toContain(triggerName);
+      }
+      for (const triggerName of [
+        'events_rsvp_deadline_insert',
+        'events_rsvp_deadline_update',
+        'media_stamp_stored_at_compat',
+      ]) expect(faultTriggers).toContain(triggerName);
 
       const bootstrapFaultPersist = tempRoot();
       const bootstrapFaultPath = resolve(owned.root, 'phase2-bootstrap-fault.sql');

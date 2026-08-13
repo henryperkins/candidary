@@ -20,6 +20,7 @@ const SCHEDULE_OWNED = [
 const SETTINGS_OWNED = [
   'name',
   'welcomeMessage',
+  'guestbookPrompt',
   ...SCHEDULE_OWNED,
   'galleryVisible',
   'moderationRequired',

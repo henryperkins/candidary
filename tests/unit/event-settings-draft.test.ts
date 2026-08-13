@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { EventView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT, MAX_GUESTBOOK_PROMPT_LENGTH } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import {
   canonicalEventSettings,
@@ -14,6 +15,7 @@ import {
 const event: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
@@ -34,7 +36,7 @@ const event: EventView = {
 describe('event settings draft', () => {
   it('covers every autosaving general setting exactly once, in form order', () => {
     expect(EVENT_SETTINGS_FIELDS).toEqual([
-      'name', 'welcomeMessage', 'eventTimezone', 'eventStartTime', 'rsvpDeadlineDate',
+      'name', 'welcomeMessage', 'guestbookPrompt', 'eventTimezone', 'eventStartTime', 'rsvpDeadlineDate',
       'rsvpEnabled', 'galleryVisible', 'moderationRequired',
     ]);
     expect(Object.keys(EVENT_SETTINGS_LABELS).sort()).toEqual([...EVENT_SETTINGS_FIELDS].sort());
@@ -42,7 +44,8 @@ describe('event settings draft', () => {
 
   it('reads a draft from the confirmed event and treats a missing deadline as empty', () => {
     expect(draftFromEvent(event)).toEqual({
-      name: 'Maya & Theo', welcomeMessage: 'Welcome.', eventTimezone: 'America/Chicago',
+      name: 'Maya & Theo', welcomeMessage: 'Welcome.', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
+      eventTimezone: 'America/Chicago',
       eventStartTime: '17:00', rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false,
       galleryVisible: true, moderationRequired: true,
     });
@@ -62,10 +65,12 @@ describe('event settings draft', () => {
   it('trims and canonicalizes before the value ever becomes a snapshot', () => {
     const payload = canonicalEventSettings({
       ...draftFromEvent(event), name: '  Maya & Theo  ', welcomeMessage: ' Welcome. ',
+      guestbookPrompt: ' Share a memory. ',
       eventTimezone: 'america/chicago',
     }, 7);
     expect(payload).toEqual({
-      name: 'Maya & Theo', welcomeMessage: 'Welcome.', eventTimezone: 'America/Chicago',
+      name: 'Maya & Theo', welcomeMessage: 'Welcome.', guestbookPrompt: 'Share a memory.',
+      eventTimezone: 'America/Chicago',
       eventStartTime: '17:00', rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false,
       galleryVisible: true, moderationRequired: true, rsvpRosterVersion: 7,
     });
@@ -97,6 +102,13 @@ describe('event settings draft', () => {
       .toEqual({ welcomeMessage: 'Enter a welcome message.' });
     expect(validateEventSettings({ ...base, welcomeMessage: 'w'.repeat(501) }, event.eventDate))
       .toEqual({ welcomeMessage: 'Use 500 characters or fewer.' });
+    expect(validateEventSettings({ ...base, guestbookPrompt: '   ' }, event.eventDate))
+      .toEqual({ guestbookPrompt: 'Enter a guestbook prompt.' });
+    expect(validateEventSettings({
+      ...base, guestbookPrompt: 'g'.repeat(MAX_GUESTBOOK_PROMPT_LENGTH + 1),
+    }, event.eventDate)).toEqual({
+      guestbookPrompt: `Use ${MAX_GUESTBOOK_PROMPT_LENGTH} characters or fewer.`,
+    });
     expect(validateEventSettings({ ...base, eventTimezone: 'Mars/Olympus' }, event.eventDate))
       .toEqual({ eventTimezone: 'Choose a valid time zone.' });
     expect(validateEventSettings({ ...base, eventStartTime: '' }, event.eventDate))
