@@ -290,6 +290,23 @@ describe('guarded release deployment', () => {
     });
   });
 
+  it('schema-validates the manifest before selecting its migration boundary', async () => {
+    const fixture = await candidateFixture();
+    await writeFile(fixture.manifestPath, JSON.stringify({
+      status: 'passed',
+      candidate: {},
+      migrations: {},
+      bindings: {},
+      artifacts: {},
+    }), 'utf8');
+    const run = fakeAdapters(fixture);
+
+    expect(() => runDeployRelease({
+      candidateRoot: fixture.root, sha: SHA, manifestPath: fixture.manifestPath,
+    }, run.adapters)).toThrow(/candidate manifest has unknown or missing keys/iu);
+    expect(run.commands).toHaveLength(0);
+  });
+
   it('rejects sidecar, failed-manifest, journey, and current-migration mismatches before deploy', async () => {
     const sidecar = await candidateFixture();
     await writeFile(sidecar.sidecarPath, `${'0'.repeat(64)}  candidate-manifest.json\n`, 'utf8');

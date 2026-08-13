@@ -21,7 +21,6 @@ import {
 import { fileURLToPath } from 'node:url';
 
 import type * as ReleaseEvidenceModule from './release-evidence';
-import type { CandidateManifest } from './release-evidence';
 import {
   verifyExactReleaseCandidate,
   type ReleaseCandidateObservationAdapter,
@@ -385,7 +384,8 @@ export function runDeployRelease(
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error('Candidate root must be one exact directory.');
   }
-  const declaredManifest = JSON.parse(readFileSync(request.manifestPath, 'utf8')) as CandidateManifest;
+  const declaredManifest: unknown = JSON.parse(readFileSync(request.manifestPath, 'utf8'));
+  releaseEvidence.assertRedactedCandidateManifest(declaredManifest);
   if (declaredManifest.status !== 'passed' || declaredManifest.candidate === null
     || declaredManifest.migrations === null || declaredManifest.bindings === null
     || declaredManifest.artifacts === null) {
