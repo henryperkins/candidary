@@ -8,7 +8,11 @@ import type {
   HexColor,
   ResolvedEventTheme,
 } from '../../shared/contracts';
-import type { EventCoverProfileId } from '../../shared/event-cover';
+import type {
+  EventCoverEffectId,
+  EventCoverPresetId,
+  EventCoverProfileId,
+} from '../../shared/event-cover';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
   EVENT_THEME_VERSION,
@@ -40,6 +44,7 @@ import {
 import { ManagerCoverPreparationStatus } from './ManagerCoverPreparationStatus';
 import { EventThemePresetSelector } from './EventThemePresetSelector';
 import { CoverStudio } from '../features/cover/CoverStudio';
+import type { CoverStyleThumbnailState } from '../features/cover/CoverStylePicker';
 import { describeLoadFailure } from './States';
 import type { LoadFailure } from './States';
 
@@ -68,6 +73,24 @@ type ColorKind = 'primaryColor' | 'accentColor';
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/u;
 const SYNTAX_ERROR = 'Enter a six-digit hex color, such as #245c46.';
+
+function presetStyleThumbnail(
+  presetId: EventCoverPresetId,
+  effect: EventCoverEffectId,
+): CoverStyleThumbnailState {
+  return {
+    status: 'ready',
+    url: presetCoverAssetPath(
+      1,
+      presetId,
+      effect,
+      'standard-default',
+      '1x',
+      'webp',
+    ),
+    error: null,
+  };
+}
 // The recovery view travels in the response envelope rather than an error body,
 // so these two are the client's own prose over a payload it can actually read.
 const COVER_MOVED_ON = 'This cover changed somewhere else, so that change was not applied. The page is up to date now — try again.';
@@ -454,7 +477,7 @@ export function EventAppearanceEditor({
       <div>
         <p className="section-label">Guest experience</p>
         <h3>Event appearance</h3>
-        <p>Choose the colors and shape guests see. Changes save as you make them. Cover changes apply immediately.</p>
+        <p>Choose the colors and shape guests see. Theme and color changes save as you make them. Cover changes begin after you choose Done, and the current cover stays live until the new one is ready.</p>
       </div>
       <AutosaveStatus
         className="event-appearance-editor__status"
@@ -464,6 +487,8 @@ export function EventAppearanceEditor({
         onRetry={() => enqueueTheme(true)}
       />
     </div>
+
+    {canvas(true)}
 
     <form onSubmit={(formEvent) => {
       formEvent.preventDefault();
@@ -553,8 +578,6 @@ export function EventAppearanceEditor({
         </div>
       </div>
 
-      {canvas(true)}
-
       <div className="event-appearance-editor__actions">
         <button type="button" className="button button--secondary" onClick={reset}>
           Reset to Candidary default
@@ -583,7 +606,11 @@ export function EventAppearanceEditor({
         '1x',
         'webp',
       )}
-      styleThumbnail={(effect) => coverSession.styleThumbnails[effect]}
+      styleThumbnail={(effect) => (
+        coverSession.selection.source?.kind === 'preset'
+          ? presetStyleThumbnail(coverSession.selection.source.presetId, effect)
+          : coverSession.styleThumbnails[effect]
+      )}
       onSourceChange={(source) => {
         setCoverError(null);
         coverSession.chooseSource(source);

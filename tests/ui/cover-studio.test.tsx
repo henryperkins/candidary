@@ -6,7 +6,12 @@ import axe from 'axe-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventCoverEffectId, EventCoverPreparationView } from '../../shared/event-cover';
-import { CoverStudio, type CoverStudioDraft } from '../../src/features/cover/CoverStudio';
+import {
+  CoverStudio,
+  type CoverPublishIntent,
+  type CoverStudioDraft,
+} from '../../src/features/cover/CoverStudio';
+import type { CoverFocusValue } from '../../src/features/cover/CoverComposer';
 import type { CoverOperationAnswer } from '../../src/features/cover/cover-draft-client';
 import type { CoverSourceChoice } from '../../src/features/cover/CoverSourcePicker';
 import type { CoverDraftSessionState, CoverStyleThumbnail } from '../../src/features/cover/use-cover-studio-session';
@@ -20,7 +25,6 @@ import {
 
 const DRAFT: CoverStudioDraft = {
   id: 'draft-a',
-  previewUrl: 'blob:preview',
   master: { width: 1600, height: 1000, safeZoomMaximum: 1.6 },
   available2xProfiles: [
     'compact-default',
@@ -36,6 +40,24 @@ const DRAFT: CoverStudioDraft = {
 
 function readyThumbnail(effect: EventCoverEffectId): CoverStyleThumbnail {
   return { status: 'ready', url: `blob:${effect}`, error: null };
+}
+
+function canvasAtFocus(focus: CoverFocusValue): ReactNode {
+  return <figure className="event-appearance-canvas">
+    <div className="event-appearance-canvas__guest">
+      <div className="event-appearance-canvas__local-cover">
+        <img
+          className="responsive-cover__image"
+          alt=""
+          style={{
+            objectPosition: `${Math.round(focus.x * 100)}% ${Math.round(focus.y * 100)}%`,
+            transform: `scale(${focus.zoom})`,
+            transformOrigin: `${Math.round(focus.x * 100)}% ${Math.round(focus.y * 100)}%`,
+          }}
+        />
+      </div>
+    </div>
+  </figure>;
 }
 
 function preparing(patch: Partial<EventCoverPreparationView> = {}): EventCoverPreparationView {
@@ -66,6 +88,7 @@ function answer(
 function Harness({
   open = true,
   canvas,
+  canvasForFocus,
   draft = null,
   canRemove = false,
   onPublish = vi.fn(),
@@ -84,6 +107,7 @@ function Harness({
 }: {
   open?: boolean;
   canvas?: ReactNode;
+  canvasForFocus?: (focus: CoverFocusValue) => ReactNode;
   draft?: CoverStudioDraft | null;
   canRemove?: boolean;
   onPublish?: (intent: unknown) => void;
@@ -123,7 +147,7 @@ function Harness({
 
   return <CoverStudio
     open={open}
-    canvas={canvas}
+    canvas={canvasForFocus ? canvasForFocus(focus) : canvas}
     operation={live}
     operationState={state}
     draft={draft}
@@ -153,6 +177,7 @@ function Harness({
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -161,6 +186,16 @@ describe('cover studio', () => {
     render(<Harness />);
     const dialog = screen.getByRole('dialog', { name: 'Cover Studio' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
+  });
+
+  it('orders the header as close action, title, then step counter', () => {
+    render(<Harness />);
+    const header = screen.getByRole('heading', { name: 'Choose a cover' }).parentElement!;
+    expect(Array.from(header.children)).toEqual([
+      screen.getByRole('button', { name: 'Cancel' }),
+      screen.getByRole('heading', { name: 'Choose a cover' }),
+      screen.getByText('Step 1 of 3'),
+    ]);
   });
 
   it('keeps cover errors inside the modal and moves focus to them', () => {
@@ -189,8 +224,13 @@ describe('cover studio', () => {
     const onUpload = vi.fn();
     render(<Harness onUpload={onUpload} />);
     expect(screen.getByRole('radio', { name: 'Upload a photo' })).toBeVisible();
-    const chooser = screen.getByLabelText('Choose photo');
+    const chooser = screen.getByLabelText<HTMLInputElement>('Choose photo');
     expect(chooser).toHaveAttribute('type', 'file');
+    const proxy = chooser.nextElementSibling;
+    expect(proxy).toMatchObject({ tagName: 'LABEL' });
+    expect(proxy).toHaveClass('cover-source-picker__file-proxy');
+    expect(proxy).toHaveAttribute('for', chooser.id);
+    expect(document.querySelectorAll('.cover-source-picker__choice-heading')).toHaveLength(7);
 
     // Canceling the native picker emits no file and must not invent a draft or
     // advance the step.
@@ -256,6 +296,52 @@ describe('cover studio', () => {
     expect(document.activeElement).toBe(heading);
     // No meaningless Compose or Style screens on the way.
     expect(screen.queryByRole('heading', { name: 'Choose a style' })).not.toBeInTheDocument();
+  });
+
+  it('shows exact preset, upload, and removal receipts before dispatch', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialEffect="film" />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.getByText('Warm Linen · Film', { exact: true })).toBeVisible();
+    expect(screen.getByText(
+      'Guests see this at the top of RSVP and photo delivery.',
+      { exact: true },
+    )).toBeVisible();
+    expect(screen.getByText(
+      'Your current cover stays live until the new one is completely ready. If anything fails, nothing changes.',
+      { exact: true },
+    )).toBeVisible();
+
+    cleanup();
+    render(<Harness
+      initialSource={{ kind: 'upload' }}
+      initialEffect="soft"
+      draft={DRAFT}
+    />);
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.getByText('Your photo · Soft', { exact: true })).toBeVisible();
+    expect(screen.getByText(
+      'Guests see this at the top of RSVP and photo delivery.',
+      { exact: true },
+    )).toBeVisible();
+    expect(screen.getByText(
+      'Your current cover stays live until the new one is completely ready. If anything fails, nothing changes.',
+      { exact: true },
+    )).toBeVisible();
+
+    cleanup();
+    render(<Harness canRemove />);
+    await user.click(screen.getByRole('button', { name: 'Remove cover' }));
+    expect(screen.getByText('Remove the current cover', { exact: true })).toBeVisible();
+    expect(screen.getByText('Guests will see the event theme instead.', { exact: true })).toBeVisible();
+    expect(screen.getByText(
+      'The current cover stays live until this change is completely applied. If anything fails, nothing changes.',
+      { exact: true },
+    )).toBeVisible();
   });
 
   it('keeps Done disabled until an uploaded draft is ready', async () => {
@@ -399,11 +485,18 @@ describe('cover studio', () => {
     render(<Harness draft={DRAFT} focusMode="auto" />);
     await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(screen.getByText('Automatic framing')).toBeVisible();
+    expect(screen.getByText(
+      'Drag the preview to reposition it, or choose Adjust framing for precise controls.',
+    )).toBeVisible();
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Adjust focus' }));
-    expect(screen.getByRole('slider', { name: 'Horizontal focus' }))
+    expect(document.querySelector('.cover-composer__surface')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Adjust framing' }));
+    expect(screen.getByText('Manual framing')).toBeVisible();
+    expect(screen.getByText('Drag the preview or use the controls below.')).toBeVisible();
+    expect(screen.getByRole('slider', { name: 'Left or right' }))
       .toHaveAttribute('aria-valuetext', '50 percent from left');
-    expect(screen.getByRole('slider', { name: 'Vertical focus' }))
+    expect(screen.getByRole('slider', { name: 'Up or down' }))
       .toHaveAttribute('aria-valuetext', '40 percent from top');
   });
 
@@ -413,10 +506,14 @@ describe('cover studio', () => {
     await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
 
-    const horizontal = screen.getByRole('slider', { name: 'Horizontal focus' });
-    const vertical = screen.getByRole('slider', { name: 'Vertical focus' });
+    const reset = screen.getByRole('button', { name: 'Reset to automatic' });
+    const horizontal = screen.getByRole('slider', { name: 'Left or right' });
+    const vertical = screen.getByRole('slider', { name: 'Up or down' });
     const zoom = screen.getByRole('slider', { name: 'Zoom' });
 
+    expect(reset.compareDocumentPosition(horizontal) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(horizontal.compareDocumentPosition(vertical) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(vertical.compareDocumentPosition(zoom) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(horizontal).toHaveAttribute('min', '0');
     expect(horizontal).toHaveAttribute('max', '100');
     expect(horizontal).toHaveAttribute('step', '1');
@@ -426,6 +523,9 @@ describe('cover studio', () => {
     expect(zoom).toHaveAttribute('max', '160');
     expect(zoom).toHaveAttribute('step', '5');
     expect(zoom).toHaveAttribute('aria-valuetext', '100 percent zoom');
+    expect(screen.getByText('50% from left')).toBeVisible();
+    expect(screen.getByText('40% from top')).toBeVisible();
+    expect(screen.getByText('100%')).toBeVisible();
   });
 
   it('adjusts the crop from the keyboard and announces only once settled', async () => {
@@ -434,7 +534,7 @@ describe('cover studio', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 
-    const horizontal = screen.getByRole('slider', { name: 'Horizontal focus' });
+    const horizontal = screen.getByRole('slider', { name: 'Left or right' });
     fireEvent.change(horizontal, { target: { value: '70' } });
     expect(horizontal).toHaveAttribute('aria-valuetext', '70 percent from left');
     // Nothing announced yet: a summary on every key press makes a screen reader
@@ -452,7 +552,7 @@ describe('cover studio', () => {
     render(<Harness draft={DRAFT} />);
     fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    const horizontal = screen.getByRole('slider', { name: 'Horizontal focus' });
+    const horizontal = screen.getByRole('slider', { name: 'Left or right' });
     horizontal.focus();
 
     fireEvent.keyDown(horizontal, { key: 'ArrowRight' });
@@ -479,28 +579,142 @@ describe('cover studio', () => {
     vi.useRealTimers();
   });
 
-  it('drags by delta rather than jumping to the pressed point', () => {
+  it('uses controls without rendering a detached composer preview', () => {
     render(<Harness draft={DRAFT} />);
     fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
 
-    const surface = document.querySelector('.cover-composer__surface')!;
-    surface.getBoundingClientRect = () => ({
-      left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0,
-      toJSON: () => ({}),
+    expect(document.querySelector('.cover-composer__surface')).not.toBeInTheDocument();
+    expect(document.querySelector('.cover-composer img')).not.toBeInTheDocument();
+  });
+
+  it('keeps each framing label associated with only its range control', () => {
+    render(<Harness draft={DRAFT} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    for (const name of ['Left or right', 'Up or down', 'Zoom']) {
+      const slider = screen.getByRole('slider', { name });
+      const label = slider.closest('label');
+      expect(label).not.toBeNull();
+      expect(label?.querySelectorAll('button, input, meter, output, progress, select, textarea'))
+        .toHaveLength(1);
+    }
+  });
+
+  it('promotes the live canvas drag only after 3px and announces the settled framing', async () => {
+    vi.useFakeTimers();
+    render(<Harness draft={DRAFT} focusMode="auto" canvasForFocus={canvasAtFocus} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const canvas = document.querySelector<HTMLDivElement>('.cover-studio__canvas')!;
+    const guest = canvas.querySelector<HTMLElement>('.event-appearance-canvas__guest')!;
+    vi.spyOn(guest, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 200, bottom: 100,
+      width: 200, height: 100, toJSON: () => ({}),
     });
-    (surface as HTMLElement).setPointerCapture = () => undefined;
-    (surface as HTMLElement).releasePointerCapture = () => undefined;
+    let captured: number | null = null;
+    const setPointerCapture = vi.fn((pointerId: number) => { captured = pointerId; });
+    const releasePointerCapture = vi.fn((pointerId: number) => {
+      if (captured === pointerId) captured = null;
+    });
+    Object.assign(canvas, {
+      setPointerCapture,
+      releasePointerCapture,
+      hasPointerCapture: (pointerId: number) => captured === pointerId,
+    });
+    const image = () => canvas.querySelector<HTMLImageElement>(
+      '.event-appearance-canvas__local-cover .responsive-cover__image',
+    )!;
 
-    // Pressing well away from the current focal point must not move it at all.
-    fireEvent.pointerDown(surface, { clientX: 180, clientY: 90, pointerId: 1 });
-    expect(screen.getByRole('slider', { name: 'Horizontal focus' }))
-      .toHaveAttribute('aria-valuetext', '50 percent from left');
+    expect(canvas).toHaveAttribute('data-drag-enabled', 'true');
+    fireEvent.pointerDown(canvas, { pointerId: 7, isPrimary: true, clientX: 180, clientY: 90 });
+    fireEvent.pointerMove(canvas, { pointerId: 7, isPrimary: true, clientX: 178, clientY: 89 });
+    expect(image()).toHaveStyle({ objectPosition: '50% 40%' });
+    expect(screen.getByText('Automatic framing')).toBeVisible();
+    expect(screen.queryByRole('slider')).not.toBeInTheDocument();
+    expect(setPointerCapture).not.toHaveBeenCalled();
 
-    // Only the movement moves it, and by the distance travelled.
-    fireEvent.pointerMove(surface, { clientX: 160, clientY: 90, pointerId: 1 });
-    expect(screen.getByRole('slider', { name: 'Horizontal focus' }))
+    fireEvent.pointerMove(canvas, { pointerId: 7, isPrimary: true, clientX: 160, clientY: 90 });
+    expect(setPointerCapture).toHaveBeenCalledWith(7);
+    expect(image()).toHaveStyle({ objectPosition: '60% 40%' });
+    expect(screen.getByText('Manual framing')).toBeVisible();
+    expect(screen.getByRole('slider', { name: 'Left or right' }))
       .toHaveAttribute('aria-valuetext', '60 percent from left');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(screen.getByRole('status')).toHaveTextContent('Cover positioned 60 percent from left');
+    fireEvent.pointerUp(canvas, { pointerId: 7, isPrimary: true, clientX: 160, clientY: 90 });
+    expect(releasePointerCapture).toHaveBeenCalledWith(7);
+    vi.useRealTimers();
+  });
+
+  it('keeps taps and multi-pointer or cancelled gestures out of framing', () => {
+    render(<Harness draft={DRAFT} focusMode="auto" canvasForFocus={canvasAtFocus} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const canvas = document.querySelector<HTMLDivElement>('.cover-studio__canvas')!;
+    const guest = canvas.querySelector<HTMLElement>('.event-appearance-canvas__guest')!;
+    vi.spyOn(guest, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 200, bottom: 100,
+      width: 200, height: 100, toJSON: () => ({}),
+    });
+    let captured: number | null = null;
+    const setPointerCapture = vi.fn((pointerId: number) => { captured = pointerId; });
+    const releasePointerCapture = vi.fn((pointerId: number) => {
+      if (captured === pointerId) captured = null;
+    });
+    Object.assign(canvas, {
+      setPointerCapture,
+      releasePointerCapture,
+      hasPointerCapture: (pointerId: number) => captured === pointerId,
+    });
+
+    fireEvent.pointerDown(canvas, { pointerId: 1, isPrimary: true, clientX: 100, clientY: 50 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, isPrimary: true, clientX: 100, clientY: 50 });
+    expect(screen.getByText('Automatic framing')).toBeVisible();
+    expect(setPointerCapture).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(canvas, { pointerId: 2, isPrimary: true, clientX: 100, clientY: 50 });
+    fireEvent.pointerDown(canvas, { pointerId: 3, isPrimary: false, clientX: 110, clientY: 50 });
+    fireEvent.pointerMove(canvas, { pointerId: 2, isPrimary: true, clientX: 80, clientY: 50 });
+    expect(screen.getByText('Automatic framing')).toBeVisible();
+    expect(setPointerCapture).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(canvas, { pointerId: 4, isPrimary: true, clientX: 100, clientY: 50 });
+    fireEvent.pointerMove(canvas, { pointerId: 4, isPrimary: true, clientX: 80, clientY: 50 });
+    expect(setPointerCapture).toHaveBeenCalledWith(4);
+    fireEvent.pointerDown(canvas, { pointerId: 5, isPrimary: false, clientX: 90, clientY: 50 });
+    expect(releasePointerCapture).toHaveBeenCalledWith(4);
+    const valueAfterCancel = screen.getByRole('slider', { name: 'Left or right' })
+      .getAttribute('aria-valuetext');
+    fireEvent.pointerMove(canvas, { pointerId: 4, isPrimary: true, clientX: 60, clientY: 50 });
+    expect(screen.getByRole('slider', { name: 'Left or right' }))
+      .toHaveAttribute('aria-valuetext', valueAfterCancel);
+
+    fireEvent.pointerDown(canvas, { pointerId: 6, isPrimary: true, clientX: 100, clientY: 50 });
+    fireEvent.pointerCancel(canvas, { pointerId: 6, isPrimary: true });
+    fireEvent.pointerMove(canvas, { pointerId: 6, isPrimary: true, clientX: 60, clientY: 50 });
+    expect(screen.getByRole('slider', { name: 'Left or right' }))
+      .toHaveAttribute('aria-valuetext', valueAfterCancel);
+  });
+
+  it('does not expose canvas dragging while upload preparation is not ready', () => {
+    render(<Harness
+      draft={DRAFT}
+      focusMode="auto"
+      canvasForFocus={canvasAtFocus}
+      composeState={{ status: 'loading', error: null }}
+    />);
+    fireEvent.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    const canvas = document.querySelector<HTMLDivElement>('.cover-studio__canvas')!;
+    expect(canvas).toHaveAttribute('data-drag-enabled', 'false');
+    fireEvent.pointerDown(canvas, { pointerId: 1, isPrimary: true, clientX: 100, clientY: 50 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, isPrimary: true, clientX: 50, clientY: 50 });
+    expect(screen.queryByText('Manual framing')).not.toBeInTheDocument();
   });
 
   it('resets to the automatic composition', async () => {
@@ -509,15 +723,14 @@ describe('cover studio', () => {
     await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
 
-    fireEvent.change(screen.getByRole('slider', { name: 'Vertical focus' }), { target: { value: '90' } });
-    expect(screen.getByRole('slider', { name: 'Vertical focus' }))
+    fireEvent.change(screen.getByRole('slider', { name: 'Up or down' }), { target: { value: '90' } });
+    expect(screen.getByRole('slider', { name: 'Up or down' }))
       .toHaveAttribute('aria-valuetext', '90 percent from top');
 
     await user.click(screen.getByRole('button', { name: 'Reset to automatic' }));
-    expect(screen.queryByRole('slider', { name: 'Vertical focus' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Adjust focus' })).toBeVisible();
-    expect(document.querySelector('.cover-composer__surface img'))
-      .toHaveStyle({ objectPosition: '50% 40%' });
+    expect(screen.queryByRole('slider', { name: 'Up or down' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Adjust framing' })).toBeVisible();
+    expect(screen.getByText('Automatic framing')).toBeVisible();
   });
 
   it('shows the softness note only when no 2x profile qualifies', async () => {
@@ -549,20 +762,25 @@ describe('cover studio', () => {
     for (const name of ['Natural', 'Warm', 'Film', 'Soft', 'Monochrome']) {
       expect(screen.getByText(name)).toBeVisible();
     }
+    expect(document.querySelectorAll('.cover-style-picker__choice-heading')).toHaveLength(5);
     // No intensity slider anywhere in this step.
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
   });
 
   it('keeps style radios usable while real thumbnails load or fail', async () => {
     const user = userEvent.setup();
-    render(<Harness styleThumbnail={(effect) => effect === 'warm'
-      ? { status: 'error', url: null, error: new Error('Preview unavailable') }
-      : effect === 'film'
-        ? { status: 'loading', url: null, error: null }
-        : readyThumbnail(effect)} />);
+    render(<Harness styleThumbnail={(effect) => effect === 'natural'
+      ? { status: 'idle', url: null, error: null }
+      : effect === 'warm'
+        ? { status: 'error', url: null, error: new Error('Preview unavailable') }
+        : effect === 'film'
+          ? { status: 'loading', url: null, error: null }
+          : readyThumbnail(effect)} />);
     await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
 
+    expect(screen.getByRole('radio', { name: /^Natural/u })).toBeEnabled();
+    expect(screen.getByText('Preview not ready')).toBeVisible();
     expect(screen.getByRole('radio', { name: /^Warm/u })).toBeEnabled();
     expect(screen.getByText('Preview unavailable. Try this preview again.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Retry Warm preview' })).toBeVisible();
@@ -579,7 +797,11 @@ describe('cover studio', () => {
     await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.getByRole('alert')).toHaveTextContent('access');
+    const receipt = document.querySelector('.cover-studio__receipt')!;
+    const alert = screen.getByRole('alert');
+    expect(receipt).toHaveTextContent('Warm Linen · Natural');
+    expect(receipt.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(alert).toHaveTextContent('access');
     expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
     expect(onPublish).not.toHaveBeenCalled();
   });
@@ -906,6 +1128,144 @@ describe('cover studio dispatch and recovery', () => {
     />;
   }
 
+  function ControlledDoneHarness({
+    controller,
+    source,
+    effect,
+    focus,
+    onPublish,
+  }: {
+    controller: ReturnType<typeof dispatchHarness>['controller'];
+    source: CoverSourceChoice | { kind: 'none' };
+    effect: EventCoverEffectId;
+    focus: CoverFocusValue | null;
+    onPublish: (intent: CoverPublishIntent) => void;
+  }) {
+    const [state, setState] = useState(controller.getState());
+    useEffect(() => controller.subscribe(setState), [controller]);
+    return <CoverStudio
+      open
+      canvas={canvasAtFocus(focus ?? DRAFT.initialFocus)}
+      operation={controller}
+      operationState={state}
+      draft={DRAFT}
+      composeState={{ status: 'ready', error: null }}
+      source={source}
+      focus={focus}
+      focusMode="manual"
+      effect={effect}
+      accessFailure={null}
+      canRemove
+      presetThumbnail={(presetId) => `/assets/${presetId}.webp`}
+      styleThumbnail={readyThumbnail}
+      onSourceChange={vi.fn()}
+      onUpload={vi.fn()}
+      onEnterCompose={vi.fn()}
+      onFocusChange={vi.fn()}
+      onResetFocus={vi.fn()}
+      onEffectChange={vi.fn()}
+      onPublish={onPublish}
+      onDiscardDraft={vi.fn()}
+      onClose={vi.fn()}
+    />;
+  }
+
+  it('freezes the submitted receipt while preparing, prop churn, and retryable failure', async () => {
+    const { controller } = dispatchHarness();
+    const onPublish = vi.fn();
+    const { rerender } = render(<ControlledDoneHarness
+      controller={controller}
+      source={{ kind: 'preset', presetId: 'warm-linen' }}
+      effect="film"
+      focus={null}
+      onPublish={onPublish}
+    />);
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    const receipt = document.querySelector('.cover-studio__receipt')!;
+    const submittedCopy = receipt.textContent;
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(onPublish).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      controller.beginDispatch('operation-a');
+      controller.dispatchSettled(answer({ operation: preparing() }));
+    });
+    expect(screen.getByRole('button', { name: 'Back' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
+    expect(document.querySelector('.cover-studio__receipt')?.textContent).toBe(submittedCopy);
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByRole('slider')).not.toBeInTheDocument();
+
+    rerender(<ControlledDoneHarness
+      controller={controller}
+      source={{ kind: 'upload' }}
+      effect="soft"
+      focus={{ x: 0.9, y: 0.1, zoom: 1.5 }}
+      onPublish={onPublish}
+    />);
+    expect(document.querySelector('.cover-studio__receipt')?.textContent).toBe(submittedCopy);
+    expect(onPublish).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      controller.dispatchSettled(answer({
+        status: 503,
+        operation: preparing({ status: 'retryable-failed', retryable: true }),
+      }));
+    });
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
+    expect(document.querySelector('.cover-studio__receipt')?.textContent).toBe(submittedCopy);
+    expect(onPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables every mounted editing path when dispatch starts on Choose, Compose, or Style', async () => {
+    const choose = dispatchHarness();
+    render(<ControlledDoneHarness
+      controller={choose.controller}
+      source={{ kind: 'preset', presetId: 'warm-linen' }}
+      effect="natural"
+      focus={null}
+      onPublish={vi.fn()}
+    />);
+    await act(async () => { choose.controller.beginDispatch('operation-choose'); });
+    expect(screen.getAllByRole('radio').every((radio) => (radio as HTMLInputElement).disabled)).toBe(true);
+    expect(screen.getByLabelText('Choose photo')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove cover' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+
+    cleanup();
+    const compose = dispatchHarness();
+    render(<ControlledDoneHarness
+      controller={compose.controller}
+      source={{ kind: 'upload' }}
+      effect="natural"
+      focus={DRAFT.initialFocus}
+      onPublish={vi.fn()}
+    />);
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await act(async () => { compose.controller.beginDispatch('operation-compose'); });
+    expect(screen.getAllByRole('slider').every((slider) => (slider as HTMLInputElement).disabled)).toBe(true);
+    expect(screen.getByRole('button', { name: 'Reset to automatic' })).toBeDisabled();
+    expect(document.querySelector('.cover-studio__canvas')).toHaveAttribute('data-drag-enabled', 'false');
+    expect(screen.getByRole('button', { name: 'Back' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+
+    cleanup();
+    const style = dispatchHarness();
+    render(<ControlledDoneHarness
+      controller={style.controller}
+      source={{ kind: 'preset', presetId: 'warm-linen' }}
+      effect="natural"
+      focus={null}
+      onPublish={vi.fn()}
+    />);
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await act(async () => { style.controller.beginDispatch('operation-style'); });
+    expect(screen.getAllByRole('radio').every((radio) => (radio as HTMLInputElement).disabled)).toBe(true);
+    expect(screen.getByRole('button', { name: 'Back' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+  });
+
   it('turns Cancel into Close the moment dispatch begins', async () => {
     const { controller } = dispatchHarness();
     render(<LiveHarness controller={controller} />);
@@ -933,14 +1293,14 @@ describe('cover studio dispatch and recovery', () => {
   it('shows durable progress and the sixty-second copy from the receipt', async () => {
     const { controller } = dispatchHarness();
     render(<LiveHarness controller={controller} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await act(async () => {
       controller.beginDispatch('operation-a');
       controller.dispatchSettled(answer({ operation: preparing({ completedSteps: 3 }) }));
     });
-    // Done is the step the sheet lands on once dispatch begins.
-    fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(screen.getByRole('status')).toHaveTextContent('Preparing cover 4 of 6');
     expect(screen.getByRole('status').textContent).not.toMatch(/profile/iu);
   });
@@ -967,6 +1327,10 @@ describe('cover studio dispatch and recovery', () => {
   it('offers Try again only for a retryable receipt', async () => {
     const { controller } = dispatchHarness();
     render(<LiveHarness controller={controller} />);
+    fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await act(async () => {
       controller.beginDispatch('operation-a');
       controller.dispatchSettled(answer({
@@ -974,9 +1338,6 @@ describe('cover studio dispatch and recovery', () => {
         operation: preparing({ status: 'retryable-failed', retryable: true }),
       }));
     });
-    fireEvent.click(screen.getByRole('radio', { name: /Warm Linen/u }));
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
 
     await act(async () => {

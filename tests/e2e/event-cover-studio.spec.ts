@@ -14,6 +14,13 @@ import {
   stubManagerRoutes,
 } from './fixtures/routes';
 import { settleRendering } from './helpers/rendering';
+import {
+  measureDocument,
+  measureFold,
+  measureSeparation,
+  measureTarget,
+  measureViewportEscapes,
+} from './helpers/geometry';
 
 const UPLOAD = {
   name: 'portrait-edge-dark.png',
@@ -77,6 +84,41 @@ async function setDocumentVisibility(page: Page, state: 'hidden' | 'visible') {
   }, state);
 }
 
+test('Event Appearance places the captioned guest canvas before theme and color controls', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+
+  const editor = page.getByRole('region', { name: 'Event appearance editor' });
+  const figure = editor.locator('figure.event-appearance-canvas');
+  await expect(figure).toHaveCount(1);
+  await expect(figure.locator(':scope > figcaption').first()).toHaveText('What guests see');
+  await expect(editor.getByText(
+    'Choose the colors and shape guests see. Theme and color changes save as you make them. Cover changes begin after you choose Done, and the current cover stays live until the new one is ready.',
+    { exact: true },
+  )).toBeVisible();
+  await expect(editor.getByText('Cover changes apply immediately', { exact: false })).toHaveCount(0);
+
+  for (const control of [
+    editor.getByRole('group', { name: 'Event appearance' }),
+    editor.getByRole('textbox', { name: 'Primary color', exact: true }),
+    editor.getByRole('textbox', { name: 'Accent color', exact: true }),
+  ]) {
+    const target = await control.elementHandle();
+    expect(target).not.toBeNull();
+    expect(await figure.evaluate((canvas, target) => (
+      canvas.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING
+    ) !== 0, target!)).toBe(true);
+  }
+
+  const guest = figure.locator('.event-appearance-canvas__guest');
+  await expect(guest).not.toHaveAttribute('role', 'img');
+  await expect(guest.getByRole('button', { name: 'Change cover' })).toHaveCount(0);
+  await expect(figure.getByRole('button', { name: 'Change cover' })).toBeVisible();
+});
+
 test('preset publication consumes its applied event without a redundant read or duplicate operation', async ({ page }, testInfo) => {
   desktopOnly(testInfo);
   const audit = await openManagerStudio(page);
@@ -86,6 +128,20 @@ test('preset publication consumes its applied event without a redundant read or 
 
   await expect(page.getByRole('dialog', { name: 'Cover Studio' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Change cover' })).toBeFocused();
+  const applied = page.locator('.cover-preparation--success');
+  await expect(applied).toBeVisible();
+  expect(await applied.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundColor: style.backgroundColor,
+      color: style.color,
+      borderColor: style.borderColor,
+    };
+  })).toEqual({
+    backgroundColor: 'rgb(232, 236, 216)',
+    color: 'rgb(78, 91, 40)',
+    borderColor: 'rgb(104, 118, 61)',
+  });
   const publications = records(audit, 'publication');
   expect(publications).toHaveLength(1);
   expect(publications[0]?.responseStatus).toBe(200);
@@ -103,20 +159,77 @@ test('preset publication consumes its applied event without a redundant read or 
     .toBeNull();
 });
 
-test('upload preparation is bounded, range-keyboard complete, and performs no transforms while adjusting', async ({ page }, testInfo) => {
+test('Compose uses one real canvas, promotes the first 3px drag to manual framing, and requests no local transforms', async ({ page }, testInfo) => {
   desktopOnly(testInfo);
   const audit = await openManagerStudio(page);
 
   await page.getByLabel('Choose photo').setInputFiles(UPLOAD);
   await expect(page.getByRole('radio', { name: 'Upload a photo' })).toBeChecked();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page.getByRole('heading', { name: 'Position the photo' })).toBeFocused();
-  await expect(page.getByRole('button', { name: 'Adjust focus' })).toBeVisible();
+  const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+  await expect(studio.getByRole('heading', { name: 'Position the photo' })).toBeFocused();
+  await expect(studio.locator('.event-appearance-canvas')).toHaveCount(1);
+  await expect(studio.locator('.cover-composer__surface')).toHaveCount(0);
+  await expect(studio.locator('.cover-composer img')).toHaveCount(0);
+  await expect(studio.getByText('Automatic framing', { exact: true })).toBeVisible();
+  await expect(studio.getByText(
+    'Drag the preview to reposition it, or choose Adjust framing for precise controls.',
+    { exact: true },
+  )).toBeVisible();
+  await expect(studio.getByRole('slider')).toHaveCount(0);
 
   const transformCount = records(audit, 'transform').length;
   expect(transformCount).toBe(3);
-  await page.getByRole('button', { name: 'Adjust focus' }).click();
-  const horizontal = page.getByRole('slider', { name: 'Horizontal focus' });
+  const guest = studio.locator('.event-appearance-canvas__guest');
+  const image = studio.locator(
+    '.event-appearance-canvas__local-cover .responsive-cover__image',
+  );
+  const box = await guest.boundingBox();
+  expect(box).not.toBeNull();
+  const start = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  const position = () => image.evaluate((element) => (
+    (element as HTMLImageElement).style.objectPosition
+  ));
+  expect(await position()).toBe('50% 50%');
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x - 2, start.y - 1);
+  expect(await position()).toBe('50% 50%');
+  await expect(studio.getByText('Automatic framing', { exact: true })).toBeVisible();
+  await expect(studio.getByRole('slider')).toHaveCount(0);
+
+  await page.mouse.move(start.x - 20, start.y);
+  const expectedX = 0.5 + 20 / box!.width;
+  await expect.poll(async () => Number.parseFloat((await position()).split('%')[0]!))
+    .toBeCloseTo(expectedX * 100, 4);
+  await page.mouse.up();
+  await expect(studio.getByText('Manual framing', { exact: true })).toBeVisible();
+  await expect(studio.getByText('Drag the preview or use the controls below.', { exact: true }))
+    .toBeVisible();
+
+  const horizontal = studio.getByRole('slider', { name: 'Left or right' });
+  const vertical = studio.getByRole('slider', { name: 'Up or down' });
+  const zoom = studio.getByRole('slider', { name: 'Zoom' });
+  const expectedPercent = Math.round(expectedX * 100);
+  await expect(horizontal).toHaveAttribute('aria-valuetext', `${expectedPercent} percent from left`);
+  await expect(vertical).toHaveAttribute('aria-valuetext', '50 percent from top');
+  await expect(zoom).toHaveAttribute('aria-valuetext', '100 percent zoom');
+  await expect(studio.getByText(`${expectedPercent}% from left`, { exact: true })).toBeVisible();
+  await expect(studio.getByText('50% from top', { exact: true })).toBeVisible();
+  await expect(studio.getByText('100%', { exact: true })).toBeVisible();
+  const reset = studio.getByRole('button', { name: 'Reset to automatic' });
+  const horizontalHandle = await horizontal.elementHandle();
+  expect(horizontalHandle).not.toBeNull();
+  expect(await reset.evaluate((element, range) => (
+    element.compareDocumentPosition(range) & Node.DOCUMENT_POSITION_FOLLOWING
+  ) !== 0, horizontalHandle!)).toBe(true);
+  await expect(studio.locator('.cover-studio__canvas')).toHaveCSS('touch-action', 'pan-y pinch-zoom');
+
+  await reset.click();
+  await expect(studio.getByText('Automatic framing', { exact: true })).toBeVisible();
+  await expect(studio.getByRole('slider')).toHaveCount(0);
+  await expect.poll(position).toBe('50% 50%');
+  await studio.getByRole('button', { name: 'Adjust framing' }).click();
   await horizontal.focus();
   await horizontal.press('End');
   await expect(horizontal).toHaveAttribute('aria-valuetext', '100 percent from left');
@@ -124,36 +237,12 @@ test('upload preparation is bounded, range-keyboard complete, and performs no tr
   await horizontal.press('PageUp');
   await horizontal.press('ArrowRight');
   await expect(horizontal).toHaveAttribute('aria-valuetext', '11 percent from left');
-  const zoom = page.getByRole('slider', { name: 'Zoom' });
   await zoom.press('End');
   await expect(zoom).toHaveAttribute('aria-valuetext', '200 percent zoom');
-  await expect(page.getByRole('dialog', { name: 'Cover Studio' }).getByRole('status'))
+  await expect(studio.getByRole('status'))
     .toContainText('Cover positioned 11 percent from left');
   expect(records(audit, 'transform')).toHaveLength(transformCount);
-
-  await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page.getByRole('heading', { name: 'Choose a style' })).toBeFocused();
-  for (const style of ['Warm', 'Film', 'Soft', 'Monochrome']) {
-    await page.getByRole('radio', { name: new RegExp(`^${style}`, 'u') }).check();
-    await expect(page.locator('.cover-style-picker li').filter({
-      has: page.getByRole('radio', { name: new RegExp(`^${style}`, 'u') }),
-    })).toHaveAttribute('data-thumbnail-state', 'ready');
-  }
-  const previews = records(audit, 'preview');
-  expect(previews).toHaveLength(5);
-  expect(new Set(previews.map(({ path }) => path)).size).toBe(5);
-  expect(records(audit, 'transform')).toHaveLength(transformCount);
-
-  await page.getByRole('button', { name: 'Continue' }).click();
-  await page.getByRole('button', { name: 'Done' }).click();
-  await expect(page.getByRole('dialog', { name: 'Cover Studio' })).toHaveCount(0);
-  const publications = records(audit, 'publication');
-  expect(publications).toHaveLength(1);
-  expect(publications[0]?.requestBody).toMatchObject({
-    source: { kind: 'upload', draftId: 'draft-e2e' },
-    focus: { mode: 'manual', x: 0.11, zoom: 2 },
-    effect: 'monochrome',
-  });
+  expect(records(audit, 'publication')).toHaveLength(0);
 });
 
 test('upload validation stays inside the Studio and resets the native picker', async ({ page }) => {
@@ -183,7 +272,7 @@ test('an existing upload is inspected once, can be reset to automatic focus, and
 
   await expect(page.getByRole('radio', { name: 'Upload a photo' })).toBeChecked();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page.getByRole('button', { name: 'Adjust focus' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Adjust framing' })).toBeVisible();
   const draft = records(audit, 'draft').find(({ method, path }) => method === 'POST' && path.endsWith('/drafts'));
   expect(draft?.requestBody).toMatchObject({
     source: { kind: 'existing-upload' },
@@ -191,8 +280,8 @@ test('an existing upload is inspected once, can be reset to automatic focus, and
   });
   expect(records(audit, 'transform').filter(({ path }) => path.endsWith('/raw'))).toHaveLength(0);
 
-  await page.getByRole('button', { name: 'Adjust focus' }).click();
-  await page.getByRole('slider', { name: 'Horizontal focus' }).press('End');
+  await page.getByRole('button', { name: 'Adjust framing' }).click();
+  await page.getByRole('slider', { name: 'Left or right' }).press('End');
   await page.getByRole('button', { name: 'Reset to automatic' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByRole('button', { name: 'Continue' }).click();
@@ -246,6 +335,8 @@ test('server Retry-After controls polling and close does not detach the Manager 
   await finishPreset(page, 'Warm');
   await expect(page.getByRole('dialog', { name: 'Cover Studio' }).getByRole('status'))
     .toContainText('Preparing cover');
+  await expect(page.locator('.cover-preparation')).toBeVisible();
+  await expect(page.locator('.cover-preparation--success')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close' }).click();
 
   await expect.poll(() => records(audit, 'status').length, { timeout: 6_000 }).toBe(1);
@@ -594,6 +685,306 @@ async function geometryPage(
   await openManagerStudio(page);
   return { context, page };
 }
+
+test('source and style radios retain 20px glyphs, 44px labels, and a visible file-focus proxy at 320 and 390', async ({ browser }, testInfo) => {
+  desktopOnly(testInfo);
+  for (const viewport of [
+    { width: 320, height: 568 },
+    { width: 390, height: 844 },
+  ]) {
+    const { context, page } = await geometryPage(browser, viewport.width, viewport.height);
+    try {
+      const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+      const assertRadioGeometry = async (selector: string) => {
+        for (const radio of await studio.locator(selector).all()) {
+          const geometry = await radio.evaluate((element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            const label = element.closest('label');
+            const labelRect = label?.getBoundingClientRect();
+            return {
+              width: rect.width,
+              height: rect.height,
+              padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+              border: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+              computedWidth: style.width,
+              minHeight: style.minHeight,
+              accentColor: style.accentColor,
+              labelWidth: labelRect?.width ?? 0,
+              labelHeight: labelRect?.height ?? 0,
+            };
+          });
+          expect(geometry.width).toBe(20);
+          expect(geometry.height).toBe(20);
+          expect(geometry.padding).toEqual(['0px', '0px', '0px', '0px']);
+          expect(geometry.border).toEqual(['0px', '0px', '0px', '0px']);
+          expect(geometry.computedWidth).not.toBe('100%');
+          expect(geometry.minHeight).not.toBe('48px');
+          expect(geometry.accentColor).toBe('rgb(63, 109, 149)');
+          expect(geometry.labelWidth).toBeGreaterThanOrEqual(44);
+          expect(geometry.labelHeight).toBeGreaterThanOrEqual(44);
+        }
+      };
+
+      await assertRadioGeometry('.cover-source-picker input[type="radio"]');
+      const upload = studio.locator('.cover-source-picker__upload');
+      await expect(upload).toHaveCSS('border-top-style', 'dashed');
+      await expect(studio.locator('.cover-source-picker__upload-choice')).toHaveCSS('min-width', '0px');
+      const uploadNameLines = await studio.locator(
+        '.cover-source-picker__upload .cover-source-picker__name',
+      ).evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size;
+      });
+      expect(uploadNameLines).toBeLessThanOrEqual(2);
+
+      const file = studio.locator('.cover-source-picker__file');
+      await studio.getByRole('radio', { name: 'Upload a photo' }).focus();
+      await page.keyboard.press('Tab');
+      await expect(file).toBeFocused();
+      const proxy = studio.locator('.cover-source-picker__file-proxy');
+      const outline = await proxy.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          style: style.outlineStyle,
+          width: style.outlineWidth,
+          color: style.outlineColor,
+          offset: Number.parseFloat(style.outlineOffset),
+        };
+      });
+      expect(outline).toEqual({
+        style: 'solid',
+        width: '2px',
+        color: 'rgb(44, 92, 133)',
+        offset: 2,
+      });
+
+      const warmLinen = studio.getByRole('radio', { name: /^Warm Linen/u });
+      await warmLinen.check();
+      const selectedSource = warmLinen.locator('xpath=ancestor::label');
+      await expect(selectedSource).toContainText('Warm Linen');
+      const sourceRing = await selectedSource.evaluate((element) => getComputedStyle(element).boxShadow);
+      expect(sourceRing).toContain('rgb(63, 109, 149)');
+      expect(sourceRing).toContain('2px');
+
+      await studio.getByRole('button', { name: 'Continue' }).click();
+      await assertRadioGeometry('.cover-style-picker input[type="radio"]');
+      const film = studio.getByRole('radio', { name: /^Film/u });
+      await film.check();
+      const selectedStyle = film.locator('xpath=ancestor::label');
+      await expect(selectedStyle).toContainText('Film');
+      const styleRing = await selectedStyle.evaluate((element) => getComputedStyle(element).boxShadow);
+      expect(styleRing).toContain('rgb(63, 109, 149)');
+      expect(styleRing).toContain('2px');
+    } finally {
+      await context.close();
+    }
+  }
+});
+
+test('Done keeps the preset receipt visible before dispatch and while preparing or retryable failed', async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  const audit = await openManagerStudio(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+    coverScenario: {
+      publicationReplies: [{
+        operationStatus: 'preparing',
+        status: 202,
+        retryAfter: '1',
+      }],
+      statusReplies: [{
+        operationStatus: 'retryable-failed',
+        status: 503,
+        retryable: true,
+        includeEvent: true,
+      }],
+    },
+  });
+  await choosePreset(page);
+  await page.getByRole('radio', { name: /^Film/u }).check();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+  const receipt = studio.locator('.cover-studio__receipt');
+  await expect(receipt).toContainText('Warm Linen · Film');
+  await expect(receipt).toContainText('Guests see this at the top of RSVP and photo delivery.');
+  await expect(receipt).toContainText(
+    'Your current cover stays live until the new one is completely ready. If anything fails, nothing changes.',
+  );
+  const receiptText = await receipt.textContent();
+
+  await studio.getByRole('button', { name: 'Done' }).click();
+  const preparing = studio.getByRole('status');
+  await expect(preparing).toContainText('Preparing cover');
+  await expect(receipt).toHaveText(receiptText!);
+  const preparingHandle = await preparing.elementHandle();
+  expect(preparingHandle).not.toBeNull();
+  expect(await receipt.evaluate((element, status) => (
+    element.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING
+  ) !== 0, preparingHandle!)).toBe(true);
+  await expect(studio.getByRole('button', { name: 'Back' })).toBeDisabled();
+  await expect(studio.getByRole('button', { name: 'Done' })).toBeDisabled();
+
+  await expect.poll(() => records(audit, 'status').length, { timeout: 4_000 }).toBe(1);
+  const retry = studio.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await expect(receipt).toHaveText(receiptText!);
+  const retryHandle = await retry.elementHandle();
+  expect(retryHandle).not.toBeNull();
+  expect(await receipt.evaluate((element, action) => (
+    element.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING
+  ) !== 0, retryHandle!)).toBe(true);
+  expect(records(audit, 'publication')).toHaveLength(1);
+  expect(records(audit, 'status')).toHaveLength(1);
+});
+
+test('preset styles load five static effect thumbnails without draft or preview requests', async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  const audit = await openManagerStudio(page);
+  await choosePreset(page);
+  const items = page.locator('.cover-style-picker li');
+  await expect(items).toHaveCount(5);
+  for (const item of await items.all()) await expect(item).toHaveAttribute('data-thumbnail-state', 'ready');
+  const images = page.locator('.cover-style-picker img');
+  await expect(images).toHaveCount(5);
+  for (const thumbnail of await images.all()) await expect(thumbnail).toBeVisible();
+  await expect.poll(() => images.evaluateAll((nodes) => nodes.every((node) => {
+    const image = node as HTMLImageElement;
+    return image.complete && image.naturalWidth > 0;
+  }))).toBe(true);
+  const effects = ['natural', 'warm', 'film', 'soft', 'monochrome'];
+  expect(await images.evaluateAll((nodes) => nodes.map((node) => (
+    new URL((node as HTMLImageElement).src).pathname
+  )))).toEqual(effects.map((effect) => (
+    `/assets/event-covers/v1/warm-linen/${effect}/standard-default-1x.webp`
+  )));
+  for (const name of ['Natural', 'Warm', 'Film', 'Soft', 'Monochrome']) {
+    await expect(page.getByRole('radio', { name: new RegExp(`^${name}`, 'u') })).toBeEnabled();
+  }
+  for (const kind of ['draft', 'preview', 'transform', 'publication'] as const) {
+    expect(records(audit, kind)).toHaveLength(0);
+  }
+});
+
+test('missing preset style artwork keeps its named radio usable without upload fallbacks', async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  await page.route(
+    '**/assets/event-covers/v1/warm-linen/film/standard-default-1x.webp',
+    (route) => route.fulfill({ status: 404, body: 'Missing fixture artwork.' }),
+  );
+  const audit = await openManagerStudio(page);
+  await choosePreset(page);
+  const film = page.getByRole('radio', { name: /^Film/u });
+  await expect(film).toBeEnabled();
+  await film.check();
+  await expect(film).toBeChecked();
+  const image = page.locator('.cover-style-picker li', { has: film }).locator('img');
+  await expect.poll(() => image.evaluate((node) => {
+    const thumbnail = node as HTMLImageElement;
+    return thumbnail.complete && thumbnail.naturalWidth === 0;
+  })).toBe(true);
+  await expect(page.locator('.cover-style-picker__state')).toHaveCount(0);
+  for (const kind of ['draft', 'preview', 'transform', 'publication'] as const) {
+    expect(records(audit, kind)).toHaveLength(0);
+  }
+});
+
+test('default, compact, and short Studio modes size the real guest frame and retain one reachable scroller', async ({ browser }, testInfo) => {
+  desktopOnly(testInfo);
+  for (const geometry of [
+    { width: 320, height: 568, mode: 'default', guestHeight: 144 },
+    { width: 390, height: 844, mode: 'default', guestHeight: 144 },
+    { width: 640, height: 450, mode: 'compact', guestHeight: 96 },
+    { width: 320, height: 180, mode: 'short', guestHeight: 96 },
+  ] as const) {
+    const { context, page } = await geometryPage(browser, geometry.width, geometry.height);
+    try {
+      const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+      await expect(studio).toHaveAttribute('data-viewport', geometry.mode);
+      const guest = studio.locator('.cover-studio__canvas .event-appearance-canvas__guest');
+      const guestGeometry = await guest.evaluate((element) => ({
+        height: element.getBoundingClientRect().height,
+        minHeight: Number.parseFloat(getComputedStyle(element).minHeight),
+      }));
+      expect(guestGeometry.minHeight).toBe(geometry.guestHeight);
+      expect(guestGeometry.height).toBeGreaterThanOrEqual(geometry.guestHeight);
+      expect(guestGeometry.height).toBeLessThanOrEqual(geometry.guestHeight + 1);
+      const guestHandle = await guest.elementHandle();
+      expect(guestHandle).not.toBeNull();
+      for (const content of await guest.locator(
+        '.event-appearance-canvas__event, .event-appearance-canvas__welcome, .event-appearance-canvas__action',
+      ).all()) {
+        await expect(content).toBeVisible();
+        const containment = await content.evaluate((element, frame) => {
+          const contentRect = element.getBoundingClientRect();
+          const frameRect = frame.getBoundingClientRect();
+          return {
+            className: element.className,
+            content: { left: contentRect.left, right: contentRect.right, top: contentRect.top, bottom: contentRect.bottom },
+            frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
+            inside: contentRect.left >= frameRect.left - 1
+            && contentRect.right <= frameRect.right + 1
+            && contentRect.top >= frameRect.top - 1
+            && contentRect.bottom <= frameRect.bottom + 1,
+          };
+        }, guestHandle!);
+        expect(containment.inside, JSON.stringify(containment)).toBe(true);
+      }
+
+      const scrollableRegions = await studio.evaluate((element) => (
+        [element, ...Array.from(element.querySelectorAll<HTMLElement>('*'))]
+          .filter((candidate) => {
+            const overflow = getComputedStyle(candidate).overflowY;
+            return (overflow === 'auto' || overflow === 'scroll')
+              && candidate.scrollHeight > candidate.clientHeight + 1;
+          }).length
+      ));
+      expect(scrollableRegions).toBe(1);
+      const documentSize = await measureDocument(page);
+      expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+      expect(await measureViewportEscapes(studio)).toEqual([]);
+
+      if (geometry.width === 320 && geometry.height === 568) {
+        await expect(studio.locator('.cover-source-picker__upload')).toBeInViewport();
+        await expect(studio.locator('.cover-studio__footer')).toBeInViewport();
+        const header = studio.locator('.cover-studio__header');
+        const cancel = header.getByRole('button', { name: 'Cancel' });
+        const title = header.getByRole('heading', { name: 'Choose a cover' });
+        const counter = header.getByText('Step 1 of 3', { exact: true });
+        expect((await measureTarget(header)).height).toBe(56);
+        expect(await measureSeparation(cancel, title)).toBeGreaterThan(0);
+        expect(await measureSeparation(title, counter)).toBeGreaterThan(0);
+        const headerGeometry = await header.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return Array.from(element.children).map((child) => {
+            const rect = child.getBoundingClientRect();
+            return {
+              withinHeader: rect.left >= bounds.left && rect.right <= bounds.right
+                && rect.top >= bounds.top && rect.bottom <= bounds.bottom,
+              withinViewport: rect.left >= 0 && rect.right <= document.documentElement.clientWidth,
+            };
+          });
+        });
+        expect(headerGeometry.every(({ withinHeader, withinViewport }) => (
+          withinHeader && withinViewport
+        ))).toBe(true);
+        expect(await title.evaluate((element) => ({
+          horizontal: element.scrollWidth <= element.clientWidth,
+          vertical: element.scrollHeight <= element.clientHeight + 1,
+        }))).toEqual({ horizontal: true, vertical: true });
+      }
+
+      const footer = studio.locator('.cover-studio__footer');
+      await footer.scrollIntoViewIfNeeded();
+      expect((await measureFold(page, footer)).visible).toBeGreaterThan(0);
+      for (const action of await footer.getByRole('button').all()) {
+        expect((await measureTarget(action)).height).toBeGreaterThanOrEqual(44);
+      }
+    } finally {
+      await context.close();
+    }
+  }
+});
 
 test('sheet/dialog, compact keyboard, 200%, and 400% geometries retain one usable scroll region', async ({ browser }, testInfo) => {
   desktopOnly(testInfo);

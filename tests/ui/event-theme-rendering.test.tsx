@@ -144,10 +144,26 @@ describe('event theme primitives', () => {
         event={previewEvent}
         theme={coastalTheme}
         sourceFor={(slot) => managerEventCoverSlotPath(previewEvent.id, slot)}
+        summary={<p data-testid="cover-summary">Cover summary</p>}
+        controls={<button type="button">Canvas control</button>}
       />
     </>);
 
     const preview = screen.getByTestId('event-appearance-canvas');
+    const figure = container.querySelector('figure.event-appearance-canvas');
+    expect(figure).not.toBeNull();
+    expect(figure?.firstElementChild).toMatchObject({
+      tagName: 'FIGCAPTION',
+      textContent: 'What guests see',
+    });
+    expect(preview).not.toHaveAttribute('role', 'img');
+    expect(preview).not.toContainElement(screen.getByTestId('cover-summary'));
+    expect(preview).not.toContainElement(screen.getByRole('button', { name: 'Canvas control' }));
+    expect(preview.compareDocumentPosition(screen.getByTestId('cover-summary')))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.getByTestId('cover-summary').compareDocumentPosition(
+      screen.getByRole('button', { name: 'Canvas control' }),
+    )).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(preview.style.getPropertyValue('--event-page')).toBe('#edf7f5');
     expect(preview.style.getPropertyValue('--event-primary')).toBe('#0c6370');
     expect(inlineEventProperties(preview)).toEqual(Object.values(EVENT_THEME_CSS_PROPERTIES).sort());
@@ -159,7 +175,7 @@ describe('event theme primitives', () => {
     expect(preview).toHaveTextContent('Add photos');
     expect(preview).toHaveTextContent('View gallery');
     expect(preview.querySelectorAll('button, a, input, textarea, select, [role="button"], h1, h2, h3, h4, h5, h6')).toHaveLength(0);
-    expect(container.querySelector('figcaption')).toBeNull();
+    expect(container.querySelector('figcaption')).toHaveTextContent('What guests see');
     expect(preview.querySelector('[aria-hidden="true"]')).not.toBeNull();
   });
 
