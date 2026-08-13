@@ -6,6 +6,7 @@ import {
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
+import { mediaUploadReleaseForEnv } from '../../shared/media-upload-release';
 import type { AppEnv } from '../env';
 import { ExportsRepository } from '../db/exports';
 import { MediaRepository } from '../db/media';
@@ -46,6 +47,7 @@ export async function deletePrefix(bucket: R2Bucket, prefix: string): Promise<vo
 }
 
 export async function cleanupExpiredReservations(env: AppEnv, now = new Date()): Promise<number> {
+  if (mediaUploadReleaseForEnv(env).mode === 'bridge-disabled') return 0;
   const media = new MediaRepository(env.DB);
   let cleaned = 0;
   for (;;) {
@@ -1454,6 +1456,25 @@ export async function reconcileEventCoverPurge(
   const summary: CoverPurgeProgressSummary = {
     eventId, phase: 'fences', inspected: 0, platformMutations: 0, remainder: true,
   };
+  if (!mediaUploadReleaseForEnv(env).capabilities.eventRelationalPurge) {
+    // The schema-14 bridge cannot hard-delete the rows migration 0015 must use
+    // to seed permanent suppression for already-admitted legacy R2 writes.
+    // Access is revoked atomically, but the relational graph and object prefix
+    // remain available to the immediately following guarded migration.
+    await env.DB.batch([
+      env.DB.prepare('UPDATE events SET deleted_at = COALESCE(deleted_at, ?) WHERE id = ?')
+        .bind(timestamp, eventId),
+      env.DB.prepare('UPDATE event_access_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE event_id = ?')
+        .bind(timestamp, eventId),
+      env.DB.prepare('UPDATE event_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE event_id = ?')
+        .bind(timestamp, eventId),
+      env.DB.prepare('UPDATE rsvp_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE event_id = ?')
+        .bind(timestamp, eventId),
+      env.DB.prepare('UPDATE event_entry_credentials SET disabled_at = COALESCE(disabled_at, ?) WHERE event_id = ?')
+        .bind(timestamp, eventId),
+    ]);
+    return summary;
+  }
   const platform = accessors ?? {
     render: defaultCoverWorkflowAccessor(env),
     backfill: defaultCoverBackfillWorkflowAccessor(env),
@@ -1767,6 +1788,7 @@ export async function resumeDeletedEventPurges(
   env: AppEnv,
   now = new Date(),
 ): Promise<number> {
+  if (!mediaUploadReleaseForEnv(env).capabilities.eventRelationalPurge) return 0;
   // Least-recently-attempted first. A stalled purge must rotate behind events
   // that have never had a chance to start, and the ID is the stable tie-break.
   const purged = await env.DB.prepare(`

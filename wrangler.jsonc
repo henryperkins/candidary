@@ -95,9 +95,7 @@
       "LOGIN_HMAC_KEY",
       "ENTRY_HMAC_KEY",
       "ENTRY_ENCRYPTION_KEY",
-      "RSVP_LOOKUP_HMAC_KEY",
-      "R2_ACCESS_KEY_ID",
-      "R2_SECRET_ACCESS_KEY"
+      "RSVP_LOOKUP_HMAC_KEY"
     ]
   },
   "observability": {

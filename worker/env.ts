@@ -8,6 +8,11 @@ import type { RuntimeReleaseIdentity } from '../shared/release';
 // place.
 export type AppEnv = Cloudflare.Env;
 
+export type MediaUploadReleaseEnv = AppEnv & {
+  /** Local Worker-test compatibility only; never declared in Wrangler. */
+  TEST_MEDIA_UPLOAD_RELEASE_MODE?: string;
+};
+
 export interface AuthenticatedSession {
   event: EventRecord;
   session: SessionRecord;
