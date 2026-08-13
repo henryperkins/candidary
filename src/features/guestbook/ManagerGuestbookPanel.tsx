@@ -1,5 +1,5 @@
 import { Camera, MessageCircle } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import type { ManagerGuestbookItem } from '../../../shared/contracts';
 import { api, ClientApiError, mediaPreview } from '../../app/api';
@@ -68,6 +68,12 @@ interface RowFailure {
   retry: () => void;
 }
 
+interface FocusRestoreRequest {
+  currentKey: string;
+  nextKey: string | null;
+  scrollY: number;
+}
+
 export function ManagerGuestbookPanel({
   eventId,
   eventTimezone,
@@ -89,6 +95,7 @@ export function ManagerGuestbookPanel({
   const [rowFailures, setRowFailures] = useState<Record<string, RowFailure>>({});
   const [undoItem, setUndoItem] = useState<ManagerGuestbookItem | null>(null);
   const [announcement, setAnnouncement] = useState('');
+  const [focusRestore, setFocusRestore] = useState<FocusRestoreRequest | null>(null);
   const requestGeneration = useRef(0);
   const rowElements = useRef(new Map<string, HTMLLIElement>());
   const mounted = useRef(true);
@@ -97,6 +104,17 @@ export function ManagerGuestbookPanel({
     mounted.current = false;
     requestGeneration.current += 1;
   }, []);
+
+  useLayoutEffect(() => {
+    if (!focusRestore) return;
+    const target = rowElements.current.get(focusRestore.currentKey)
+      ?? (focusRestore.nextKey ? rowElements.current.get(focusRestore.nextKey) : null);
+    const control = target?.querySelector<HTMLButtonElement>('button:not(:disabled)')
+      ?? document.querySelector<HTMLButtonElement>('.manager-guestbook__refresh');
+    control?.focus({ preventScroll: true });
+    window.scrollTo(0, focusRestore.scrollY);
+    setFocusRestore(null);
+  }, [focusRestore]);
 
   const listPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams({ view, source, limit: '25' });
@@ -153,13 +171,8 @@ export function ManagerGuestbookPanel({
     setSource(next);
   };
 
-  const restoreFocus = (currentKey: string, nextKey: string | null) => {
-    requestAnimationFrame(() => {
-      const target = rowElements.current.get(currentKey) ?? (nextKey ? rowElements.current.get(nextKey) : null);
-      const control = target?.querySelector<HTMLButtonElement>('button:not(:disabled)')
-        ?? document.querySelector<HTMLButtonElement>('.manager-guestbook__refresh');
-      control?.focus({ preventScroll: true });
-    });
+  const restoreFocus = (currentKey: string, nextKey: string | null, scrollY: number) => {
+    setFocusRestore({ currentKey, nextKey, scrollY });
   };
 
   const runAction = async (item: ManagerGuestbookItem, action: GuestbookRowAction) => {
@@ -197,6 +210,7 @@ export function ManagerGuestbookPanel({
         confirmed = response.item;
       }
       if (!mounted.current) return;
+      const confirmedScrollY = window.scrollY;
       setRows((current) => {
         const without = current.filter((candidate) => guestbookItemKey(candidate) !== key);
         if (
@@ -218,7 +232,7 @@ export function ManagerGuestbookPanel({
         setAnnouncement(purged ? 'Note permanently deleted.' : 'Guestbook entry updated.');
       }
       void onSummaryRefresh({ silent: true });
-      restoreFocus(confirmed ? guestbookItemKey(confirmed) : key, nextKey);
+      restoreFocus(confirmed ? guestbookItemKey(confirmed) : key, nextKey, confirmedScrollY);
     } catch (error) {
       if (!mounted.current) return;
       const conflict = error instanceof ClientApiError
@@ -226,12 +240,13 @@ export function ManagerGuestbookPanel({
       const retry = conflict
         ? () => { void loadEntries('replace'); }
         : () => { void runAction(item, action); };
+      const failureScrollY = window.scrollY;
       setRowFailures((current) => ({ ...current, [key]: {
         message: conflict ? 'This entry changed. Reload it before choosing another action.' : actionFailureMessage(error),
         retry,
       } }));
       setAnnouncement(conflict ? 'This entry changed. Reload is available.' : 'Guestbook entry update failed.');
-      restoreFocus(key, null);
+      restoreFocus(key, null, failureScrollY);
     } finally {
       if (mounted.current) {
         setBusyKey(null);

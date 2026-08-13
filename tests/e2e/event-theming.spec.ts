@@ -38,7 +38,7 @@ type MatrixState =
   | 'review with long filenames'
   | 'active progress and retry failure'
   | 'terminal receipt'
-  | 'gallery deliveries and Notes'
+  | 'gallery deliveries and Guestbook'
   | 'full-screen long caption';
 
 const VIEWPORTS = [
@@ -57,7 +57,7 @@ const MATRIX: ReadonlyArray<{
   { state: 'review with long filenames', presets: ['candidary-default', 'coastal-light', 'midnight-film'] },
   { state: 'active progress and retry failure', presets: ['coastal-light', 'candidary-default', 'garden-party'] },
   { state: 'terminal receipt', presets: ['candidary-default', 'coastal-light', 'midnight-film'] },
-  { state: 'gallery deliveries and Notes', presets: ['coastal-light', 'candidary-default', 'garden-party'] },
+  { state: 'gallery deliveries and Guestbook', presets: ['coastal-light', 'candidary-default', 'garden-party'] },
   { state: 'full-screen long caption', presets: ['candidary-default', 'coastal-light', 'midnight-film'] },
 ];
 
@@ -209,7 +209,7 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
     await page.locator('input[data-photo-source="library"]').setInputFiles(IMAGE);
     await page.getByRole('button', { name: 'Send 1 photo' }).click();
     await expect(page.getByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
-  } else if (state === 'gallery deliveries and Notes') {
+  } else if (state === 'gallery deliveries and Guestbook') {
     await stubGuestRoutes(page, {
       ...baseOptions,
       gallery: makeMedia(3),
@@ -217,7 +217,7 @@ async function renderMatrixState(page: Page, state: MatrixState, theme: Resolved
       messages: [TEST_NOTE],
     });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    for (const summary of ['Shared gallery', 'My deliveries', 'Guest notes']) {
+    for (const summary of ['Shared gallery', 'My deliveries', 'Guestbook']) {
       await page.locator('.event-extra summary').filter({ hasText: summary }).click();
     }
     await expect(page.locator('.photo-grid figure')).toHaveCount(3);
@@ -533,19 +533,19 @@ test('manager Settings saves without a Save button and stays contained at 320 an
   }
 });
 
-test('Notes placeholder uses the approved themed muted text role', async ({ page }, testInfo) => {
+test('Guestbook placeholder uses the approved themed muted text role', async ({ page }, testInfo) => {
   onlyOnce(testInfo);
   await page.setViewportSize({ width: 390, height: 844 });
   await stubGuestRoutes(page, { event: { theme: eventTheme('candidary-default') } });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-  await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+  await page.locator('.event-extra summary').filter({ hasText: 'Guestbook' }).click();
   const placeholderColor = await page.getByRole('textbox', { name: 'Your note for Maya & Theo' }).evaluate(
     (element) => getComputedStyle(element, '::placeholder').color,
   );
   expect(placeholderColor).toBe('rgb(119, 110, 106)');
 });
 
-test('Notes contain valid maximum text and expose private moderation states', async ({ page }, testInfo) => {
+test('Guestbook contains valid maximum text and exposes private moderation states', async ({ page }, testInfo) => {
   onlyOnce(testInfo);
   await page.setViewportSize({ width: 320, height: 844 });
   await stubGuestRoutes(page, {
@@ -581,16 +581,17 @@ test('Notes contain valid maximum text and expose private moderation states', as
     ],
   });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-  await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+  await page.locator('.event-extra summary').filter({ hasText: 'Guestbook' }).click();
   await expect(page.getByText('Awaiting host review')).toBeVisible();
   await expect(page.getByText('Kept private')).toBeVisible();
-  await expect(page.getByText('Only you can see this until the host shares it.')).toBeVisible();
-  await expect(page.getByText('Only you can see this.', { exact: true })).toBeVisible();
-  await expect(page.getByText('Taylor · Photo caption', { exact: true })).toBeVisible();
+  await expect(page.getByText('Only this guest session and the hosts can see it until it is shared.')).toBeVisible();
+  await expect(page.getByText('Only this guest session and the hosts can see it.', { exact: true })).toBeVisible();
+  const privateCaption = page.getByRole('article').filter({ hasText: 'A private photo caption.' });
+  await expect(privateCaption.locator('.guestbook-entry__meta small')).toContainText('Taylor · Photo caption');
   await expectContained(page, 'maximum guest note');
 });
 
-test('Guest notes reflow at 200 percent zoom and preserve bidirectional guest text', async ({ page }, testInfo) => {
+test('Guestbook reflows at 200 percent zoom and preserves bidirectional guest text', async ({ page }, testInfo) => {
   onlyOnce(testInfo);
   const eventName = 'M'.repeat(80);
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -607,16 +608,16 @@ test('Guest notes reflow at 200 percent zoom and preserve bidirectional guest te
     }],
   });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-  await page.locator('.event-extra summary').filter({ hasText: 'Guest notes' }).click();
+  await page.locator('.event-extra summary').filter({ hasText: 'Guestbook' }).click();
 
-  const notes = page.locator('.notes-secondary');
+  const notes = page.locator('.guestbook__content');
   const textarea = page.locator('.note-form textarea');
-  const body = page.locator('.notes-feed__body > p');
+  const body = page.locator('.guestbook-entry__body > p');
   const send = page.getByRole('button', { name: 'Send note' });
   expect(await measureGridTracks(notes)).toHaveLength(2);
   await expect(textarea).toHaveAttribute('dir', 'auto');
   await expect(body).toHaveAttribute('dir', 'auto');
-  await expect(page.locator('.notes-feed__meta bdi')).toHaveText('G'.repeat(80));
+  await expect(page.locator('.guestbook-entry__meta bdi')).toHaveText('G'.repeat(80));
   await expectContained(page, 'desktop guest notes');
 
   await page.setViewportSize({ width: 640, height: 450 });

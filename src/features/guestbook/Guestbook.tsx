@@ -90,6 +90,7 @@ export function Guestbook({
   const lifetimeTicket = useRef(0);
   const readControllers = useRef(new Set<AbortController>());
   const lastOpenRequest = useRef(openRequest);
+  const pendingFocusRequest = useRef<number | null>(null);
   const signedName = explicitlyUnsigned ? null : guestName.trim() || null;
 
   const loadFirstPage = useCallback(async (confirmedItem?: GuestGuestbookItem) => {
@@ -139,15 +140,24 @@ export function Guestbook({
   useEffect(() => {
     if (openRequest === lastOpenRequest.current) return;
     lastOpenRequest.current = openRequest;
+    pendingFocusRequest.current = openRequest;
     setOpened(true);
-    requestAnimationFrame(() => {
+  }, [openRequest]);
+
+  useEffect(() => {
+    const request = pendingFocusRequest.current;
+    if (!opened || request === null) return;
+    const frame = requestAnimationFrame(() => {
+      if (pendingFocusRequest.current !== request) return;
       const heading = headingRef.current;
       if (!heading) return;
+      pendingFocusRequest.current = null;
       const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
       heading.scrollIntoView?.({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
       heading.focus({ preventScroll: true });
     });
-  }, [openRequest]);
+    return () => cancelAnimationFrame(frame);
+  }, [openRequest, opened]);
 
   useEffect(() => () => {
     loadTicket.current += 1;

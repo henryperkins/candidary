@@ -3,6 +3,8 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
 import type { EventView } from '../../shared/contracts';
+import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
+import { buildGuestbookHtml } from '../../worker/export/guestbook-html';
 import { EVENT_THEME_PRESETS } from '../../shared/event-theme';
 import { PHOTOGRAPHIC_COVER } from './fixtures/cover-images';
 import {
@@ -45,7 +47,7 @@ const MANAGER_SECTIONS = [
   { name: 'Intake', heading: 'Live intake' },
   { name: 'RSVP', heading: 'Guest list and RSVPs' },
   { name: 'Gallery', heading: 'Gallery publishing' },
-  { name: 'Notes', heading: 'Notes from the day' },
+  { name: 'Guestbook', heading: 'Guestbook from the day' },
   { name: 'Share', heading: 'Share your event' },
   { name: 'Settings', heading: 'Settings' },
 ] as const;
@@ -208,6 +210,7 @@ test('cover photo focus lands on the control the host can actually see', async (
 test('guest photo sources have mobile-sized targets and name errors focus the field', async ({ page }) => {
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event: {
     id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Help us remember tonight.',
+    guestbookPrompt: 'Share a wish, memory, or moment from the day.',
     uploadsEnabled: true, galleryVisible: false, moderationRequired: true,
     cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
     eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
@@ -254,8 +257,9 @@ test('guest RSVP lookup and household editor are semantic, touch-sized, focus-co
   await name.fill('Taylor Morgan');
   await page.getByRole('button', { name: 'Find my invitation' }).click();
   await expect(page.getByRole('heading', { name: 'Your household RSVP' })).toBeVisible();
-  await expect(page.getByRole('group')).toHaveCount(3);
-  for (const fieldset of await page.getByRole('group').all()) {
+  const householdGroups = page.locator('.rsvp-household form').getByRole('group');
+  await expect(householdGroups).toHaveCount(3);
+  for (const fieldset of await householdGroups.all()) {
     for (const label of ['Attending', 'Not attending']) {
       const radio = fieldset.getByRole('radio', { name: label, exact: true });
       await expect(radio).toHaveAccessibleName(label);
@@ -610,7 +614,7 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
   for (const [summary, rendered] of [
     ['Shared gallery', '.photo-grid figure'],
     ['My deliveries', '.contributions li'],
-    ['Guest notes', '.note-form textarea'],
+    ['Guestbook', '.note-form textarea'],
   ] as const) {
     await page.locator('.event-extra summary').filter({ hasText: summary }).click();
     await expect(page.locator(rendered).first()).toBeVisible();
@@ -620,6 +624,101 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
   await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
   await expect(page.locator('.fullscreen figure')).toHaveCount(3);
   await expectNoAxeViolations(page, 'fullscreen gallery');
+});
+
+test('reduced motion opens the terminal Guestbook without smooth scrolling or moving focus into the textarea', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.addInitScript(() => {
+    const observed: ScrollBehavior[] = [];
+    Object.defineProperty(window, '__guestbookScrollBehaviors', { value: observed, configurable: true });
+    HTMLElement.prototype.scrollIntoView = function scrollIntoView(options?: boolean | ScrollIntoViewOptions) {
+      if (typeof options === 'object') observed.push(options.behavior ?? 'auto');
+    };
+  });
+  await stubGuestRoutes(page);
+  const base = `**/api/event/${EVENT_FIXTURE.slug}`;
+  await page.route(`${base}/uploads/batch`, async (route) => {
+    const payload = route.request().postDataJSON() as { files: Array<{ idempotencyKey: string; mimeType: string }> };
+    const origin = new URL(page.url()).origin;
+    await route.fulfill({ status: 201, json: { data: { items: payload.files.map((file) => ({
+      idempotencyKey: file.idempotencyKey,
+      status: 'accepted',
+      media: { id: `media-${file.idempotencyKey}`, mimeType: file.mimeType },
+      uploadUrl: `${origin}/direct-upload/${file.idempotencyKey}`,
+    })) }, requestId: 'request-a' } });
+  });
+  await page.route('**/direct-upload/*', (route) => route.fulfill({ status: 200, body: '' }));
+  await page.route(`${base}/uploads/*/finalize`, (route) => route.fulfill({
+    json: { data: { media: { uploadState: 'stored' } }, requestId: 'request-a' },
+  }));
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'wish.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('wish'),
+  });
+  await page.getByRole('button', { name: 'Send 1 photo' }).click();
+  const action = page.getByRole('button', { name: 'Leave a guestbook note' });
+  await action.focus();
+  await page.keyboard.press('Enter');
+  const heading = page.getByRole('heading', { name: 'Leave a note for Maya & Theo' });
+  await expect(heading).toBeFocused();
+  await expect(page.getByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { __guestbookScrollBehaviors: ScrollBehavior[] })
+    .__guestbookScrollBehaviors)).toEqual(['auto']);
+  const ring = await outline(heading);
+  expect(ring.style).toBe('solid');
+  expect(ring.width).toBeGreaterThanOrEqual(2);
+
+  await action.focus();
+  await page.keyboard.press('Enter');
+  await expect(heading).toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { __guestbookScrollBehaviors: ScrollBehavior[] })
+    .__guestbookScrollBehaviors)).toEqual(['auto', 'auto']);
+  await expectNoAxeViolations(page, 'terminal Guestbook focus');
+});
+
+test('printable Guestbook HTML stays self-contained, semantic, high-contrast, and axe-clean on screen and in print media', async ({ page }) => {
+  const entry: ExportGuestbookEntryRecord = {
+    exportJobId: 'export-a',
+    source: 'guest_note',
+    sourceId: 'note-a',
+    sourceRank: 1,
+    guestName: 'ليلى',
+    body: 'ذكرى جميلة <script>never runs</script> 🌿',
+    createdAt: '2026-09-19T20:00:00Z',
+    sourceState: 'approved',
+    guestVisibility: 'shared',
+    includedInKeepsake: true,
+    mediaId: null,
+    originalFilename: null,
+  };
+  const requests: string[] = [];
+  page.on('request', (request) => requests.push(request.url()));
+  await page.setContent(buildGuestbookHtml({
+    eventName: 'Maya & Theo',
+    eventDate: '2026-09-19',
+    eventTimezone: 'America/Chicago',
+    prompt: 'Share a wish, memory, or moment from the day.',
+    snapshotAt: '2026-09-20T02:00:00Z',
+    entries: [entry],
+    photoArchiveByMediaId: new Map(),
+  }), { waitUntil: 'load' });
+  await expect(page.getByRole('heading', { name: 'Maya & Theo' })).toBeVisible();
+  await expect(page.locator('article')).toHaveCount(1);
+  await expect(page.locator('article')).toHaveAttribute('dir', 'auto');
+  await expect(page.locator('script, form, link[rel="stylesheet"], img')).toHaveCount(0);
+  await expect(page.getByText(/never runs/u)).toBeVisible();
+  expect(requests).toEqual([]);
+  expect(await measureContrast(page.locator('body'))).toBeGreaterThanOrEqual(7);
+  await expectNoAxeViolations(page, 'printable Guestbook screen rendering');
+
+  await page.emulateMedia({ media: 'print' });
+  expect(await page.locator('body').evaluate((element) => getComputedStyle(element).backgroundColor))
+    .toBe('rgb(255, 255, 255)');
+  expect(await measureContrast(page.locator('body'))).toBeGreaterThanOrEqual(7);
+  await expect(page.locator('article')).toHaveCSS('break-inside', 'avoid');
+  await expectNoAxeViolations(page, 'printable Guestbook print rendering');
+  expect(requests).toEqual([]);
 });
 
 for (const { name, theme } of THEME_ACCESSIBILITY_CASES) {

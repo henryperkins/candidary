@@ -187,8 +187,11 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
 
       <section
         className={`guest-secondary${terminal || event.phase !== 'photos-primary' ? ' guest-secondary--guestbook-only' : ''}`}
-        aria-labelledby={!terminal && event.phase === 'photos-primary' ? 'more-from-event' : undefined}
+        aria-labelledby={terminal
+          ? 'terminal-guestbook'
+          : event.phase === 'photos-primary' ? 'more-from-event' : undefined}
       >
+        {terminal && <h2 id="terminal-guestbook" className="sr-only">Guestbook</h2>}
         {!terminal && event.phase === 'photos-primary' && <div className="guest-secondary__heading">
           <p className="section-label">More from the event</p>
           <h2 id="more-from-event">Here when you want it.</h2>
