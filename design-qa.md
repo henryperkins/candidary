@@ -215,7 +215,7 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `guest-secondary-long-content-320.png` | `/event/:slug` `.guest-secondary` with deliveries and gallery open on 80-character filenames | 320 x 844 |
 | `fullscreen-long-caption-320.png` | `/event/:slug/fullscreen` first figure with an 80-character caption | 320 x 844 |
 | `manager-nav-768.png` | `/manage/event/:id` compact 104 px rail | 768 x 900 |
-| `manager-nav-count-390.png` | `/manage/event/:id` destination bar at the foot of the viewport, with the count at the 10,000-photo cap drawn as a dot | 390 x 844 |
+| `manager-nav-count-390.png` | `/manage/event/:id` destination bar at the foot of the viewport, with the count at the 10,000-photo cap drawn as a dot — **pending recapture**, the tracked file still pictures the previous stacked header | 390 x 844 |
 | `manager-actions-320.png` | `/manage/event/:id` selected Gallery card with all four controls | 320 x 844 |
 | `manager-export-first-390.png` | `/manage/event/:id` Share section: event link, QR, both entry controls, and the mobile export panel | 390 wide |
 | `manager-rsvp-390.png` | `/manage/event/:id?section=rsvp` guest list: totals, filters, list, editor entry, import | 390 wide |
