@@ -103,7 +103,8 @@ export function EventAppearanceCanvas({
           onRefreshEvent={preview.kind === 'authoritative' ? onRefreshCoverEvent : undefined}
         />;
 
-  return <div className="event-appearance-canvas">
+  return <figure className="event-appearance-canvas">
+    <figcaption className="event-appearance-canvas__caption">What guests see</figcaption>
     <div
       className="event-appearance-canvas__guest"
       style={eventThemeStyle(theme.tokens) as CSSProperties}
@@ -128,5 +129,5 @@ export function EventAppearanceCanvas({
 
     {summary && <div className="event-appearance-canvas__summary">{summary}</div>}
     {controls && <div className="event-appearance-canvas__controls">{controls}</div>}
-  </div>;
+  </figure>;
 }
