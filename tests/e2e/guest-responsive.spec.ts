@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
+import type { GuestGuestbookItem } from '../../shared/contracts';
 import { EVENT_FIXTURE, eventTheme, stubGuestRoutes } from './fixtures/routes';
 import { LONG_FILENAME, LONG_WELCOME, makeMedia } from './fixtures/ui-data';
 import {
@@ -335,4 +336,103 @@ test('the delivery receipt with a caveat stays contained at 320 px', async ({ pa
 
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+const MAX_GUESTBOOK_PROMPT = `${'احتفظوا بهذه الذكرى الجميلة من يومكم — '.repeat(8)}🌿`.slice(0, 160);
+const MAX_GUESTBOOK_BODY = `${'في هذا اليوم رأينا المحبة في كل تفصيل صغير — '.repeat(18)}✨`.slice(0, 500);
+const RTL_GUESTBOOK_ENTRY: GuestGuestbookItem = {
+  id: 'note-rtl',
+  source: 'guest_note',
+  kind: 'message',
+  mediaId: null,
+  guestName: 'ليلى'.repeat(20),
+  body: MAX_GUESTBOOK_BODY,
+  createdAt: '2026-09-19T20:00:00Z',
+  state: 'approved',
+  moderationStatus: 'approved',
+  visibility: 'shared',
+  isOwn: false,
+};
+
+test('Guestbook contains maximum RTL and Unicode content at phone, desktop, and zoom-equivalent widths', async ({ page }) => {
+  await stubGuestRoutes(page, {
+    event: { guestbookPrompt: MAX_GUESTBOOK_PROMPT },
+    guestbook: { shared: [RTL_GUESTBOOK_ENTRY] },
+  });
+  await page.goto('/event/maya-theo');
+
+  for (const { width, height, label } of [
+    { width: 320, height: 844, label: '320 phone and 400% zoom equivalent' },
+    { width: 390, height: 844, label: '390 phone' },
+    { width: 1280, height: 900, label: 'representative desktop' },
+    { width: 640, height: 450, label: '200% zoom equivalent' },
+  ]) {
+    await page.setViewportSize({ width, height });
+    const guestbook = page.locator('details.guestbook');
+    if (!(await guestbook.evaluate((element) => (element as HTMLDetailsElement).open))) {
+      await guestbook.locator('summary').click();
+    }
+    await expect(page.getByText(MAX_GUESTBOOK_PROMPT)).toHaveAttribute('dir', 'auto');
+    const entry = page.locator('.guestbook-entry');
+    await expect(entry.locator('.guestbook-entry__body > p')).toHaveAttribute('dir', 'auto');
+    await expect(entry.locator('.guestbook-entry__meta small')).toHaveAttribute('dir', 'auto');
+    const body = await measureOverflow(entry.locator('.guestbook-entry__body > p'));
+    expect(body.scrollWidth, `${label} body wraps`).toBeLessThanOrEqual(body.clientWidth + 1);
+    for (const control of await guestbook.locator('button:visible, summary:visible').all()) {
+      const target = await measureTarget(control);
+      expect(target.width, `${label} control width`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${label} control height`).toBeGreaterThanOrEqual(44);
+    }
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth, `${label} document width`)
+      .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+});
+
+test('keyboard-only guest contribution confirms and announces the server response', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubGuestRoutes(page);
+  await page.goto('/event/maya-theo');
+  const summary = page.locator('details.guestbook summary');
+  await summary.focus();
+  await page.keyboard.press('Enter');
+  const note = page.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+  await note.focus();
+  await page.keyboard.type('A keyboard-written wish for the happy couple.');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Send note' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Confirm and send' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('status').filter({ hasText: 'Safely sent to Maya & Theo.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your private entries' })).toBeVisible();
+});
+
+test('gallery-off keeps a published caption out of Shared while retaining the current author read-back', async ({ page }) => {
+  const caption: GuestGuestbookItem = {
+    id: 'caption-own',
+    source: 'photo_caption',
+    kind: 'caption',
+    mediaId: 'media-caption-own',
+    guestName: 'Avery',
+    body: 'A private read-back while the shared gallery is off.',
+    createdAt: '2026-09-19T21:00:00Z',
+    state: 'published',
+    moderationStatus: 'rejected',
+    visibility: 'author_only',
+    previewAvailable: true,
+    isOwn: true,
+  };
+  await stubGuestRoutes(page, {
+    event: { galleryVisible: false },
+    guestbook: { ownUnshared: [caption] },
+  });
+  await page.goto('/event/maya-theo');
+  await page.locator('details.guestbook summary').click();
+  await expect(page.getByRole('heading', { name: 'Your private entries' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Shared guestbook' })
+    .locator('..').locator('.guestbook-entry')).toHaveCount(0);
+  await expect(page.getByText('A private read-back while the shared gallery is off.')).toBeVisible();
+  await expect(page.getByText('Your entry')).toBeVisible();
 });

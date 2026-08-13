@@ -8,6 +8,7 @@ import { buildExportZip, buildExportZipStream, exportPath } from '../../worker/e
 const media = {
   id: 'media-a', eventId: 'event-a', uploaderSessionId: 'session-a',
   objectKey: 'events/event-a/media/a', originalFilename: 'Maya, "laughing".png',
+  objectBucketGeneration: 'canonical' as const,
   mimeType: 'image/png' as const, declaredByteSize: 64, byteSize: 64,
   width: 800, height: 600, guestName: 'Zoë', caption: 'A bright, "golden" hour',
   uploadState: 'stored' as const, publicationStatus: 'published' as const,

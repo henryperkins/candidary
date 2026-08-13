@@ -7,8 +7,38 @@ import { AccountsRepository } from '../../worker/db/accounts';
 import type { AppEnv } from '../../worker/env';
 import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 
-export const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
+const cloudflareTestEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
+const permissiveGuestMessageRateLimit = {
+  async limit(): Promise<RateLimitOutcome> { return { success: true }; },
+} satisfies RateLimit;
+
+export const testEnv = new Proxy(cloudflareTestEnv, {
+  get(target, property) {
+    if (property === 'GUEST_MESSAGE_RATE_LIMIT') return permissiveGuestMessageRateLimit;
+    return Reflect.get(target, property, target) as unknown;
+  },
+});
 export const origin = env.APP_ORIGIN;
+
+/**
+ * Miniflare does not instantiate Workers Rate Limiting bindings. Keep the
+ * production-generated Env type and replace only that external edge decision.
+ */
+export function withGuestMessageRateLimit(
+  decide: (key: string) => boolean = () => true,
+): { env: AppEnv; keys: string[] } {
+  const keys: string[] = [];
+  const fixture = Object.create(testEnv) as AppEnv;
+  Object.defineProperty(fixture, 'GUEST_MESSAGE_RATE_LIMIT', {
+    value: {
+      async limit({ key }: RateLimitOptions): Promise<RateLimitOutcome> {
+        keys.push(key);
+        return { success: decide(key) };
+      },
+    } satisfies RateLimit,
+  });
+  return { env: fixture, keys };
+}
 
 /**
  * Execute prepared statements without ever exceeding D1's 100-statement batch
@@ -480,6 +510,7 @@ export async function applySettings(
     method: 'PATCH',
     headers: writeHeaders(access.manager),
     body: JSON.stringify({
+      guestbookPrompt: access.event.guestbookPrompt,
       galleryVisible: access.event.galleryVisible,
       moderationRequired: access.event.moderationRequired,
       eventTimezone: access.event.eventTimezone,
@@ -592,14 +623,20 @@ export async function uploadPending(
   const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
     method: 'POST', headers: writeHeaders(access.guest),
     body: JSON.stringify({
-      filename: `${key}.png`, mimeType: 'image/png', byteSize: 128,
+      filename: `${key}.png`, mimeType: 'image/png', byteSize: png().byteLength,
       idempotencyKey: key, guestName, caption,
     }),
   }, testEnv);
   const media = (await initiated.json<any>()).data.media;
-  await env.MEDIA_BUCKET.put(media.objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
-  const finalized = await createApp().request(`/api/event/${access.event.slug}/uploads/${media.id}/finalize`, {
-    method: 'POST', headers: writeHeaders(access.guest), body: '{}',
+  const bytes = png();
+  const finalized = await createApp().request(`/api/event/${access.event.slug}/uploads/${media.id}/content`, {
+    method: 'PUT',
+    headers: {
+      ...writeHeaders(access.guest),
+      'content-type': 'image/png',
+      'content-length': String(bytes.byteLength),
+    },
+    body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   }, testEnv);
   return (await finalized.json<any>()).data.media;
 }

@@ -22,6 +22,7 @@ const EVENT_VIEW_KEYS = [
   'name',
   'eventDate',
   'welcomeMessage',
+  'guestbookPrompt',
   'cover',
   'uploadsEnabled',
   'galleryVisible',
@@ -54,6 +55,7 @@ const GUEST_EVENT_VIEW_KEYS = [
   'name',
   'eventDate',
   'welcomeMessage',
+  'guestbookPrompt',
   'cover',
   'uploadsEnabled',
   'galleryVisible',
@@ -638,6 +640,7 @@ describe('authorized event theme updates', () => {
       method: 'PATCH',
       headers: writeHeaders(access.manager),
       body: JSON.stringify({
+        guestbookPrompt: access.event.guestbookPrompt,
         galleryVisible: true,
         eventTimezone: 'America/Chicago', eventStartTime: '00:00',
         rsvpDeadlineDate: '2026-09-05',

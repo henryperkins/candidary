@@ -6,29 +6,12 @@ import {
   type SupportedImageType,
 } from '../../shared/constants';
 import { ApiError, type ApiErrorCode } from '../../shared/errors';
-import { mediaUploadReleaseForEnv } from '../../shared/media-upload-release';
 import { resolvePhotoIntake } from '../../shared/rsvp';
 import { MediaRepository, type ReserveMediaRecord } from '../db/media';
-import type { AppEnv, AuthenticatedSession, MediaUploadReleaseEnv } from '../env';
+import type { AppEnv, AuthenticatedSession } from '../env';
+import { assertWorkerIngressEnabled } from '../media-upload-release';
 import { sanitizeFilename } from '../security/filenames';
-
-declare const __CANDIDARY_TEST_LEGACY_R2_SIGNING__: boolean;
-
-async function legacyTestUploadTicket(
-  env: AppEnv,
-  key: string,
-  mimeType: SupportedImageType,
-): Promise<{ url: string; expiresAt: string }> {
-  const testEnv = env as MediaUploadReleaseEnv;
-  if (!__CANDIDARY_TEST_LEGACY_R2_SIGNING__
-    || String(testEnv.APP_ORIGIN) !== 'http://localhost'
-    || String(testEnv.R2_ACCOUNT_ID) !== 'local'
-    || testEnv.TEST_MEDIA_UPLOAD_RELEASE_MODE !== 'worker-ingress') {
-    throw new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this release.', 409);
-  }
-  const { presignUpload } = await import('../storage/presign');
-  return presignUpload(env, key, mimeType);
-}
+import { mediaReservationObjectKey } from '../storage/media-keys';
 
 export interface InitiateUploadInput {
   filename: string;
@@ -82,16 +65,6 @@ export class UploadService {
     }
   }
 
-  private assertBridgeAllowsInitiation() {
-    if (mediaUploadReleaseForEnv(this.env).mode === 'bridge-disabled') {
-      throw new ApiError(
-        'UPLOADS_DISABLED',
-        'Photo uploads are briefly paused while storage is upgraded. Try again soon.',
-        409,
-      );
-    }
-  }
-
   private prepareReservation(
     auth: AuthenticatedSession,
     input: InitiateUploadInput,
@@ -116,7 +89,7 @@ export class UploadService {
       id: mediaId,
       eventId: auth.event.id,
       uploaderSessionId: auth.session.id,
-      objectKey: `events/${auth.event.id}/media/${mediaId}`,
+      objectKey: mediaReservationObjectKey(auth.event.id, mediaId),
       originalFilename: sanitizeFilename(input.filename),
       mimeType,
       declaredByteSize: input.byteSize,
@@ -129,12 +102,17 @@ export class UploadService {
   }
 
   async initiate(auth: AuthenticatedSession, input: InitiateUploadInput, now = new Date()) {
-    this.assertBridgeAllowsInitiation();
+    assertWorkerIngressEnabled();
     this.assertCanUpload(auth);
     const repository = new MediaRepository(this.env.DB);
     const media = await repository.reserve(this.prepareReservation(auth, input, now));
-    const signed = await legacyTestUploadTicket(this.env, media.objectKey, media.mimeType);
-    return { media, uploadUrl: signed.url, uploadUrlExpiresAt: signed.expiresAt };
+    if (media.uploadState === 'stored') return { media, alreadyDelivered: true as const };
+    return {
+      media,
+      alreadyDelivered: false as const,
+      uploadUrl: `/api/event/${encodeURIComponent(auth.event.slug)}/uploads/${encodeURIComponent(media.id)}/content`,
+      uploadUrlExpiresAt: media.reservationExpiresAt,
+    };
   }
 
   async initiateBatch(
@@ -142,7 +120,7 @@ export class UploadService {
     input: { guestName: string; files: BatchUploadFile[] },
     now = new Date(),
   ): Promise<{ items: BatchUploadResult[] }> {
-    this.assertBridgeAllowsInitiation();
+    assertWorkerIngressEnabled();
     this.assertCanUpload(auth);
     const guestName = input.guestName.trim();
     if (!guestName || guestName.length > 80) {
@@ -185,13 +163,22 @@ export class UploadService {
         };
         return;
       }
-      const signed = await legacyTestUploadTicket(this.env, result.media.objectKey, result.media.mimeType);
+      if (result.media.uploadState === 'stored') {
+        items[index] = {
+          idempotencyKey: file.idempotencyKey,
+          status: 'accepted',
+          media: result.media,
+          alreadyDelivered: true,
+        };
+        return;
+      }
       items[index] = {
         idempotencyKey: file.idempotencyKey,
         status: 'accepted',
         media: result.media,
-        uploadUrl: signed.url,
-        uploadUrlExpiresAt: signed.expiresAt,
+        alreadyDelivered: false,
+        uploadUrl: `/api/event/${encodeURIComponent(auth.event.slug)}/uploads/${encodeURIComponent(result.media.id)}/content`,
+        uploadUrlExpiresAt: result.media.reservationExpiresAt,
       };
     }));
     return { items: items as BatchUploadResult[] };

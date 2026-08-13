@@ -25,11 +25,33 @@ export const CUTOVER_DISABLED_CAPABILITIES = {
   reservedFinalize: false,
   exportDownloadPresign: false,
   authenticatedWorkerIngress: false,
+  legacyMediaCopy: false,
+  legacyPointerCutover: false,
+  eventRelationalPurge: false,
+} as const;
+
+export const BRIDGE_DISABLED_CAPABILITIES = {
+  singleInitiationPresign: false,
+  batchInitiationPresign: false,
+  storedReplayPresign: false,
+  reservedFinalize: false,
+  exportDownloadPresign: false,
+  authenticatedWorkerIngress: false,
   legacyPromotion: false,
   eventRelationalPurge: false,
 } as const;
 
-export const BRIDGE_DISABLED_CAPABILITIES = { ...CUTOVER_DISABLED_CAPABILITIES } as const;
+export const CANONICAL_COPY_ONLY_CAPABILITIES = {
+  singleInitiationPresign: false,
+  batchInitiationPresign: false,
+  storedReplayPresign: false,
+  reservedFinalize: false,
+  exportDownloadPresign: false,
+  authenticatedWorkerIngress: false,
+  legacyMediaCopy: true,
+  legacyPointerCutover: false,
+  eventRelationalPurge: false,
+} as const;
 
 export const CANONICAL_LIVE_CAPABILITIES = {
   singleInitiationPresign: false,
@@ -38,11 +60,13 @@ export const CANONICAL_LIVE_CAPABILITIES = {
   reservedFinalize: false,
   exportDownloadPresign: false,
   authenticatedWorkerIngress: true,
-  legacyPromotion: true,
+  legacyMediaCopy: true,
+  legacyPointerCutover: true,
   eventRelationalPurge: true,
 } as const;
 
 const CAPABILITY_NAMES = Object.keys(CUTOVER_DISABLED_CAPABILITIES);
+const BRIDGE_CAPABILITY_NAMES = Object.keys(BRIDGE_DISABLED_CAPABILITIES);
 
 export const LEGACY_MEDIA_SCANNER_CONTRACT = {
   kind: 'candidary.legacy-media-scanner',
@@ -77,7 +101,20 @@ export const LEGACY_MEDIA_SCANNER_CONTRACT = {
     absence: 'telemetry-only',
     cursorAdvance: 'after-durable-inventory',
     errors: 'rotate-without-retirement',
-    runtimeModes: ['canonical-cutover-disabled', 'canonical-live'],
+    runtimeModes: [
+      'canonical-cutover-disabled',
+      'canonical-copy-only',
+      'canonical-live',
+    ],
+  },
+  throughput: {
+    scanPagesPerInvocation: 5,
+    scanObjectsPerPage: 1000,
+    tombstonesPerInvocation: 500,
+    suppressedTombstoneQuota: 400,
+    classificationTombstoneQuota: 100,
+    expectedLegacyGrowthCeilingPerHour: 1000,
+    fullEpochSlaHours: 24,
   },
 } as const;
 
@@ -97,6 +134,13 @@ export interface MediaWriteBridgeRuntimeContractV1 {
   capabilities: typeof BRIDGE_DISABLED_CAPABILITIES;
 }
 
+export interface CanonicalCopyOnlyRuntimeContractV2 {
+  kind: 'candidary.media-upload-release';
+  schemaVersion: 2;
+  mode: 'canonical-copy-only';
+  capabilities: typeof CANONICAL_COPY_ONLY_CAPABILITIES;
+}
+
 export interface CanonicalLiveRuntimeContractV2 {
   kind: 'candidary.media-upload-release';
   schemaVersion: 2;
@@ -106,6 +150,7 @@ export interface CanonicalLiveRuntimeContractV2 {
 
 export type MediaUploadReleaseContractV2 =
   | CanonicalCutoverDisabledRuntimeContractV2
+  | CanonicalCopyOnlyRuntimeContractV2
   | CanonicalLiveRuntimeContractV2;
 
 export interface CanonicalMediaBucketProvisioningEvidenceV1 {
@@ -225,7 +270,9 @@ export function parseMediaUploadReleaseContract(value: unknown): MediaUploadRele
     'Media upload release contract',
   );
   if (item.kind !== 'candidary.media-upload-release' || item.schemaVersion !== 2
-    || (item.mode !== 'canonical-cutover-disabled' && item.mode !== 'canonical-live')) {
+    || (item.mode !== 'canonical-cutover-disabled'
+      && item.mode !== 'canonical-copy-only'
+      && item.mode !== 'canonical-live')) {
     throw new Error('Media upload release contract identity, schema, or mode is invalid.');
   }
   const capabilities = exactRecord(
@@ -235,25 +282,36 @@ export function parseMediaUploadReleaseContract(value: unknown): MediaUploadRele
   );
   const expected = item.mode === 'canonical-cutover-disabled'
     ? CUTOVER_DISABLED_CAPABILITIES
-    : CANONICAL_LIVE_CAPABILITIES;
+    : item.mode === 'canonical-copy-only'
+      ? CANONICAL_COPY_ONLY_CAPABILITIES
+      : CANONICAL_LIVE_CAPABILITIES;
   for (const [name, required] of Object.entries(expected)) {
     if (capabilities[name] !== required) {
       throw new Error(`Media upload release capability ${name} is invalid for ${item.mode}.`);
     }
   }
-  return item.mode === 'canonical-cutover-disabled'
-    ? {
+  if (item.mode === 'canonical-cutover-disabled') {
+    return {
       kind: 'candidary.media-upload-release',
       schemaVersion: 2,
       mode: 'canonical-cutover-disabled',
       capabilities: { ...CUTOVER_DISABLED_CAPABILITIES },
-    }
-    : {
+    };
+  }
+  if (item.mode === 'canonical-copy-only') {
+    return {
       kind: 'candidary.media-upload-release',
       schemaVersion: 2,
-      mode: 'canonical-live',
-      capabilities: { ...CANONICAL_LIVE_CAPABILITIES },
+      mode: 'canonical-copy-only',
+      capabilities: { ...CANONICAL_COPY_ONLY_CAPABILITIES },
     };
+  }
+  return {
+    kind: 'candidary.media-upload-release',
+    schemaVersion: 2,
+    mode: 'canonical-live',
+    capabilities: { ...CANONICAL_LIVE_CAPABILITIES },
+  };
 }
 
 export function parseMediaWriteBridgeRuntimeContract(
@@ -270,10 +328,10 @@ export function parseMediaWriteBridgeRuntimeContract(
   }
   const capabilities = exactRecord(
     item.capabilities,
-    CAPABILITY_NAMES,
+    BRIDGE_CAPABILITY_NAMES,
     'Media write bridge capabilities',
   );
-  for (const name of CAPABILITY_NAMES) {
+  for (const name of BRIDGE_CAPABILITY_NAMES) {
     if (capabilities[name] !== false) {
       throw new Error(`Media write bridge capability ${name} must be false.`);
     }

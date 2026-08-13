@@ -47,7 +47,9 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   let finalizeAttempt = 0;
   await page.route('**/api/event/maya-theo', (route) => route.fulfill({ json: { data: { event, role: 'guest' }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/contributions', (route) => route.fulfill({ json: { data: { media: [] }, requestId: 'r' } }));
-  await page.route('**/api/event/maya-theo/messages', (route) => route.fulfill({ json: { data: { items: [] }, requestId: 'r' } }));
+  await page.route('**/api/event/maya-theo/messages*', (route) => route.fulfill({ json: { data: {
+    items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null,
+  }, requestId: 'r' } }));
   await page.route('**/api/event/maya-theo/uploads/batch', async (route) => {
     batchAttempt += 1;
     const uploadOrigin = new URL(page.url()).origin;
@@ -114,10 +116,18 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   await page.getByRole('button', { name: 'Retry 1 photo' }).click();
   await expect(page.getByRole('heading', { name: 'Your 2 photos were sent.' })).toBeVisible();
   await expect(page.getByText(/all done and can close this page/i)).toBeVisible();
-  await expect(page.getByRole('button')).toHaveCount(0);
+  const guestbookAction = page.getByRole('button', { name: 'Leave a guestbook note' });
+  await expect(guestbookAction).toBeVisible();
+  await expect(page.locator('.delivery-receipt').getByRole('button')).toHaveCount(1);
   await expect(page.getByText(/Shared gallery/)).toHaveCount(0);
   expect(finalizeAttempt).toBe(3);
   expect(await page.evaluate(() => localStorage.getItem('candidary_guest_name'))).toBe('Taylor Morgan');
+
+  await guestbookAction.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Leave a note for Maya & Theo' })).toBeFocused();
+  await expect(page.getByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeFocused();
+  await expect(page.locator('details.guestbook')).toHaveAttribute('open', '');
 
   await page.reload();
   await expect(page.getByText('Sending as Taylor Morgan')).toBeVisible();

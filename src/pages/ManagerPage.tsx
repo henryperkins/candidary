@@ -11,7 +11,7 @@ import {
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
 import type { PhotoIntakeState } from '../../shared/contracts';
-import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView, MessageView } from '../app/types';
+import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
@@ -27,6 +27,8 @@ import { UnsavedSettingsPrompt } from '../components/UnsavedSettingsPrompt';
 import type { LoadFailure } from '../components/States';
 import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
 import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRecheck';
+import { ManagerGuestbookPanel } from '../features/guestbook/ManagerGuestbookPanel';
+import type { GuestbookSummary } from '../features/guestbook/manager-guestbook-state';
 import {
   mergeCoverResponse,
   mergePhotoIntakeResponse,
@@ -36,7 +38,7 @@ import {
 import { createEventReadGuard } from '../features/settings/event-read-guard';
 import type { AutosaveHandle, DomainAutosaveState } from '../features/settings/autosave-queue';
 
-type Section = 'intake' | 'rsvp' | 'gallery' | 'messages' | 'share' | 'settings';
+type Section = 'intake' | 'rsvp' | 'gallery' | 'guestbook' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
 
 // The only destination a link may open directly. The create receipt sends a brand
@@ -146,7 +148,8 @@ export function ManagerPage() {
   shownEvent.current = event;
   const [mediaPage, setMediaPage] = useState<MediaPageState>({ rows: [], cursor: null });
   const { rows: media, cursor: nextMediaCursor } = mediaPage;
-  const [messages, setMessages] = useState<MessageView[]>([]);
+  const [guestbookSummary, setGuestbookSummary] = useState<GuestbookSummary | null>(null);
+  const [guestbookSummaryFailure, setGuestbookSummaryFailure] = useState<string | null>(null);
   const [exports, setExports] = useState<ExportView[]>([]);
   const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
   const [eventLink, setEventLink] = useState('');
@@ -195,6 +198,7 @@ export function ManagerPage() {
   // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
+  const guestbookSummaryRequest = useRef(0);
   const loadMoreOwner = useRef<AbortController | null>(null);
   // Reads and writes of the event row overlap once autosave can be running
   // behind another destination. Every write brackets itself here, and every
@@ -306,6 +310,31 @@ export function ManagerPage() {
     active?.abort();
   }, []);
 
+  const refreshGuestbookSummary = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    const request = ++guestbookSummaryRequest.current;
+    try {
+      const loaded = await api<{ summary: GuestbookSummary }>(
+        `/api/manage/events/${eventId}/guestbook/summary`,
+      );
+      if (request !== guestbookSummaryRequest.current) return false;
+      setGuestbookSummary(loaded.summary);
+      setGuestbookSummaryFailure(null);
+      return true;
+    } catch (caught) {
+      if (request !== guestbookSummaryRequest.current) return false;
+      if (!silent) {
+        setGuestbookSummaryFailure(caught instanceof ClientApiError
+          ? caught.message
+          : 'The Guestbook summary could not be loaded.');
+      }
+      return false;
+    }
+  }, [eventId]);
+  useEffect(() => () => {
+    // Retire a completion owned by the prior event or an unmounted Manager.
+    guestbookSummaryRequest.current += 1;
+  }, [eventId]);
+
   // Reused verbatim behind Try again, so the prior failure clears the moment the attempt starts and
   // the host watches this load rather than the dead end the last one left.
   const refresh = useCallback(async () => {
@@ -321,23 +350,22 @@ export function ManagerPage() {
           throw caught;
         });
       const readToken = eventReads.current.openRead();
-      const [eventData, mediaData, messageData, exportData, linkData] = await Promise.all([
+      const [eventData, mediaData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
-        api<{ messages: MessageView[] }>(`/api/manage/events/${eventId}/messages`),
         api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`),
         entryLoad,
+        refreshGuestbookSummary(),
       ]);
-      // Media, notes, exports, and the link are unaffected by a settings or
+      // Media, the Guestbook summary, exports, and the link are unaffected by a settings or
       // theme write, so only the event itself is at risk of being put back.
       if (eventReads.current.adopt(readToken)) setEvent(eventData.event);
       // A load opened under the previous query must not reinstate its rows or its cursor. Polling
       // merges rather than replaces, so a stale list here would sit behind every later poll forever.
-      // Only the media half is query-scoped; notes, exports, and links are the same either way.
+      // Only the media half is query-scoped; exports and links are the same either way.
       if (latestMediaPath.current === mediaPath) {
         setMediaPage({ rows: mediaData.media, cursor: mediaData.nextCursor ?? null });
       }
-      setMessages(messageData.messages);
       setExports(exportData.exports);
       setEventLink(linkData.eventLink ?? '');
       entryDisabled.current = linkData.disabledAt !== null;
@@ -353,7 +381,7 @@ export function ManagerPage() {
         setFailure(loadFailure);
       }
     }
-  }, [eventId, mediaPath]);
+  }, [eventId, mediaPath, refreshGuestbookSummary]);
 
   const refreshIntake = useCallback(async () => {
     try {
@@ -465,6 +493,18 @@ export function ManagerPage() {
     return () => window.clearInterval(interval);
   }, [refreshIntake, section]);
   useEffect(() => {
+    if (section !== 'guestbook') return;
+    const refreshVisibleSummary = () => {
+      if (document.visibilityState === 'visible') void refreshGuestbookSummary({ silent: true });
+    };
+    const interval = window.setInterval(refreshVisibleSummary, 15_000);
+    window.addEventListener('focus', refreshVisibleSummary);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshVisibleSummary);
+    };
+  }, [refreshGuestbookSummary, section]);
+  useEffect(() => {
     let current = true;
     // The event link never changes, so this renders once. It is still cleared
     // first, so a disabled entry cannot leave a scannable code on screen.
@@ -566,10 +606,6 @@ export function ManagerPage() {
   }
   async function retryExport(job: ExportView) {
     await eventWrite(() => api(`/api/manage/events/${eventId}/exports/${job.id}/retry`, { method: 'POST', body: '{}' }));
-    await refresh();
-  }
-  async function moderateMessage(message: MessageView, action: 'approve' | 'reject' | 'delete') {
-    await eventWrite(() => api(`/api/manage/events/${eventId}/messages/${message.id}`, { method: 'PATCH', body: JSON.stringify({ action, expectedStatus: message.moderationStatus }) }));
     await refresh();
   }
   async function rotateManagerLink() {
@@ -779,7 +815,7 @@ export function ManagerPage() {
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
       <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => openSection('rsvp')}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'messages'} className={section === 'messages' ? 'active' : ''} onClick={() => openSection('messages')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Notes</span>{messages.length > 0 && <span className="manager-nav__count">{messages.length}</span>}</button>
+      <button aria-label={guestbookSummary?.needsReviewCount ? `Guestbook ${guestbookSummary.needsReviewCount}` : 'Guestbook'} disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'guestbook'} className={section === 'guestbook' ? 'active' : ''} onClick={() => openSection('guestbook')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Guestbook</span>{Boolean(guestbookSummary?.needsReviewCount) && <span className="manager-nav__count" aria-hidden="true">{guestbookSummary?.needsReviewCount}</span>}</button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => openSection('settings')}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
     </nav></header>
@@ -899,7 +935,15 @@ export function ManagerPage() {
         {exportPanel('share')}
       </section>}
 
-      {section === 'messages' && <section className="manager-panel"><p className="section-label">Guest notes</p><h2>Notes from the day</h2>{messages.length ? <ul className="manager-messages">{messages.map((message) => <li key={message.id}><p>{message.body}</p><small>{message.guestName || 'A guest'} · {message.moderationStatus}</small><div className="button-row"><button className="button button--approve" onClick={() => void runManagerAction(() => moderateMessage(message, 'approve'))}><Check aria-hidden="true" /> Approve</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'reject'))}><EyeOff aria-hidden="true" /> Hide</button><button className="button button--danger-outline" onClick={() => void runManagerAction(() => moderateMessage(message, 'delete'))}><Trash2 aria-hidden="true" /> Delete</button></div></li>)}</ul> : <div className="empty-state"><MessageCircle aria-hidden="true" /><h3>No notes yet.</h3><p>Optional guest messages will appear here.</p></div>}</section>}
+      {section === 'guestbook' && <ManagerGuestbookPanel
+        eventId={eventId}
+        eventTimezone={event.eventTimezone}
+        summary={guestbookSummary}
+        summaryFailure={guestbookSummaryFailure}
+        onSummaryRefresh={refreshGuestbookSummary}
+        onSummaryObserved={setGuestbookSummary}
+        onOpenSettings={() => openSection('settings')}
+      />}
 
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
         <p className="section-label">Event controls</p>

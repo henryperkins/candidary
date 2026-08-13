@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventView, GuestEventView, ResolvedEventTheme } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { presetCoverAssetPath } from '../../shared/event-cover-assets';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
@@ -50,6 +51,7 @@ const baseGuestEvent: Omit<GuestEventView, 'theme'> = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'Come share the moments you caught.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: true,
   galleryVisible: true,

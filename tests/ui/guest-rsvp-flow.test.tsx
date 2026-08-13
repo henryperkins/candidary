@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { GuestEventView, RsvpHouseholdView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { GuestRsvpFlow } from '../../src/features/rsvp/GuestRsvpFlow';
 
 const event: GuestEventView = {
@@ -11,6 +12,7 @@ const event: GuestEventView = {
   name: 'Maya & Theo',
   eventDate: '2026-09-19',
   welcomeMessage: 'We cannot wait to celebrate with you.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: { revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' },
   uploadsEnabled: false,
   galleryVisible: false,
@@ -90,6 +92,27 @@ afterEach(() => {
 });
 
 describe('household RSVP guest flow', () => {
+  it('reports a successful lookup name to the shared remembered-name owner', async () => {
+    const onGuestNameChange = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/rsvp/household')) return sessionRequired();
+      if (path.endsWith('/rsvp/lookup')) return success({ status: 'found', household });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+
+    render(<GuestRsvpFlow
+      event={event}
+      presentation="primary"
+      guestName=""
+      onGuestNameChange={onGuestNameChange}
+    />);
+    await openInvitation(user, 'Taylor Morgan');
+
+    expect(onGuestNameChange).toHaveBeenCalledWith('Taylor Morgan');
+  });
+
   it('draws the guest hero on primary RSVP only and steps its heading down when embedded', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       if (String(input).endsWith('/rsvp/household')) return sessionRequired();

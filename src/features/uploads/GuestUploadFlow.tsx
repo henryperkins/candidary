@@ -1,5 +1,5 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { MAX_IMAGE_BYTES } from '../../../shared/constants';
 import type { GuestEventCoverView } from '../../../shared/event-cover';
@@ -48,6 +48,9 @@ interface GuestUploadFlowProps {
   slug: string;
   transport?: UploadTransport;
   onDelivered?: (count: number) => void;
+  guestName?: string;
+  onGuestNameChange?: (name: string) => void;
+  onLeaveGuestbook?: () => void;
 }
 
 function validationMessage(file: File): string | null {
@@ -79,10 +82,18 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
   return count === 1 ? singular : pluralForm;
 }
 
-export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUploadFlowProps) {
-  const rememberedName = useMemo(readGuestName, []);
-  const [name, setName] = useState(rememberedName);
-  const [editingName, setEditingName] = useState(!rememberedName);
+export function GuestUploadFlow({
+  event,
+  slug,
+  transport,
+  onDelivered,
+  guestName,
+  onGuestNameChange,
+  onLeaveGuestbook,
+}: GuestUploadFlowProps) {
+  const [fallbackName, setFallbackName] = useState(readGuestName);
+  const name = guestName ?? fallbackName;
+  const [editingName, setEditingName] = useState(!name);
   const [nameError, setNameError] = useState('');
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [sending, setSending] = useState(false);
@@ -93,6 +104,11 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
   const uploadController = useRef<AbortController | null>(null);
   const notifiedReceipt = useRef<number | null>(null);
   const receiptCount = getReceiptCount(items);
+
+  function updateName(value: string) {
+    if (guestName === undefined) setFallbackName(value);
+    onGuestNameChange?.(value);
+  }
 
   useEffect(() => () => {
     uploadController.current?.abort();
@@ -116,10 +132,10 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
       requestAnimationFrame(() => nameInput.current?.focus());
       return null;
     }
-    setName(trimmed);
+    updateName(trimmed);
     setNameError('');
     setEditingName(false);
-    rememberGuestName(trimmed);
+    if (!onGuestNameChange) rememberGuestName(trimmed);
     return trimmed;
   }
 
@@ -195,6 +211,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
         <h1>Your {receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} sent.</h1>
         {validationFailureCount > 0 && <p className="delivery-receipt__caveat">{validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.</p>}
         <p>Thanks, {name}. You’re all done and can close this page.</p>
+        {onLeaveGuestbook && <button type="button" className="button button--secondary delivery-receipt__guestbook" onClick={onLeaveGuestbook}>Leave a guestbook note</button>}
       </div>
     </section>;
   }
@@ -227,7 +244,7 @@ export function GuestUploadFlow({ event, slug, transport, onDelivered }: GuestUp
           aria-invalid={Boolean(nameError)}
           aria-describedby={nameError ? 'guest-name-error' : undefined}
           placeholder="Taylor Morgan"
-          onChange={(change) => { setName(change.target.value); setNameError(''); }}
+          onChange={(change) => { updateName(change.target.value); setNameError(''); }}
           onBlur={() => { if (name.trim()) saveName(); }}
         />
       </label> : !reviewMode && <div className="sending-as">

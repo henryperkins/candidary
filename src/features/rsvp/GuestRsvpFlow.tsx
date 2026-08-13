@@ -34,6 +34,8 @@ type Screen =
 interface GuestRsvpFlowProps {
   event: GuestEventView;
   presentation: Presentation;
+  guestName?: string;
+  onGuestNameChange?: (name: string) => void;
 }
 /* `presentation` decides layout and nothing else. What a household may do comes from `rsvpAccess`,
    the same sentence the guest RSVP routes enforce, so the interface and the boundary can never
@@ -96,7 +98,12 @@ function screenAfterConflict(
   };
 }
 
-export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
+export function GuestRsvpFlow({
+  event,
+  presentation,
+  guestName = '',
+  onGuestNameChange,
+}: GuestRsvpFlowProps) {
   const [screen, setScreen] = useState<Screen>({ kind: 'restoring' });
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupMessage, setLookupMessage] = useState('');
@@ -158,7 +165,9 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
         setLookupMessage(result.message);
         return;
       }
-      rememberGuestName(firstName.trim());
+      const rememberedName = firstName.trim();
+      if (onGuestNameChange) onGuestNameChange(rememberedName);
+      else rememberGuestName(rememberedName);
       setReviewUpdated(false);
       setScreen(screenForHousehold(event, result.household));
     } catch (caught) {
@@ -295,6 +304,7 @@ export function GuestRsvpFlow({ event, presentation }: GuestRsvpFlowProps) {
       secondNameRequired={renderedScreen.secondNameRequired}
       busy={lookupBusy}
       message={lookupMessage}
+      rememberedName={guestName}
       onLookup={lookup}
     />;
   }

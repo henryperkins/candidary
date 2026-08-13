@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn(() => Promise.resolve('data:image/png;base64,x')) } }));
 
 import type { EventView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { createAppRouter } from '../../src/app/router';
 import type { LifecycleRecheckOutcome } from '../../src/features/guest/useLifecycleRecheck';
@@ -22,6 +23,7 @@ function json(data: unknown, status = 200) {
 const SCHEDULED: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
   welcomeMessage: 'Welcome.',
+  guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
   cover: {
     config: { version: 1, source: { kind: 'none' } }, revision: 0, hasCover: false,
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,

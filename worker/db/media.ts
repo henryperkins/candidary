@@ -1,4 +1,4 @@
-import type { PublicationStatus } from '../../shared/contracts';
+import type { ManagerMediaView, PublicationStatus } from '../../shared/contracts';
 import {
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_EVENT_BYTES,
@@ -8,12 +8,18 @@ import {
 import { ApiError } from '../../shared/errors';
 import type { ManagerMediaCursor } from '../http/media-cursor';
 import type { MediaRecord } from './types';
+import { MediaObjectWriteTombstoneRepository } from './media-write-tombstones';
+import {
+  assertLegacyPointerCutoverEnabled,
+  assertWorkerIngressEnabled,
+} from '../media-upload-release';
 
 interface MediaRow {
   id: string;
   event_id: string;
   uploader_session_id: string;
   object_key: string;
+  object_bucket_generation: 'legacy' | 'canonical';
   original_filename: string;
   mime_type: SupportedImageType;
   declared_byte_size: number;
@@ -64,12 +70,78 @@ export type ReserveMediaBatchResult =
   | { status: 'accepted'; media: MediaRecord }
   | { status: 'rejected'; error: ApiError };
 
+export type MediaObjectPromotionState =
+  | 'pending'
+  | 'copying'
+  | 'target_verified'
+  | 'cleanup_pending';
+
+interface MediaObjectPromotionRow {
+  media_id: string;
+  event_id: string;
+  source_bucket_generation: 'legacy';
+  source_object_key: string;
+  final_bucket_generation: 'canonical';
+  final_object_key: string;
+  source_etag: string | null;
+  source_mime_type: SupportedImageType | null;
+  source_byte_size: number | null;
+  source_sha256: string | null;
+  source_width: number | null;
+  source_height: number | null;
+  final_etag: string | null;
+  target_verified_at: string | null;
+  source_writable_until: string;
+  state: MediaObjectPromotionState;
+  final_pointer_committed: 0 | 1;
+  claim_token: string | null;
+  lease_expires_at: string | null;
+  source_absent_since: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MediaObjectPromotion {
+  mediaId: string;
+  eventId: string;
+  sourceBucketGeneration: 'legacy';
+  sourceObjectKey: string;
+  finalBucketGeneration: 'canonical';
+  finalObjectKey: string;
+  sourceEtag: string | null;
+  sourceMimeType: SupportedImageType | null;
+  sourceByteSize: number | null;
+  sourceSha256: string | null;
+  sourceWidth: number | null;
+  sourceHeight: number | null;
+  finalEtag: string | null;
+  targetVerifiedAt: string | null;
+  sourceWritableUntil: string;
+  state: MediaObjectPromotionState;
+  finalPointerCommitted: boolean;
+  claimToken: string | null;
+  leaseExpiresAt: string | null;
+  sourceAbsentSince: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClaimedMediaPromotion {
+  promotion: MediaObjectPromotion;
+  media: MediaRecord;
+}
+
+export interface ClaimedMediaIngress extends ClaimedMediaPromotion {
+  claimToken: string;
+}
+
 function mapMedia(row: MediaRow): MediaRecord {
   return {
     id: row.id,
     eventId: row.event_id,
     uploaderSessionId: row.uploader_session_id,
     objectKey: row.object_key,
+    objectBucketGeneration: row.object_bucket_generation,
     originalFilename: row.original_filename,
     mimeType: row.mime_type,
     declaredByteSize: row.declared_byte_size,
@@ -89,6 +161,75 @@ function mapMedia(row: MediaRow): MediaRecord {
   };
 }
 
+function mapPromotion(row: MediaObjectPromotionRow): MediaObjectPromotion {
+  return {
+    mediaId: row.media_id,
+    eventId: row.event_id,
+    sourceBucketGeneration: row.source_bucket_generation,
+    sourceObjectKey: row.source_object_key,
+    finalBucketGeneration: row.final_bucket_generation,
+    finalObjectKey: row.final_object_key,
+    sourceEtag: row.source_etag,
+    sourceMimeType: row.source_mime_type,
+    sourceByteSize: row.source_byte_size,
+    sourceSha256: row.source_sha256,
+    sourceWidth: row.source_width,
+    sourceHeight: row.source_height,
+    finalEtag: row.final_etag,
+    targetVerifiedAt: row.target_verified_at,
+    sourceWritableUntil: row.source_writable_until,
+    state: row.state,
+    finalPointerCommitted: row.final_pointer_committed === 1,
+    claimToken: row.claim_token,
+    leaseExpiresAt: row.lease_expires_at,
+    sourceAbsentSince: row.source_absent_since,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function managerMediaView(media: Pick<
+  MediaRecord,
+  | 'id'
+  | 'originalFilename'
+  | 'guestName'
+  | 'caption'
+  | 'publicationStatus'
+  | 'uploadState'
+  | 'previewObjectKey'
+  | 'width'
+  | 'height'
+  | 'createdAt'
+>): ManagerMediaView {
+  return {
+    id: media.id,
+    originalFilename: media.originalFilename,
+    guestName: media.guestName,
+    caption: media.caption,
+    publicationStatus: media.publicationStatus,
+    uploadState: media.uploadState,
+    previewAvailable: media.previewObjectKey !== null,
+    width: media.width,
+    height: media.height,
+    createdAt: media.createdAt,
+  };
+}
+
+function mapManagerMedia(row: MediaRow): ManagerMediaView {
+  return {
+    id: row.id,
+    originalFilename: row.original_filename,
+    guestName: row.guest_name,
+    caption: row.caption,
+    publicationStatus: row.publication_status,
+    uploadState: row.upload_state,
+    previewAvailable: row.preview_object_key !== null,
+    width: row.width,
+    height: row.height,
+    createdAt: row.created_at,
+  };
+}
+
 export interface ManagerMediaOptions {
   status?: PublicationStatus;
   guestName?: string;
@@ -97,7 +238,7 @@ export interface ManagerMediaOptions {
 }
 
 export interface ManagerMediaPage {
-  media: MediaRecord[];
+  media: ManagerMediaView[];
   nextCursor: ManagerMediaCursor | null;
 }
 
@@ -137,7 +278,10 @@ export function buildManagerMediaQuery(
 
   return {
     sql: `
-      SELECT * FROM media
+      SELECT
+        id, original_filename, guest_name, caption, publication_status,
+        upload_state, preview_object_key, width, height, created_at, stored_at
+      FROM media
       WHERE ${predicates.join(' AND ')}
       ORDER BY stored_at DESC, id DESC
       LIMIT ?
@@ -160,7 +304,7 @@ export class MediaRepository {
     // One extra row tells us whether another page exists without a second query.
     const result = await this.db.prepare(query.sql).bind(...query.bindings).all<MediaRow>();
     const pageRows = result.results.slice(0, limit);
-    const media = pageRows.map(mapMedia);
+    const media = pageRows.map(mapManagerMedia);
     const last = pageRows[pageRows.length - 1];
     const hasMore = result.results.length > limit;
     return {
@@ -196,6 +340,982 @@ export class MediaRepository {
       ORDER BY reservation_expires_at ASC LIMIT ?
     `).bind(now, limit).all<MediaRow>();
     return result.results.map(mapMedia);
+  }
+
+  async getPromotion(mediaId: string): Promise<MediaObjectPromotion | null> {
+    const row = await this.db.prepare(`
+      SELECT * FROM media_object_promotions WHERE media_id = ?
+    `).bind(mediaId).first<MediaObjectPromotionRow>();
+    return row ? mapPromotion(row) : null;
+  }
+
+  async ensureFinalObjectWriteTombstone(
+    mediaId: string,
+    finalObjectKey: string,
+    recordedAt: string,
+  ): Promise<void> {
+    const media = await this.getById(mediaId);
+    if (!media) throw new Error('Media row disappeared before final-object inventory.');
+    await new MediaObjectWriteTombstoneRepository(this.db).ensure({
+      bucketGeneration: 'canonical',
+      objectKey: finalObjectKey,
+      eventId: media.eventId,
+      mediaId,
+      objectKind: 'final',
+      recordedAt,
+    });
+  }
+
+  async listPromotionWork(
+    now: string,
+    limit = 25,
+    includeActiveVerified = false,
+  ): Promise<MediaObjectPromotion[]> {
+    const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    const result = await this.db.prepare(`
+      SELECT p.* FROM media_object_promotions AS p
+      WHERE (
+        p.state = 'cleanup_pending' AND p.source_writable_until <= ?
+      ) OR (
+        p.state = 'copying' AND p.lease_expires_at <= ? AND (
+          p.source_writable_until <= ? OR (
+            EXISTS (
+              SELECT 1 FROM media AS m
+              WHERE m.id = p.media_id
+                AND m.event_id = p.event_id
+                AND m.upload_state = 'stored'
+                AND m.deleted_at IS NULL
+                AND m.object_bucket_generation = p.source_bucket_generation
+                AND m.object_key = p.source_object_key
+            )
+            AND EXISTS (
+              SELECT 1 FROM events AS e
+              WHERE e.id = p.event_id AND e.deleted_at IS NULL
+            )
+          )
+        )
+      ) OR (
+        p.state = 'pending' AND p.source_writable_until <= ?
+      ) OR (
+        p.state = 'target_verified' AND (
+          ? = 1
+          OR NOT (
+            EXISTS (
+              SELECT 1 FROM media AS m
+              WHERE m.id = p.media_id AND m.event_id = p.event_id
+                AND m.upload_state = 'stored' AND m.deleted_at IS NULL
+                AND m.object_bucket_generation = p.source_bucket_generation
+                AND m.object_key = p.source_object_key
+                AND m.mime_type = p.source_mime_type
+                AND m.byte_size = p.source_byte_size
+                AND m.width = p.source_width AND m.height = p.source_height
+            )
+            AND EXISTS (
+              SELECT 1 FROM events AS e
+              WHERE e.id = p.event_id AND e.deleted_at IS NULL
+            )
+          )
+        )
+      )
+      ORDER BY p.updated_at ASC, p.media_id ASC
+      LIMIT ?
+    `).bind(
+      now,
+      now,
+      now,
+      now,
+      includeActiveVerified ? 1 : 0,
+      boundedLimit,
+    ).all<MediaObjectPromotionRow>();
+    return result.results.map(mapPromotion);
+  }
+
+  async countPromotions(): Promise<number> {
+    return (await this.db.prepare(`
+      SELECT count(*) AS count FROM media_object_promotions
+    `).first<number>('count')) ?? 0;
+  }
+
+  async legacyStoredCutoverReadiness(): Promise<{
+    liveLegacyCount: number;
+    unverifiedLiveLegacyCount: number;
+  }> {
+    const row = await this.db.prepare(`
+      SELECT
+        count(*) AS live_legacy_count,
+        COALESCE(sum(CASE WHEN NOT EXISTS (
+          SELECT 1 FROM media_object_promotions AS p
+          WHERE p.media_id = m.id AND p.event_id = m.event_id
+            AND p.source_bucket_generation = m.object_bucket_generation
+            AND p.source_object_key = m.object_key
+            AND p.source_mime_type = m.mime_type
+            AND p.source_byte_size = m.byte_size
+            AND p.source_width = m.width AND p.source_height = m.height
+            AND p.state = 'target_verified'
+            AND p.source_etag IS NOT NULL AND p.source_sha256 IS NOT NULL
+            AND p.final_etag IS NOT NULL AND p.target_verified_at IS NOT NULL
+            AND p.final_object_key =
+              ('events/' || m.event_id || '/media/final/' || m.id)
+            AND EXISTS (
+              SELECT 1 FROM media_object_write_tombstones AS t
+              WHERE t.bucket_generation = p.final_bucket_generation
+                AND t.object_key = p.final_object_key
+                AND t.event_id = p.event_id AND t.media_id = p.media_id
+                AND t.object_kind = 'final' AND t.suppression_started_at IS NULL
+            )
+        ) THEN 1 ELSE 0 END), 0) AS unverified_live_legacy_count
+      FROM media AS m
+      JOIN events AS e ON e.id = m.event_id AND e.deleted_at IS NULL
+      WHERE m.upload_state = 'stored' AND m.deleted_at IS NULL
+        AND m.object_bucket_generation = 'legacy'
+    `).first<{ live_legacy_count: number; unverified_live_legacy_count: number }>();
+    return {
+      liveLegacyCount: row?.live_legacy_count ?? 0,
+      unverifiedLiveLegacyCount: row?.unverified_live_legacy_count ?? 0,
+    };
+  }
+
+  async claimPromotion(
+    mediaId: string,
+    claimToken: string,
+    claimedAt: string,
+    leaseExpiresAt: string,
+  ): Promise<ClaimedMediaPromotion | null> {
+    const result = await this.db.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'copying', claim_token = ?, lease_expires_at = ?,
+            final_pointer_committed = 0, updated_at = ?
+      WHERE media_id = ?
+        AND source_writable_until <= ?
+        AND (
+          state = 'pending'
+          OR (state = 'copying' AND lease_expires_at <= ?
+            AND (source_etag IS NULL OR source_etag NOT LIKE 'buffer:%'))
+        )
+        AND EXISTS (
+          SELECT 1 FROM media AS m
+          WHERE m.id = media_object_promotions.media_id
+            AND m.event_id = media_object_promotions.event_id
+            AND m.upload_state = 'stored'
+            AND m.deleted_at IS NULL
+            AND m.object_bucket_generation = media_object_promotions.source_bucket_generation
+            AND m.object_key = media_object_promotions.source_object_key
+        )
+        AND EXISTS (
+          SELECT 1 FROM events AS e
+          WHERE e.id = media_object_promotions.event_id AND e.deleted_at IS NULL
+        )
+    `).bind(claimToken, leaseExpiresAt, claimedAt, mediaId, claimedAt, claimedAt).run();
+    if ((result.meta.changes ?? 0) !== 1) return null;
+    const promotion = await this.getPromotion(mediaId);
+    const media = await this.getById(mediaId);
+    if (!promotion || !media) throw new Error('Claimed media promotion inventory disappeared.');
+    return { promotion, media };
+  }
+
+  async claimInactivePromotion(
+    mediaId: string,
+    claimToken: string,
+    claimedAt: string,
+    leaseExpiresAt: string,
+  ): Promise<ClaimedMediaPromotion | null> {
+    const result = await this.db.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'copying', claim_token = ?, lease_expires_at = ?,
+            final_pointer_committed = 0,
+          source_etag = NULL, source_mime_type = NULL,
+          source_byte_size = NULL, source_sha256 = NULL,
+          source_width = NULL, source_height = NULL,
+          final_etag = NULL, target_verified_at = NULL, updated_at = ?
+      WHERE media_id = ? AND source_writable_until <= ?
+        AND (
+          state = 'pending'
+          OR (state = 'copying' AND lease_expires_at <= ?
+            AND (source_etag IS NULL OR source_etag NOT LIKE 'buffer:%'))
+        )
+        AND NOT (
+          EXISTS (
+            SELECT 1 FROM media AS m
+            WHERE m.id = media_object_promotions.media_id
+              AND m.event_id = media_object_promotions.event_id
+              AND m.upload_state = 'stored'
+              AND m.deleted_at IS NULL
+              AND m.object_bucket_generation = media_object_promotions.source_bucket_generation
+              AND m.object_key = media_object_promotions.source_object_key
+          )
+          AND EXISTS (
+            SELECT 1 FROM events AS e
+            WHERE e.id = media_object_promotions.event_id AND e.deleted_at IS NULL
+          )
+        )
+    `).bind(
+      claimToken,
+      leaseExpiresAt,
+      claimedAt,
+      mediaId,
+      claimedAt,
+      claimedAt,
+    ).run();
+    if ((result.meta.changes ?? 0) !== 1) return null;
+    const promotion = await this.getPromotion(mediaId);
+    const media = await this.getById(mediaId);
+    if (!promotion || !media) throw new Error('Claimed inactive media promotion inventory disappeared.');
+    return { promotion, media };
+  }
+
+  async claimReservationIngress(input: {
+    mediaId: string;
+    eventId: string;
+    uploaderSessionId: string;
+    sourceObjectKey: string;
+    mimeType: SupportedImageType;
+    byteSize: number;
+    sha256: string;
+    width: number;
+    height: number;
+    claimToken: string;
+    claimedAt: string;
+    leaseExpiresAt: string;
+  }): Promise<ClaimedMediaIngress | null> {
+    assertWorkerIngressEnabled();
+    const row = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'copying', final_pointer_committed = 0,
+          claim_token = ?, lease_expires_at = ?,
+          source_etag = ?, source_mime_type = ?, source_byte_size = ?,
+          source_sha256 = ?, source_width = ?, source_height = ?,
+          final_etag = NULL, target_verified_at = NULL,
+          source_absent_since = NULL, updated_at = ?
+      WHERE media_id = ? AND event_id = ?
+        AND (
+          state = 'pending'
+          OR (
+            state = 'copying' AND source_etag = ?
+              AND source_mime_type = ? AND source_byte_size = ?
+              AND source_sha256 = ? AND source_width = ? AND source_height = ?
+          )
+        )
+        AND source_object_key = ?
+        AND EXISTS (
+          SELECT 1 FROM media AS m
+          WHERE m.id = ? AND m.event_id = ? AND m.uploader_session_id = ?
+            AND m.object_key = ? AND m.mime_type = ?
+            AND m.declared_byte_size = ? AND m.upload_state = 'reserved'
+            AND m.deleted_at IS NULL AND m.reservation_expires_at > ?
+            AND media_object_promotions.source_writable_until >= m.reservation_expires_at
+        )
+        AND EXISTS (
+          SELECT 1 FROM events AS e
+          WHERE e.id = ? AND e.deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+        )
+      RETURNING *
+    `).bind(
+      input.claimToken,
+      input.leaseExpiresAt,
+      `buffer:${input.sha256}`,
+      input.mimeType,
+      input.byteSize,
+      input.sha256,
+      input.width,
+      input.height,
+      input.claimedAt,
+      input.mediaId,
+      input.eventId,
+      `buffer:${input.sha256}`,
+      input.mimeType,
+      input.byteSize,
+      input.sha256,
+      input.width,
+      input.height,
+      input.sourceObjectKey,
+      input.mediaId,
+      input.eventId,
+      input.uploaderSessionId,
+      input.sourceObjectKey,
+      input.mimeType,
+      input.byteSize,
+      input.claimedAt,
+      input.eventId,
+      input.claimedAt,
+    ).first<MediaObjectPromotionRow>();
+    if (!row) return null;
+    const media = await this.getById(input.mediaId);
+    if (!media) throw new Error('Claimed media ingress row disappeared.');
+    return { promotion: mapPromotion(row), media, claimToken: input.claimToken };
+  }
+
+  async commitReservationIngress(input: {
+    mediaId: string;
+    claimToken: string;
+    finalObjectKey: string;
+    byteSize: number;
+    width: number;
+    height: number;
+    finalEtag: string;
+    committedAt: string;
+  }): Promise<boolean> {
+    assertWorkerIngressEnabled();
+    const current = await this.getById(input.mediaId);
+    if (!current || current.uploadState !== 'reserved') return false;
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET object_key = ?, object_bucket_generation = 'canonical',
+            byte_size = ?, width = ?, height = ?,
+            upload_state = 'stored', stored_at = ?, preview_object_key = NULL
+        WHERE id = ? AND upload_state = 'reserved' AND deleted_at IS NULL
+          AND object_key = (
+            SELECT source_object_key FROM media_object_promotions WHERE media_id = ?
+          )
+          AND object_bucket_generation = (
+            SELECT source_bucket_generation FROM media_object_promotions WHERE media_id = ?
+          )
+          AND reservation_expires_at > ?
+          AND mime_type = (
+            SELECT source_mime_type FROM media_object_promotions WHERE media_id = ?
+          )
+          AND declared_byte_size = (
+            SELECT source_byte_size FROM media_object_promotions WHERE media_id = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM media_object_promotions AS p
+            WHERE p.media_id = ? AND p.state = 'copying'
+              AND p.final_pointer_committed = 0 AND p.claim_token = ?
+              AND p.lease_expires_at > ? AND p.final_object_key = ?
+              AND p.source_sha256 IS NOT NULL
+          )
+          AND EXISTS (
+            SELECT 1 FROM events AS e
+            WHERE e.id = media.event_id AND e.deleted_at IS NULL
+              AND ${PHOTO_INTAKE_OPEN_SQL}
+          )
+        RETURNING id
+      `).bind(
+        input.finalObjectKey,
+        input.byteSize,
+        input.width,
+        input.height,
+        input.committedAt,
+        input.mediaId,
+        input.mediaId,
+        input.mediaId,
+        input.committedAt,
+        input.mediaId,
+        input.mediaId,
+        input.mediaId,
+        input.claimToken,
+        input.committedAt,
+        input.finalObjectKey,
+        input.committedAt,
+      ),
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - 1,
+            reserved_bytes = reserved_bytes - ?,
+            stored_media_count = stored_media_count + 1,
+            stored_bytes = stored_bytes + ?
+        WHERE id = ? AND changes() = 1
+      `).bind(current.declaredByteSize, input.byteSize, current.eventId),
+      this.db.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'cleanup_pending', final_pointer_committed = 1,
+            lease_expires_at = NULL, source_absent_since = NULL,
+            final_etag = ?, target_verified_at = ?, updated_at = ?
+        WHERE media_id = ? AND state = 'copying' AND claim_token = ?
+          AND changes() = 1
+      `).bind(
+        input.finalEtag,
+        input.committedAt,
+        input.committedAt,
+        input.mediaId,
+        input.claimToken,
+      ),
+    ]);
+    return (results[0]?.results?.length ?? 0) === 1
+      && (results[1]?.meta.changes ?? 0) === 1
+      && (results[2]?.meta.changes ?? 0) === 1;
+  }
+
+  async recordPromotionSource(
+    mediaId: string,
+    claimToken: string,
+    source: {
+      etag: string;
+      mimeType: SupportedImageType;
+      byteSize: number;
+      sha256: string;
+      width: number;
+      height: number;
+      recordedAt: string;
+    },
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET source_etag = ?, source_mime_type = ?, source_byte_size = ?,
+          source_sha256 = ?, source_width = ?, source_height = ?, updated_at = ?
+      WHERE media_id = ? AND state = 'copying' AND claim_token = ?
+        AND lease_expires_at > ?
+        AND EXISTS (
+          SELECT 1 FROM media AS m
+          WHERE m.id = media_object_promotions.media_id
+            AND m.event_id = media_object_promotions.event_id
+            AND m.upload_state = 'stored' AND m.deleted_at IS NULL
+            AND m.object_key = media_object_promotions.source_object_key
+            AND m.object_bucket_generation = media_object_promotions.source_bucket_generation
+            AND m.mime_type = ? AND m.byte_size = ?
+            AND m.width = ? AND m.height = ?
+        )
+        AND EXISTS (
+          SELECT 1 FROM events AS e
+          WHERE e.id = media_object_promotions.event_id AND e.deleted_at IS NULL
+        )
+    `).bind(
+      source.etag,
+      source.mimeType,
+      source.byteSize,
+      source.sha256,
+      source.width,
+      source.height,
+      source.recordedAt,
+      mediaId,
+      claimToken,
+      source.recordedAt,
+      source.mimeType,
+      source.byteSize,
+      source.width,
+      source.height,
+    ).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async hasPromotionWritePermit(mediaId: string, claimToken: string, now: string): Promise<boolean> {
+    const permitted = await this.db.prepare(`
+      SELECT 1 AS permitted FROM media_object_promotions
+      WHERE media_id = ? AND state = 'copying' AND claim_token = ?
+        AND lease_expires_at > ?
+        AND source_etag IS NOT NULL AND source_mime_type IS NOT NULL
+        AND source_byte_size IS NOT NULL AND source_sha256 IS NOT NULL
+        AND source_width IS NOT NULL AND source_height IS NOT NULL
+    `).bind(mediaId, claimToken, now).first<number>('permitted');
+    return permitted === 1;
+  }
+
+  async markPromotionTargetVerified(
+    mediaId: string,
+    claimToken: string,
+    finalEtag: string,
+    verifiedAt: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions AS p
+      SET state = 'target_verified', lease_expires_at = NULL,
+          final_etag = ?, target_verified_at = ?, updated_at = ?
+      WHERE p.media_id = ? AND p.state = 'copying' AND p.claim_token = ?
+        AND p.lease_expires_at > ?
+        AND p.source_etag IS NOT NULL AND p.source_mime_type IS NOT NULL
+        AND p.source_byte_size IS NOT NULL AND p.source_sha256 IS NOT NULL
+        AND p.source_width IS NOT NULL AND p.source_height IS NOT NULL
+        AND p.final_object_key = ('events/' || p.event_id || '/media/final/' || p.media_id)
+        AND EXISTS (
+          SELECT 1 FROM media AS m
+          JOIN events AS e ON e.id = m.event_id AND e.deleted_at IS NULL
+          WHERE m.id = p.media_id AND m.event_id = p.event_id
+            AND m.upload_state = 'stored' AND m.deleted_at IS NULL
+            AND m.object_bucket_generation = p.source_bucket_generation
+            AND m.object_key = p.source_object_key
+            AND m.mime_type = p.source_mime_type
+            AND m.byte_size = p.source_byte_size
+            AND m.width = p.source_width AND m.height = p.source_height
+        )
+        AND EXISTS (
+          SELECT 1 FROM media_object_write_tombstones AS t
+          WHERE t.bucket_generation = p.final_bucket_generation
+            AND t.object_key = p.final_object_key
+            AND t.event_id = p.event_id AND t.media_id = p.media_id
+            AND t.object_kind = 'final' AND t.suppression_started_at IS NULL
+        )
+    `).bind(finalEtag, verifiedAt, verifiedAt, mediaId, claimToken, verifiedAt).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async commitPromotionPointer(mediaId: string, claimToken: string, committedAt: string): Promise<boolean> {
+    assertLegacyPointerCutoverEnabled();
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET object_key = (
+          SELECT final_object_key FROM media_object_promotions WHERE media_id = ?
+        ), object_bucket_generation = 'canonical', preview_object_key = NULL
+        WHERE id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+          AND object_key = (
+            SELECT source_object_key FROM media_object_promotions WHERE media_id = ?
+          )
+          AND object_bucket_generation = (
+            SELECT source_bucket_generation FROM media_object_promotions WHERE media_id = ?
+          )
+          AND mime_type = (
+            SELECT source_mime_type FROM media_object_promotions WHERE media_id = ?
+          )
+          AND byte_size = (
+            SELECT source_byte_size FROM media_object_promotions WHERE media_id = ?
+          )
+          AND width = (
+            SELECT source_width FROM media_object_promotions WHERE media_id = ?
+          )
+          AND height = (
+            SELECT source_height FROM media_object_promotions WHERE media_id = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM media_object_promotions AS p
+            WHERE p.media_id = ? AND p.event_id = media.event_id
+              AND p.state = 'target_verified' AND p.claim_token = ?
+              AND p.lease_expires_at IS NULL
+              AND p.source_etag IS NOT NULL AND p.source_sha256 IS NOT NULL
+              AND p.final_etag IS NOT NULL AND p.target_verified_at IS NOT NULL
+              AND p.final_object_key =
+                ('events/' || media.event_id || '/media/final/' || media.id)
+              AND EXISTS (
+                SELECT 1 FROM media_object_write_tombstones AS t
+                WHERE t.bucket_generation = p.final_bucket_generation
+                  AND t.object_key = p.final_object_key
+                  AND t.event_id = p.event_id AND t.media_id = p.media_id
+                  AND t.object_kind = 'final' AND t.suppression_started_at IS NULL
+              )
+          )
+          AND EXISTS (
+            SELECT 1 FROM events AS e
+            WHERE e.id = media.event_id AND e.deleted_at IS NULL
+          )
+        RETURNING id
+      `).bind(
+        mediaId,
+        mediaId,
+        mediaId,
+        mediaId,
+        mediaId,
+        mediaId,
+        mediaId,
+        mediaId,
+        mediaId,
+        claimToken,
+      ),
+      this.db.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'cleanup_pending', lease_expires_at = NULL,
+            final_pointer_committed = 1,
+            source_absent_since = NULL, updated_at = ?
+        WHERE media_id = ? AND state = 'target_verified' AND claim_token = ?
+          AND changes() = 1
+      `).bind(committedAt, mediaId, claimToken),
+    ]);
+    return (results[0]?.results?.length ?? 0) === 1
+      && (results[1]?.meta.changes ?? 0) === 1;
+  }
+
+  async releasePromotionClaim(mediaId: string, claimToken: string, releasedAt: string): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+          final_pointer_committed = 0,
+          source_etag = NULL, source_mime_type = NULL,
+          source_byte_size = NULL, source_sha256 = NULL,
+          source_width = NULL, source_height = NULL,
+          final_etag = NULL, target_verified_at = NULL, updated_at = ?
+      WHERE media_id = ? AND state = 'copying' AND claim_token = ?
+    `).bind(releasedAt, mediaId, claimToken).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async handoffPromotionToPermanentSuppression(
+    mediaId: string,
+    claimToken: string,
+    handedOffAt: string,
+  ): Promise<boolean> {
+    const activePointerSql = `
+      EXISTS (
+        SELECT 1 FROM media AS m
+        JOIN events AS e ON e.id = m.event_id AND e.deleted_at IS NULL
+        WHERE m.id = p.media_id AND m.event_id = p.event_id
+          AND m.upload_state = 'stored' AND m.deleted_at IS NULL
+          AND m.object_key = CASE p.final_pointer_committed
+            WHEN 1 THEN p.final_object_key ELSE p.source_object_key END
+          AND m.object_bucket_generation = CASE p.final_pointer_committed
+            WHEN 1 THEN p.final_bucket_generation ELSE p.source_bucket_generation END
+      )
+    `;
+    try {
+      const results = await this.db.batch([
+        this.db.prepare(`
+          UPDATE media
+          SET preview_object_key = NULL
+          WHERE id = ? AND preview_object_key IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM media_object_promotions AS p
+              WHERE p.media_id = media.id AND p.media_id = ?
+                AND p.state = 'cleanup_pending' AND p.claim_token = ?
+            )
+        `).bind(mediaId, mediaId, claimToken),
+        this.db.prepare(`
+          UPDATE media_object_write_tombstones AS target
+          SET suppression_started_at = COALESCE(suppression_started_at, ?),
+              next_check_at = min(next_check_at, ?), updated_at = ?
+          WHERE target.media_id = ? AND suppression_started_at IS NULL
+            AND target.object_kind NOT IN ('export', 'cover')
+            AND EXISTS (
+              SELECT 1 FROM media_object_promotions AS p
+              WHERE p.media_id = target.media_id AND p.event_id = target.event_id
+                AND p.media_id = ? AND p.state = 'cleanup_pending'
+                AND p.claim_token = ?
+                AND (
+                  (
+                    p.final_pointer_committed = 1
+                    AND ${activePointerSql}
+                    AND NOT (
+                      target.object_kind = 'final'
+                      AND target.bucket_generation = p.final_bucket_generation
+                      AND target.object_key = p.final_object_key
+                    )
+                  )
+                  OR NOT ${activePointerSql}
+                )
+            )
+        `).bind(handedOffAt, handedOffAt, handedOffAt, mediaId, mediaId, claimToken),
+        this.db.prepare(`
+          DELETE FROM media_object_promotions AS p
+          WHERE p.media_id = ? AND p.state = 'cleanup_pending' AND p.claim_token = ?
+            AND (
+              (
+                p.final_pointer_committed = 1
+                AND ${activePointerSql}
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS final_target
+                  WHERE final_target.bucket_generation = p.final_bucket_generation
+                    AND final_target.object_key = p.final_object_key
+                    AND final_target.event_id = p.event_id
+                    AND final_target.media_id = p.media_id
+                    AND final_target.object_kind = 'final'
+                    AND final_target.suppression_started_at IS NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS preview_target
+                  WHERE preview_target.bucket_generation = 'legacy'
+                    AND preview_target.object_key =
+                    ('events/' || p.event_id || '/previews/' || p.media_id || '.webp')
+                    AND preview_target.event_id = p.event_id
+                    AND preview_target.media_id = p.media_id
+                    AND preview_target.object_kind = 'preview'
+                    AND preview_target.suppression_started_at IS NOT NULL
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS pending_target
+                  WHERE pending_target.event_id = p.event_id
+                    AND pending_target.media_id = p.media_id
+                    AND pending_target.object_kind NOT IN ('export', 'cover')
+                    AND NOT (
+                      pending_target.object_kind = 'final'
+                      AND pending_target.bucket_generation = p.final_bucket_generation
+                      AND pending_target.object_key = p.final_object_key
+                    )
+                    AND pending_target.suppression_started_at IS NULL
+                )
+              )
+              OR (
+                NOT ${activePointerSql}
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS source_target
+                  WHERE source_target.bucket_generation = p.source_bucket_generation
+                    AND source_target.object_key = p.source_object_key
+                    AND source_target.event_id = p.event_id
+                    AND source_target.media_id = p.media_id
+                    AND source_target.suppression_started_at IS NOT NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS final_target
+                  WHERE final_target.bucket_generation = p.final_bucket_generation
+                    AND final_target.object_key = p.final_object_key
+                    AND final_target.event_id = p.event_id
+                    AND final_target.media_id = p.media_id
+                    AND final_target.object_kind = 'final'
+                    AND final_target.suppression_started_at IS NOT NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS preview_target
+                  WHERE preview_target.bucket_generation = 'legacy'
+                    AND preview_target.object_key =
+                    ('events/' || p.event_id || '/previews/' || p.media_id || '.webp')
+                    AND preview_target.event_id = p.event_id
+                    AND preview_target.media_id = p.media_id
+                    AND preview_target.object_kind = 'preview'
+                    AND preview_target.suppression_started_at IS NOT NULL
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS pending_target
+                  WHERE pending_target.event_id = p.event_id
+                    AND pending_target.media_id = p.media_id
+                    AND pending_target.object_kind NOT IN ('export', 'cover')
+                    AND pending_target.suppression_started_at IS NULL
+                )
+              )
+            )
+        `).bind(mediaId, claimToken),
+      ]);
+      if ((results[2]?.meta.changes ?? 0) === 1) return true;
+    } catch (error) {
+      // A D1 response can be lost after both statements committed. The missing
+      // finite fence is success only because the permanent tombstones survive.
+      if (!await this.getPromotion(mediaId)) return true;
+      throw error;
+    }
+    return await this.getPromotion(mediaId) === null;
+  }
+
+  async parkInactivePromotionCleanup(
+    mediaId: string,
+    claimToken: string,
+    now: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'cleanup_pending', lease_expires_at = NULL,
+          final_pointer_committed = 0,
+          source_etag = NULL, source_mime_type = NULL,
+          source_byte_size = NULL, source_sha256 = NULL,
+          source_width = NULL, source_height = NULL,
+          final_etag = NULL, target_verified_at = NULL,
+          source_absent_since = NULL, updated_at = ?
+      WHERE media_id = ? AND state = 'copying'
+        AND final_pointer_committed = 0 AND claim_token = ?
+        AND source_writable_until <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM media AS m
+          JOIN events AS e ON e.id = m.event_id AND e.deleted_at IS NULL
+          WHERE m.id = media_object_promotions.media_id
+            AND m.event_id = media_object_promotions.event_id
+            AND m.deleted_at IS NULL
+            AND (
+              (
+                media_object_promotions.final_pointer_committed = 1
+                AND m.upload_state = 'stored'
+                AND m.object_key = media_object_promotions.final_object_key
+                AND m.object_bucket_generation = media_object_promotions.final_bucket_generation
+              )
+              OR (
+                media_object_promotions.final_pointer_committed = 0
+                AND media_object_promotions.source_etag LIKE 'buffer:%'
+                AND m.upload_state = 'reserved'
+                AND m.object_key = media_object_promotions.source_object_key
+                AND m.object_bucket_generation = media_object_promotions.source_bucket_generation
+              )
+              OR (
+                media_object_promotions.final_pointer_committed = 0
+                AND media_object_promotions.source_etag NOT LIKE 'buffer:%'
+                AND m.upload_state = 'stored'
+                AND m.object_key = CASE media_object_promotions.final_pointer_committed
+                  WHEN 1 THEN media_object_promotions.final_object_key
+                  ELSE media_object_promotions.source_object_key END
+                AND m.object_bucket_generation = CASE media_object_promotions.final_pointer_committed
+                  WHEN 1 THEN media_object_promotions.final_bucket_generation
+                  ELSE media_object_promotions.source_bucket_generation END
+              )
+            )
+        )
+    `).bind(now, mediaId, claimToken, now).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async parkInactiveVerifiedPromotionCleanup(
+    mediaId: string,
+    claimToken: string,
+    now: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions AS p
+      SET state = 'cleanup_pending', final_pointer_committed = 0,
+          lease_expires_at = NULL, source_absent_since = NULL, updated_at = ?
+      WHERE p.media_id = ? AND p.state = 'target_verified'
+        AND p.final_pointer_committed = 0 AND p.claim_token = ?
+        AND NOT (
+          EXISTS (
+            SELECT 1 FROM media AS m
+            WHERE m.id = p.media_id AND m.event_id = p.event_id
+              AND m.upload_state = 'stored' AND m.deleted_at IS NULL
+              AND m.object_bucket_generation = p.source_bucket_generation
+              AND m.object_key = p.source_object_key
+              AND m.mime_type = p.source_mime_type
+              AND m.byte_size = p.source_byte_size
+              AND m.width = p.source_width AND m.height = p.source_height
+          )
+          AND EXISTS (
+            SELECT 1 FROM events AS e
+            WHERE e.id = p.event_id AND e.deleted_at IS NULL
+          )
+        )
+    `).bind(now, mediaId, claimToken).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async markPromotionSourceAbsent(
+    mediaId: string,
+    claimToken: string,
+    observedAt: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET source_absent_since = ?, updated_at = ?
+      WHERE media_id = ? AND state = 'cleanup_pending' AND claim_token = ?
+        AND source_writable_until <= ?
+    `).bind(observedAt, observedAt, mediaId, claimToken, observedAt).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async clearPromotionSourceAbsence(
+    mediaId: string,
+    claimToken: string,
+    observedAt: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET source_absent_since = NULL, updated_at = ?
+      WHERE media_id = ? AND state = 'cleanup_pending' AND claim_token = ?
+    `).bind(observedAt, mediaId, claimToken).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async touchPromotion(mediaId: string, touchedAt: string): Promise<void> {
+    await this.db.prepare(`
+      UPDATE media_object_promotions SET updated_at = ? WHERE media_id = ?
+    `).bind(touchedAt, mediaId).run();
+  }
+
+  async rotateAmbiguousIngressPromotion(
+    mediaId: string,
+    sourceSha256: string,
+    touchedAt: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE media_object_promotions
+      SET updated_at = ?
+      WHERE media_id = ? AND state = 'copying'
+        AND source_etag = ('buffer:' || ?)
+        AND source_sha256 = ?
+    `).bind(touchedAt, mediaId, sourceSha256, sourceSha256).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async ingressPromotionIsInactive(mediaId: string): Promise<boolean> {
+    const active = await this.db.prepare(`
+      SELECT 1 AS active FROM media_object_promotions AS p
+      JOIN media AS m ON m.id = p.media_id AND m.event_id = p.event_id
+      JOIN events AS e ON e.id = p.event_id AND e.deleted_at IS NULL
+      WHERE p.media_id = ? AND p.state = 'copying'
+        AND p.source_etag LIKE 'buffer:%'
+        AND m.upload_state = 'reserved' AND m.deleted_at IS NULL
+        AND m.object_bucket_generation = p.source_bucket_generation
+        AND m.object_key = p.source_object_key
+      LIMIT 1
+    `).bind(mediaId).first<number>('active');
+    return active !== 1;
+  }
+
+  async adoptPresentIngressFinal(
+    mediaId: string,
+    expectedSha256: string,
+    byteSize: number,
+    width: number,
+    height: number,
+    finalEtag: string,
+    committedAt: string,
+  ): Promise<boolean> {
+    assertWorkerIngressEnabled();
+    const current = await this.getById(mediaId);
+    if (!current || current.uploadState !== 'reserved') return false;
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET object_key = (
+              SELECT final_object_key FROM media_object_promotions WHERE media_id = ?
+            ), object_bucket_generation = 'canonical',
+            byte_size = ?, width = ?, height = ?,
+            upload_state = 'stored', stored_at = ?, preview_object_key = NULL
+        WHERE id = ? AND upload_state = 'reserved' AND deleted_at IS NULL
+          AND object_bucket_generation = 'legacy'
+          AND object_key = (
+            SELECT source_object_key FROM media_object_promotions WHERE media_id = ?
+          )
+          AND mime_type = (
+            SELECT source_mime_type FROM media_object_promotions WHERE media_id = ?
+          )
+          AND declared_byte_size = ?
+          AND EXISTS (
+            SELECT 1 FROM media_object_promotions AS p
+            WHERE p.media_id = ? AND p.event_id = media.event_id
+              AND p.state = 'copying'
+              AND p.source_etag = ('buffer:' || ?)
+              AND p.source_sha256 = ? AND p.source_byte_size = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM events AS e
+            WHERE e.id = media.event_id AND e.deleted_at IS NULL
+          )
+        RETURNING id
+      `).bind(
+        mediaId,
+        byteSize,
+        width,
+        height,
+        committedAt,
+        mediaId,
+        mediaId,
+        mediaId,
+        byteSize,
+        mediaId,
+        expectedSha256,
+        expectedSha256,
+        byteSize,
+      ),
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - 1,
+            reserved_bytes = reserved_bytes - ?,
+            stored_media_count = stored_media_count + 1,
+            stored_bytes = stored_bytes + ?
+        WHERE id = ? AND changes() = 1
+      `).bind(current.declaredByteSize, byteSize, current.eventId),
+      this.db.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'cleanup_pending', final_pointer_committed = 1,
+            lease_expires_at = NULL, source_absent_since = NULL,
+            final_etag = ?, target_verified_at = ?, updated_at = ?
+        WHERE media_id = ? AND state = 'copying'
+          AND source_etag = ('buffer:' || ?) AND source_sha256 = ?
+          AND changes() = 1
+      `).bind(
+        finalEtag,
+        committedAt,
+        committedAt,
+        mediaId,
+        expectedSha256,
+        expectedSha256,
+      ),
+    ]);
+    return (results[0]?.results?.length ?? 0) === 1
+      && (results[1]?.meta.changes ?? 0) === 1
+      && (results[2]?.meta.changes ?? 0) === 1;
+  }
+
+  async eventHasPromotionFence(eventId: string): Promise<boolean> {
+    const row = await this.db.prepare(`
+      SELECT 1 AS present FROM media_object_promotions WHERE event_id = ? LIMIT 1
+    `).bind(eventId).first<number>('present');
+    return row === 1;
+  }
+
+  async eventHasWritableMediaAlias(eventId: string, now: string): Promise<boolean> {
+    const row = await this.db.prepare(`
+      SELECT 1 AS present FROM media
+      WHERE event_id = ? AND reservation_expires_at > ? LIMIT 1
+    `).bind(eventId, now).first<number>('present');
+    return row === 1;
   }
 
   async listContributions(eventId: string, sessionId: string): Promise<MediaRecord[]> {
@@ -234,6 +1354,25 @@ export class MediaRepository {
     return new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its storage limit.', 409);
   }
 
+  private async idempotentRefreshConflict(input: ReserveMediaRecord): Promise<ApiError> {
+    const promotion = await this.getPromotion((await this.getIdempotent(input))?.id ?? input.id);
+    if (!promotion || promotion.state !== 'pending') {
+      return new ApiError(
+        'UPLOAD_FINALIZE_CONFLICT',
+        'This upload is finishing secure storage cleanup. Choose the photo again shortly.',
+        409,
+      );
+    }
+    const intakeOpen = await this.db.prepare(`
+      SELECT 1 AS permitted FROM events
+      WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+    `).bind(input.eventId, input.createdAt).first<number>('permitted');
+    if (intakeOpen !== 1) {
+      return new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this event.', 409);
+    }
+    return new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload changed while it was being refreshed.', 409);
+  }
+
   private async refreshIdempotent(input: ReserveMediaRecord, existing: MediaRecord): Promise<MediaRecord> {
     if (existing.uploadState === 'stored') return existing;
     if (existing.uploadState === 'deleted') {
@@ -241,18 +1380,34 @@ export class MediaRepository {
     }
 
     if (existing.uploadState === 'reserved') {
-      await this.db.prepare(`
+      const refreshed = await this.db.prepare(`
         UPDATE media
-        SET reservation_expires_at = ?, guest_name = ?, caption = ?
-        WHERE id = ? AND upload_state = 'reserved' AND reservation_expires_at < ?
+        SET reservation_expires_at = max(reservation_expires_at, ?),
+            guest_name = ?, caption = ?
+        WHERE id = ? AND upload_state = 'reserved' AND object_key = ?
+          AND EXISTS (
+            SELECT 1 FROM media_object_promotions AS p
+            WHERE p.media_id = ? AND p.state = 'pending'
+              AND p.source_object_key = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM events
+            WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+          )
+        RETURNING *
       `).bind(
         input.reservationExpiresAt,
         input.guestName,
         input.caption,
         existing.id,
-        input.reservationExpiresAt,
-      ).run();
-      return (await this.getById(existing.id))!;
+        existing.objectKey,
+        existing.id,
+        existing.objectKey,
+        input.eventId,
+        input.createdAt,
+      ).first<MediaRow>();
+      if (!refreshed) throw await this.idempotentRefreshConflict(input);
+      return mapMedia(refreshed);
     }
 
     const results = await this.db.batch([
@@ -260,19 +1415,28 @@ export class MediaRepository {
         UPDATE media
         SET upload_state = 'reserved', reservation_expires_at = ?,
             guest_name = ?, caption = ?, original_filename = ?
-        WHERE id = ? AND upload_state = 'failed'
+        WHERE id = ? AND upload_state = 'failed' AND object_key = ?
+          AND EXISTS (
+            SELECT 1 FROM media_object_promotions AS p
+            WHERE p.media_id = ? AND p.state = 'pending'
+              AND p.source_object_key = ?
+          )
           AND EXISTS (
             SELECT 1 FROM events
             WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
               AND reserved_media_count + stored_media_count < ?
               AND reserved_bytes + stored_bytes + ? <= ?
           )
+        RETURNING id
       `).bind(
         input.reservationExpiresAt,
         input.guestName,
         input.caption,
         input.originalFilename,
         existing.id,
+        existing.objectKey,
+        existing.id,
+        existing.objectKey,
         input.eventId,
         input.createdAt,
         MAX_EVENT_MEDIA,
@@ -286,10 +1450,12 @@ export class MediaRepository {
         WHERE id = ? AND changes() = 1
       `).bind(input.declaredByteSize, input.eventId),
     ]);
-    if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(existing.id))!;
+    if ((results[0]?.results?.length ?? 0) === 1) return (await this.getById(existing.id))!;
 
     const raced = await this.getById(existing.id);
     if (raced && raced.uploadState !== 'failed') return this.refreshIdempotent(input, raced);
+    const promotion = await this.getPromotion(existing.id);
+    if (!promotion || promotion.state !== 'pending') throw await this.idempotentRefreshConflict(input);
     throw await this.capacityError(input.eventId);
   }
 
@@ -488,16 +1654,29 @@ export class MediaRepository {
 
   async finalize(
     id: string,
-    metadata: { byteSize: number; width: number; height: number },
+    metadata: {
+      byteSize: number;
+      width: number;
+      height: number;
+      objectKey?: string;
+      source?: {
+        etag: string;
+        mimeType: SupportedImageType;
+        sha256: string;
+        finalEtag: string;
+      };
+    },
     storedAt = new Date().toISOString(),
   ): Promise<MediaRecord> {
     const current = await this.getById(id);
     if (!current) throw new ApiError('UPLOAD_OBJECT_MISSING', 'The upload reservation no longer exists.', 404);
+    const objectKey = metadata.objectKey ?? current.objectKey;
     if (current.uploadState === 'stored') {
       if (
         current.byteSize === metadata.byteSize
         && current.width === metadata.width
         && current.height === metadata.height
+        && current.objectKey === objectKey
       ) return current;
       throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload was already finalized with different metadata.', 409);
     }
@@ -505,17 +1684,33 @@ export class MediaRepository {
       throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer be finalized.', 409);
     }
 
-    const results = await this.db.batch([
+    const statements = [
       this.db.prepare(`
         UPDATE media
-        SET byte_size = ?, width = ?, height = ?, upload_state = 'stored', stored_at = ?
-        WHERE id = ? AND upload_state = 'reserved'
+        SET object_key = ?, object_bucket_generation = CASE
+              WHEN ? <> object_key THEN 'canonical' ELSE object_bucket_generation END,
+            byte_size = ?, width = ?, height = ?, upload_state = 'stored', stored_at = ?
+            , preview_object_key = CASE WHEN ? <> object_key THEN NULL ELSE preview_object_key END
+        WHERE id = ? AND upload_state = 'reserved' AND object_key = ?
+          AND (
+            ? = object_key OR EXISTS (
+              SELECT 1 FROM media_object_promotions AS p
+              WHERE p.media_id = media.id AND p.state = 'pending'
+                AND p.source_object_key = media.object_key
+            )
+          )
+        RETURNING id
       `).bind(
+        objectKey,
+        objectKey,
         metadata.byteSize,
         metadata.width,
         metadata.height,
         storedAt,
+        objectKey,
         id,
+        current.objectKey,
+        objectKey,
       ),
       this.db.prepare(`
         UPDATE events
@@ -525,8 +1720,40 @@ export class MediaRepository {
             stored_bytes = stored_bytes + ?
         WHERE id = ? AND changes() = 1
       `).bind(current.declaredByteSize, metadata.byteSize, current.eventId),
-    ]);
-    if ((results[0]?.meta.changes ?? 0) !== 1) return this.finalize(id, metadata);
+    ];
+    if (objectKey !== current.objectKey) {
+      if (!metadata.source) throw new Error('Final object transition requires its validated source digest.');
+      statements.push(this.db.prepare(`
+        UPDATE media_object_promotions
+        SET final_object_key = ?, source_etag = ?, source_mime_type = ?,
+            source_byte_size = ?, source_sha256 = ?, source_width = ?, source_height = ?,
+            final_etag = ?, target_verified_at = ?, state = 'cleanup_pending',
+            final_pointer_committed = 1,
+            claim_token = COALESCE(claim_token, ?), lease_expires_at = NULL,
+            source_absent_since = NULL, updated_at = ?
+        WHERE media_id = ? AND state = 'pending'
+          AND source_object_key = ? AND changes() = 1
+      `).bind(
+        objectKey,
+        metadata.source.etag,
+        metadata.source.mimeType,
+        metadata.byteSize,
+        metadata.source.sha256,
+        metadata.width,
+        metadata.height,
+        metadata.source.finalEtag,
+        storedAt,
+        crypto.randomUUID(),
+        storedAt,
+        id,
+        current.objectKey,
+      ));
+    }
+    const results = await this.db.batch(statements);
+    if ((results[0]?.results?.length ?? 0) !== 1) return this.finalize(id, metadata);
+    if (objectKey !== current.objectKey && (results[2]?.meta.changes ?? 0) !== 1) {
+      throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload changed while it was being finalized.', 409);
+    }
     return (await this.getById(id))!;
   }
 
@@ -552,7 +1779,7 @@ export class MediaRepository {
     expected: PublicationStatus,
     target: PublicationStatus,
     changedAt: string,
-  ): Promise<string[]> {
+  ): Promise<MediaRecord[]> {
     const firstIdSlot = 4;
     const idPlaceholders = ids
       .map((_, index) => `?${firstIdSlot + index}`)
@@ -591,18 +1818,30 @@ export class MediaRepository {
         409,
       );
     }
-    return [...ids];
+    const selected = await this.db.prepare(`
+      SELECT * FROM media
+      WHERE event_id = ? AND id IN (${ids.map(() => '?').join(', ')})
+    `).bind(eventId, ...ids).all<MediaRow>();
+    const byId = new Map(selected.results.map((row) => [row.id, mapMedia(row)]));
+    return ids.map((id) => {
+      const media = byId.get(id);
+      if (!media) throw new Error('Bulk-updated media row was not found.');
+      return media;
+    });
   }
 
   async setPreviewObjectKey(id: string, previewObjectKey: string): Promise<MediaRecord> {
     const result = await this.db.prepare(`
       UPDATE media SET preview_object_key = ?
       WHERE id = ? AND upload_state = 'stored' AND deleted_at IS NULL
-    `).bind(previewObjectKey, id).run();
-    if ((result.meta.changes ?? 0) !== 1) {
+        AND object_bucket_generation = 'legacy'
+      RETURNING *
+    `).bind(previewObjectKey, id).all<MediaRow>();
+    const row = result.results[0];
+    if (!row || result.results.length !== 1) {
       throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
     }
-    return (await this.getById(id))!;
+    return mapMedia(row);
   }
 
   async failReservation(id: string): Promise<MediaRecord> {
@@ -623,9 +1862,9 @@ export class MediaRepository {
   }
 
   async delete(id: string, deletedAt: string): Promise<MediaRecord> {
-    // A schema-14 Worker admitted before the bridge can still finalize a
-    // reservation after this call's first read. Retry that finite state race so
-    // a successful delete response always represents a committed tombstone.
+    // The observed state can change between the read and CAS (for example,
+    // reserved -> stored finalization). Retry against the winner so a 200
+    // response never reports success while leaving an active photo behind.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const current = await this.getById(id);
       if (!current) throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo no longer exists.', 404);
@@ -636,6 +1875,7 @@ export class MediaRepository {
         this.db.prepare(`
           UPDATE media SET upload_state = 'deleted', deleted_at = ?
           WHERE id = ? AND upload_state = ? AND deleted_at IS NULL
+          RETURNING id
         `).bind(deletedAt, id, counterType),
         this.db.prepare(`
           UPDATE events SET
@@ -651,12 +1891,42 @@ export class MediaRepository {
           counterType === 'stored' ? current.byteSize ?? 0 : 0,
           current.eventId,
         ),
+        this.db.prepare(`
+          UPDATE media_object_write_tombstones AS target
+          SET suppression_started_at = COALESCE(suppression_started_at, ?),
+              next_check_at = min(next_check_at, ?), updated_at = ?
+          WHERE target.event_id = ? AND target.media_id = ?
+            AND target.object_kind NOT IN ('export', 'cover')
+            AND EXISTS (
+              SELECT 1 FROM media AS m
+              WHERE m.id = ? AND m.event_id = ?
+                AND m.upload_state = 'deleted' AND m.deleted_at = ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM media_object_promotions AS p
+              WHERE p.media_id = ? AND p.event_id = ?
+            )
+            AND changes() = 1
+        `).bind(
+          deletedAt,
+          deletedAt,
+          deletedAt,
+          current.eventId,
+          id,
+          id,
+          current.eventId,
+          deletedAt,
+          id,
+          current.eventId,
+        ),
       ]);
-      if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(id))!;
+      if ((results[0]?.results?.length ?? 0) === 1) return (await this.getById(id))!;
+      const winner = await this.getById(id);
+      if (winner?.uploadState === 'deleted') return winner;
     }
     throw new ApiError(
       'MEDIA_STATE_CONFLICT',
-      'This photo changed while it was being deleted. Try again.',
+      'This photo changed while it was being removed. Try again.',
       409,
     );
   }

@@ -275,6 +275,30 @@ tokens above. Every state below is narrow-first at 320px and carries 44px target
 | Manager photo intake | scheduled / open-early / open / paused | The status and the one available action are chosen from the server-derived `photoIntakeState`, never from a comparison the browser makes against its own clock, and the page refetches across the start rather than switching itself. Before the start the only actions are opening photos early and returning to the schedule; a pre-start `paused` belongs to a legacy row or a disabled printed entry and is explained rather than offered an early reopen. |
 | Manager Share | entry controls | `Sign out guest devices` and `Disable printed event QR` are separate actions with separate copy; each requires the exact event name. The disable copy states that every invitation and sign using the QR stops working and that it cannot be undone. After a disable there is no link, no QR, and no replacement action. |
 
+### Guestbook states
+
+Guestbook is a themed guest surface inside the existing event-theme scope. Its disclosure,
+prompt, composer, private read-back, and shared feed use the resolved event semantic tokens; they do
+not introduce Guestbook-specific colors, type, radii, or remote assets. The Manager destination,
+filters, rows, errors, and moderation actions remain global Candidary chrome and never inherit event
+tokens.
+
+| Surface | State | Contract |
+| --- | --- | --- |
+| Guest, photos primary | available | `Guestbook` is the first secondary disclosure. It orders the 160-character host prompt and privacy explanation before the composer, then `Your private entries` and `Shared guestbook`. The note body is at most 500 characters; prompts, names, notes, captions, textareas, and entry metadata use `dir="auto"` and overflow wrapping. |
+| Guest, sent-photo receipt | terminal | The receipt remains the delivery result and has exactly one follow-on action, `Leave a guestbook note`. It opens the existing disclosure, scrolls it into view, and focuses the composer heading with `preventScroll`; reduced motion uses an immediate, non-smooth scroll. |
+| Guest contribution | sending and confirmed | Native controls preserve logical keyboard order. A confirmed item is inserted from the server response and a polite atomic live region announces the send; an ambiguous failure retains the body, signature choice, and idempotency key. Feed refresh never steals focus or scroll. |
+| Manager | Guestbook from the day | The unresolved-count badge, visibility views, source filters, row-local actions/errors, and explicit refresh are lazy-loaded global chrome. A confirmed action focuses the updated or next meaningful row control with `preventScroll` and restores the scroll position captured immediately before applying that confirmed row update. |
+| Export artifacts | printable and private | `guestbook.html` is a neutral, self-contained, semantic, high-contrast rendering of only the shared keepsake snapshot, with `article` and `dir="auto"` and no scripts, forms, analytics, remote fonts/styles/images, or network dependency. The complete non-deleted private archive is a separately named and labelled CSV; private rows never leak into the printable keepsake. |
+
+Every visible Guestbook control is at least 44 by 44 CSS pixels and retains the established
+`:focus-visible` indicator. Send and moderation results use polite atomic live regions, while reads,
+polling, and background failures do not move focus or scroll. The layouts remain usable at 320 and
+390 CSS pixels, 640 CSS pixels as the 1280-at-200%-zoom equivalent, and 320 CSS pixels as the
+1280-at-400%-zoom equivalent, with no horizontal document overflow at the maximum prompt/body
+lengths. Nonessential motion and smooth receipt-to-Guestbook scrolling are disabled under
+`prefers-reduced-motion`.
+
 ### Icon inventory
 
 Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCircle`, `Link`, `Copy`, `QrCode`, `Check`, `Ban`, `Trash2`, `Download`, `Settings`, `CalendarDays`, `ShieldCheck`, `ClipboardCheck`, `Search`, `Inbox`, `Eye`, `EyeOff`, `ChevronRight`, and `ChevronDown`. Icons remain secondary to text labels except familiar close controls. `ChevronDown` carries the open and closed state of the landing FAQ disclosures and is the one icon that rotates.
@@ -287,7 +311,7 @@ The landing header carries three exits beside the brand: `How it works`, `Sign i
 
 The returning-host entry point is also allowed, worded exactly `Already have an account?` and `Sign in to your events`, followed by `New here?` and `Create one`. It is permitted because a host who already has an account otherwise reaches their events only from a manager card or a typed URL; it sits below the primary actions as one sentence, and it clears the fold at 320 x 568 but not at 360 x 640 or 390 x 844.
 
-Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
+Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt with its sole follow-on action `Leave a guestbook note`. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
 
 Guest RSVP: event name/date, the deadline sentence worded exactly `Please RSVP by <date>.`, `Find your household invitation`, `Full name`, the privacy sentence, and `Find my invitation`. On the household surface: the household label, `Your household RSVP`, each person's name, `Attending`, `Not attending`, the live counts, and `Submit RSVP`. On the receipt: `You're all set`, the counts, the roster, the closing date, and `Change RSVP`. Nothing here may name, count, or suggest anyone the household has not already been matched to.
 
@@ -295,7 +319,7 @@ Guest before-start: `The event hasn't started yet`, `{event name} begins {format
 
 Create receipt: the existing links plus `Set up guest list`. It is permitted because a new event starts with RSVP paused until the host has a validated roster — photo intake is permitted from creation and opens on the event's own schedule — so the guest list is the one thing the receipt would otherwise name no way to reach.
 
-Manager: `Candidary`, event name/date, the event's start time and time zone, the server-derived photo intake state, capacity/lifecycle facts, the active section title, and the six destination labels `Intake`, `RSVP`, `Gallery`, `Notes`, `Share`, `Settings`. The RSVP destination's eight totals are labelled facts derived from the server, not marketing metrics.
+Manager: `Candidary`, event name/date, the event's start time and time zone, the server-derived photo intake state, capacity/lifecycle facts, the active section title, and the six destination labels `Intake`, `RSVP`, `Gallery`, `Guestbook`, `Share`, `Settings`. The RSVP destination's eight totals are labelled facts derived from the server, not marketing metrics.
 
 Cover preparation is Manager copy below the Settings fold, so it sits outside
 this list's above-the-fold reach — but it is recorded here because it is the one

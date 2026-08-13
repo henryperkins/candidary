@@ -36,11 +36,12 @@ npx playwright test tests/e2e/core-journey.spec.ts --project=mobile
 ```
 
 Local secrets go in `.dev.vars` (copy `.dev.vars.example`). `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`,
-`LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and
+`LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_MESSAGE_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and
 `ENTRY_ENCRYPTION_KEY` must be independent values; the two encryption keys must each be exactly
-32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY`
-are persisted-data keys: rotating one without a re-encryption/re-digest migration breaks every
-printed QR or the roster lookup. Ordinary guest-grant and session rotation must leave them alone.
+32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, `RSVP_LOOKUP_HMAC_KEY`, and
+`GUEST_MESSAGE_HMAC_KEY` are persisted-data keys: rotating one without a coordinated re-encryption,
+re-digest, re-HMAC, or invalidation migration breaks persisted behavior. Ordinary guest-grant and
+session rotation must leave them alone.
 Local `vite dev` reads this file, while production builds explicitly omit it from generated output.
 
 ## Architecture
@@ -49,7 +50,8 @@ One Cloudflare Worker (`worker/index.ts`) serves everything: a Hono API, the Rea
 binding, daily cleanup and hourly notification-dispatch scheduled jobs, and the exported
 `ExportWorkflow`, `CoverRenderWorkflow`, and `CoverBackfillWorkflow` classes. Bindings are `DB` (D1),
 `MEDIA_BUCKET` (private R2), `IMAGES`, `EXPORT_WORKFLOW`, `COVER_RENDER_WORKFLOW`,
-`COVER_BACKFILL_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`, and `ASSETS`.
+`COVER_BACKFILL_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`,
+`GUEST_MESSAGE_RATE_LIMIT`, and `ASSETS`.
 `CF_VERSION_METADATA` supplies the deployed Worker version identity used by release certification.
 
 Three build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`),
@@ -126,15 +128,18 @@ infers phase — `resolveGuestEventPhase()` runs on the Worker and returns `rsvp
 
 ### Upload path (the core journey)
 
-Three phases, because originals never pass through the Worker:
+Three phases; canonical-live originals now pass through the authenticated Worker and never receive a
+presigned R2 URL:
 
 1. **Reserve** — `POST /api/event/:slug/uploads/batch` validates type/size, atomically increments event
-   counters, inserts `reserved` media rows, and returns presigned R2 PUT URLs (10 min, MIME-bound).
-2. **Transfer** — the browser PUTs bytes straight to R2 (`xhrUpload` in `GuestUploadFlow.tsx`), max two
-   concurrent per guest (`runUploadQueue` in `features/uploads/upload-queue.ts`).
-3. **Finalize** — `POST .../uploads/:mediaId/finalize` HEADs the object, checks size/content-type, sniffs
-   the file signature (`security/image-metadata.ts`), and flips the row to `stored` while moving counters
-   from reserved to stored. Failures delete the object and release the reservation.
+   counters, inserts `reserved` media rows, and returns authenticated same-origin content URLs.
+2. **Transfer** — the browser sends at most two CSRF-protected PUTs concurrently. The Worker rechecks
+   event/session ownership, buffers no more than the accepted 20 MB, validates exact size, MIME, image
+   signature, and dimensions, then writes the deterministic canonical key create-only and re-reads its
+   complete bytes before committing D1 `stored` + `canonical`.
+3. **Confirm** — `POST .../uploads/:mediaId/finalize` is an idempotent confirmation for the browser
+   queue. A committed Stored row succeeds without resending bytes; an uncommitted reservation requires
+   the content PUT again. The schema-v2 five historical presign/download capabilities stay false.
 
 Every reservation carries a client-generated `idempotencyKey` unique per `(event, session)`. Retry
 re-enters the same media row rather than creating a new one — see `MediaRepository.refreshIdempotent`.
@@ -149,6 +154,19 @@ manager-only (`GET /api/media/:id/original`); guests may read a preview only for
 a published photo in a visible gallery. Previews are always produced through the `IMAGES` binding into a
 separate R2 key so original metadata is not exposed — never fall back to serving the original bytes from
 the preview route.
+
+`0015` makes bucket generation categorical and durably inventories every legacy pointer in
+`media_object_promotions`. Candidate A disables ingress/copy/pointer/purge; copy-only validates the
+exact legacy ETag, MIME, size, SHA-256, and dimensions, creates and completely re-verifies the object
+in the distinct canonical bucket, then freezes `target_verified` proof without moving the pointer.
+Only canonical-live may perform the exact proof-bound pointer CAS, and it clears the legacy preview
+pointer in the same transaction. Exports fail closed until eligible rows are canonical, while content,
+export Workflow, deletion, and maintenance always select the bucket recorded by generation.
+
+Permanent non-FK `media_object_write_tombstones`, `legacy_media_scan_state`, and scanner quarantine
+outlive media/events. The scanner repeatedly wraps the entire legacy namespace forever; it is not a
+finite drain detector. `source_writable_until`, signer revocation, TTL expiry, and repeated HEADs do
+not prove an already-admitted legacy operation is gone.
 
 ### Event covers
 
@@ -191,7 +209,8 @@ slot, retired/cross-event set, or impossible pointer graph fails closed. There i
 reader, legacy-object response, lazy Images transform, or normalized-master fallback. The nine
 `0014_event_cover_invariants.sql` triggers make those semantic, receipt, active-set, and ordered-purge
 relationships database invariants; Phase 2 ends one file earlier at
-`0013_guest_message_hardening.sql`.
+`0013_guest_message_hardening.sql`. Those 13/14-migration boundaries remain immutable historical
+release evidence; the active post-cutover schema ends at `0015_curated_private_guestbook.sql`.
 
 ### Exports
 
@@ -201,9 +220,15 @@ relationships database invariants; Phase 2 ends one file earlier at
 through R2 multipart upload, and writes `candidary-export-manifest.csv`. Retries bump `attempt`, write to
 a new prefix, and clear prior part rows. Failures surface as `EXPORT_*` codes carried in `errorCode`.
 
+Post-cutover export creation also freezes Guestbook metadata and entries for a printable HTML keepsake
+and a separate private CSV archive. Both inherit the Ready artifact's 24-hour object expiry; immutable
+snapshot rows remain in D1 for authorized retry until event purge.
+
 The daily cron (`workflows/cleanup.ts`) sweeps bounded auth and RSVP scratch, releases expired
-reservations, deletes expired export objects, and purges retention-due events. The hourly cron
-dispatches the bounded host-notification outbox.
+reservations, deletes expired export objects, and purges retention-due events. Both the daily pass and
+the hourly `47 * * * *` pass independently track bounded media copy/pointer work, the permanent legacy
+scanner/tombstone janitor, and the host-notification outbox. Promoter failure or exhaustion cannot
+prevent scanner/janitor progress, and scanner failure cannot abandon the already-started janitor.
 
 `deleteEventData()` order is load-bearing: revoke every credential and disable the entry, delete the
 event's R2 prefix, then delete `media` and `guest_messages` before the event row. Those two tables

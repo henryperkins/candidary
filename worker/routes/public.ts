@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { canonicalTimeZone, isCalendarDate, isIanaTimeZone } from '../../shared/event-time';
 import {
   assertOverridesLegible,
@@ -25,6 +26,7 @@ const eventSchema = z.object({
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Choose a valid event date.')
     .refine(isCalendarDate, 'Choose a valid event date.'),
   welcomeMessage: z.string().trim().min(1, 'Add a welcome message.').max(500, 'Use 500 characters or fewer.'),
+  guestbookPrompt: z.literal(DEFAULT_GUESTBOOK_PROMPT).default(DEFAULT_GUESTBOOK_PROMPT),
   eventTimezone: z.string().min(1).max(64)
     .refine(isIanaTimeZone, 'Choose a valid time zone.'),
   // Local wall clock, never an instant. Optional for rollout compatibility;

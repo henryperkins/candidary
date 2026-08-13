@@ -1,5 +1,5 @@
 import { csvCell as cell } from '../../shared/csv';
-import type { MediaRecord } from '../db/types';
+import type { ExportableMediaRecord } from '../db/types';
 import { exportPartName, exportPath } from './paths';
 
 const columns = [
@@ -7,7 +7,7 @@ const columns = [
   'byte_size', 'width', 'height', 'uploaded_at', 'publication_status', 'published_at',
 ] as const;
 
-export function buildMediaCsv(media: MediaRecord[]): string {
+export function buildMediaCsv(media: ExportableMediaRecord[]): string {
   const rows = media.map((item) => [
     item.id, item.originalFilename, item.guestName, item.caption, item.mimeType,
     item.byteSize, item.width, item.height, item.createdAt, item.publicationStatus, item.publishedAt,
@@ -21,7 +21,7 @@ const manifestColumns = [
   'uploaded_at', 'publication_status',
 ] as const;
 
-export function buildExportManifest(parts: Array<{ partNumber: number; media: MediaRecord[] }>): string {
+export function buildExportManifest(parts: Array<{ partNumber: number; media: ExportableMediaRecord[] }>): string {
   const rows = parts.flatMap((part) => part.media.map((item, index) => [
     part.partNumber,
     exportPartName(part.partNumber),

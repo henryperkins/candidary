@@ -9,6 +9,7 @@ interface RsvpLookupProps {
   secondNameRequired: boolean;
   busy: boolean;
   message: string;
+  rememberedName?: string;
   onLookup: (firstName: string, secondName?: string) => Promise<void>;
 }
 
@@ -26,6 +27,7 @@ export function RsvpLookup({
   secondNameRequired,
   busy,
   message,
+  rememberedName = '',
   onLookup,
 }: RsvpLookupProps) {
   const [firstName, setFirstName] = useState('');
@@ -37,6 +39,10 @@ export function RsvpLookup({
   useEffect(() => {
     if (secondNameRequired) secondNameRef.current?.focus();
   }, [secondNameRequired]);
+
+  useEffect(() => {
+    setFirstName(rememberedName);
+  }, [rememberedName]);
 
   async function submit(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();

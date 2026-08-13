@@ -7,11 +7,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { canonicalJson, sha256 } from '../../scripts/release-evidence';
+import { POST_CUTOVER_PRODUCTION_TRIGGER_NAMES } from '../../scripts/migrate-release';
 import {
   STAGING_BROWSER_CASE_IDS,
   STAGING_IMAGES_CASE_IDS,
   STAGING_ROUTE_CASE_IDS,
   STAGING_WORKFLOW_CASE_IDS,
+  MEDIA_CUTOVER_READINESS_QUERY_SHA256,
+  assertMediaCutoverPhaseEvidence,
   assertStagingConformanceArtifact,
   assertCompleteCleanup,
   makePhaseReceipt,
@@ -21,9 +24,11 @@ import {
   writeExclusiveCanonical,
   writeFinalArtifact,
   writePhaseReceipt,
+  writeMediaCutoverPhaseEvidence,
   writeStagingConformanceArtifact,
   verifyStagingConformanceArtifactFile,
   type StagingConformanceArtifactV1,
+  type MediaCutoverPhaseEvidenceV1,
 } from '../../scripts/staging-release-evidence';
 
 const CANDIDATE_SHA = 'a'.repeat(40);
@@ -210,6 +215,9 @@ function stagingArtifact(): StagingConformanceArtifactV1 {
         'event_cover_render_set_manifest_update',
         'event_cover_source_pointer_insert',
         'event_cover_source_pointer_update',
+        'events_rsvp_deadline_insert',
+        'events_rsvp_deadline_update',
+        'media_stamp_stored_at_compat',
       ],
       zeroCounts: {
         legacyRows: 0, blockingJobs: 0, incompleteActiveSets: 0, uploadsWithoutActiveSet: 0,
@@ -262,6 +270,54 @@ function expectedArtifactBindings(artifact: StagingConformanceArtifactV1) {
 }
 
 describe('Task 12 immutable staging conformance artifact', () => {
+  it('accepts a separately named 15-migration post-cutover artifact and rejects Phase-3 substitution', () => {
+    const historical = stagingArtifact();
+    const postCutover = {
+      ...historical,
+      schemaVersion: 2,
+      sources: {
+        phase2: historical.sources.phase2,
+        postCutover: {
+          sha: CANDIDATE_SHA, manifestSha256: '3'.repeat(64),
+          migrationManifestSha256: '4'.repeat(64),
+        },
+      },
+      migrations: {
+        phase2Ledger: historical.migrations.phase2Ledger,
+        postCutoverLedger: [
+          ...historical.migrations.phase3Ledger,
+          '0015_curated_private_guestbook.sql',
+        ],
+        bootstrapSha256: '9'.repeat(64),
+        postCutoverMigrationsSha256: 'a'.repeat(64),
+        postCutoverBundleSha256: 'b'.repeat(64),
+        triggerNames: [...POST_CUTOVER_PRODUCTION_TRIGGER_NAMES],
+        zeroCounts: historical.migrations.zeroCounts,
+        integrity: 'ok', foreignKeyRows: 0,
+      },
+      deployments: {
+        workflowConformance: historical.deployments.workflowConformance,
+        phase2Cutover: historical.deployments.phase2Cutover,
+        postCutoverCutover: historical.deployments.phase3Cutover,
+      },
+    };
+    expect(assertStagingConformanceArtifact(postCutover)).toEqual(postCutover);
+    for (const triggerNames of [
+      postCutover.migrations.triggerNames.slice(0, -1),
+      [...postCutover.migrations.triggerNames, 'unexpected_post_cutover_trigger'],
+    ]) {
+      expect(() => assertStagingConformanceArtifact({
+        ...postCutover,
+        migrations: { ...postCutover.migrations, triggerNames },
+      })).toThrow(/trigger/iu);
+    }
+    const substituted = structuredClone(postCutover) as Record<string, unknown>;
+    const sources = substituted.sources as Record<string, unknown>;
+    sources.phase3 = sources.postCutover;
+    delete sources.postCutover;
+    expect(() => assertStagingConformanceArtifact(substituted)).toThrow(/source|post-cutover|field/u);
+  });
+
   it('writes canonical bytes exclusively and independently rebinds every source digest', () => {
     const root = temporaryRoot();
     const artifact = stagingArtifact();
@@ -310,5 +366,100 @@ describe('Task 12 immutable staging conformance artifact', () => {
     writeFileSync(noncanonicalPath, bytes);
     writeFileSync(`${noncanonicalPath}.sha256`, `${sha256(bytes)}  noncanonical.json\n`);
     expect(() => verifyStagingConformanceArtifactFile(noncanonicalPath, expected)).toThrow(/canonical/u);
+  });
+});
+
+function mediaCutoverPhaseEvidence(): MediaCutoverPhaseEvidenceV1 {
+  const candidateA = 'a'.repeat(40);
+  const copyOnly = 'e'.repeat(40);
+  const candidateB = 'f'.repeat(40);
+  const deployment = (candidateSha: string, suffix: string) => ({
+    versionId: `1000000a-0000-4000-8000-0000000000${suffix}`,
+    tagSha: candidateSha,
+    metadataSha: candidateSha,
+    trafficPercent: 100,
+  });
+  return {
+    kind: 'candidary.media-cutover-phase-evidence',
+    schemaVersion: 1,
+    status: 'passed',
+    runId: RUN_ID,
+    candidateA: {
+      candidateSha: candidateA,
+      candidateManifestSha256: '1'.repeat(64),
+      mediaUploadReleaseConfigSha256: '2'.repeat(64),
+      mode: 'canonical-cutover-disabled',
+      migrationCount: 15,
+      productionMigrationEvidenceSha256: '3'.repeat(64),
+      deployment: deployment(candidateA, '11'),
+      observedAt: '2026-08-13T12:00:00.000Z',
+    },
+    copyOnly: {
+      candidateSha: copyOnly,
+      candidateManifestSha256: '4'.repeat(64),
+      mediaUploadReleaseConfigSha256: '5'.repeat(64),
+      mode: 'canonical-copy-only',
+      migrationCount: 15,
+      deployment: deployment(copyOnly, '12'),
+      readiness: {
+        querySha256: MEDIA_CUTOVER_READINESS_QUERY_SHA256,
+        liveLegacyCount: 18,
+        unverifiedLiveLegacyCount: 0,
+        observedAt: '2026-08-13T12:30:00.000Z',
+      },
+      observedAt: '2026-08-13T12:15:00.000Z',
+    },
+    candidateB: {
+      candidateSha: candidateB,
+      candidateManifestSha256: '6'.repeat(64),
+      mediaUploadReleaseConfigSha256: '7'.repeat(64),
+      mode: 'canonical-live',
+      migrationCount: 15,
+      deployment: deployment(candidateB, '13'),
+      readinessBeforePointerCutover: {
+        querySha256: MEDIA_CUTOVER_READINESS_QUERY_SHA256,
+        liveLegacyCount: 18,
+        unverifiedLiveLegacyCount: 0,
+        observedAt: '2026-08-13T12:45:00.000Z',
+      },
+      readinessAfterPointerCutover: {
+        querySha256: MEDIA_CUTOVER_READINESS_QUERY_SHA256,
+        liveLegacyCount: 0,
+        unverifiedLiveLegacyCount: 0,
+        observedAt: '2026-08-13T13:00:00.000Z',
+      },
+      observedAt: '2026-08-13T12:40:00.000Z',
+    },
+    legacyMediaScannerConfigSha256: '8'.repeat(64),
+    startedAt: '2026-08-13T11:55:00.000Z',
+    finishedAt: '2026-08-13T13:05:00.000Z',
+  };
+}
+
+describe('media cutover phase evidence', () => {
+  it('records separate disabled, copy-only readiness, and live pointer-cutover candidates', () => {
+    const evidence = mediaCutoverPhaseEvidence();
+    expect(assertMediaCutoverPhaseEvidence(evidence)).toEqual(evidence);
+    const root = temporaryRoot();
+    const path = join(root, 'media-cutover-phase-evidence.json');
+    const written = writeMediaCutoverPhaseEvidence(path, evidence);
+    expect(written.sha256).toBe(sha256(readFileSync(path)));
+  });
+
+  it('rejects mode substitution, shared candidates, incomplete proof, and nonzero final pointers', () => {
+    const mutations: Array<(value: MediaCutoverPhaseEvidenceV1) => void> = [
+      (value) => { value.copyOnly.mode = 'canonical-live' as 'canonical-copy-only'; },
+      (value) => { value.copyOnly.candidateSha = value.candidateA.candidateSha; },
+      (value) => { value.copyOnly.readiness.unverifiedLiveLegacyCount = 1 as 0; },
+      (value) => { value.candidateB.readinessBeforePointerCutover.unverifiedLiveLegacyCount = 1 as 0; },
+      (value) => { value.candidateB.readinessAfterPointerCutover.liveLegacyCount = 1 as 0; },
+      (value) => { value.candidateB.deployment.trafficPercent = 99; },
+      (value) => { value.candidateB.observedAt = '2026-08-13T12:20:00.000Z'; },
+    ];
+    for (const mutate of mutations) {
+      const evidence = mediaCutoverPhaseEvidence();
+      mutate(evidence);
+      expect(() => assertMediaCutoverPhaseEvidence(evidence)).toThrow();
+    }
   });
 });

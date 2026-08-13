@@ -8,6 +8,7 @@ import { EventEntriesRepository } from '../../worker/db/event-entries';
 import { EventsRepository, mapEvent, type EventRow } from '../../worker/db/events';
 import { ExportsRepository } from '../../worker/db/exports';
 import { buildManagerMediaQuery, MediaRepository } from '../../worker/db/media';
+import { MediaObjectWriteTombstoneRepository } from '../../worker/db/media-write-tombstones';
 import {
   buildRosterStatements,
   MAX_D1_BINDINGS,
@@ -17,7 +18,8 @@ import { RsvpRateLimitsRepository } from '../../worker/db/rsvp-rate-limits';
 import { RsvpSessionsRepository } from '../../worker/db/rsvp-sessions';
 import { SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
-import { finalizeStoredMedia } from '../../worker/storage/media';
+import { finalizeStoredMedia, receiveMediaUpload } from '../../worker/storage/media';
+import { finalizedMediaObjectKey } from '../../worker/storage/media-keys';
 import type { AppEnv } from '../../worker/env';
 import { HostAuthService } from '../../worker/services/host-auth';
 import {
@@ -136,6 +138,12 @@ beforeEach(async () => {
     name: '0001_core.sql',
     queries: JSON.parse(testEnv.TEST_MIGRATION_QUERIES) as string[],
   }]);
+  // Repository unit fixtures intentionally model rows grandfathered by 0015;
+  // the dedicated migration suite owns the categorical trigger contract.
+  await env.DB.exec(`
+    DROP TRIGGER IF EXISTS media_stored_legacy_guard_insert;
+    DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;
+  `);
 });
 
 describe('manager media storage timestamp migration', () => {
@@ -593,6 +601,266 @@ describe('atomic authentication budgets and ownership', () => {
 });
 
 describe('media reservation and lifecycle', () => {
+  it('leases durable legacy promotion work and atomically commits its pointer fence', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-durable-promotion', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/media-durable-promotion', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-durable-promotion',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const bytes = png(1200, 800);
+    await env.DB.exec('DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;');
+    await repository.finalize(reserved.id, { byteSize: bytes.byteLength, width: 1200, height: 800 });
+    const work = await repository.listPromotionWork('2026-07-21T12:16:00.000Z', 10);
+    expect(work.map(({ mediaId }) => mediaId)).toEqual([reserved.id]);
+
+    const claimed = await repository.claimPromotion(
+      reserved.id,
+      'owner-token-at-least-sixteen-bytes-a',
+      '2026-07-21T12:16:00.000Z',
+      '2026-07-21T12:36:00.000Z',
+    );
+    expect(claimed?.promotion).toMatchObject({
+      state: 'copying', claimToken: 'owner-token-at-least-sixteen-bytes-a',
+      leaseExpiresAt: '2026-07-21T12:36:00.000Z',
+    });
+    await expect(repository.claimPromotion(
+      reserved.id,
+      'owner-token-at-least-sixteen-bytes-b',
+      '2026-07-21T12:35:59.999Z',
+      '2026-07-21T12:55:59.999Z',
+    )).resolves.toBeNull();
+
+    const reclaimed = await repository.claimPromotion(
+      reserved.id,
+      'owner-token-at-least-sixteen-bytes-b',
+      '2026-07-21T12:36:00.001Z',
+      '2026-07-21T12:56:00.001Z',
+    );
+    expect(reclaimed?.promotion.claimToken).toBe('owner-token-at-least-sixteen-bytes-b');
+    await expect(repository.recordPromotionSource(reserved.id, reclaimed!.promotion.claimToken!, {
+      etag: 'source-etag', mimeType: 'image/png', byteSize: bytes.byteLength,
+      sha256: 'a'.repeat(64), width: 1200, height: 800,
+      recordedAt: '2026-07-21T12:36:01.000Z',
+    })).resolves.toBe(true);
+    await repository.ensureFinalObjectWriteTombstone(
+      reserved.id,
+      finalizedMediaObjectKey('event-a', reserved.id),
+      '2026-07-21T12:36:01.000Z',
+    );
+    await expect(repository.markPromotionTargetVerified(
+      reserved.id,
+      reclaimed!.promotion.claimToken!,
+      'canonical-target-etag',
+      '2026-07-21T12:36:01.500Z',
+    )).resolves.toBe(true);
+    expect(await repository.getPromotion(reserved.id)).toMatchObject({
+      state: 'target_verified', finalEtag: 'canonical-target-etag',
+      targetVerifiedAt: '2026-07-21T12:36:01.500Z', leaseExpiresAt: null,
+    });
+    await expect(repository.commitPromotionPointer(
+      reserved.id,
+      reclaimed!.promotion.claimToken!,
+      '2026-07-21T12:36:02.000Z',
+    )).resolves.toBe(true);
+
+    expect(await repository.getById(reserved.id)).toMatchObject({
+      objectKey: finalizedMediaObjectKey('event-a', reserved.id), uploadState: 'stored',
+    });
+    expect(await repository.getPromotion(reserved.id)).toMatchObject({
+      state: 'cleanup_pending', claimToken: reclaimed!.promotion.claimToken,
+      leaseExpiresAt: null, sourceEtag: 'source-etag', sourceSha256: 'a'.repeat(64),
+      finalPointerCommitted: true,
+    });
+
+    await expect(repository.handoffPromotionToPermanentSuppression(
+      reserved.id,
+      reclaimed!.promotion.claimToken!,
+      '2026-07-21T12:36:03.000Z',
+    )).resolves.toBe(true);
+    expect(await repository.getPromotion(reserved.id)).toBeNull();
+    const tombstones = new MediaObjectWriteTombstoneRepository(env.DB);
+    expect(await tombstones.get(finalizedMediaObjectKey('event-a', reserved.id), 'canonical'))
+      .toMatchObject({ suppressionStartedAt: null, objectKind: 'final' });
+    expect(await tombstones.get(reserved.objectKey))
+      .toMatchObject({ suppressionStartedAt: '2026-07-21T12:36:03.000Z' });
+    expect(await tombstones.get(`events/event-a/previews/${reserved.id}.webp`))
+      .toMatchObject({ suppressionStartedAt: '2026-07-21T12:36:03.000Z' });
+  });
+
+  it('hands a deleted canonical photo to permanent suppression without requiring a source-kind row', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const mediaId = 'media-canonical-delete';
+    const finalKey = finalizedMediaObjectKey('event-a', mediaId);
+    const reserved = await repository.reserve({
+      id: mediaId, eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: finalKey, originalFilename: 'photo.png', mimeType: 'image/png',
+      declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-canonical-delete',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    await repository.finalize(
+      reserved.id,
+      { byteSize: 128, width: 1, height: 1 },
+      '2026-07-21T12:01:00.000Z',
+    );
+    await env.DB.prepare(`
+      UPDATE media SET object_bucket_generation = 'canonical' WHERE id = ?
+    `).bind(reserved.id).run();
+    await env.DB.prepare('DELETE FROM media_object_promotions WHERE media_id = ?')
+      .bind(reserved.id).run();
+    await repository.delete(reserved.id, '2026-07-21T12:16:00.000Z');
+    expect(await repository.getPromotion(reserved.id)).toBeNull();
+    expect(await new MediaObjectWriteTombstoneRepository(env.DB).get(finalKey, 'canonical')).toMatchObject({
+      objectKind: 'final',
+      suppressionStartedAt: '2026-07-21T12:16:00.000Z',
+    });
+  });
+
+  it('requires permanent final-key inventory immediately before authenticated ingress writes R2', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const bytes = png(800, 600);
+    const reserved = await repository.reserve({
+      id: 'media-pre-put-tombstone', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-pre-put-tombstone',
+      originalFilename: 'photo.png', mimeType: 'image/png',
+      declaredByteSize: bytes.byteLength, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-pre-put-tombstone',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const guard = vi.fn().mockRejectedValue(new Error('target permanently suppressed'));
+    const guardedRepository = new Proxy(repository, {
+      get(target, property) {
+        if (property === 'ensureFinalObjectWriteTombstone') return guard;
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const put = vi.spyOn(env.MEDIA_BUCKET, 'put');
+
+    await expect(receiveMediaUpload(
+      env.MEDIA_BUCKET,
+      guardedRepository,
+      reserved,
+      sessionId,
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      'image/png',
+      new Date('2026-07-21T12:01:00.000Z'),
+    )).rejects.toThrow('target permanently suppressed');
+
+    expect(guard).toHaveBeenCalledWith(
+      'media-pre-put-tombstone',
+      finalizedMediaObjectKey('event-a', 'media-pre-put-tombstone'),
+      expect.any(String),
+    );
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('parks an inactive promotion without pretending an uncommitted final is canonical', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-inactive-promotion', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-inactive-promotion', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-inactive-promotion',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    await env.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+      .bind('2026-07-21T12:16:00.000Z', 'event-a').run();
+
+    const claimed = await repository.claimInactivePromotion(
+      reserved.id,
+      'inactive-owner-at-least-sixteen-bytes',
+      '2026-07-21T12:16:01.000Z',
+      '2026-07-21T12:36:01.000Z',
+    );
+    expect(claimed).not.toBeNull();
+    await expect(repository.parkInactivePromotionCleanup(
+      reserved.id,
+      claimed!.promotion.claimToken!,
+      '2026-07-21T12:16:02.000Z',
+    )).resolves.toBe(true);
+    expect(await repository.getPromotion(reserved.id)).toMatchObject({
+      state: 'cleanup_pending',
+      finalPointerCommitted: false,
+      sourceEtag: null,
+      sourceSha256: null,
+    });
+  });
+
+  it('cannot downgrade an ingress commit that wins after an inactive probe selected copying work', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-ingress-park-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-ingress-park-race',
+      originalFilename: 'photo.png', mimeType: 'image/png', declaredByteSize: 128,
+      guestName: 'Avery', caption: null, idempotencyKey: 'idem-ingress-park-race',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const claimToken = 'ingress-park-race-owner-at-least-sixteen';
+    const digest = 'b'.repeat(64);
+    const claimed = await repository.claimReservationIngress({
+      mediaId: reserved.id,
+      eventId: reserved.eventId,
+      uploaderSessionId: sessionId,
+      sourceObjectKey: reserved.objectKey,
+      mimeType: 'image/png',
+      byteSize: 128,
+      sha256: digest,
+      width: 800,
+      height: 600,
+      claimToken,
+      claimedAt: '2026-07-21T12:01:00.000Z',
+      leaseExpiresAt: '2026-07-21T12:21:00.000Z',
+    });
+    expect(claimed).not.toBeNull();
+
+    // The scheduled pass selected the copying row. The HTTP writer commits
+    // before its later inactive check/park CAS reaches D1.
+    expect(await repository.commitReservationIngress({
+      mediaId: reserved.id,
+      claimToken,
+      finalObjectKey: finalizedMediaObjectKey('event-a', reserved.id),
+      byteSize: 128,
+      width: 800,
+      height: 600,
+      finalEtag: 'canonical-final-etag',
+      committedAt: '2026-07-21T12:02:00.000Z',
+    })).toBe(true);
+    expect(await repository.ingressPromotionIsInactive(reserved.id)).toBe(true);
+    expect(await repository.parkInactivePromotionCleanup(
+      reserved.id,
+      claimToken,
+      '2026-07-21T12:02:01.000Z',
+    )).toBe(false);
+
+    expect(await repository.getById(reserved.id)).toMatchObject({
+      uploadState: 'stored',
+      objectBucketGeneration: 'canonical',
+      objectKey: finalizedMediaObjectKey('event-a', reserved.id),
+    });
+    expect(await repository.getPromotion(reserved.id)).toMatchObject({
+      state: 'cleanup_pending',
+      finalPointerCommitted: true,
+      claimToken,
+    });
+    expect(await new MediaObjectWriteTombstoneRepository(env.DB)
+      .get(finalizedMediaObjectKey('event-a', reserved.id), 'canonical'))
+      .toMatchObject({ suppressionStartedAt: null });
+  });
+
   it('requires a named guest for every new photo', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
@@ -688,6 +956,14 @@ describe('media reservation and lifecycle', () => {
     };
 
     await media.reserve(input);
+    expect(await media.getPromotion(input.id)).toMatchObject({
+      state: 'pending', sourceObjectKey: input.objectKey,
+    });
+    expect(await env.DB.prepare(`
+      SELECT 1 AS permitted FROM events
+      WHERE id = ? AND deleted_at IS NULL AND uploads_enabled = 1
+        AND COALESCE(photos_open_from, event_start_at) <= ?
+    `).bind(input.eventId, '2026-07-21T12:30:00.000Z').first<number>('permitted')).toBe(1);
     const refreshed = await media.reserve({
       ...input,
       id: 'ignored-id',
@@ -697,8 +973,103 @@ describe('media reservation and lifecycle', () => {
     const event = await events.getById('event-a');
 
     expect(refreshed).toMatchObject({ id: 'media-refresh', reservationExpiresAt: '2026-07-21T12:45:00.000Z' });
+    expect(await media.getPromotion(refreshed.id)).toMatchObject({
+      state: 'pending', sourceWritableUntil: '2026-07-21T12:45:00.000Z',
+    });
     expect(event?.reservedMediaCount).toBe(1);
     expect(event?.reservedBytes).toBe(1024);
+  });
+
+  it('rejects a reserved refresh after inactive cleanup owns the signed alias', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    const input = {
+      id: 'media-refresh-claimed', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-refresh-claimed', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
+      guestName: 'Avery', caption: null, idempotencyKey: 'idem-refresh-claimed',
+      reservationExpiresAt: '2026-07-21T12:05:00.000Z', createdAt: now,
+    };
+    const reserved = await media.reserve(input);
+    expect(await media.claimInactivePromotion(
+      reserved.id,
+      'refresh-owner-at-least-sixteen-bytes',
+      '2026-07-21T12:06:00.000Z',
+      '2026-07-21T12:26:00.000Z',
+    )).not.toBeNull();
+
+    await expect(media.reserve({
+      ...input,
+      id: 'ignored-refresh-id',
+      reservationExpiresAt: '2026-07-21T12:45:00.000Z',
+      createdAt: '2026-07-21T12:06:01.000Z',
+    })).rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT', status: 409 });
+    expect(await media.getById(reserved.id)).toMatchObject({
+      uploadState: 'reserved', reservationExpiresAt: '2026-07-21T12:05:00.000Z',
+    });
+    expect(await media.getPromotion(reserved.id)).toMatchObject({
+      state: 'copying', sourceWritableUntil: '2026-07-21T12:05:00.000Z',
+    });
+  });
+
+  it('rejects failed-reservation reactivation after inactive cleanup owns the alias', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    const input = {
+      id: 'media-failed-claimed', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-failed-claimed', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
+      guestName: 'Avery', caption: null, idempotencyKey: 'idem-failed-claimed',
+      reservationExpiresAt: '2026-07-21T12:05:00.000Z', createdAt: now,
+    };
+    const reserved = await media.reserve(input);
+    await media.failReservation(reserved.id);
+    expect(await media.claimInactivePromotion(
+      reserved.id,
+      'failed-owner-at-least-sixteen-bytes',
+      '2026-07-21T12:06:00.000Z',
+      '2026-07-21T12:26:00.000Z',
+    )).not.toBeNull();
+
+    await expect(media.reserve({
+      ...input,
+      id: 'ignored-failed-id',
+      reservationExpiresAt: '2026-07-21T12:45:00.000Z',
+      createdAt: '2026-07-21T12:06:01.000Z',
+    })).rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT', status: 409 });
+    expect(await media.getById(reserved.id)).toMatchObject({ uploadState: 'failed' });
+    expect(await media.getPromotion(reserved.id)).toMatchObject({
+      state: 'copying', sourceWritableUntil: '2026-07-21T12:05:00.000Z',
+    });
+  });
+
+  it('decrements stored counters once when identical-timestamp deletes race', async () => {
+    const events = await seedEvent();
+    const sessionId = await seedGuestSession();
+    const media = new MediaRepository(env.DB);
+    const reserved = await media.reserve({
+      id: 'media-delete-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/media-delete-race', originalFilename: 'photo.jpg',
+      mimeType: 'image/jpeg', declaredByteSize: 1024,
+      guestName: 'Avery', caption: null, idempotencyKey: 'idem-delete-race',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    await media.finalize(reserved.id, { byteSize: 900, width: 800, height: 600 });
+    await env.DB.prepare('DELETE FROM media_object_promotions WHERE media_id = ?')
+      .bind(reserved.id).run();
+
+    const [first, second] = await Promise.all([
+      media.delete(reserved.id, '2026-07-21T12:20:00.000Z'),
+      media.delete(reserved.id, '2026-07-21T12:20:00.000Z'),
+    ]);
+
+    expect(first.uploadState).toBe('deleted');
+    expect(second.uploadState).toBe('deleted');
+    expect(await events.getById('event-a')).toMatchObject({
+      storedMediaCount: 0, storedBytes: 0,
+    });
   });
 
   it('reserves a new metadata batch through one aggregate repository operation', async () => {
@@ -767,6 +1138,101 @@ describe('media reservation and lifecycle', () => {
     expect(event?.storedBytes).toBe(0);
   });
 
+  it('retries deletion when reserved finalization wins after the delete state read', async () => {
+    const events = await seedEvent();
+    const sessionId = await seedGuestSession();
+    const base = new MediaRepository(env.DB);
+    const reserved = await base.reserve({
+      id: 'media-delete-finalize-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-delete-finalize-race',
+      originalFilename: 'race.png', mimeType: 'image/png', declaredByteSize: 128,
+      guestName: 'Avery', caption: null, idempotencyKey: 'delete-finalize-race',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    let raced = false;
+    const db = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!raced) {
+              raced = true;
+              await base.finalize(
+                reserved.id,
+                { byteSize: 120, width: 800, height: 600 },
+                '2026-07-21T12:01:00.000Z',
+              );
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const deleted = await new MediaRepository(db).delete(
+      reserved.id,
+      '2026-07-21T12:02:00.000Z',
+    );
+    expect(raced).toBe(true);
+    expect(deleted).toMatchObject({ uploadState: 'deleted', deletedAt: '2026-07-21T12:02:00.000Z' });
+    expect(await events.getById('event-a')).toMatchObject({
+      reservedMediaCount: 0,
+      reservedBytes: 0,
+      storedMediaCount: 0,
+      storedBytes: 0,
+    });
+  });
+
+  it('retries deletion when failed reservation reactivation wins after the delete state read', async () => {
+    const events = await seedEvent();
+    const sessionId = await seedGuestSession();
+    const base = new MediaRepository(env.DB);
+    const input = {
+      id: 'media-delete-refresh-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-delete-refresh-race',
+      originalFilename: 'race.png', mimeType: 'image/png' as const, declaredByteSize: 128,
+      guestName: 'Avery', caption: null, idempotencyKey: 'delete-refresh-race',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    };
+    const failed = await base.reserve(input);
+    await base.failReservation(failed.id);
+    let raced = false;
+    const db = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!raced) {
+              raced = true;
+              await base.reserve({
+                ...input,
+                id: 'ignored-refresh-race-id',
+                reservationExpiresAt: '2026-07-21T12:30:00.000Z',
+                createdAt: '2026-07-21T12:01:00.000Z',
+              });
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const deleted = await new MediaRepository(db).delete(
+      failed.id,
+      '2026-07-21T12:02:00.000Z',
+    );
+    expect(raced).toBe(true);
+    expect(deleted).toMatchObject({ uploadState: 'deleted', deletedAt: '2026-07-21T12:02:00.000Z' });
+    expect(await events.getById('event-a')).toMatchObject({
+      reservedMediaCount: 0,
+      reservedBytes: 0,
+      storedMediaCount: 0,
+      storedBytes: 0,
+    });
+  });
+
   it('sets the storage timestamp on the first finalization and preserves it on repeats', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
@@ -804,19 +1270,44 @@ describe('media reservation and lifecycle', () => {
     const expiryCheckTime = new Date('2026-07-21T12:10:00.000Z');
     const storageEligibilityTime = new Date('2026-07-21T12:20:00.000Z');
     const laterRetryTime = new Date('2026-07-21T12:30:00.000Z');
+    const copiedObjects = new Map<string, Uint8Array>();
     const bucket = {
       async head() {
         return {
+          etag: 'validated-version',
           size: bytes.byteLength,
           httpMetadata: { contentType: 'image/png' },
         };
       },
-      async get() {
+      async get(key: string) {
         await Promise.resolve();
         vi.setSystemTime(storageEligibilityTime);
-        return { body: new Response(bytes).body };
+        const stored = copiedObjects.get(key);
+        return stored
+          ? {
+            body: new Response(stored.buffer.slice(
+              stored.byteOffset,
+              stored.byteOffset + stored.byteLength,
+            ) as ArrayBuffer).body,
+            etag: 'canonical-validated-version',
+            size: stored.byteLength,
+            httpMetadata: { contentType: 'image/png' },
+          }
+          : {
+              body: new Response(bytes).body,
+              etag: 'validated-version',
+              size: bytes.byteLength,
+              httpMetadata: { contentType: 'image/png' },
+            };
       },
-      delete: vi.fn(),
+      async put(key: string, value: ReadableStream) {
+        const stored = new Uint8Array(await new Response(value).arrayBuffer());
+        copiedObjects.set(key, stored);
+        return { size: stored.byteLength };
+      },
+      delete: vi.fn((key: string | string[]) => {
+        for (const item of Array.isArray(key) ? key : [key]) copiedObjects.delete(item);
+      }),
     } as unknown as R2Bucket;
 
     vi.useFakeTimers();
@@ -831,9 +1322,134 @@ describe('media reservation and lifecycle', () => {
         .first<{ stored_at: string | null }>();
       expect(row?.stored_at).toBe(storageEligibilityTime.toISOString());
       expect(bucket.delete).not.toHaveBeenCalled();
+      expect(await repository.getPromotion(reserved.id)).toMatchObject({
+        state: 'cleanup_pending',
+        finalPointerCommitted: true,
+      });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('refuses to copy a different temporary object version than the one whose image header was validated', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-version-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-version-race', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-version-race',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const validated = png(1200, 800);
+    const swapped = png(300, 200);
+    await env.MEDIA_BUCKET.put(reserved.objectKey, validated, { httpMetadata: { contentType: 'image/png' } });
+    let swappedAfterHeaderRead = false;
+    const racingBucket = {
+      head: env.MEDIA_BUCKET.head.bind(env.MEDIA_BUCKET),
+      async get(key: string, options?: R2GetOptions) {
+        const result = await env.MEDIA_BUCKET.get(key, options as R2GetOptions & { onlyIf: R2Conditional });
+        if (options?.range && !swappedAfterHeaderRead) {
+          swappedAfterHeaderRead = true;
+          await env.MEDIA_BUCKET.put(key, swapped, { httpMetadata: { contentType: 'image/png' } });
+        }
+        return result;
+      },
+      put: env.MEDIA_BUCKET.put.bind(env.MEDIA_BUCKET),
+      delete: env.MEDIA_BUCKET.delete.bind(env.MEDIA_BUCKET),
+    } as unknown as R2Bucket;
+
+    await expect(finalizeStoredMedia(racingBucket, repository, reserved, new Date('2026-07-21T12:10:00.000Z')))
+      .rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT', status: 409 });
+    expect((await repository.getById(reserved.id))?.uploadState).toBe('reserved');
+    expect(await env.MEDIA_BUCKET.head(`events/event-a/media/final/${reserved.id}`)).toBeNull();
+  });
+
+  it('recovers a validated final object left before the atomic D1 finalize transition', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-orphan-recovery', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-orphan-recovery', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-orphan-recovery',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const bytes = png(1200, 800);
+    await env.MEDIA_BUCKET.put(reserved.objectKey, bytes, { httpMetadata: { contentType: 'image/png' } });
+    let failAfterFinalPut = true;
+    const interruptedBucket = new Proxy(env.MEDIA_BUCKET, {
+      get(target, property) {
+        if (property === 'put') {
+          return async (...args: Parameters<R2Bucket['put']>) => {
+            const stored = await target.put(...args);
+            if (failAfterFinalPut) {
+              failAfterFinalPut = false;
+              throw new Error('simulated isolate loss after final R2 put');
+            }
+            return stored;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(finalizeStoredMedia(
+      interruptedBucket,
+      repository,
+      reserved,
+      new Date('2026-07-21T12:10:00.000Z'),
+    )).rejects.toThrow('simulated isolate loss');
+    expect((await repository.getById(reserved.id))?.uploadState).toBe('reserved');
+    expect(await env.MEDIA_BUCKET.head(finalizedMediaObjectKey('event-a', reserved.id))).not.toBeNull();
+
+    const recovered = await finalizeStoredMedia(
+      env.MEDIA_BUCKET,
+      repository,
+      reserved,
+      new Date('2026-07-21T12:10:00.000Z'),
+    );
+    expect(recovered).toMatchObject({
+      uploadState: 'stored', objectKey: finalizedMediaObjectKey('event-a', reserved.id),
+      byteSize: bytes.byteLength, width: 1200, height: 800,
+    });
+    expect(await env.MEDIA_BUCKET.head(reserved.objectKey)).not.toBeNull();
+    expect(await repository.getPromotion(reserved.id)).toMatchObject({
+      state: 'cleanup_pending',
+      finalPointerCommitted: true,
+    });
+    expect(new Uint8Array(await (await env.MEDIA_BUCKET.get(recovered.objectKey))!.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('does not adopt an arbitrary preexisting final object during recovery', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-orphan-reject', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/uploads/media-orphan-reject', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-orphan-reject',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    const source = png(1200, 800);
+    const unrelated = png(300, 200);
+    await env.MEDIA_BUCKET.put(reserved.objectKey, source, { httpMetadata: { contentType: 'image/png' } });
+    await env.MEDIA_BUCKET.put(finalizedMediaObjectKey('event-a', reserved.id), unrelated, {
+      httpMetadata: { contentType: 'image/png' },
+    });
+
+    await expect(finalizeStoredMedia(
+      env.MEDIA_BUCKET,
+      repository,
+      reserved,
+      new Date('2026-07-21T12:10:00.000Z'),
+    )).rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT', status: 409 });
+    expect((await repository.getById(reserved.id))?.uploadState).toBe('reserved');
+    expect(await env.MEDIA_BUCKET.head(reserved.objectKey)).not.toBeNull();
   });
 
   it('keeps private delivery separate from optional publication and exports every stored original', async () => {

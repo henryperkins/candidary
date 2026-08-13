@@ -1,9 +1,11 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   lstatSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import {
   basename,
@@ -15,15 +17,35 @@ import {
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { canonicalJson, sha256 } from './release-evidence';
+import { canonicalJson, sha256 } from './release-evidence.ts';
+import {
+  verifyMediaWriteBridgeDeploymentEvidence,
+  verifyR2SigningTokenRevocationEvidence,
+  type MediaWriteBridgeDeploymentEvidenceV1,
+  type R2SigningTokenRevocationEvidenceV1,
+} from './bridge-release-contract.ts';
+import {
+  CANONICAL_MEDIA_BINDING,
+  CANONICAL_MEDIA_BUCKET_NAME,
+  LEGACY_MEDIA_BINDING,
+  LEGACY_MEDIA_BUCKET_NAME,
+  LEGACY_MEDIA_SCANNER_CONFIG_PATH,
+  MEDIA_UPLOAD_RELEASE_CONFIG_PATH,
+  verifyCanonicalMediaBucketProvisioningEvidence,
+  verifyLegacyMediaScannerContract,
+  verifyMediaUploadReleaseContract,
+  type CanonicalMediaBucketProvisioningEvidenceV1,
+} from './media-cutover-release-contract.ts';
 import {
   PHASE_2_MIGRATION,
   PHASE_3_MIGRATION,
+  POST_CUTOVER_MIGRATION,
   buildAtomicMigrationBundle,
+  buildPostCutoverAtomicMigrationBundle,
   verifyExactReleaseCandidate,
   type ReleaseCandidateVerificationRequest,
   type VerifiedReleaseCandidate,
-} from './release-candidate';
+} from './release-candidate.ts';
 
 const APPROVED_BASE_SHA = '0b92387d2e237d568d2514373dcc3044e7960d4b';
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -46,9 +68,12 @@ export const PRODUCTION_TRIGGER_NAMES = [
   'event_cover_render_set_manifest_update',
   'event_cover_source_pointer_insert',
   'event_cover_source_pointer_update',
+  'events_rsvp_deadline_insert',
+  'events_rsvp_deadline_update',
+  'media_stamp_stored_at_compat',
 ] as const;
 
-const REQUIRED_SECRET_NAMES = [
+const HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES = [
   'ENTRY_ENCRYPTION_KEY',
   'ENTRY_HMAC_KEY',
   'GUEST_TOKEN_ENCRYPTION_KEY',
@@ -59,6 +84,44 @@ const REQUIRED_SECRET_NAMES = [
   'SESSION_HMAC_KEY',
   'TOKEN_HMAC_KEY',
 ] as const;
+
+export const POST_CUTOVER_PRODUCTION_TRIGGER_NAMES = [
+  'event_cover_master_live_reference_delete',
+  'event_cover_render_object_manifest_delete',
+  'event_cover_render_object_manifest_insert',
+  'event_cover_render_object_manifest_update',
+  'event_cover_render_set_live_reference_delete',
+  'event_cover_render_set_manifest_insert',
+  'event_cover_render_set_manifest_update',
+  'event_cover_source_pointer_insert',
+  'event_cover_source_pointer_update',
+  'events_rsvp_deadline_insert',
+  'events_rsvp_deadline_update',
+  'legacy_media_scan_quarantine_permanent',
+  'legacy_media_scan_state_permanent',
+  'media_object_promotion_inventory_insert',
+  'media_object_promotion_inventory_update',
+  'media_object_promotion_reservation_capability_guard',
+  'media_object_promotion_verified_delete_guard',
+  'media_object_promotion_verified_proof_immutable',
+  'media_object_write_tombstone_guard_insert',
+  'media_object_write_tombstone_guard_update',
+  'media_object_write_tombstone_immutable',
+  'media_object_write_tombstone_inventory_insert',
+  'media_object_write_tombstone_inventory_update',
+  'media_object_write_tombstone_permanent',
+  'media_stamp_stored_at_compat',
+  'media_stored_legacy_guard_insert',
+  'media_stored_legacy_guard_update',
+] as const;
+
+const POST_CUTOVER_REQUIRED_SECRET_NAMES = [
+  ...HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES
+    .filter((name) => name !== 'R2_ACCESS_KEY_ID' && name !== 'R2_SECRET_ACCESS_KEY'),
+  'GUEST_MESSAGE_HMAC_KEY',
+] as const;
+
+type ProductionTopologyBaseline = 'historical-phase-3' | 'media-write-bridge' | 'post-cutover';
 
 export interface ProductionMigrationAuthorizationV1 {
   kind: 'candidary.production-migration-authorization';
@@ -82,6 +145,40 @@ export interface ProductionMigrationAuthorizationV1 {
   noDeployWindowOwner: string;
   rollbackOwner: string;
 }
+
+export interface ProductionMigrationAuthorizationV2 {
+  kind: 'candidary.production-migration-authorization';
+  schemaVersion: 2;
+  runId: string;
+  approvedMainSha: string;
+  candidateSha: string;
+  manifestSha256: string;
+  productionTopologySha256: string;
+  accountId: string;
+  databaseName: string;
+  databaseId: string;
+  migrationName: typeof POST_CUTOVER_MIGRATION;
+  migrationSha256: string;
+  bundleSha256: string;
+  bookmarkSha256: string;
+  preSchemaSha256: string;
+  postSchemaSha256: string;
+  canonicalMediaBucketProvisioningEvidenceSha256: string;
+  bridgeSha: string;
+  bridgeDeploymentEvidenceSha256: string;
+  r2SigningTokenId: string;
+  r2RevocationEvidenceSha256: string;
+  mediaUploadReleaseConfigSha256: string;
+  legacyMediaScannerConfigSha256: string;
+  authorizedAt: string;
+  expiresAt: string;
+  noDeployWindowOwner: string;
+  rollbackOwner: string;
+}
+
+export type ProductionMigrationAuthorization =
+  | ProductionMigrationAuthorizationV1
+  | ProductionMigrationAuthorizationV2;
 
 export interface TimeTravelBookmarkV1 {
   kind: 'candidary.d1-time-travel-bookmark';
@@ -120,7 +217,7 @@ export interface ProductionMigrationCommand {
 
 export interface ProductionObservationContext {
   candidate: VerifiedReleaseCandidate;
-  authorization: ProductionMigrationAuthorizationV1;
+  authorization: ProductionMigrationAuthorization;
 }
 
 export interface MigrateReleaseAdapters {
@@ -137,6 +234,9 @@ export interface MigrateReleaseRequest {
   manifestPath: string;
   authorizationPath: string;
   bookmarkPath: string;
+  bridgeEvidencePath?: string;
+  revocationEvidencePath?: string;
+  canonicalBucketEvidencePath?: string;
 }
 
 export interface MigrateReleaseArguments {
@@ -144,15 +244,69 @@ export interface MigrateReleaseArguments {
   manifestPath: string;
   authorizationPath: string;
   bookmarkPath: string;
+  bridgeEvidencePath?: string;
+  revocationEvidencePath?: string;
+  canonicalBucketEvidencePath?: string;
 }
 
 export interface ProductionMigrationResult {
   candidateSha: string;
-  migrationName: typeof PHASE_3_MIGRATION;
+  migrationName: typeof PHASE_3_MIGRATION | typeof POST_CUTOVER_MIGRATION;
   migrationSha256: string;
   bundleSha256: string;
   preSchemaSha256: string;
   postSchemaSha256: string;
+  evidencePath?: string;
+  evidenceSha256?: string;
+}
+
+export interface ProductionMigrationEvidenceV2 {
+  kind: 'candidary.production-migration-evidence';
+  schemaVersion: 2;
+  status: 'passed';
+  runId: string;
+  candidate: {
+    sha: string;
+    approvedMainSha: string;
+    manifestSha256: string;
+    artifactTreeSha256: string;
+    bindingTopologySha256: string;
+  };
+  production: {
+    topologySha256: string;
+    accountId: string;
+    databaseName: string;
+    databaseId: string;
+  };
+  authorizationSha256: string;
+  bridge: {
+    sha: string;
+    deploymentEvidenceSha256: string;
+    versionId: string;
+    r2SigningTokenId: string;
+    revocationEvidenceSha256: string;
+    revocationReceiptSha256: string;
+    statusObservationSha256: string;
+  };
+  mediaUploadReleaseConfigSha256: string;
+  legacyMediaScannerConfigSha256: string;
+  canonicalMediaBucketProvisioningEvidenceSha256: string;
+  migration: {
+    name: typeof POST_CUTOVER_MIGRATION;
+    sha256: string;
+    bundleSha256: string;
+  };
+  before: {
+    ledger: string[];
+    schemaSha256: string;
+  };
+  after: ProductionDatabaseObservation;
+  rollback: {
+    bookmarkSha256: string;
+    bookmarkRecordedAt: string;
+    rollbackOwner: string;
+  };
+  observedAt: string;
 }
 
 function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
@@ -253,23 +407,35 @@ function parseBookmark(value: unknown): TimeTravelBookmarkV1 {
   };
 }
 
-function parseAuthorization(value: unknown): ProductionMigrationAuthorizationV1 {
+function parseAuthorization(value: unknown): ProductionMigrationAuthorization {
+  const identity = object(value, 'Production migration authorization');
+  const postCutover = identity.kind === 'candidary.production-migration-authorization'
+    && identity.schemaVersion === 2;
   const item = exactRecord(value, [
     'kind', 'schemaVersion', 'runId', 'approvedMainSha', 'candidateSha', 'manifestSha256',
     'productionTopologySha256', 'accountId', 'databaseName', 'databaseId', 'migrationName',
     'migrationSha256', 'bundleSha256', 'bookmarkSha256', 'preSchemaSha256',
     'postSchemaSha256', 'authorizedAt', 'expiresAt', 'noDeployWindowOwner', 'rollbackOwner',
+    ...(postCutover ? [
+      'canonicalMediaBucketProvisioningEvidenceSha256',
+      'bridgeSha', 'bridgeDeploymentEvidenceSha256', 'r2SigningTokenId',
+      'r2RevocationEvidenceSha256', 'mediaUploadReleaseConfigSha256',
+      'legacyMediaScannerConfigSha256',
+    ] : []),
   ], 'Production migration authorization');
-  if (item.kind !== 'candidary.production-migration-authorization' || item.schemaVersion !== 1) {
+  const historical = item.kind === 'candidary.production-migration-authorization'
+    && item.schemaVersion === 1;
+  if (!historical && !postCutover) {
     throw new Error('Production migration authorization identity is invalid.');
   }
-  if (item.migrationName !== PHASE_3_MIGRATION) {
-    throw new Error(`Production authorization must name only ${PHASE_3_MIGRATION}.`);
+  const migrationName = historical ? PHASE_3_MIGRATION : POST_CUTOVER_MIGRATION;
+  if (item.migrationName !== migrationName) {
+    throw new Error(`Production authorization must name only ${migrationName}.`);
   }
   const owner = (entry: unknown, label: string) =>
     patternString(entry, /^[a-z][a-z0-9._-]{2,63}$/u, label);
-  return {
-    kind: 'candidary.production-migration-authorization', schemaVersion: 1,
+  const common = {
+    kind: 'candidary.production-migration-authorization' as const,
     runId: patternString(item.runId, UUID_PATTERN, 'authorization runId'),
     approvedMainSha: sha1(item.approvedMainSha, 'approvedMainSha'),
     candidateSha: sha1(item.candidateSha, 'candidateSha'),
@@ -278,7 +444,6 @@ function parseAuthorization(value: unknown): ProductionMigrationAuthorizationV1 
     accountId: patternString(item.accountId, ACCOUNT_ID_PATTERN, 'accountId'),
     databaseName: exactString(item.databaseName, 'databaseName'),
     databaseId: patternString(item.databaseId, D1_ID_PATTERN, 'databaseId'),
-    migrationName: PHASE_3_MIGRATION,
     migrationSha256: sha256Value(item.migrationSha256, 'migrationSha256'),
     bundleSha256: sha256Value(item.bundleSha256, 'bundleSha256'),
     bookmarkSha256: sha256Value(item.bookmarkSha256, 'bookmarkSha256'),
@@ -289,6 +454,39 @@ function parseAuthorization(value: unknown): ProductionMigrationAuthorizationV1 
     noDeployWindowOwner: owner(item.noDeployWindowOwner, 'noDeployWindowOwner'),
     rollbackOwner: owner(item.rollbackOwner, 'rollbackOwner'),
   };
+  return historical
+    ? { ...common, schemaVersion: 1, migrationName: PHASE_3_MIGRATION }
+    : {
+      ...common,
+      schemaVersion: 2,
+      migrationName: POST_CUTOVER_MIGRATION,
+      canonicalMediaBucketProvisioningEvidenceSha256: sha256Value(
+        item.canonicalMediaBucketProvisioningEvidenceSha256,
+        'canonicalMediaBucketProvisioningEvidenceSha256',
+      ),
+      bridgeSha: sha1(item.bridgeSha, 'bridgeSha'),
+      bridgeDeploymentEvidenceSha256: sha256Value(
+        item.bridgeDeploymentEvidenceSha256,
+        'bridgeDeploymentEvidenceSha256',
+      ),
+      r2SigningTokenId: patternString(
+        item.r2SigningTokenId,
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u,
+        'r2SigningTokenId',
+      ),
+      r2RevocationEvidenceSha256: sha256Value(
+        item.r2RevocationEvidenceSha256,
+        'r2RevocationEvidenceSha256',
+      ),
+      mediaUploadReleaseConfigSha256: sha256Value(
+        item.mediaUploadReleaseConfigSha256,
+        'mediaUploadReleaseConfigSha256',
+      ),
+      legacyMediaScannerConfigSha256: sha256Value(
+        item.legacyMediaScannerConfigSha256,
+        'legacyMediaScannerConfigSha256',
+      ),
+    };
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -339,7 +537,10 @@ function containsConfiguredValue(value: unknown): boolean {
   return String(value).length > 0;
 }
 
-function productionTopology(candidateRoot: string): Record<string, unknown> {
+function productionTopology(
+  candidateRoot: string,
+  baseline: ProductionTopologyBaseline,
+): Record<string, unknown> {
   const configPath = exactRegularFile(
     resolve(candidateRoot, 'dist/candidary/wrangler.json'),
     'Production Wrangler config',
@@ -408,7 +609,13 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
       binding: 'DB', databaseName: PRODUCTION_DATABASE_NAME,
       databaseId: PRODUCTION_DATABASE_ID, migrationsDir: '../../migrations',
     }],
-    r2: [{ binding: 'MEDIA_BUCKET', bucketName: 'candidary-media' }],
+    r2: [
+      { binding: LEGACY_MEDIA_BINDING, bucketName: LEGACY_MEDIA_BUCKET_NAME },
+      ...(baseline === 'post-cutover' ? [{
+        binding: CANONICAL_MEDIA_BINDING,
+        bucketName: CANONICAL_MEDIA_BUCKET_NAME,
+      }] : []),
+    ],
     images: { binding: 'IMAGES' },
     assets: {
       binding: 'ASSETS', directory: '../client',
@@ -418,6 +625,9 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
     rateLimits: [
       { name: 'HOST_AUTH_RATE_LIMIT', namespaceId: '1001', simple: { limit: 20, period: 60 } },
       { name: 'RSVP_LOOKUP_RATE_LIMIT', namespaceId: '1002', simple: { limit: 30, period: 60 } },
+      ...(baseline === 'post-cutover' ? [{
+        name: 'GUEST_MESSAGE_RATE_LIMIT', namespaceId: '1003', simple: { limit: 120, period: 60 },
+      }] : []),
     ],
     workflows: [
       { name: 'candidary-export', binding: 'EXPORT_WORKFLOW', className: 'ExportWorkflow' },
@@ -425,16 +635,25 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
       { name: 'candidary-cover-backfill', binding: 'COVER_BACKFILL_WORKFLOW', className: 'CoverBackfillWorkflow' },
     ],
     crons: ['17 3 * * *', '47 * * * *'],
-    vars: {
-      APP_ORIGIN: 'https://candidary.app', ALTERNATE_ORIGINS: 'https://candidary.online',
-      R2_ACCOUNT_ID: vars.R2_ACCOUNT_ID, R2_BUCKET_NAME: 'candidary-media',
-      EMAIL_FROM: 'hello@candidary.app',
-    },
-    requiredSecrets: [...REQUIRED_SECRET_NAMES],
+    vars: baseline === 'post-cutover'
+      ? {
+        APP_ORIGIN: 'https://candidary.app', ALTERNATE_ORIGINS: 'https://candidary.online',
+        EMAIL_FROM: 'hello@candidary.app',
+      }
+      : {
+        APP_ORIGIN: 'https://candidary.app', ALTERNATE_ORIGINS: 'https://candidary.online',
+        R2_ACCOUNT_ID: vars.R2_ACCOUNT_ID, R2_BUCKET_NAME: 'candidary-media',
+        EMAIL_FROM: 'hello@candidary.app',
+      },
+    requiredSecrets: baseline === 'post-cutover'
+      ? [...POST_CUTOVER_REQUIRED_SECRET_NAMES].sort()
+      : baseline === 'media-write-bridge'
+        ? [...HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES]
+        : [...HISTORICAL_PHASE_3_REQUIRED_SECRET_NAMES],
     observability: { enabled: true },
     placement: { mode: 'smart' },
   };
-  if (!ACCOUNT_ID_PATTERN.test(String(vars.R2_ACCOUNT_ID))
+  if ((baseline !== 'post-cutover' && !ACCOUNT_ID_PATTERN.test(String(vars.R2_ACCOUNT_ID)))
     || canonicalJson(topology) !== canonicalJson(expected)) {
     throw new Error('Generated config is not the exact canonical production topology.');
   }
@@ -442,11 +661,22 @@ function productionTopology(candidateRoot: string): Record<string, unknown> {
 }
 
 export function productionTopologySha256(candidateRoot: string): string {
-  return sha256(canonicalJson(productionTopology(candidateRoot)));
+  return sha256(canonicalJson(productionTopology(candidateRoot, 'post-cutover')));
 }
 
-function productionAccountId(candidateRoot: string): string {
-  const topology = productionTopology(candidateRoot);
+export function historicalPhase3ProductionTopologySha256(candidateRoot: string): string {
+  return sha256(canonicalJson(productionTopology(candidateRoot, 'historical-phase-3')));
+}
+
+export function mediaWriteBridgeProductionTopologySha256(candidateRoot: string): string {
+  return sha256(canonicalJson(productionTopology(candidateRoot, 'media-write-bridge')));
+}
+
+function productionAccountId(
+  candidateRoot: string,
+  baseline: Exclude<ProductionTopologyBaseline, 'post-cutover'>,
+): string {
+  const topology = productionTopology(candidateRoot, baseline);
   return (topology.vars as Record<string, unknown>).R2_ACCOUNT_ID as string;
 }
 
@@ -496,26 +726,34 @@ function expectedLedger(candidate: VerifiedReleaseCandidate, count: number): str
 function assertPreState(
   observation: ProductionDatabaseObservation,
   candidate: VerifiedReleaseCandidate,
-  authorization: ProductionMigrationAuthorizationV1,
+  authorization: ProductionMigrationAuthorization,
 ): void {
-  const expected = expectedLedger(candidate, 13);
-  if (expected.at(-1) !== PHASE_2_MIGRATION || !sameStrings(observation.ledger, expected)) {
-    throw new Error('Production ledger is not exactly at the Phase-2 boundary.');
+  const historical = authorization.schemaVersion === 1;
+  const preCount = historical ? 13 : 14;
+  const preBoundary = historical ? PHASE_2_MIGRATION : PHASE_3_MIGRATION;
+  const pendingMigration = historical ? PHASE_3_MIGRATION : POST_CUTOVER_MIGRATION;
+  const expected = expectedLedger(candidate, preCount);
+  if (expected.at(-1) !== preBoundary || !sameStrings(observation.ledger, expected)) {
+    throw new Error(`Production ledger is not exactly at the ${preBoundary} boundary.`);
   }
-  if (!sameStrings(observation.pendingMigrations, [PHASE_3_MIGRATION])) {
-    throw new Error('Production must have only the exact Phase-3 migration pending.');
+  if (!sameStrings(observation.pendingMigrations, [pendingMigration])) {
+    throw new Error(`Production must have only the exact ${pendingMigration} migration pending.`);
   }
   if (observation.schemaSha256 !== authorization.preSchemaSha256) {
     throw new Error('Production pre-migration schema does not match authorization.');
+  }
+  if (!historical && !sameStrings(observation.triggerNames, [...PRODUCTION_TRIGGER_NAMES])) {
+    throw new Error('Production pre-migration trigger set is incomplete or unexpected.');
   }
 }
 
 function assertPostState(
   observation: ProductionDatabaseObservation,
   candidate: VerifiedReleaseCandidate,
-  authorization: ProductionMigrationAuthorizationV1,
+  authorization: ProductionMigrationAuthorization,
 ): void {
-  if (!sameStrings(observation.ledger, expectedLedger(candidate, 14))) {
+  const postCount = authorization.schemaVersion === 1 ? 14 : 15;
+  if (!sameStrings(observation.ledger, expectedLedger(candidate, postCount))) {
     throw new Error('Production post-migration ledger is incomplete or out of order.');
   }
   if (observation.pendingMigrations.length !== 0) {
@@ -524,7 +762,10 @@ function assertPostState(
   if (observation.schemaSha256 !== authorization.postSchemaSha256) {
     throw new Error('Production post-migration schema fingerprint does not match authorization.');
   }
-  if (!sameStrings(observation.triggerNames, [...PRODUCTION_TRIGGER_NAMES])) {
+  const expectedTriggers = authorization.schemaVersion === 1
+    ? PRODUCTION_TRIGGER_NAMES
+    : POST_CUTOVER_PRODUCTION_TRIGGER_NAMES;
+  if (!sameStrings(observation.triggerNames, [...expectedTriggers])) {
     throw new Error('Production post-migration trigger set is incomplete or unexpected.');
   }
 }
@@ -536,7 +777,7 @@ function sameObservation(left: ProductionDatabaseObservation, right: ProductionD
 function validateCrossReferences(
   request: MigrateReleaseRequest,
   candidate: VerifiedReleaseCandidate,
-  authorization: ProductionMigrationAuthorizationV1,
+  authorization: ProductionMigrationAuthorization,
   bookmark: CanonicalInput<TimeTravelBookmarkV1>,
   now: string,
 ): void {
@@ -544,8 +785,12 @@ function validateCrossReferences(
     || candidate.sha !== request.sha || authorization.manifestSha256 !== candidate.manifestSha256) {
     throw new Error('Production authorization does not bind the exact landed candidate and manifest.');
   }
-  const topologySha = productionTopologySha256(candidate.candidateRoot);
-  const accountId = productionAccountId(candidate.candidateRoot);
+  const topologySha = authorization.schemaVersion === 1
+    ? historicalPhase3ProductionTopologySha256(candidate.candidateRoot)
+    : productionTopologySha256(candidate.candidateRoot);
+  const accountId = authorization.schemaVersion === 1
+    ? productionAccountId(candidate.candidateRoot, 'historical-phase-3')
+    : authorization.accountId;
   if (authorization.productionTopologySha256 !== topologySha
     || authorization.accountId !== accountId
     || authorization.databaseName !== PRODUCTION_DATABASE_NAME
@@ -563,9 +808,11 @@ function validateCrossReferences(
     throw new Error('Production authorization or Time Travel bookmark timing is invalid or expired.');
   }
   const migration = candidate.migrations.at(-1);
-  if (candidate.migrationCount !== 14 || basename(migration?.path ?? '') !== PHASE_3_MIGRATION
+  const migrationCount = authorization.schemaVersion === 1 ? 14 : 15;
+  const migrationName = authorization.schemaVersion === 1 ? PHASE_3_MIGRATION : POST_CUTOVER_MIGRATION;
+  if (candidate.migrationCount !== migrationCount || basename(migration?.path ?? '') !== migrationName
     || migration?.sha256 !== authorization.migrationSha256) {
-    throw new Error('Production authorization does not bind the sole manifest-hashed Phase-3 migration.');
+    throw new Error('Production authorization does not bind the sole manifest-hashed migration.');
   }
 }
 
@@ -582,11 +829,322 @@ function validateCandidateCli(candidate: VerifiedReleaseCandidate): void {
   }
 }
 
+interface ValidatedBridgePrerequisites {
+  bucket: CanonicalMediaBucketProvisioningEvidenceV1;
+  bucketSha256: string;
+  bridge: MediaWriteBridgeDeploymentEvidenceV1;
+  bridgeSha256: string;
+  revocation: R2SigningTokenRevocationEvidenceV1;
+  revocationSha256: string;
+  mediaUploadReleaseConfigSha256: string;
+  legacyMediaScannerConfigSha256: string;
+}
+
+function validateBridgePrerequisites(
+  request: MigrateReleaseRequest,
+  candidate: VerifiedReleaseCandidate,
+  authorization: ProductionMigrationAuthorizationV2,
+): ValidatedBridgePrerequisites {
+  if (request.canonicalBucketEvidencePath === undefined
+    || request.bridgeEvidencePath === undefined || request.revocationEvidencePath === undefined) {
+    throw new Error('Schema-v2 migration requires exact bucket, bridge, and revocation evidence inputs.');
+  }
+  const bucketInput = verifyCanonicalMediaBucketProvisioningEvidence(
+    request.canonicalBucketEvidencePath,
+  );
+  const bridgeInput = verifyMediaWriteBridgeDeploymentEvidence(request.bridgeEvidencePath);
+  const revocationInput = verifyR2SigningTokenRevocationEvidence(request.revocationEvidencePath);
+  const runtimeInput = verifyMediaUploadReleaseContract(
+    resolve(candidate.candidateRoot, MEDIA_UPLOAD_RELEASE_CONFIG_PATH),
+    'canonical-cutover-disabled',
+  );
+  const scannerInput = verifyLegacyMediaScannerContract(resolve(
+    candidate.candidateRoot,
+    LEGACY_MEDIA_SCANNER_CONFIG_PATH,
+  ));
+  const bucket = bucketInput.artifact;
+  const bridge = bridgeInput.artifact;
+  const revocation = revocationInput.artifact;
+  if (bucketInput.sha256 !== authorization.canonicalMediaBucketProvisioningEvidenceSha256
+    || bucket.accountId !== authorization.accountId
+    || bridgeInput.sha256 !== authorization.bridgeDeploymentEvidenceSha256
+    || bridge.bridgeCandidate.sha !== authorization.bridgeSha
+    || bridge.bridgeCandidate.migrationCount !== 14
+    || bridge.deployment.tagSha !== authorization.bridgeSha
+    || bridge.deployment.trafficPercent !== 100
+    || bridge.production.accountId !== authorization.accountId
+    || bridge.production.workerName !== 'candidary'
+    || bridge.r2SigningTokenId !== authorization.r2SigningTokenId
+    || bridge.canonicalBucketProvisioningEvidenceSha256 !== bucketInput.sha256) {
+    throw new Error('Schema-v2 authorization does not bind the exact 100-percent bridge deployment.');
+  }
+  if (revocationInput.sha256 !== authorization.r2RevocationEvidenceSha256
+    || revocation.bridgeDeploymentEvidenceSha256 !== bridgeInput.sha256
+    || revocation.accountId !== authorization.accountId
+    || revocation.r2SigningTokenId !== authorization.r2SigningTokenId
+    || revocation.canonicalBucketProvisioningEvidenceSha256 !== bucketInput.sha256
+    || revocation.status !== 'revoked') {
+    throw new Error('Schema-v2 authorization does not bind exact revoked R2 signing-token evidence.');
+  }
+  if (runtimeInput.sha256 !== authorization.mediaUploadReleaseConfigSha256
+    || scannerInput.sha256 !== authorization.legacyMediaScannerConfigSha256) {
+    throw new Error('Schema-v2 authorization does not bind the exact runtime and permanent scanner configs.');
+  }
+  const bridgeExportCanary = bridge.signerFree.exportDownloadCanary;
+  const postRevocationExportCanary = revocation.bridgeExportDownloadCanaryAfterRevocation;
+  if (bridgeExportCanary.expectedArtifactSha256 !== postRevocationExportCanary.expectedArtifactSha256
+    || bridgeExportCanary.method !== postRevocationExportCanary.method
+    || bridgeExportCanary.artifactUrlSha256 !== postRevocationExportCanary.artifactUrlSha256
+    || bridgeExportCanary.expectedByteLength !== postRevocationExportCanary.expectedByteLength
+    || postRevocationExportCanary.responseSha256 !== bridgeExportCanary.responseSha256
+    || postRevocationExportCanary.responseByteLength !== bridgeExportCanary.responseByteLength) {
+    throw new Error('Post-revocation export canary does not reproduce the exact bridge artifact bytes.');
+  }
+  if (bucket.observedAt > bridge.observedAt
+    || bridge.observedAt > revocation.revokedAt
+    || revocation.revokedAt > revocation.providerStatus.observedAt
+    || revocation.providerStatus.observedAt > revocation.legacyBucketSignerProbe.invokedAt
+    || revocation.providerStatus.observedAt > revocation.canonicalBucketSignerProbe.invokedAt
+    || revocation.canonicalBucketSignerProbe.invokedAt
+      > revocation.canonicalPostRevocationEmpty.observedAt
+    || revocation.legacyBucketSignerProbe.invokedAt
+      > revocation.legacyBucketProbeAbsence.observedAt
+    || revocation.canonicalPostRevocationEmpty.observedAt > authorization.authorizedAt
+    || revocation.legacyBucketProbeAbsence.observedAt > authorization.authorizedAt
+    || postRevocationExportCanary.observedAt > authorization.authorizedAt) {
+    throw new Error('Bridge deployment, R2 revocation, status observation, and authorization are out of order.');
+  }
+  return {
+    bucket,
+    bucketSha256: bucketInput.sha256,
+    bridge,
+    bridgeSha256: bridgeInput.sha256,
+    revocation,
+    revocationSha256: revocationInput.sha256,
+    mediaUploadReleaseConfigSha256: runtimeInput.sha256,
+    legacyMediaScannerConfigSha256: scannerInput.sha256,
+  };
+}
+
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function productionMigrationEvidencePath(
+  candidate: VerifiedReleaseCandidate,
+  runId: string,
+): string {
+  return resolve(
+    candidate.candidateRoot,
+    'output/production-migration',
+    candidate.sha,
+    runId,
+    'post-cutover-migration-evidence.json',
+  );
+}
+
+function prepareEvidenceOutput(candidate: VerifiedReleaseCandidate, runId: string): string {
+  const path = productionMigrationEvidencePath(candidate, runId);
+  const parent = dirname(path);
+  mkdirSync(parent, { recursive: true });
+  if (!within(realpathSync(candidate.candidateRoot), realpathSync(parent))) {
+    throw new Error('Production migration evidence path escaped the candidate root.');
+  }
+  if (pathExists(path) || pathExists(`${path}.sha256`)) {
+    throw new Error('Production migration evidence output must be absent before migration.');
+  }
+  return path;
+}
+
+function writeProductionMigrationEvidence(
+  path: string,
+  evidence: ProductionMigrationEvidenceV2,
+): { path: string; sha256: string } {
+  const bytes = `${canonicalJson(evidence)}\n`;
+  const digest = sha256(bytes);
+  writeFileSync(path, bytes, { encoding: 'utf8', flag: 'wx' });
+  try {
+    writeFileSync(
+      `${path}.sha256`,
+      `${digest}  post-cutover-migration-evidence.json\n`,
+      { encoding: 'utf8', flag: 'wx' },
+    );
+  } catch (error) {
+    rmSync(path, { force: true });
+    throw error;
+  }
+  return { path, sha256: digest };
+}
+
+function parseProductionMigrationEvidence(value: unknown): ProductionMigrationEvidenceV2 {
+  const item = exactRecord(value, [
+    'kind', 'schemaVersion', 'status', 'runId', 'candidate', 'production',
+    'authorizationSha256', 'bridge', 'mediaUploadReleaseConfigSha256',
+    'legacyMediaScannerConfigSha256',
+    'canonicalMediaBucketProvisioningEvidenceSha256',
+    'migration', 'before', 'after', 'rollback', 'observedAt',
+  ], 'Production migration evidence');
+  if (item.kind !== 'candidary.production-migration-evidence'
+    || item.schemaVersion !== 2 || item.status !== 'passed') {
+    throw new Error('Production migration evidence identity or status is invalid.');
+  }
+  const candidate = exactRecord(item.candidate, [
+    'sha', 'approvedMainSha', 'manifestSha256', 'artifactTreeSha256', 'bindingTopologySha256',
+  ], 'Production migration evidence candidate');
+  const production = exactRecord(item.production, [
+    'topologySha256', 'accountId', 'databaseName', 'databaseId',
+  ], 'Production migration evidence topology');
+  const migration = exactRecord(item.migration, [
+    'name', 'sha256', 'bundleSha256',
+  ], 'Production migration evidence migration');
+  const bridge = exactRecord(item.bridge, [
+    'sha', 'deploymentEvidenceSha256', 'versionId', 'r2SigningTokenId',
+    'revocationEvidenceSha256', 'revocationReceiptSha256', 'statusObservationSha256',
+  ], 'Production migration bridge evidence');
+  if (migration.name !== POST_CUTOVER_MIGRATION) {
+    throw new Error(`Production migration evidence must name only ${POST_CUTOVER_MIGRATION}.`);
+  }
+  const before = exactRecord(item.before, ['ledger', 'schemaSha256'], 'Production migration evidence pre-state');
+  const after = validatedObservation(item.after);
+  const rollback = exactRecord(item.rollback, [
+    'bookmarkSha256', 'bookmarkRecordedAt', 'rollbackOwner',
+  ], 'Production migration rollback evidence');
+  return {
+    kind: 'candidary.production-migration-evidence',
+    schemaVersion: 2,
+    status: 'passed',
+    runId: patternString(item.runId, UUID_PATTERN, 'migration evidence runId'),
+    candidate: {
+      sha: sha1(candidate.sha, 'evidence candidate sha'),
+      approvedMainSha: sha1(candidate.approvedMainSha, 'evidence approved main sha'),
+      manifestSha256: sha256Value(candidate.manifestSha256, 'evidence manifest sha256'),
+      artifactTreeSha256: sha256Value(candidate.artifactTreeSha256, 'evidence artifact tree sha256'),
+      bindingTopologySha256: sha256Value(
+        candidate.bindingTopologySha256,
+        'evidence binding topology sha256',
+      ),
+    },
+    production: {
+      topologySha256: sha256Value(production.topologySha256, 'evidence production topology sha256'),
+      accountId: patternString(production.accountId, ACCOUNT_ID_PATTERN, 'evidence accountId'),
+      databaseName: exactString(production.databaseName, 'evidence database name'),
+      databaseId: patternString(production.databaseId, D1_ID_PATTERN, 'evidence database id'),
+    },
+    authorizationSha256: sha256Value(item.authorizationSha256, 'evidence authorization sha256'),
+    bridge: {
+      sha: sha1(bridge.sha, 'evidence bridge sha'),
+      deploymentEvidenceSha256: sha256Value(
+        bridge.deploymentEvidenceSha256,
+        'evidence bridge deployment sha256',
+      ),
+      versionId: patternString(bridge.versionId, UUID_PATTERN, 'evidence bridge versionId'),
+      r2SigningTokenId: patternString(
+        bridge.r2SigningTokenId,
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u,
+        'evidence R2 signing token ID',
+      ),
+      revocationEvidenceSha256: sha256Value(
+        bridge.revocationEvidenceSha256,
+        'evidence revocation sha256',
+      ),
+      revocationReceiptSha256: sha256Value(
+        bridge.revocationReceiptSha256,
+        'evidence revocation receipt sha256',
+      ),
+      statusObservationSha256: sha256Value(
+        bridge.statusObservationSha256,
+        'evidence revocation status sha256',
+      ),
+    },
+    mediaUploadReleaseConfigSha256: sha256Value(
+      item.mediaUploadReleaseConfigSha256,
+      'evidence media upload release config sha256',
+    ),
+    legacyMediaScannerConfigSha256: sha256Value(
+      item.legacyMediaScannerConfigSha256,
+      'evidence legacy media scanner config sha256',
+    ),
+    canonicalMediaBucketProvisioningEvidenceSha256: sha256Value(
+      item.canonicalMediaBucketProvisioningEvidenceSha256,
+      'evidence canonical media bucket provisioning sha256',
+    ),
+    migration: {
+      name: POST_CUTOVER_MIGRATION,
+      sha256: sha256Value(migration.sha256, 'evidence migration sha256'),
+      bundleSha256: sha256Value(migration.bundleSha256, 'evidence bundle sha256'),
+    },
+    before: {
+      ledger: exactStringArray(before.ledger, 'evidence pre-ledger'),
+      schemaSha256: sha256Value(before.schemaSha256, 'evidence pre-schema sha256'),
+    },
+    after,
+    rollback: {
+      bookmarkSha256: sha256Value(rollback.bookmarkSha256, 'evidence bookmark sha256'),
+      bookmarkRecordedAt: instant(rollback.bookmarkRecordedAt, 'evidence bookmark recordedAt'),
+      rollbackOwner: patternString(
+        rollback.rollbackOwner,
+        /^[a-z][a-z0-9._-]{2,63}$/u,
+        'evidence rollback owner',
+      ),
+    },
+    observedAt: instant(item.observedAt, 'evidence observedAt'),
+  };
+}
+
+export function verifyPostCutoverMigrationEvidence(
+  path: string,
+  candidate: VerifiedReleaseCandidate,
+): { artifact: ProductionMigrationEvidenceV2; path: string; sha256: string } {
+  if (candidate.migrationCount !== 15 || candidate.manifest.bindings === null
+    || candidate.manifest.artifacts === null) {
+    throw new Error('Post-cutover migration evidence requires one complete 15-migration candidate.');
+  }
+  const input = readCanonicalInput<unknown>(path, 'Production migration evidence');
+  const artifact = parseProductionMigrationEvidence(input.value);
+  const scannerInput = verifyLegacyMediaScannerContract(resolve(
+    candidate.candidateRoot,
+    LEGACY_MEDIA_SCANNER_CONFIG_PATH,
+  ));
+  const expectedBefore = expectedLedger(candidate, 14);
+  const expectedAfter = expectedLedger(candidate, 15);
+  const migration = candidate.migrations.at(-1)!;
+  if (artifact.candidate.bindingTopologySha256 !== candidate.manifest.bindings.sourceTopologySha256
+    || artifact.production.topologySha256 !== productionTopologySha256(candidate.candidateRoot)
+    || artifact.legacyMediaScannerConfigSha256 !== scannerInput.sha256
+    || artifact.production.databaseName !== PRODUCTION_DATABASE_NAME
+    || artifact.production.databaseId !== PRODUCTION_DATABASE_ID
+    || artifact.migration.name !== POST_CUTOVER_MIGRATION
+    || artifact.migration.sha256 !== migration.sha256
+    || !sameStrings(artifact.before.ledger, expectedBefore)
+    || artifact.before.ledger.at(-1) !== PHASE_3_MIGRATION
+    || !sameStrings(artifact.after.ledger, expectedAfter)
+    || artifact.after.ledger.at(-1) !== POST_CUTOVER_MIGRATION
+    || artifact.after.pendingMigrations.length !== 0
+    || !sameStrings(artifact.after.triggerNames, [...POST_CUTOVER_PRODUCTION_TRIGGER_NAMES])
+    || artifact.before.schemaSha256 === artifact.after.schemaSha256
+    || artifact.rollback.bookmarkRecordedAt > artifact.observedAt) {
+    throw new Error('Production migration evidence does not bind the exact post-cutover migration closure.');
+  }
+  return { artifact, path: input.path, sha256: input.digest };
+}
+
 export function parseMigrateReleaseArgs(
   args: readonly string[],
   cwd = process.cwd(),
 ): MigrateReleaseArguments {
-  const accepted = new Set(['--sha', '--manifest', '--authorization', '--bookmark']);
+  const required = new Set(['--sha', '--manifest', '--authorization', '--bookmark']);
+  const accepted = new Set([
+    ...required,
+    '--bridge-evidence',
+    '--revocation-evidence',
+    '--canonical-bucket-evidence',
+  ]);
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
@@ -597,16 +1155,40 @@ export function parseMigrateReleaseArgs(
     if (!value) throw new Error(`Production migration argument ${flag} is missing or empty.`);
     values.set(flag, value);
   }
-  for (const flag of accepted) {
+  for (const flag of required) {
     if (!values.has(flag)) throw new Error(`Production migration argument ${flag} is required.`);
   }
   const sha = sha1(values.get('--sha'), '--sha');
-  return {
+  const result: MigrateReleaseArguments = {
     sha,
     manifestPath: exactRegularFile(resolve(cwd, values.get('--manifest')!), 'Candidate manifest'),
     authorizationPath: exactRegularFile(resolve(cwd, values.get('--authorization')!), 'Production authorization'),
     bookmarkPath: exactRegularFile(resolve(cwd, values.get('--bookmark')!), 'Time Travel bookmark'),
   };
+  const bridgeEvidence = values.get('--bridge-evidence');
+  const revocationEvidence = values.get('--revocation-evidence');
+  const canonicalBucketEvidence = values.get('--canonical-bucket-evidence');
+  const evidenceCount = [bridgeEvidence, revocationEvidence, canonicalBucketEvidence]
+    .filter((value) => value !== undefined).length;
+  if (evidenceCount !== 0 && evidenceCount !== 3) {
+    throw new Error('Production bucket, bridge, and revocation evidence arguments must be supplied together.');
+  }
+  if (bridgeEvidence !== undefined && revocationEvidence !== undefined
+    && canonicalBucketEvidence !== undefined) {
+    result.bridgeEvidencePath = exactRegularFile(
+      resolve(cwd, bridgeEvidence),
+      'Media write bridge deployment evidence',
+    );
+    result.revocationEvidencePath = exactRegularFile(
+      resolve(cwd, revocationEvidence),
+      'R2 signing token revocation evidence',
+    );
+    result.canonicalBucketEvidencePath = exactRegularFile(
+      resolve(cwd, canonicalBucketEvidence),
+      'Canonical media bucket provisioning evidence',
+    );
+  }
+  return result;
 }
 
 function migrationCommand(candidate: VerifiedReleaseCandidate, bundlePath: string): ProductionMigrationCommand {
@@ -630,6 +1212,11 @@ export function runMigrateRelease(
 ): ProductionMigrationResult {
   const authorizationInput = readCanonicalInput<unknown>(request.authorizationPath, 'Production authorization');
   const authorization = parseAuthorization(authorizationInput.value);
+  if (authorization.schemaVersion === 1
+    && (request.bridgeEvidencePath !== undefined || request.revocationEvidencePath !== undefined
+      || request.canonicalBucketEvidencePath !== undefined)) {
+    throw new Error('Historical schema-v1 migration must not accept bucket, bridge, or revocation evidence.');
+  }
   const bookmarkInput = readCanonicalInput<unknown>(request.bookmarkPath, 'Time Travel bookmark');
   const bookmark = {
     ...bookmarkInput,
@@ -640,11 +1227,17 @@ export function runMigrateRelease(
     sha: request.sha,
     manifestPath: request.manifestPath,
     approvedBaseSha: APPROVED_BASE_SHA,
-    expectedMigrationCount: 14,
+    expectedMigrationCount: authorization.schemaVersion === 1 ? 14 : 15,
   };
   const candidate = adapters.verifyCandidate(verificationRequest);
   validateCrossReferences(request, candidate, authorization, bookmark, adapters.now());
   validateCandidateCli(candidate);
+  const bridgePrerequisites = authorization.schemaVersion === 2
+    ? validateBridgePrerequisites(request, candidate, authorization)
+    : undefined;
+  const evidencePath = authorization.schemaVersion === 2
+    ? prepareEvidenceOutput(candidate, authorization.runId)
+    : undefined;
   const context = { candidate, authorization };
   const before = validatedObservation(adapters.observeDatabase(context));
   assertPreState(before, candidate, authorization);
@@ -654,16 +1247,25 @@ export function runMigrateRelease(
     'output/production-migration',
     candidate.sha,
     authorization.runId,
-    '0014-event-cover-invariants.sql',
+    authorization.schemaVersion === 1
+      ? '0014-event-cover-invariants.sql'
+      : '0015-curated-private-guestbook.sql',
   );
   let bundleCreated = false;
   try {
-    const bundle = buildAtomicMigrationBundle({
-      verifiedCandidate: candidate,
-      expectedLedger: before.ledger,
-      migration: PHASE_3_MIGRATION,
-      outputPath: bundlePath,
-    });
+    const bundle = authorization.schemaVersion === 1
+      ? buildAtomicMigrationBundle({
+        verifiedCandidate: candidate,
+        expectedLedger: before.ledger,
+        migration: PHASE_3_MIGRATION,
+        outputPath: bundlePath,
+      })
+      : buildPostCutoverAtomicMigrationBundle({
+        verifiedCandidate: candidate,
+        expectedLedger: before.ledger,
+        migration: POST_CUTOVER_MIGRATION,
+        outputPath: bundlePath,
+      });
     bundleCreated = true;
     if (bundle.sha256 !== authorization.bundleSha256
       || bundle.migrationHash !== authorization.migrationSha256) {
@@ -692,14 +1294,65 @@ export function runMigrateRelease(
     }
     const after = validatedObservation(adapters.observeDatabase(context));
     assertPostState(after, candidate, authorization);
-    return {
+    const result: ProductionMigrationResult = {
       candidateSha: candidate.sha,
-      migrationName: PHASE_3_MIGRATION,
+      migrationName: authorization.migrationName,
       migrationSha256: bundle.migrationHash,
       bundleSha256: bundle.sha256,
       preSchemaSha256: before.schemaSha256,
       postSchemaSha256: after.schemaSha256,
     };
+    if (authorization.schemaVersion === 1 || evidencePath === undefined) return result;
+    if (candidate.manifest.bindings === null || candidate.manifest.artifacts === null) {
+      throw new Error('Verified post-cutover candidate lost deployment identity evidence.');
+    }
+    const evidence: ProductionMigrationEvidenceV2 = {
+      kind: 'candidary.production-migration-evidence',
+      schemaVersion: 2,
+      status: 'passed',
+      runId: authorization.runId,
+      candidate: {
+        sha: candidate.sha,
+        approvedMainSha: authorization.approvedMainSha,
+        manifestSha256: candidate.manifestSha256,
+        artifactTreeSha256: candidate.artifactTreeSha256,
+        bindingTopologySha256: candidate.manifest.bindings.sourceTopologySha256,
+      },
+      production: {
+        topologySha256: authorization.productionTopologySha256,
+        accountId: authorization.accountId,
+        databaseName: authorization.databaseName,
+        databaseId: authorization.databaseId,
+      },
+      authorizationSha256: authorizationInput.digest,
+      bridge: {
+        sha: bridgePrerequisites!.bridge.bridgeCandidate.sha,
+        deploymentEvidenceSha256: bridgePrerequisites!.bridgeSha256,
+        versionId: bridgePrerequisites!.bridge.deployment.versionId,
+        r2SigningTokenId: authorization.r2SigningTokenId,
+        revocationEvidenceSha256: bridgePrerequisites!.revocationSha256,
+        revocationReceiptSha256: bridgePrerequisites!.revocation.providerResponses.revocationReceiptSha256,
+        statusObservationSha256: bridgePrerequisites!.revocation.providerResponses.statusObservationSha256,
+      },
+      mediaUploadReleaseConfigSha256: bridgePrerequisites!.mediaUploadReleaseConfigSha256,
+      legacyMediaScannerConfigSha256: bridgePrerequisites!.legacyMediaScannerConfigSha256,
+      canonicalMediaBucketProvisioningEvidenceSha256: bridgePrerequisites!.bucketSha256,
+      migration: {
+        name: POST_CUTOVER_MIGRATION,
+        sha256: bundle.migrationHash,
+        bundleSha256: bundle.sha256,
+      },
+      before: { ledger: before.ledger, schemaSha256: before.schemaSha256 },
+      after,
+      rollback: {
+        bookmarkSha256: bookmark.digest,
+        bookmarkRecordedAt: bookmark.value.recordedAt,
+        rollbackOwner: authorization.rollbackOwner,
+      },
+      observedAt: adapters.now(),
+    };
+    const written = writeProductionMigrationEvidence(evidencePath, evidence);
+    return { ...result, evidencePath: written.path, evidenceSha256: written.sha256 };
   } finally {
     if (bundleCreated) rmSync(bundlePath, { force: true });
   }
@@ -748,7 +1401,6 @@ function defaultObservation(context: ProductionObservationContext): ProductionDa
   const triggerNames = schema
     .filter((row) => row.type === 'trigger')
     .map((row) => exactString(row.name, 'trigger name'))
-    .filter((name) => PRODUCTION_TRIGGER_NAMES.includes(name as typeof PRODUCTION_TRIGGER_NAMES[number]))
     .sort();
   const counts = wranglerRows(candidate, [
     'SELECT',
@@ -758,7 +1410,7 @@ function defaultObservation(context: ProductionObservationContext): ProductionDa
     "(SELECT count(*) FROM events e WHERE e.deleted_at IS NULL AND json_extract(e.cover_config, '$.source.kind') = 'upload' AND (e.cover_object_key IS NULL OR NOT EXISTS (SELECT 1 FROM event_cover_render_sets s JOIN event_cover_masters m ON m.id = s.master_id WHERE s.id = e.cover_render_set_id AND s.event_id = e.id AND s.state = 'active' AND m.event_id = e.id AND m.object_key = e.cover_object_key))) AS uploadsWithoutActiveSet;",
   ].join(' '));
   if (counts.length !== 1) throw new Error('D1 zero-proof query returned the wrong row count.');
-  const names = expectedLedger(candidate, 14);
+  const names = expectedLedger(candidate, candidate.migrationCount);
   return {
     ledger,
     pendingMigrations: names.filter((name) => !ledger.includes(name)),

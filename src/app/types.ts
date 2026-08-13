@@ -1,4 +1,11 @@
-export type { EventView, GuestEventView } from '../../shared/contracts';
+export type {
+  EventView,
+  GuestEventView,
+  GuestbookItem,
+  GuestbookSource,
+  GuestGuestbookItem,
+  ManagerGuestbookItem,
+} from '../../shared/contracts';
 
 export interface MediaView {
   id: string;
@@ -37,13 +44,25 @@ export interface ExportView {
   mediaCount: number;
   totalBytes: number;
   attempt: number;
-  manifestObjectKey?: string | null;
-  partCount?: number;
+  partCount: number;
   expiresAt: string | null;
+  guestbookEntryCount: number | null;
+  guestbookSharedCount: number | null;
+  guestbookEventName: string | null;
+  guestbookEventDate: string | null;
+  guestbookEventTimezone: string | null;
+  guestbookPrompt: string | null;
+  guestbookGalleryVisible: boolean | null;
+}
+
+export interface ExportDownloadDescriptor {
+  url: string;
+  expiresAt: string;
+  filename: string;
 }
 
 export interface ExportDownloadView {
-  manifest: { url: string; expiresAt: string; filename: string };
+  manifest: ExportDownloadDescriptor | null;
   parts: Array<{
     partNumber: number;
     mediaCount: number;
@@ -52,4 +71,6 @@ export interface ExportDownloadView {
     expiresAt: string;
     filename: string;
   }>;
+  printableGuestbook: ExportDownloadDescriptor | null;
+  privateGuestbook: ExportDownloadDescriptor | null;
 }

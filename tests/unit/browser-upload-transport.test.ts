@@ -15,6 +15,7 @@ class ControlledXMLHttpRequest {
   static instances: ControlledXMLHttpRequest[] = [];
 
   status = 0;
+  withCredentials = false;
   readonly upload = { addEventListener: vi.fn() };
   readonly open = vi.fn();
   readonly setRequestHeader = vi.fn();
@@ -107,6 +108,42 @@ afterEach(() => {
 });
 
 describe('browser upload transport cancellation', () => {
+  it('sends same-origin ingress with guest credentials and scoped CSRF', async () => {
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      value: 'candidary_csrf=csrf-token',
+    });
+    const sameOrigin = {
+      ...reservation,
+      uploadUrl: `${window.location.origin}/api/event/alex-jordan/uploads/media-a/content`,
+    };
+    const upload = xhrUpload(item().file, sameOrigin, vi.fn());
+    const request = ControlledXMLHttpRequest.instances[0]!;
+    request.status = 200;
+    request.dispatch('load');
+    await upload;
+
+    expect(request.withCredentials).toBe(true);
+    expect(request.setRequestHeader).toHaveBeenCalledWith('x-candidary-csrf', 'csrf-token');
+    expect(request.setRequestHeader).toHaveBeenCalledWith('Content-Type', reservation.mimeType);
+  });
+
+  it('maps a stored idempotent batch replay to an already-delivered queue result', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({
+      items: [{
+        idempotencyKey: 'item-a',
+        status: 'accepted',
+        alreadyDelivered: true,
+        media: { id: reservation.mediaId, mimeType: reservation.mimeType, uploadState: 'stored' },
+      }],
+    })));
+
+    const results = await createBrowserTransport('alex-jordan', 'Taylor').reserve([item()]);
+
+    expect(results).toEqual([{ id: 'item-a', status: 'delivered' }]);
+    expect(ControlledXMLHttpRequest.instances).toHaveLength(0);
+  });
+
   it('rejects a pre-aborted XHR without constructing a request', async () => {
     const controller = new AbortController();
     controller.abort();

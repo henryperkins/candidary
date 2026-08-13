@@ -9,6 +9,11 @@ import {
 } from '../../worker/security/crypto';
 import { calculateLifecycle } from '../../worker/security/lifecycle';
 import { sanitizeFilename } from '../../worker/security/filenames';
+import {
+  guestMessageIpScopeDigest,
+  guestMessagePayloadHmac,
+  guestMessageSessionScopeDigest,
+} from '../../worker/security/guest-message';
 import { eventSlug } from '../../worker/security/slugs';
 
 const encryptionKey = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY';
@@ -42,6 +47,30 @@ describe('secret token security', () => {
     expect(first).not.toBe(second);
     await expect(decryptSecret(first, encryptionKey)).resolves.toBe('guest-secret');
     await expect(decryptSecret(`${first}tampered`, encryptionKey)).rejects.toThrow();
+  });
+});
+
+describe('guest message persisted-data HMACs', () => {
+  const hmacKey = 'test-guest-message-hmac-key-with-at-least-32-bytes';
+
+  it('canonicalizes the normalized nullable-name and body tuple under a versioned domain', async () => {
+    await expect(guestMessagePayloadHmac(hmacKey, null, 'A quiet, perfect moment.'))
+      .resolves.toBe('WWDxup0LSPV3jk5MwoHpAHvm7txGmkoqpyLxniu__x0');
+    await expect(guestMessagePayloadHmac(hmacKey, 'Avery', 'A quiet, perfect moment.'))
+      .resolves.toBe('SO_zVt6vEJiQpsmhSAw9uUP9aOw1c1UIPmNMWYFoStE');
+  });
+
+  it('domain-separates event-scoped session and trusted-IP rate identities', async () => {
+    const session = await guestMessageSessionScopeDigest(hmacKey, 'event-a', 'session-a');
+    const ip = await guestMessageIpScopeDigest(hmacKey, 'event-a', 'session-a');
+
+    expect(session).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(ip).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(session).not.toBe(ip);
+    await expect(guestMessageSessionScopeDigest(hmacKey, 'event-b', 'session-a'))
+      .resolves.not.toBe(session);
+    await expect(guestMessageIpScopeDigest(hmacKey, 'event-b', 'session-a'))
+      .resolves.not.toBe(ip);
   });
 });
 

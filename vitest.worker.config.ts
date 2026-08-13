@@ -13,7 +13,7 @@ export default defineConfig({
   define: {
     __CANDIDARY_BUILD_SHA__: JSON.stringify(testBuildSha),
     __CANDIDARY_MIGRATION_MANIFEST_SHA256__: JSON.stringify(testMigrationManifestSha256),
-    __CANDIDARY_TEST_LEGACY_R2_SIGNING__: 'true',
+    __CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE__: 'true',
   },
   plugins: [
     cloudflareTest({
@@ -41,19 +41,11 @@ export default defineConfig({
           ENTRY_HMAC_KEY: 'test-entry-hmac-key-with-at-least-32-bytes',
           ENTRY_ENCRYPTION_KEY: 'ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA',
           RSVP_LOOKUP_HMAC_KEY: 'test-rsvp-lookup-hmac-key-with-at-least-32-bytes',
+          GUEST_MESSAGE_HMAC_KEY: 'test-guest-message-hmac-key-with-at-least-32-bytes',
           EMAIL_FROM: 'hello@candidary.test',
-          R2_ACCOUNT_ID: 'local',
-          R2_ACCESS_KEY_ID: 'test-r2-access-key',
-          R2_SECRET_ACCESS_KEY: 'test-r2-secret-key',
-          R2_BUCKET_NAME: 'candidary-media',
-          // The checked-in bridge config is the production default. The broad
-          // Worker suite still exercises the ordinary schema-14 implementation;
-          // focused bridge tests remove this test-only binding and prove the
-          // exact production-disabled behavior instead.
-          TEST_MEDIA_UPLOAD_RELEASE_MODE: 'worker-ingress',
         },
         d1Databases: ['DB'],
-        r2Buckets: ['MEDIA_BUCKET'],
+        r2Buckets: ['MEDIA_BUCKET', 'CANONICAL_MEDIA_BUCKET'],
       },
     }),
   ],

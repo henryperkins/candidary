@@ -1,10 +1,9 @@
 import { Hono, type Context } from 'hono';
 
-import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
 import { ExportsRepository } from '../db/exports';
-import { MediaRepository } from '../db/media';
+import type { ExportRecord } from '../db/types';
 import type { AppBindings, AppEnv } from '../env';
 
 function manager(context: Context<AppBindings>, write = false) {
@@ -17,19 +16,24 @@ async function ownedJob(context: Context<AppBindings>) {
   return job;
 }
 
-async function readyInventory(context: Context<AppBindings>) {
-  const job = await ownedJob(context);
-  const expiresAt = job.expiresAt ? Date.parse(job.expiresAt) : Number.NaN;
-  if (job.state !== 'ready' || !job.manifestObjectKey
-    || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-    throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
-  }
-  const parts = await new ExportsRepository(context.env.DB).listParts(job.id);
-  if (parts.length !== job.partCount
-    || parts.some((part, index) => part.partNumber !== index + 1 || !part.objectKey)) {
-    throw new ApiError('EXPORT_FAILED', 'This export is incomplete. Retry it.', 409);
-  }
-  return { job, parts };
+function managerExport(job: ExportRecord) {
+  return {
+    id: job.id,
+    state: job.state,
+    snapshotAt: job.snapshotAt,
+    mediaCount: job.mediaCount,
+    totalBytes: job.totalBytes,
+    attempt: job.attempt,
+    partCount: job.partCount,
+    expiresAt: job.expiresAt,
+    guestbookEntryCount: job.guestbookEntryCount,
+    guestbookSharedCount: job.guestbookSharedCount,
+    guestbookEventName: job.guestbookEventName,
+    guestbookEventDate: job.guestbookEventDate,
+    guestbookEventTimezone: job.guestbookEventTimezone,
+    guestbookPrompt: job.guestbookPrompt,
+    guestbookGalleryVisible: job.guestbookGalleryVisible,
+  };
 }
 
 async function commitOrRecoverRetry(
@@ -106,8 +110,56 @@ async function deleteExportKeys(bucket: R2Bucket, keys: string[]): Promise<void>
   }
 }
 
-function artifactUrl(eventId: string, jobId: string, artifact: string): string {
-  return `/api/manage/events/${encodeURIComponent(eventId)}/exports/${encodeURIComponent(jobId)}/artifacts/${artifact}`;
+export const exportRoutes = new Hono<AppBindings>();
+
+type ExportArtifactKind = 'manifest' | 'part' | 'printable-guestbook' | 'private-guestbook';
+
+async function ownedReadyArtifact(
+  context: Context<AppBindings>,
+  kind: ExportArtifactKind,
+  partNumber?: number,
+) {
+  await manager(context);
+  const job = await ownedJob(context);
+  if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
+    throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
+  }
+  if (kind === 'manifest' && job.manifestObjectKey) {
+    return {
+      key: job.manifestObjectKey,
+      filename: 'candidary-export-manifest.csv',
+      contentType: 'text/csv; charset=utf-8',
+    };
+  }
+  if (kind === 'printable-guestbook' && job.guestbookHtmlObjectKey) {
+    return {
+      key: job.guestbookHtmlObjectKey,
+      filename: 'guestbook.html',
+      contentType: 'text/html; charset=utf-8',
+    };
+  }
+  if (kind === 'private-guestbook' && job.guestbookCsvObjectKey) {
+    return {
+      key: job.guestbookCsvObjectKey,
+      filename: 'guestbook-private.csv',
+      contentType: 'text/csv; charset=utf-8',
+    };
+  }
+  if (kind === 'part' && Number.isSafeInteger(partNumber) && (partNumber ?? 0) > 0) {
+    const part = (await new ExportsRepository(context.env.DB).listParts(job.id))
+      .find((candidate) => candidate.partNumber === partNumber);
+    if (part) return {
+      key: part.objectKey,
+      filename: `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
+      contentType: 'application/zip',
+    };
+  }
+  throw new ApiError('EXPORT_FAILED', 'That export artifact is not available.', 404);
+}
+
+function artifactUrl(eventId: string, jobId: string, kind: ExportArtifactKind, part?: number) {
+  const suffix = kind === 'part' ? `/part/${part}` : `/${kind}`;
+  return `/api/manage/events/${encodeURIComponent(eventId)}/exports/${encodeURIComponent(jobId)}/artifact${suffix}`;
 }
 
 class InvalidExportRange extends Error {}
@@ -134,14 +186,16 @@ function requestedRange(value: string | undefined, size: number): { offset: numb
   return { offset, length: end - offset + 1 };
 }
 
-async function artifactResponse(
+async function streamArtifact(
   context: Context<AppBindings>,
-  key: string,
-  filename: string,
-  contentType: string,
+  kind: ExportArtifactKind,
+  partNumber?: number,
 ) {
-  const metadata = await context.env.MEDIA_BUCKET.head(key);
-  if (!metadata) throw new ApiError('EXPORT_FAILED', 'This export artifact is unavailable. Retry the export.', 409);
+  const artifact = await ownedReadyArtifact(context, kind, partNumber);
+  const metadata = await context.env.MEDIA_BUCKET.head(artifact.key);
+  if (!metadata) {
+    throw new ApiError('EXPORT_FAILED', 'This export artifact is unavailable. Retry the export.', 409);
+  }
   let range: { offset: number; length: number } | null;
   try {
     range = requestedRange(context.req.header('range'), metadata.size);
@@ -160,7 +214,7 @@ async function artifactResponse(
     }
     throw error;
   }
-  const object = await context.env.MEDIA_BUCKET.get(key, {
+  const object = await context.env.MEDIA_BUCKET.get(artifact.key, {
     onlyIf: { etagMatches: metadata.etag },
     ...(range ? { range } : {}),
   });
@@ -170,9 +224,9 @@ async function artifactResponse(
   const headers = new Headers({
     'Accept-Ranges': 'bytes',
     'Cache-Control': 'private, no-store',
-    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Disposition': `attachment; filename="${artifact.filename}"`,
     'Content-Length': String(range?.length ?? metadata.size),
-    'Content-Type': contentType,
+    'Content-Type': artifact.contentType,
     'Cross-Origin-Resource-Policy': 'same-origin',
     'X-Content-Type-Options': 'nosniff',
   });
@@ -182,33 +236,27 @@ async function artifactResponse(
   return new Response(object.body, { status: range ? 206 : 200, headers });
 }
 
-export const exportRoutes = new Hono<AppBindings>();
-
 exportRoutes.get('/manage/events/:eventId/exports', async (context) => {
   await manager(context);
   const jobs = await new ExportsRepository(context.env.DB).listForEvent(context.req.param('eventId'));
-  return context.json({ data: { exports: jobs }, requestId: context.get('requestId') });
+  return context.json({ data: { exports: jobs.map(managerExport) }, requestId: context.get('requestId') });
 });
 
 exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
   await manager(context, true);
   const snapshotAt = new Date().toISOString();
-  const media = await new MediaRepository(context.env.DB).exportSnapshot(context.req.param('eventId'), snapshotAt);
-  if (!media.length) throw new ApiError('EXPORT_EMPTY', 'Deliver at least one photo before preparing an export.', 409);
-  const totalBytes = media.reduce((sum, item) => sum + (item.byteSize ?? 0), 0);
-  if (totalBytes > MAX_EVENT_BYTES) throw new ApiError('EXPORT_LIMIT_EXCEEDED', 'This event is too large to export.', 409);
   const job = await new ExportsRepository(context.env.DB).createActive({
     id: crypto.randomUUID(), eventId: context.req.param('eventId'), snapshotAt,
-    mediaCount: media.length, totalBytes, createdAt: snapshotAt,
+    createdAt: snapshotAt,
   });
   await context.env.EXPORT_WORKFLOW.create({ id: job.id, params: { jobId: job.id } });
-  return context.json({ data: { export: job }, requestId: context.get('requestId') }, 202);
+  return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 
 exportRoutes.get('/manage/events/:eventId/exports/:jobId', async (context) => {
   await manager(context);
   const job = await ownedJob(context);
-  return context.json({ data: { export: job }, requestId: context.get('requestId') });
+  return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') });
 });
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context) => {
@@ -222,62 +270,82 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
   const currentParts = await repository.listParts(current.id);
   const keys = recovering
     ? await priorAttemptKeys(context.env.MEDIA_BUCKET, current)
-    : [current.objectKey, current.manifestObjectKey, ...currentParts.map(({ objectKey }) => objectKey)]
-      .filter((key): key is string => Boolean(key));
+    : [
+      current.objectKey,
+      current.manifestObjectKey,
+      ...currentParts.map(({ objectKey }) => objectKey),
+      current.guestbookHtmlObjectKey,
+      current.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
   const job = recovering ? current : await commitOrRecoverRetry(repository, current);
   await ensureRetryWorkflow(context.env.EXPORT_WORKFLOW, job);
   await deleteExportKeys(context.env.MEDIA_BUCKET, keys);
-  return context.json({ data: { export: job }, requestId: context.get('requestId') }, 202);
+  return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (context) => {
   await manager(context, true);
-  const { job, parts } = await readyInventory(context);
-  const eventId = context.req.param('eventId');
+  const job = await ownedJob(context);
+  if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
+    throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
+  }
+  const repository = new ExportsRepository(context.env.DB);
+  const parts = await repository.listParts(job.id);
+  const newFormat = job.guestbookEntryCount !== null;
+  const snapshotMetadataComplete = !newFormat || (
+    job.guestbookSharedCount !== null && job.guestbookEventName !== null
+    && job.guestbookEventDate !== null && job.guestbookEventTimezone !== null
+    && job.guestbookPrompt !== null && job.guestbookGalleryVisible !== null
+  );
+  const partsComplete = parts.every((part, index) => part.partNumber === index + 1
+    && part.mediaCount > 0 && part.sourceBytes >= 0 && Boolean(part.objectKey));
+  const photoComplete = job.mediaCount === 0
+    ? newFormat && job.manifestObjectKey === null && job.partCount === 0 && parts.length === 0
+    : Boolean(job.manifestObjectKey) && partsComplete
+      && parts.length === job.partCount && job.partCount > 0
+      && parts.reduce((count, part) => count + part.mediaCount, 0) === job.mediaCount;
+  const guestbookComplete = !newFormat || Boolean(
+    job.guestbookHtmlObjectKey && job.guestbookHtmlBytes !== null && job.guestbookHtmlSha256
+    && job.guestbookCsvObjectKey && job.guestbookCsvBytes !== null && job.guestbookCsvSha256,
+  );
+  if (!snapshotMetadataComplete || !photoComplete || !guestbookComplete) {
+    throw new ApiError('EXPORT_FAILED', 'This export is incomplete. Retry it.', 409);
+  }
   return context.json({
     data: {
-      manifest: {
-        url: artifactUrl(eventId, job.id, 'manifest'),
+      manifest: job.manifestObjectKey ? {
+        url: artifactUrl(job.eventId, job.id, 'manifest'),
         expiresAt: job.expiresAt,
         filename: 'candidary-export-manifest.csv',
-      },
+      } : null,
       parts: parts.map((part) => ({
         partNumber: part.partNumber,
         mediaCount: part.mediaCount,
         sourceBytes: part.sourceBytes,
-        url: artifactUrl(eventId, job.id, `parts/${part.partNumber}`),
+        url: artifactUrl(job.eventId, job.id, 'part', part.partNumber),
         expiresAt: job.expiresAt,
         filename: `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
       })),
+      printableGuestbook: job.guestbookHtmlObjectKey
+        ? { url: artifactUrl(job.eventId, job.id, 'printable-guestbook'), expiresAt: job.expiresAt, filename: 'guestbook.html' }
+        : null,
+      privateGuestbook: job.guestbookCsvObjectKey
+        ? { url: artifactUrl(job.eventId, job.id, 'private-guestbook'), expiresAt: job.expiresAt, filename: 'guestbook-private.csv' }
+        : null,
     },
     requestId: context.get('requestId'),
   });
 });
 
-exportRoutes.get('/manage/events/:eventId/exports/:jobId/artifacts/manifest', async (context) => {
-  await manager(context);
-  const { job } = await readyInventory(context);
-  return artifactResponse(
-    context,
-    job.manifestObjectKey!,
-    'candidary-export-manifest.csv',
-    'text/csv; charset=utf-8',
-  );
-});
-
-exportRoutes.get('/manage/events/:eventId/exports/:jobId/artifacts/parts/:partNumber', async (context) => {
-  await manager(context);
-  const { parts } = await readyInventory(context);
-  const rawPartNumber = context.req.param('partNumber');
-  const partNumber = /^[1-9][0-9]*$/u.test(rawPartNumber) ? Number(rawPartNumber) : Number.NaN;
-  const part = Number.isSafeInteger(partNumber)
-    ? parts.find((candidate) => candidate.partNumber === partNumber)
-    : undefined;
-  if (!part) throw new ApiError('RESOURCE_FORBIDDEN', 'This export artifact is not available.', 403);
-  return artifactResponse(
-    context,
-    part.objectKey,
-    `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
-    'application/zip',
-  );
-});
+exportRoutes.get('/manage/events/:eventId/exports/:jobId/artifact/manifest', (context) => (
+  streamArtifact(context, 'manifest')
+));
+exportRoutes.get('/manage/events/:eventId/exports/:jobId/artifact/part/:partNumber', (context) => (
+  streamArtifact(context, 'part', Number(context.req.param('partNumber')))
+));
+exportRoutes.get('/manage/events/:eventId/exports/:jobId/artifact/printable-guestbook', (context) => (
+  streamArtifact(context, 'printable-guestbook')
+));
+exportRoutes.get('/manage/events/:eventId/exports/:jobId/artifact/private-guestbook', (context) => (
+  streamArtifact(context, 'private-guestbook')
+));

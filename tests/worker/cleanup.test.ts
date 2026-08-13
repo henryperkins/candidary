@@ -1,8 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import { AuthService } from '../../worker/auth/service';
 import { MediaRepository } from '../../worker/db/media';
+import { MediaObjectWriteTombstoneRepository } from '../../worker/db/media-write-tombstones';
+import { LegacyMediaScanRepository } from '../../worker/db/legacy-media-scan';
+import { ExportsRepository } from '../../worker/db/exports';
 import {
   COVER_CLEANUP_ROWS_PER_CLASS,
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
@@ -13,19 +16,28 @@ import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import {
   cleanupAuthScratch,
   cleanupEventCovers,
+  cleanupExpiredExports,
   cleanupExpiredReservations,
   cleanupRsvpScratch,
+  cleanupMediaObjectWriteTombstones,
+  maintainLegacyMediaObjects,
+  observeLegacyMediaScanner,
+  scanLegacyMediaNamespace,
   deleteEventData,
+  promoteLegacyStoredMedia,
   reconcileEventCoverPurge,
   resumeDeletedEventPurges,
   scheduledCleanup,
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
+import { processExport } from '../../worker/workflows/export';
 import type { CoverWorkflowLookup } from '../../worker/workflows/cover-platform';
 import { restartCoverPublication } from '../../worker/services/event-cover-publication';
+import { finalizedMediaObjectKey } from '../../worker/storage/media-keys';
 import worker from '../../worker/index';
 import {
   EVENT_COVER_TABLES,
+  batchD1Statements,
   eventAccess,
   importRoster,
   openRsvp,
@@ -33,6 +45,7 @@ import {
   resetDatabase,
   seedEventCoverGraph,
   testEnv,
+  uploadPending,
   writeHeaders,
 } from './helpers';
 
@@ -139,6 +152,199 @@ function purgeAccessors(
 async function purgeSettled(eventId: string, now: Date) {
   return reconcileEventCoverPurge(testEnv, eventId, now, purgeAccessors().accessors);
 }
+
+afterEach(() => {
+  delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+});
+
+async function moveStoredMediaToLegacyKey(access: Access, idempotencyKey: string) {
+  const media = await uploadPending(access, idempotencyKey);
+  const canonical = await testEnv.CANONICAL_MEDIA_BUCKET.get(media.objectKey);
+  if (!canonical?.body) throw new Error('Expected a finalized media object fixture.');
+  const legacyObjectKey = `events/${access.event.id}/media/${media.id}`;
+  await testEnv.MEDIA_BUCKET.put(legacyObjectKey, canonical.body, {
+    httpMetadata: { contentType: media.mimeType },
+  });
+  // The fixture starts from a new-code upload only to get valid media bytes.
+  // Remove its canonical-finalization fence before rewriting the row into the
+  // legacy shape this helper is meant to simulate.
+  await testEnv.DB.prepare('DELETE FROM media_object_promotions WHERE media_id = ?')
+    .bind(media.id).run();
+  // Runtime fixtures need to model rows grandfathered by 0015. The production
+  // trigger correctly forbids creating this shape after migration, so this
+  // isolated test helper removes it only for the synthetic pre-migration row.
+  await testEnv.DB.exec('DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;');
+  await testEnv.DB.prepare(`
+    UPDATE media SET object_key = ?, object_bucket_generation = 'legacy',
+      reservation_expires_at = ? WHERE id = ?
+  `).bind(legacyObjectKey, '2026-07-21T11:59:00.000Z', media.id).run();
+  await testEnv.CANONICAL_MEDIA_BUCKET.delete(media.objectKey);
+  return { ...media, objectKey: legacyObjectKey, objectBucketGeneration: 'legacy' as const };
+}
+
+describe('Guestbook export cleanup', () => {
+  beforeEach(resetDatabase);
+
+  it('deletes the complete durable inventory before expiring a job and retains immutable snapshot rows', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'cleanup-export', 'Frozen cleanup caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date('2026-08-12T12:00:00.000Z'));
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+
+    expect(await cleanupExpiredExports(testEnv, new Date('2026-08-14T12:00:00.000Z'))).toBe(1);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect(await repository.getById(job.id)).toMatchObject({ state: 'expired' });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(1);
+  });
+
+  it('keeps Ready state and durable inventory when object deletion fails', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'cleanup-failure', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await processExport(testEnv, job.id, new Date('2026-08-12T12:00:00.000Z'));
+    const bucket = Object.create(testEnv.MEDIA_BUCKET) as R2Bucket;
+    bucket.delete = vi.fn(async () => { throw new Error('R2 unavailable'); });
+    const failingEnv = { ...testEnv, MEDIA_BUCKET: bucket };
+
+    await expect(cleanupExpiredExports(failingEnv, new Date('2026-08-14T12:00:00.000Z')))
+      .rejects.toThrow('R2 unavailable');
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'ready' });
+  });
+
+  it('deletes exact durable export keys before event purge removes dependent rows', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'purge-export', 'Purge caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const durableKeys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+    const deleteCalls: string[][] = [];
+    const bucket = {
+      delete: async (keys: string | string[]) => {
+        deleteCalls.push(Array.isArray(keys) ? keys : [keys]);
+        return testEnv.MEDIA_BUCKET.delete(keys);
+      },
+      list: testEnv.MEDIA_BUCKET.list.bind(testEnv.MEDIA_BUCKET),
+    } as R2Bucket;
+    const purgeEnv = { ...testEnv, MEDIA_BUCKET: bucket };
+
+    const purgeStartedAt = new Date('2099-08-13T10:00:00.000Z');
+    expect(await deleteEventData(purgeEnv, access.event.id, purgeStartedAt))
+      .toMatchObject({ phase: 'fences', remainder: true });
+    await promoteLegacyStoredMedia(
+      purgeEnv,
+      new Date('2099-08-13T10:21:00.000Z'),
+    );
+    expect(await deleteEventData(
+      purgeEnv,
+      access.event.id,
+      new Date('2099-08-13T10:22:00.000Z'),
+    )).toMatchObject({ phase: 'complete', remainder: false });
+
+    expect(new Set(deleteCalls[0])).toEqual(new Set(durableKeys));
+    expect(await testEnv.DB.prepare('SELECT id FROM export_jobs WHERE id = ?').bind(job.id).first()).toBeNull();
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
+    for (const key of durableKeys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('holds the event prefix and relational purge until a running export is terminal', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'purge-running-export', 'Frozen caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    let releaseSource!: () => void;
+    const released = new Promise<void>((resolve) => { releaseSource = resolve; });
+    let sourceReadStarted!: () => void;
+    const sourceRead = new Promise<void>((resolve) => { sourceReadStarted = resolve; });
+    let held = false;
+    const heldBucket = new Proxy(testEnv.CANONICAL_MEDIA_BUCKET, {
+      get(target, property) {
+        if (property === 'get') {
+          return async (key: string) => {
+            if (!held && key === media.objectKey) {
+              held = true;
+              sourceReadStarted();
+              await released;
+            }
+            return target.get(key);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const running = processExport(
+      { ...testEnv, CANONICAL_MEDIA_BUCKET: heldBucket },
+      job.id,
+      new Date('2026-08-12T12:00:00.000Z'),
+      undefined,
+      '2026-08-12T12:00:00.000Z',
+    );
+    await sourceRead;
+    const partialKey = `events/${access.event.id}/exports/${job.id}/attempt-1/partial.zip`;
+    await testEnv.MEDIA_BUCKET.put(partialKey, 'partial');
+
+    const firstPurge = await deleteEventData(testEnv, access.event.id, new Date('2026-08-12T12:00:30.000Z'));
+    const eventWhileRunning = await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+      .bind(access.event.id).first<{ deleted_at: string | null }>();
+    const jobWhileRunning = await new ExportsRepository(testEnv.DB).getById(job.id);
+    const partialWhileRunning = await testEnv.MEDIA_BUCKET.head(partialKey);
+    releaseSource();
+    const settled = await running;
+
+    expect(firstPurge).toMatchObject({ phase: 'fences', remainder: true });
+    expect(eventWhileRunning?.deleted_at).not.toBeNull();
+    expect(jobWhileRunning).toMatchObject({ state: 'running' });
+    expect(partialWhileRunning).not.toBeNull();
+    expect(settled).toMatchObject({ state: 'failed', errorCode: 'EXPORT_EVENT_DELETED' });
+
+    await promoteLegacyStoredMedia(testEnv, new Date('2099-08-13T10:21:00.000Z'));
+    const completed = await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2099-08-13T10:22:00.000Z'),
+    );
+    expect(completed).toMatchObject({ phase: 'complete', remainder: false });
+    expect((await testEnv.MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` })).objects).toEqual([]);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+  });
+});
 
 async function fenceRow(instanceId: string) {
   return testEnv.DB.prepare(`
@@ -854,7 +1060,1140 @@ describe('event cover purge coordinator', () => {
 describe('lifecycle cleanup', () => {
   beforeEach(resetDatabase);
 
-  it('removes expired reserved objects and releases event quota', async () => {
+  it('never authorizes an R2 delete when the selected tombstone row is gone', async () => {
+    const repository = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+
+    expect(await repository.beginSuppression(
+      'events/missing/media/final/missing',
+      '2026-08-13T10:00:00.000Z',
+    )).toBe(false);
+  });
+
+  it('permanently rechecks late writes and rotates a bounded tombstone page fairly', async () => {
+    const repository = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    const keys = [
+      'events/deleted-event/uploads/media-a',
+      'events/deleted-event/uploads/media-b',
+      'events/deleted-event/uploads/media-c',
+    ];
+    for (const [index, objectKey] of keys.entries()) {
+      await repository.ensure({
+        objectKey,
+        eventId: 'deleted-event',
+        mediaId: `deleted-media-${index}`,
+        objectKind: 'source',
+        recordedAt: '2026-08-13T10:00:00.000Z',
+      });
+      await testEnv.MEDIA_BUCKET.put(objectKey, png());
+    }
+
+    const first = await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2026-08-13T10:01:00.000Z'),
+      2,
+    );
+    expect(first).toMatchObject({ inspected: 2, suppressed: 2, observedAbsent: 2 });
+    expect(await testEnv.MEDIA_BUCKET.head(keys[0]!)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(keys[1]!)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(keys[2]!)).not.toBeNull();
+
+    const second = await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2026-08-13T10:01:00.000Z'),
+      2,
+    );
+    expect(second).toMatchObject({ inspected: 1, suppressed: 1, observedAbsent: 1 });
+    expect(await testEnv.MEDIA_BUCKET.head(keys[2]!)).toBeNull();
+    expect(await repository.count()).toBe(3);
+
+    // Relational rows no longer exist, but an arbitrarily late old PUT remains
+    // discoverable and is deleted on the next recurring observation.
+    await testEnv.MEDIA_BUCKET.put(keys[0]!, png());
+    const late = await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2026-08-13T11:02:00.000Z'),
+      3,
+    );
+    expect(late).toMatchObject({ inspected: 3, observedAbsent: 3 });
+    expect(await testEnv.MEDIA_BUCKET.head(keys[0]!)).toBeNull();
+    expect(await repository.get(keys[0]!)).toMatchObject({
+      suppressionStartedAt: '2026-08-13T10:01:00.000Z',
+      lastObservedAt: '2026-08-13T11:02:00.000Z',
+      lastObservedPresent: false,
+      nextCheckAt: '2026-08-13T12:02:00.000Z',
+    });
+    await expect(testEnv.DB.prepare(`
+      DELETE FROM media_object_write_tombstones WHERE object_key = ?
+    `).bind(keys[0]).run()).rejects.toThrow(/tombstones are permanent/u);
+  });
+
+  it('waits for the permanent janitor even when the legacy scanner fails immediately', async () => {
+    const key = 'events/deleted-event/uploads/held-janitor';
+    const repository = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    await repository.ensure({
+      objectKey: key,
+      eventId: 'deleted-event',
+      mediaId: 'held-janitor',
+      objectKind: 'source',
+      recordedAt: '2026-08-13T10:00:00.000Z',
+    });
+    await repository.beginSuppression(key, '2026-08-13T10:00:00.000Z');
+    await testEnv.MEDIA_BUCKET.put(key, png());
+
+    const list = vi.spyOn(testEnv.MEDIA_BUCKET, 'list')
+      .mockRejectedValueOnce(new Error('scanner list unavailable'));
+    const originalDelete = testEnv.MEDIA_BUCKET.delete.bind(testEnv.MEDIA_BUCKET);
+    let releaseDelete!: () => void;
+    const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    let markDeleteStarted!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => { markDeleteStarted = resolve; });
+    const remove = vi.spyOn(testEnv.MEDIA_BUCKET, 'delete').mockImplementationOnce(async (keys) => {
+      markDeleteStarted();
+      await deleteReleased;
+      return originalDelete(keys);
+    });
+
+    let settled = false;
+    const maintenance = maintainLegacyMediaObjects(
+      testEnv,
+      new Date('2026-08-13T10:01:00.000Z'),
+    ).finally(() => { settled = true; });
+    await deleteStarted;
+    await Promise.resolve();
+    const waitedForJanitor = !settled;
+    releaseDelete();
+    await expect(maintenance).rejects.toThrow('scanner list unavailable');
+
+    expect(waitedForJanitor).toBe(true);
+    expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    list.mockRestore();
+    remove.mockRestore();
+  });
+
+  it('starts hourly permanent maintenance while legacy promotion is still pending', async () => {
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+    const lateKey = 'events/hourly-maintenance/uploads/late-old-worker-write';
+    await testEnv.MEDIA_BUCKET.put(lateKey, png());
+    let releasePromotion!: () => void;
+    const promotionReleased = new Promise<void>((resolve) => { releasePromotion = resolve; });
+    const promotion = vi.spyOn(MediaRepository.prototype, 'listPromotionWork')
+      .mockImplementationOnce(async () => {
+        await promotionReleased;
+        return [];
+    });
+    const pending: Promise<unknown>[] = [];
+    const controller = {
+      cron: '47 * * * *',
+      scheduledTime: Date.parse('2026-08-13T10:00:00.000Z'),
+    } as ScheduledController;
+
+    worker.scheduled!(
+      controller,
+      testEnv,
+      {
+        waitUntil: (promise: Promise<unknown>) => pending.push(promise),
+        passThroughOnException() {},
+      } as unknown as ExecutionContext,
+    );
+
+    let maintainedBeforePromotion = true;
+    try {
+      await vi.waitFor(async () => {
+        expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+          .get(lateKey, 'legacy')).not.toBeNull();
+      }, { timeout: 1_000, interval: 10 });
+    } catch {
+      maintainedBeforePromotion = false;
+    }
+    releasePromotion();
+    await Promise.allSettled(pending);
+    promotion.mockRestore();
+
+    expect(maintainedBeforePromotion).toBe(true);
+  });
+
+  it('finishes daily permanent maintenance before propagating promotion failure', async () => {
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+    const lateKey = 'events/daily-maintenance/uploads/late-old-worker-write';
+    await testEnv.MEDIA_BUCKET.put(lateKey, png());
+    const promotion = vi.spyOn(MediaRepository.prototype, 'listPromotionWork')
+      .mockRejectedValueOnce(new Error('promotion inventory unavailable'));
+
+    await expect(scheduledCleanup(
+      testEnv,
+      new Date('2026-08-13T10:00:00.000Z'),
+    )).rejects.toThrow('promotion inventory unavailable');
+
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+      .get(lateKey, 'legacy')).not.toBeNull();
+    promotion.mockRestore();
+  });
+
+  it('scans the legacy bucket forever without touching cover/export or unknown shapes', async () => {
+    const access = await eventAccess('Legacy scanner owner');
+    const eventId = access.event.id;
+    const sourceKey = `events/${eventId}/media/orphan-a`;
+    const previewKey = `events/${eventId}/previews/orphan-b.webp`;
+    const coverKey = `events/${eventId}/cover/masters/keep.webp`;
+    const purgedCoverKey = 'events/hard-purged/cover/raw/late-draft';
+    const exportKey = `events/${eventId}/exports/job-a/attempt-1/manifest.json`;
+    const unknownKey = `events/${eventId}/future-shape/object-a`;
+    for (const key of [sourceKey, previewKey, coverKey, purgedCoverKey, exportKey, unknownKey]) {
+      await testEnv.MEDIA_BUCKET.put(key, png());
+    }
+
+    const first = await scanLegacyMediaNamespace(
+      testEnv,
+      new Date('2026-08-13T10:00:00.000Z'),
+      100,
+    );
+    expect(first).toMatchObject({
+      inspected: 6,
+      inventoried: 5,
+      preserved: 0,
+      quarantined: 1,
+      wrapped: true,
+      epoch: 1,
+    });
+    const tombstones = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    expect(await tombstones.get(sourceKey, 'legacy')).toMatchObject({
+      eventId,
+      mediaId: 'orphan-a',
+      objectKind: 'source',
+      bucketGeneration: 'legacy',
+    });
+    expect(await tombstones.get(previewKey, 'legacy')).toMatchObject({
+      eventId,
+      mediaId: 'orphan-b',
+      objectKind: 'preview',
+      bucketGeneration: 'legacy',
+    });
+    expect(await tombstones.get(exportKey, 'legacy')).toMatchObject({
+      eventId,
+      mediaId: 'job-a',
+      objectKind: 'export',
+      bucketGeneration: 'legacy',
+    });
+    expect(await tombstones.get(coverKey, 'legacy')).toMatchObject({
+      eventId,
+      mediaId: eventId,
+      objectKind: 'cover',
+    });
+    expect(await tombstones.get(purgedCoverKey, 'legacy')).toMatchObject({
+      eventId: 'hard-purged',
+      mediaId: 'hard-purged',
+      objectKind: 'cover',
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT observation_count FROM legacy_media_scan_quarantine WHERE object_key = ?
+    `).bind(unknownKey).first<number>('observation_count')).toBe(1);
+
+    await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2026-08-13T10:01:00.000Z'),
+      100,
+    );
+    expect(await testEnv.MEDIA_BUCKET.head(sourceKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(previewKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(coverKey)).not.toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(purgedCoverKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(exportKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(unknownKey)).not.toBeNull();
+
+    // A completed scan is only an epoch boundary. A later old-bucket write is
+    // found after the cursor wraps and becomes permanently rediscoverable too.
+    const lateKey = `events/${eventId}/uploads/orphan-late`;
+    await testEnv.MEDIA_BUCKET.put(lateKey, png());
+    const second = await scanLegacyMediaNamespace(
+      testEnv,
+      new Date('2026-08-13T11:00:00.000Z'),
+      100,
+    );
+    expect(second).toMatchObject({ wrapped: true, epoch: 2 });
+    expect(await tombstones.get(lateKey, 'legacy')).toMatchObject({
+      mediaId: 'orphan-late',
+      objectKind: 'source',
+    });
+  });
+
+  it('uses the configured five-page hourly scan capacity without advancing past unprocessed keys', async () => {
+    const eventId = 'scanner-capacity-event';
+    const seed = await testEnv.MEDIA_BUCKET.put(
+      `events/${eventId}/uploads/seed`,
+      png(),
+    );
+    const pages = Array.from({ length: 6 }, (_, index) => ({
+      object: { ...seed, key: `events/${eventId}/uploads/page-${index + 1}` } as R2Object,
+      cursor: index === 5 ? undefined : `cursor-${index + 1}`,
+      truncated: index !== 5,
+    }));
+    const list = vi.spyOn(testEnv.MEDIA_BUCKET, 'list').mockImplementation(async (options) => {
+      const cursor = options?.cursor;
+      const pageIndex = cursor === undefined
+        ? 0
+        : Number(cursor.slice('cursor-'.length));
+      const page = pages[pageIndex]!;
+      return {
+        objects: [page.object],
+        truncated: page.truncated,
+        cursor: page.cursor,
+        delimitedPrefixes: [],
+      } as R2Objects;
+    });
+
+    const summary = await scanLegacyMediaNamespace(
+      testEnv,
+      new Date('2026-08-13T10:00:00.000Z'),
+      1,
+    );
+
+    expect(summary).toMatchObject({ inspected: 5, inventoried: 5, wrapped: false, epoch: 0 });
+    expect(list).toHaveBeenCalledTimes(5);
+    expect((await new LegacyMediaScanRepository(testEnv.DB).getState()).cursor).toBe('cursor-5');
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+      .get(`events/${eventId}/uploads/page-6`, 'legacy')).toBeNull();
+    list.mockRestore();
+  });
+
+  it('persists full-epoch growth, error, SLA, and overdue-backlog evidence for the live gate', async () => {
+    const scan = new LegacyMediaScanRepository(testEnv.DB);
+    const firstAt = '2026-08-13T10:00:00.000Z';
+    await scan.advance(null, null, firstAt, 0);
+    await scan.advance(null, null, '2026-08-13T11:00:00.000Z', 1_000);
+    let observation = await observeLegacyMediaScanner(
+      testEnv,
+      new Date('2026-08-13T11:01:00.000Z'),
+    );
+    expect(observation).toMatchObject({
+      lastCompletedAt: '2026-08-13T11:00:00.000Z',
+      lastCompletedStartedAt: firstAt,
+      lastCompletedDiscoveredCount: 1_000,
+      lastCompletedErrorCount: 0,
+      lastCompletedMaxHourlyGrowth: 1_000,
+      lastCompletedWithinSla: true,
+      growthWithinCeiling: true,
+      completedEpochErrorFree: true,
+      suppressedBacklogClear: true,
+      readyForCanonicalLive: true,
+    });
+
+    await scan.recordError('2026-08-13T11:30:00.000Z');
+    await scan.advance(null, null, '2026-08-13T12:00:00.000Z', 2_001);
+    observation = await observeLegacyMediaScanner(
+      testEnv,
+      new Date('2026-08-13T12:01:00.000Z'),
+    );
+    expect(observation).toMatchObject({
+      lastCompletedDiscoveredCount: 1_001,
+      lastCompletedErrorCount: 1,
+      lastCompletedMaxHourlyGrowth: 1_001,
+      growthWithinCeiling: false,
+      completedEpochErrorFree: false,
+      readyForCanonicalLive: false,
+    });
+    expect((await observeLegacyMediaScanner(
+      testEnv,
+      new Date('2026-08-14T12:00:00.001Z'),
+    )).lastCompletedWithinSla).toBe(false);
+  });
+
+  it('reserves the configured janitor quotas for both suppressed and classification work', async () => {
+    const due = '2026-08-13T09:00:00.000Z';
+    await testEnv.DB.prepare(`
+      WITH RECURSIVE seq(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 450
+      )
+      INSERT INTO media_object_write_tombstones (
+        bucket_generation, object_key, event_id, media_id, object_kind,
+        suppression_started_at, next_check_at, created_at, updated_at
+      ) SELECT
+        'legacy', 'events/deleted/uploads/suppressed-' || n,
+        'deleted', 'suppressed-' || n, 'source', ?, ?, ?, ? FROM seq
+    `).bind(due, due, due, due).run();
+    await testEnv.DB.prepare(`
+      WITH RECURSIVE seq(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 150
+      )
+      INSERT INTO media_object_write_tombstones (
+        bucket_generation, object_key, event_id, media_id, object_kind,
+        next_check_at, created_at, updated_at
+      ) SELECT
+        'legacy', 'events/deleted/uploads/classify-' || n,
+        'deleted', 'classify-' || n, 'source', ?, ?, ? FROM seq
+    `).bind(due, due, due).run();
+
+    const dueRows = await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+      .listDue('2026-08-13T10:00:00.000Z', 400, 100);
+    expect(dueRows).toHaveLength(500);
+    expect(dueRows.filter((row) => row.suppressionStartedAt !== null)).toHaveLength(400);
+    expect(dueRows.filter((row) => row.suppressionStartedAt === null)).toHaveLength(100);
+  });
+
+  it('never lets stale janitor selection delete a newly live canonical final', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'tombstone-live-final');
+    const repository = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await testEnv.DB.prepare(`DELETE FROM media_object_promotions WHERE media_id = ?`)
+      .bind(media.id).run();
+    const selected = await repository.listDue('2099-01-01T00:00:00.000Z', 80, 20);
+    expect(selected.map(({ objectKey }) => objectKey)).toContain(finalKey);
+
+    const result = await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2099-01-01T00:00:00.000Z'),
+      100,
+    );
+
+    expect(result.inspected).toBeGreaterThan(0);
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(finalKey)).not.toBeNull();
+    expect(await repository.get(finalKey, 'canonical')).toMatchObject({ suppressionStartedAt: null });
+  });
+
+  it('makes suppression win permanently when it commits before final-pointer adoption', async () => {
+    const access = await eventAccess();
+    const repository = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    const mediaRepository = new MediaRepository(testEnv.DB);
+    const session = await new AuthService(testEnv).resolve(
+      access.guest.cookie.split('=')[1]!.split(';')[0],
+    );
+    const reservedAt = new Date();
+    const media = await mediaRepository.reserve({
+      id: crypto.randomUUID(),
+      eventId: access.event.id,
+      uploaderSessionId: session.session.id,
+      objectKey: `events/${access.event.id}/uploads/suppression-wins`,
+      originalFilename: 'suppression.png',
+      mimeType: 'image/png',
+      declaredByteSize: 64,
+      guestName: 'Avery',
+      caption: null,
+      idempotencyKey: 'suppression-wins',
+      reservationExpiresAt: new Date(reservedAt.getTime() + 10 * 60 * 1_000).toISOString(),
+      createdAt: reservedAt.toISOString(),
+    });
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await mediaRepository.failReservation(media.id);
+    await testEnv.DB.prepare(`DELETE FROM media_object_promotions WHERE media_id = ?`)
+      .bind(media.id).run();
+
+    expect(await repository.beginSuppression(
+      finalKey,
+      '2099-01-01T11:00:00.000Z',
+      'canonical',
+    )).toBe(true);
+    await expect(testEnv.DB.prepare(`
+      UPDATE media
+      SET object_key = ?, upload_state = 'stored', byte_size = 64, width = 1, height = 1
+      WHERE id = ?
+    `).bind(finalKey, media.id).run()).rejects.toThrow();
+    expect(await mediaRepository.getById(media.id)).toMatchObject({ uploadState: 'failed' });
+    expect(await repository.get(finalKey, 'canonical')).toMatchObject({
+      suppressionStartedAt: '2099-01-01T11:00:00.000Z',
+    });
+  });
+
+  it('promotes a legacy stored object to its canonical immutable key', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'legacy-promotion');
+    const canonicalObjectKey = finalizedMediaObjectKey(access.event.id, media.id);
+
+    await scheduledCleanup(testEnv, new Date('2026-07-21T12:01:00.000Z'));
+
+    expect((await new MediaRepository(testEnv.DB).getById(media.id))?.objectKey)
+      .toBe(canonicalObjectKey);
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalObjectKey)).not.toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await new MediaRepository(testEnv.DB).getPromotion(media.id)).toBeNull();
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB).get(media.objectKey))
+      .toMatchObject({
+        suppressionStartedAt: expect.any(String),
+        lastObservedPresent: false,
+      });
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB).get(canonicalObjectKey, 'canonical'))
+      .toMatchObject({
+        suppressionStartedAt: null,
+        lastObservedAt: null,
+      });
+  });
+
+  it('copy-only freezes and verifies canonical bytes without changing the legacy pointer', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'legacy-copy-only');
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+    const repository = new MediaRepository(testEnv.DB);
+    const canonicalObjectKey = finalizedMediaObjectKey(access.event.id, media.id);
+
+    const copiedAt = new Date('2026-07-21T12:01:00.000Z');
+    const summary = await promoteLegacyStoredMedia(testEnv, copiedAt, 25, () => copiedAt);
+
+    expect(summary).toMatchObject({ inspected: 1, verified: 1, promoted: 0 });
+    expect(await repository.getById(media.id)).toMatchObject({
+      objectKey: media.objectKey,
+      objectBucketGeneration: 'legacy',
+      previewObjectKey: null,
+    });
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalObjectKey)).not.toBeNull();
+    expect(await repository.getPromotion(media.id)).toMatchObject({
+      state: 'target_verified',
+      finalPointerCommitted: false,
+      sourceEtag: expect.any(String),
+      sourceSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      sourceWidth: media.width,
+      sourceHeight: media.height,
+      finalEtag: expect.any(String),
+      targetVerifiedAt: copiedAt.toISOString(),
+      leaseExpiresAt: null,
+    });
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+      .get(canonicalObjectKey, 'canonical')).toMatchObject({ suppressionStartedAt: null });
+  });
+
+  it('copy-only excludes an over-limit active verified backlog but still copies pending and hands off inactive proof', async () => {
+    const access = await eventAccess();
+    const pending = await moveStoredMediaToLegacyKey(access, 'copy-only-after-verified-backlog');
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
+    await testEnv.DB.exec(`
+      DROP TRIGGER IF EXISTS media_stored_legacy_guard_insert;
+      DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;
+    `);
+    for (let index = 0; index < 26; index += 1) {
+      const mediaId = `verified-active-${String(index).padStart(2, '0')}`;
+      await testEnv.DB.prepare(`
+        INSERT INTO media (
+          id, event_id, uploader_session_id, object_key, original_filename,
+          mime_type, declared_byte_size, byte_size, width, height, guest_name,
+          upload_state, publication_status, idempotency_key,
+          reservation_expires_at, created_at, stored_at
+        ) VALUES (?, ?, ?, ?, ?, 'image/png', 64, 64, 800, 600, 'Avery',
+          'stored', 'unpublished', ?, '2026-07-21T11:59:00.000Z', ?, ?)
+      `).bind(
+        mediaId,
+        access.event.id,
+        sessionId,
+        `events/${access.event.id}/media/${mediaId}`,
+        `${mediaId}.png`,
+        mediaId,
+        '2026-07-21T10:00:00.000Z',
+        '2026-07-21T10:00:00.000Z',
+      ).run();
+      await testEnv.DB.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'target_verified', claim_token = ?, lease_expires_at = NULL,
+          source_etag = ?, source_mime_type = 'image/png', source_byte_size = 64,
+          source_sha256 = ?, source_width = 800, source_height = 600,
+          final_etag = ?, target_verified_at = ?, updated_at = ?
+        WHERE media_id = ?
+      `).bind(
+        `verified-owner-${String(index).padStart(2, '0')}-at-least-sixteen`,
+        `legacy-etag-${index}`,
+        index.toString(16).padStart(64, '0'),
+        `canonical-etag-${index}`,
+        '2026-07-21T10:01:00.000Z',
+        `2026-07-21T10:${String(index).padStart(2, '0')}:00.000Z`,
+        mediaId,
+      ).run();
+    }
+    const inactiveId = 'verified-inactive-copy-only';
+    await testEnv.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, original_filename,
+        mime_type, declared_byte_size, byte_size, width, height, guest_name,
+        upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at, stored_at
+      ) VALUES (?, ?, ?, ?, 'inactive.png', 'image/png', 64, 64, 800, 600,
+        'Avery', 'stored', 'unpublished', ?, '2026-07-21T11:59:00.000Z', ?, ?)
+    `).bind(
+      inactiveId,
+      access.event.id,
+      sessionId,
+      `events/${access.event.id}/media/${inactiveId}`,
+      inactiveId,
+      '2026-07-21T10:00:00.000Z',
+      '2026-07-21T10:00:00.000Z',
+    ).run();
+    await testEnv.DB.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'target_verified', claim_token = ?, lease_expires_at = NULL,
+        source_etag = 'inactive-source-etag', source_mime_type = 'image/png',
+        source_byte_size = 64, source_sha256 = ?, source_width = 800,
+        source_height = 600, final_etag = 'inactive-final-etag',
+        target_verified_at = ?, updated_at = ?
+      WHERE media_id = ?
+    `).bind(
+      'verified-inactive-owner-at-least-sixteen',
+      'f'.repeat(64),
+      '2026-07-21T10:01:00.000Z',
+      '2026-07-21T10:01:00.000Z',
+      inactiveId,
+    ).run();
+    await testEnv.DB.prepare(`
+      UPDATE media SET upload_state = 'deleted', deleted_at = ? WHERE id = ?
+    `).bind('2026-07-21T10:02:00.000Z', inactiveId).run();
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+
+    const now = new Date('2026-07-21T12:01:00.000Z');
+    const summary = await promoteLegacyStoredMedia(testEnv, now, 25, () => now);
+    const repository = new MediaRepository(testEnv.DB);
+
+    expect(summary).toMatchObject({ inspected: 2, verified: 1, promoted: 0 });
+    expect(await repository.getPromotion(pending.id)).toMatchObject({ state: 'target_verified' });
+    expect(await repository.getPromotion(inactiveId)).toBeNull();
+    expect(await repository.getPromotion('verified-active-00')).toMatchObject({
+      state: 'target_verified', finalPointerCommitted: false,
+    });
+    const tombstones = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    expect(await tombstones.get(
+      finalizedMediaObjectKey(access.event.id, inactiveId),
+      'canonical',
+    )).toMatchObject({ suppressionStartedAt: now.toISOString() });
+  });
+
+  it.each(['media', 'event'] as const)(
+    'hands a canonical target to permanent suppression when %s deletion wins before proof commit',
+    async (winner) => {
+      const access = await eventAccess();
+      const media = await moveStoredMediaToLegacyKey(access, `copy-proof-${winner}-delete`);
+      const repository = new MediaRepository(testEnv.DB);
+      const originalMark = MediaRepository.prototype.markPromotionTargetVerified;
+      const mark = vi.spyOn(MediaRepository.prototype, 'markPromotionTargetVerified')
+        .mockImplementationOnce(async function (this: MediaRepository, ...args) {
+          if (winner === 'media') {
+            await this.delete(media.id, '2026-07-21T12:00:30.000Z');
+          } else {
+            await testEnv.DB.prepare('UPDATE events SET deleted_at = ? WHERE id = ?')
+              .bind('2026-07-21T12:00:30.000Z', access.event.id).run();
+          }
+          return originalMark.call(this, ...args);
+        });
+      globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+
+      const firstAt = new Date('2026-07-21T12:01:00.000Z');
+      const first = await promoteLegacyStoredMedia(testEnv, firstAt, 25, () => firstAt);
+      mark.mockRestore();
+      expect(first.verified).toBe(0);
+      expect(await repository.getPromotion(media.id)).toMatchObject({ state: 'copying' });
+      const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+      expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(finalKey)).not.toBeNull();
+
+      const recoveredAt = new Date('2026-07-21T12:22:00.000Z');
+      await promoteLegacyStoredMedia(testEnv, recoveredAt, 25, () => recoveredAt);
+
+      expect(await repository.getPromotion(media.id)).toBeNull();
+      expect(await repository.getById(media.id)).not.toMatchObject({
+        objectBucketGeneration: 'canonical', objectKey: finalKey,
+      });
+      expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+        .get(finalKey, 'canonical')).toMatchObject({
+          suppressionStartedAt: recoveredAt.toISOString(),
+        });
+      // Promotion never performs a read-authorized compensation delete. The
+      // forever janitor owns this already-suppressed target on a later pass.
+      expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(finalKey)).not.toBeNull();
+    },
+  );
+
+  it('adopts the immutable verified snapshot after a late legacy replay and a lost pointer-CAS response', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'verified-snapshot-cutover');
+    const repository = new MediaRepository(testEnv.DB);
+    const previewKey = `events/${access.event.id}/previews/${media.id}.webp`;
+    await testEnv.DB.prepare('UPDATE media SET preview_object_key = ? WHERE id = ?')
+      .bind(previewKey, media.id).run();
+    await testEnv.MEDIA_BUCKET.put(previewKey, png());
+    expect(await repository.legacyStoredCutoverReadiness()).toEqual({
+      liveLegacyCount: 1, unverifiedLiveLegacyCount: 1,
+    });
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+    const copiedAt = new Date('2026-07-21T12:01:00.000Z');
+    await promoteLegacyStoredMedia(testEnv, copiedAt, 25, () => copiedAt);
+    const proof = await repository.getPromotion(media.id);
+    expect(proof).toMatchObject({ state: 'target_verified' });
+    expect(await repository.legacyStoredCutoverReadiness()).toEqual({
+      liveLegacyCount: 1, unverifiedLiveLegacyCount: 0,
+    });
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    const frozen = new Uint8Array(await new Response(
+      (await testEnv.CANONICAL_MEDIA_BUCKET.get(finalKey))!.body,
+    ).arrayBuffer());
+    const replay = png().slice();
+    replay[replay.byteLength - 1] = replay[replay.byteLength - 1]! ^ 0xff;
+    await testEnv.MEDIA_BUCKET.put(media.objectKey, replay, {
+      httpMetadata: { contentType: media.mimeType },
+    });
+
+    delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+    const originalCommit = MediaRepository.prototype.commitPromotionPointer;
+    const originalHandoff = MediaRepository.prototype.handoffPromotionToPermanentSuppression;
+    const commit = vi.spyOn(MediaRepository.prototype, 'commitPromotionPointer')
+      .mockImplementationOnce(async function (this: MediaRepository, ...args) {
+        const committed = await originalCommit.call(this, ...args);
+        if (committed) throw new Error('D1 committed before response loss');
+        return committed;
+      });
+    const handoff = vi.spyOn(MediaRepository.prototype, 'handoffPromotionToPermanentSuppression')
+      .mockImplementationOnce(async function (this: MediaRepository, ...args) {
+        // Model an old setter transaction admitted just before the canonical
+        // guard became visible. Handoff must clear it in the same D1 batch that
+        // starts preview suppression, even though the live CAS already cleared
+        // the earlier preview value.
+        await testEnv.DB.exec('DROP TRIGGER media_object_write_tombstone_guard_update;');
+        await testEnv.DB.prepare('UPDATE media SET preview_object_key = ? WHERE id = ?')
+          .bind(previewKey, media.id).run();
+        return originalHandoff.call(this, ...args);
+      });
+    const cutoverAt = new Date('2026-07-21T12:02:00.000Z');
+    const summary = await promoteLegacyStoredMedia(testEnv, cutoverAt, 25, () => cutoverAt);
+    commit.mockRestore();
+    handoff.mockRestore();
+
+    expect(summary.promoted).toBe(1);
+    expect(await repository.getById(media.id)).toMatchObject({
+      objectBucketGeneration: 'canonical',
+      objectKey: finalKey,
+      previewObjectKey: null,
+    });
+    expect(await repository.legacyStoredCutoverReadiness()).toEqual({
+      liveLegacyCount: 0, unverifiedLiveLegacyCount: 0,
+    });
+    expect(new Uint8Array(await new Response(
+      (await testEnv.CANONICAL_MEDIA_BUCKET.get(finalKey))!.body,
+    ).arrayBuffer())).toEqual(frozen);
+    expect(new Uint8Array(await new Response(
+      (await testEnv.MEDIA_BUCKET.get(media.objectKey))!.body,
+    ).arrayBuffer())).toEqual(replay);
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB)
+      .get(previewKey, 'legacy')).toMatchObject({ suppressionStartedAt: expect.any(String) });
+  });
+
+  it('hands a deleted stored canonical photo to the permanent janitor and preserves live finals', async () => {
+    const access = await eventAccess();
+    const repository = new MediaRepository(testEnv.DB);
+    const deletedMedia = await uploadPending(access, 'canonical-delete-handoff');
+    const liveMedia = await uploadPending(access, 'canonical-live-handoff');
+    const deletedPreview = `events/${access.event.id}/previews/${deletedMedia.id}.webp`;
+    await testEnv.MEDIA_BUCKET.put(deletedPreview, png());
+    await repository.delete(deletedMedia.id, '2026-08-13T10:00:00.000Z');
+
+    const cleanupAt = new Date('2099-01-01T00:00:00.000Z');
+    await promoteLegacyStoredMedia(testEnv, cleanupAt);
+    await cleanupMediaObjectWriteTombstones(testEnv, cleanupAt, 100);
+
+    expect(await repository.getPromotion(deletedMedia.id)).toBeNull();
+    expect(await repository.getPromotion(liveMedia.id)).toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(deletedMedia.objectKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(deletedPreview)).toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(liveMedia.objectKey)).not.toBeNull();
+    const tombstones = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    expect(await tombstones.get(deletedMedia.objectKey, 'canonical')).toMatchObject({
+      suppressionStartedAt: expect.any(String), lastObservedPresent: false,
+    });
+    expect(await tombstones.get(liveMedia.objectKey, 'canonical')).toMatchObject({
+      suppressionStartedAt: null, lastObservedAt: null,
+    });
+  });
+
+  it('adopts an identical pre-existing canonical object before deleting the legacy alias', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'legacy-promotion-recovery');
+    const canonicalObjectKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(canonicalObjectKey, png(), {
+      httpMetadata: { contentType: 'image/png' },
+    });
+
+    await scheduledCleanup(testEnv, new Date('2026-07-21T12:01:00.000Z'));
+
+    expect((await new MediaRepository(testEnv.DB).getById(media.id))?.objectKey)
+      .toBe(canonicalObjectKey);
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await new Response((await testEnv.CANONICAL_MEDIA_BUCKET.get(canonicalObjectKey))!.body).arrayBuffer())
+      .toEqual(png().buffer);
+  });
+
+  it('recovers the durable pre-crash source digest before a replay can replace the legacy alias', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'legacy-crash-source-replay');
+    const repository = new MediaRepository(testEnv.DB);
+    const claim = await repository.claimPromotion(
+      media.id,
+      'original-promotion-owner-at-least-sixteen',
+      '2026-07-21T12:00:00.000Z',
+      '2026-07-21T12:20:00.000Z',
+    );
+    expect(claim).not.toBeNull();
+    const source = await testEnv.MEDIA_BUCKET.get(media.objectKey);
+    expect(source?.body).toBeTruthy();
+    const sourceBytes = await new Response(source!.body).arrayBuffer();
+    const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', sourceBytes));
+    const digest = [...digestBytes]
+      .map((value) => value.toString(16).padStart(2, '0')).join('');
+    expect(await repository.recordPromotionSource(
+      media.id,
+      claim!.promotion.claimToken!,
+      {
+        etag: source!.etag,
+        mimeType: 'image/png',
+        byteSize: sourceBytes.byteLength,
+        sha256: digest,
+        width: media.width!,
+        height: media.height!,
+        recordedAt: '2026-07-21T12:01:00.000Z',
+      },
+    )).toBe(true);
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(finalKey, sourceBytes, {
+      httpMetadata: { contentType: 'image/png' },
+      sha256: digestBytes,
+    });
+    const replay = new Uint8Array(sourceBytes.slice(0));
+    replay[replay.byteLength - 1] = replay[replay.byteLength - 1]! ^ 0xff;
+    await testEnv.MEDIA_BUCKET.put(media.objectKey, replay, {
+      httpMetadata: { contentType: 'image/png' },
+    });
+
+    const recoveredAt = new Date('2026-07-21T12:21:00.000Z');
+    const summary = await promoteLegacyStoredMedia(testEnv, recoveredAt, 25, () => recoveredAt);
+    expect(summary.promoted).toBe(1);
+    expect(await repository.getById(media.id)).toMatchObject({
+      objectBucketGeneration: 'canonical',
+      objectKey: finalKey,
+    });
+    expect(new Uint8Array(await new Response(
+      (await testEnv.CANONICAL_MEDIA_BUCKET.get(finalKey))!.body,
+    ).arrayBuffer())).toEqual(new Uint8Array(sourceBytes));
+  });
+
+  it('leaves a legacy row gated when an existing canonical object has different same-size bytes', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'legacy-promotion-conflict');
+    const canonicalObjectKey = finalizedMediaObjectKey(access.event.id, media.id);
+    const unrelated = png().slice();
+    unrelated[unrelated.byteLength - 1] = unrelated[unrelated.byteLength - 1]! ^ 0xff;
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(canonicalObjectKey, unrelated, {
+      httpMetadata: { contentType: 'image/png' },
+    });
+
+    await scheduledCleanup(testEnv, new Date('2026-07-21T12:01:00.000Z'));
+
+    expect((await new MediaRepository(testEnv.DB).getById(media.id))?.objectKey)
+      .toBe(media.objectKey);
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+    expect(await new Response((await testEnv.CANONICAL_MEDIA_BUCKET.get(canonicalObjectKey))!.body).arrayBuffer())
+      .toEqual(unrelated.buffer);
+  });
+
+  it('does not copy bytes when the legacy object changes after its ETag is inspected', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'legacy-promotion-etag-swap');
+    const canonicalObjectKey = finalizedMediaObjectKey(access.event.id, media.id);
+    const replacement = png().slice();
+    replacement[replacement.byteLength - 1] = replacement[replacement.byteLength - 1]! ^ 0xff;
+    const originalGet = testEnv.MEDIA_BUCKET.get.bind(testEnv.MEDIA_BUCKET);
+    let swapped = false;
+    const get = vi.spyOn(testEnv.MEDIA_BUCKET, 'get').mockImplementation((async (...args: any[]) => {
+      const [key, options] = args;
+      if (!swapped && key === media.objectKey && options?.onlyIf?.etagMatches) {
+        swapped = true;
+        await testEnv.MEDIA_BUCKET.put(media.objectKey, replacement, {
+          httpMetadata: { contentType: 'image/png' },
+        });
+      }
+      return originalGet(...args as [string, any]);
+    }) as any);
+
+    await scheduledCleanup(testEnv, new Date('2026-07-21T12:01:00.000Z'));
+    get.mockRestore();
+
+    expect(swapped).toBe(true);
+    expect((await new MediaRepository(testEnv.DB).getById(media.id))?.objectKey)
+      .toBe(media.objectKey);
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalObjectKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+  });
+
+  it.each([
+    ['same-size non-image bytes', () => new Uint8Array(png().byteLength)],
+    ['a valid image with different dimensions', () => png(320, 240)],
+  ])('does not promote %s replayed through a legacy alias', async (_label, replacement) => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, `legacy-invalid-${crypto.randomUUID()}`);
+    const canonicalObjectKey = finalizedMediaObjectKey(access.event.id, media.id);
+    const bytes = replacement();
+    expect(bytes.byteLength).toBe(media.byteSize);
+    await testEnv.MEDIA_BUCKET.put(media.objectKey, bytes, {
+      httpMetadata: { contentType: media.mimeType },
+    });
+
+    const now = new Date('2026-07-21T12:01:00.000Z');
+    await promoteLegacyStoredMedia(testEnv, now, 25, () => now);
+
+    expect(await new MediaRepository(testEnv.DB).getById(media.id)).toMatchObject({
+      objectKey: media.objectKey,
+      objectBucketGeneration: 'legacy',
+    });
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalObjectKey)).toBeNull();
+    expect(await new MediaRepository(testEnv.DB).getPromotion(media.id)).not.toBeNull();
+  });
+
+  it('bounds each promotion page and continues after one candidate throws', async () => {
+    const access = await eventAccess();
+    const candidates = await Promise.all([
+      moveStoredMediaToLegacyKey(access, 'legacy-promotion-bad'),
+      moveStoredMediaToLegacyKey(access, 'legacy-promotion-next'),
+      moveStoredMediaToLegacyKey(access, 'legacy-promotion-later'),
+    ]);
+    for (const [index, media] of candidates.entries()) {
+      await testEnv.DB.prepare('UPDATE media_object_promotions SET updated_at = ? WHERE media_id = ?')
+        .bind(`2026-07-21T10:0${index}:00.000Z`, media.id).run();
+    }
+    const originalHead = testEnv.MEDIA_BUCKET.head.bind(testEnv.MEDIA_BUCKET);
+    const head = vi.spyOn(testEnv.MEDIA_BUCKET, 'head').mockImplementation(async (key: string) => {
+      if (key === candidates[0]!.objectKey) throw new Error('legacy R2 read failed');
+      return originalHead(key);
+    });
+
+    const promotionNow = new Date('2026-07-21T12:01:00.000Z');
+    const summary = await promoteLegacyStoredMedia(testEnv, promotionNow, 2, () => promotionNow);
+    head.mockRestore();
+
+    expect(summary).toEqual({ inspected: 2, verified: 1, promoted: 1, pending: 2 });
+    const repository = new MediaRepository(testEnv.DB);
+    expect((await repository.getById(candidates[0]!.id))?.objectKey).toBe(candidates[0]!.objectKey);
+    expect((await repository.getById(candidates[1]!.id))?.objectKey)
+      .toBe(finalizedMediaObjectKey(access.event.id, candidates[1]!.id));
+    expect((await repository.getById(candidates[2]!.id))?.objectKey).toBe(candidates[2]!.objectKey);
+  });
+
+  it('rotates a full page of absent ambiguous ingress writers so later promotion work cannot starve', async () => {
+    const access = await eventAccess();
+    const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
+    const expiredLease = '2026-08-13T09:00:00.000Z';
+    for (let index = 0; index < 25; index += 1) {
+      const mediaId = `ambiguous-backlog-${String(index).padStart(2, '0')}`;
+      await repository.reserve({
+        id: mediaId,
+        eventId: access.event.id,
+        uploaderSessionId: sessionId,
+        objectKey: `events/${access.event.id}/uploads/${mediaId}`,
+        originalFilename: `${mediaId}.png`,
+        mimeType: 'image/png',
+        declaredByteSize: png().byteLength,
+        guestName: 'Avery', caption: null, idempotencyKey: mediaId,
+        reservationExpiresAt: '2099-01-01T00:00:00.000Z',
+        createdAt: new Date().toISOString(),
+      });
+      // This is a scheduler-page fixture, not a quota test. Keep the event's
+      // capacity counters below the product cap while preserving all 25 rows.
+      await testEnv.DB.prepare(`
+        UPDATE events SET reserved_media_count = 0, reserved_bytes = 0 WHERE id = ?
+      `).bind(access.event.id).run();
+      const digest = String(index).padStart(64, '0');
+      await testEnv.DB.prepare(`
+        UPDATE media_object_promotions
+        SET state = 'copying', claim_token = ?, lease_expires_at = ?,
+          source_writable_until = ?, source_etag = ?, source_mime_type = 'image/png',
+          source_byte_size = ?, source_sha256 = ?, source_width = 800,
+          source_height = 600, updated_at = ?
+        WHERE media_id = ?
+      `).bind(
+        `ambiguous-owner-${index}-at-least-sixteen`,
+        expiredLease,
+        expiredLease,
+        `buffer:${digest}`,
+        png().byteLength,
+        digest,
+        `2026-08-13T08:${String(index).padStart(2, '0')}:00.000Z`,
+        mediaId,
+      ).run();
+    }
+    const later = await moveStoredMediaToLegacyKey(access, 'later-legacy-work');
+    await testEnv.DB.prepare(`
+      UPDATE media_object_promotions SET updated_at = ? WHERE media_id = ?
+    `).bind('2026-08-13T09:30:00.000Z', later.id).run();
+    const now = new Date('2026-08-13T10:00:00.000Z');
+
+    const first = await promoteLegacyStoredMedia(testEnv, now, 25, () => now);
+    expect(first).toMatchObject({ inspected: 25, promoted: 0 });
+    expect((await repository.getById(later.id))?.objectBucketGeneration).toBe('legacy');
+    const second = await promoteLegacyStoredMedia(testEnv, now, 25, () => now);
+    expect(second.promoted).toBe(1);
+    expect(await repository.getById(later.id)).toMatchObject({
+      objectBucketGeneration: 'canonical',
+      objectKey: finalizedMediaObjectKey(access.event.id, later.id),
+    });
+    expect((await repository.getPromotion('ambiguous-backlog-00'))?.state).toBe('copying');
+  });
+
+  it('adopts an exact-present canonical final from an expired ambiguous ingress fence', async () => {
+    const access = await eventAccess();
+    const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
+    const bytes = png(800, 600);
+    const media = await repository.reserve({
+      id: 'ambiguous-present-ingress', eventId: access.event.id,
+      uploaderSessionId: sessionId,
+      objectKey: `events/${access.event.id}/uploads/ambiguous-present-ingress`,
+      originalFilename: 'ambiguous.png', mimeType: 'image/png',
+      declaredByteSize: bytes.byteLength, guestName: 'Avery', caption: null,
+      idempotencyKey: 'ambiguous-present-ingress',
+      reservationExpiresAt: '2099-01-01T00:00:00.000Z',
+      createdAt: new Date().toISOString(),
+    });
+    const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    const digest = [...digestBytes]
+      .map((value) => value.toString(16).padStart(2, '0')).join('');
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await testEnv.DB.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'copying', claim_token = ?, lease_expires_at = ?,
+        source_writable_until = ?, source_etag = ?, source_mime_type = 'image/png',
+        source_byte_size = ?, source_sha256 = ?, source_width = 800,
+        source_height = 600, updated_at = ?
+      WHERE media_id = ?
+    `).bind(
+      'ambiguous-present-owner-at-least-sixteen',
+      '2026-08-13T09:00:00.000Z',
+      '2026-08-13T09:00:00.000Z',
+      `buffer:${digest}`,
+      bytes.byteLength,
+      digest,
+      '2026-08-13T09:00:00.000Z',
+      media.id,
+    ).run();
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(finalKey, bytes, {
+      httpMetadata: { contentType: 'image/png' },
+      sha256: digestBytes,
+    });
+
+    const summary = await promoteLegacyStoredMedia(
+      testEnv,
+      new Date('2026-08-13T10:00:00.000Z'),
+    );
+    expect(summary.promoted).toBe(1);
+    expect(await repository.getById(media.id)).toMatchObject({
+      uploadState: 'stored',
+      objectBucketGeneration: 'canonical',
+      objectKey: finalKey,
+      width: 800,
+      height: 600,
+    });
+    expect(await repository.getPromotion(media.id)).toMatchObject({
+      state: 'cleanup_pending',
+      finalPointerCommitted: true,
+    });
+  });
+
+  it('copy-only rotates an exact-present ingress fence without mutating its reserved pointer', async () => {
+    const access = await eventAccess();
+    const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
+    const bytes = png(800, 600);
+    const media = await repository.reserve({
+      id: 'copy-only-present-ingress', eventId: access.event.id,
+      uploaderSessionId: sessionId,
+      objectKey: `events/${access.event.id}/uploads/copy-only-present-ingress`,
+      originalFilename: 'copy-only.png', mimeType: 'image/png',
+      declaredByteSize: bytes.byteLength, guestName: 'Avery', caption: null,
+      idempotencyKey: 'copy-only-present-ingress',
+      reservationExpiresAt: '2099-01-01T00:00:00.000Z',
+      createdAt: new Date().toISOString(),
+    });
+    const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    const digest = [...digestBytes]
+      .map((value) => value.toString(16).padStart(2, '0')).join('');
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await testEnv.DB.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'copying', claim_token = ?, lease_expires_at = ?,
+        source_writable_until = ?, source_etag = ?, source_mime_type = 'image/png',
+        source_byte_size = ?, source_sha256 = ?, source_width = 800,
+        source_height = 600, updated_at = ?
+      WHERE media_id = ?
+    `).bind(
+      'copy-only-present-owner-at-least-sixteen',
+      '2026-08-13T09:00:00.000Z',
+      '2026-08-13T09:00:00.000Z',
+      `buffer:${digest}`,
+      bytes.byteLength,
+      digest,
+      '2026-08-13T09:00:00.000Z',
+      media.id,
+    ).run();
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(finalKey, bytes, {
+      httpMetadata: { contentType: 'image/png' }, sha256: digestBytes,
+    });
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+
+    const summary = await promoteLegacyStoredMedia(
+      testEnv,
+      new Date('2026-08-13T10:00:00.000Z'),
+    );
+
+    expect(summary.promoted).toBe(0);
+    expect(await repository.getById(media.id)).toMatchObject({
+      uploadState: 'reserved', objectBucketGeneration: 'legacy', objectKey: media.objectKey,
+    });
+    expect(await repository.getPromotion(media.id)).toMatchObject({
+      state: 'copying', finalPointerCommitted: false, sourceSha256: digest,
+      updatedAt: '2026-08-13T10:00:00.000Z',
+    });
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(finalKey)).not.toBeNull();
+  });
+
+  it('hands an inactive ambiguous ingress fence to permanent suppression without a finite retirement guess', async () => {
+    const access = await eventAccess();
+    const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
+    const media = await repository.reserve({
+      id: 'ambiguous-inactive-ingress', eventId: access.event.id,
+      uploaderSessionId: sessionId,
+      objectKey: `events/${access.event.id}/uploads/ambiguous-inactive-ingress`,
+      originalFilename: 'ambiguous.png', mimeType: 'image/png',
+      declaredByteSize: png().byteLength, guestName: 'Avery', caption: null,
+      idempotencyKey: 'ambiguous-inactive-ingress',
+      reservationExpiresAt: '2099-01-01T00:00:00.000Z',
+      createdAt: new Date().toISOString(),
+    });
+    const digest = 'c'.repeat(64);
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    await testEnv.DB.prepare(`
+      UPDATE media_object_promotions
+      SET state = 'copying', claim_token = ?, lease_expires_at = ?,
+        source_writable_until = ?, source_etag = ?, source_mime_type = 'image/png',
+        source_byte_size = ?, source_sha256 = ?, source_width = 800,
+        source_height = 600, updated_at = ?
+      WHERE media_id = ?
+    `).bind(
+      'ambiguous-inactive-owner-at-least-sixteen',
+      '2026-08-13T09:00:00.000Z',
+      '2026-08-13T09:00:00.000Z',
+      `buffer:${digest}`,
+      png().byteLength,
+      digest,
+      '2026-08-13T09:00:00.000Z',
+      media.id,
+    ).run();
+    await repository.delete(media.id, '2026-08-13T09:30:00.000Z');
+
+    await promoteLegacyStoredMedia(testEnv, new Date('2026-08-13T10:00:00.000Z'));
+
+    expect(await repository.getPromotion(media.id)).toBeNull();
+    const tombstones = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    expect(await tombstones.get(media.objectKey, 'legacy'))
+      .toMatchObject({ suppressionStartedAt: expect.any(String) });
+    expect(await tombstones.get(finalKey, 'canonical'))
+      .toMatchObject({ suppressionStartedAt: expect.any(String) });
+    expect(await repository.getById(media.id)).toMatchObject({ uploadState: 'deleted' });
+  });
+
+  it('fails expired reservations D1-first and leaves exact object cleanup to durable inventory', async () => {
     const access = await eventAccess();
     // The whole sweep is dated in the past, so photo delivery has to have been
     // open before the reservation this releases was ever taken.
@@ -869,14 +2208,94 @@ describe('lifecycle cleanup', () => {
     });
     await testEnv.MEDIA_BUCKET.put(media.objectKey, png());
     expect(await cleanupExpiredReservations(testEnv, new Date('2026-07-21T12:01:00.000Z'))).toBe(1);
-    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await repository.getById(media.id)).toMatchObject({ uploadState: 'failed' });
+    expect(await repository.getPromotion(media.id)).not.toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
     const event = await testEnv.DB.prepare('SELECT reserved_media_count FROM events WHERE id = ?').bind(access.event.id).first<any>();
     expect(event.reserved_media_count).toBe(0);
+  });
+
+  it('categorically rejects old finalization before D1-first expiry cleanup', async () => {
+    const access = await eventAccess();
+    await testEnv.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
+      .bind('2026-07-21T11:00:00.000Z', access.event.id).run();
+    const repository = new MediaRepository(testEnv.DB);
+    const media = await repository.reserve({
+      id: crypto.randomUUID(),
+      eventId: access.event.id,
+      uploaderSessionId: (await new AuthService(testEnv)
+        .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,
+      objectKey: `events/${access.event.id}/uploads/expiry-finalize-race`,
+      originalFilename: 'race.png', mimeType: 'image/png', declaredByteSize: 64,
+      guestName: 'Avery', caption: null, idempotencyKey: 'expiry-finalize-race',
+      reservationExpiresAt: '2026-07-21T12:00:00.000Z',
+      createdAt: '2026-07-21T11:45:00.000Z',
+    });
+    await testEnv.MEDIA_BUCKET.put(media.objectKey, png());
+    const originalFail = MediaRepository.prototype.failReservation;
+    let legacyFinalizeRejected = false;
+    const fail = vi.spyOn(MediaRepository.prototype, 'failReservation')
+      .mockImplementationOnce(async function (this: MediaRepository, id) {
+        try {
+          await this.finalize(
+            id,
+            { byteSize: 64, width: 800, height: 600 },
+            '2026-07-21T12:01:00.000Z',
+          );
+        } catch (error) {
+          legacyFinalizeRejected = /legacy stored media creation is fenced/u.test(String(error));
+        }
+        return originalFail.call(this, id);
+      });
+
+    expect(await cleanupExpiredReservations(
+      testEnv,
+      new Date('2026-07-21T12:01:01.000Z'),
+    )).toBe(1);
+    fail.mockRestore();
+    expect(legacyFinalizeRejected).toBe(true);
+    expect(await repository.getById(media.id)).toMatchObject({ uploadState: 'failed' });
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+    expect(await testEnv.DB.prepare(`
+      SELECT reserved_media_count, stored_media_count FROM events WHERE id = ?
+    `).bind(access.event.id).first()).toEqual({ reserved_media_count: 0, stored_media_count: 0 });
+  });
+
+  it('leaves expired reservations untouched throughout Candidate A', async () => {
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = false;
+    const access = await eventAccess();
+    await testEnv.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
+      .bind('2026-07-21T11:00:00.000Z', access.event.id).run();
+    const repository = new MediaRepository(testEnv.DB);
+    const media = await repository.reserve({
+      id: crypto.randomUUID(),
+      eventId: access.event.id,
+      uploaderSessionId: (await new AuthService(testEnv)
+        .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,
+      objectKey: `events/${access.event.id}/uploads/candidate-a-expired`,
+      originalFilename: 'held.png', mimeType: 'image/png', declaredByteSize: 64,
+      guestName: 'Avery', caption: null, idempotencyKey: 'candidate-a-expired',
+      reservationExpiresAt: '2026-07-21T12:00:00.000Z',
+      createdAt: '2026-07-21T11:45:00.000Z',
+    });
+
+    expect(await cleanupExpiredReservations(
+      testEnv,
+      new Date('2026-07-21T12:01:00.000Z'),
+    )).toBe(0);
+    expect(await repository.getById(media.id)).toMatchObject({ uploadState: 'reserved' });
+    expect(await testEnv.DB.prepare(`
+      SELECT reserved_media_count FROM events WHERE id = ?
+    `).bind(access.event.id).first<number>('reserved_media_count')).toBe(1);
   });
 
   it('marks an event inaccessible, clears its prefix, then removes the row', async () => {
     const access = await eventAccess();
     await testEnv.MEDIA_BUCKET.put(`events/${access.event.id}/media/orphan`, png());
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(
+      `events/${access.event.id}/media/final/canonical-orphan`,
+      png(),
+    );
     const summary = await deleteEventData(
       testEnv, access.event.id, new Date('2026-07-21T12:00:00.000Z'),
     );
@@ -887,6 +2306,10 @@ describe('lifecycle cleanup', () => {
     });
     const rows = await testEnv.MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` });
     expect(rows.objects).toHaveLength(0);
+    const canonicalRows = await testEnv.CANONICAL_MEDIA_BUCKET.list({
+      prefix: `events/${access.event.id}/`,
+    });
+    expect(canonicalRows.objects).toHaveLength(0);
     // The row itself is gone, so nothing about the event survives the purge.
     expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
       .bind(access.event.id).first()).toBeNull();
@@ -895,31 +2318,97 @@ describe('lifecycle cleanup', () => {
     expect(await foreignKeyCheck()).toEqual([]);
   });
 
+  it('keeps Candidate A relational purge disabled on the daily cron while permanent scanning continues', async () => {
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = false;
+    const access = await eventAccess();
+    await deleteEventData(testEnv, access.event.id, new Date('2026-08-13T03:00:00.000Z'));
+    const lateKey = 'events/already-hard-purged/uploads/daily-candidate-a-late';
+    await testEnv.MEDIA_BUCKET.put(lateKey, png());
+
+    for (const executedAt of [
+      new Date('2026-08-13T03:17:00.000Z'),
+      new Date('2026-08-13T04:17:00.000Z'),
+    ]) {
+      const pending: Promise<unknown>[] = [];
+      vi.useFakeTimers().setSystemTime(executedAt);
+      worker.scheduled!(
+        { cron: '17 3 * * *', scheduledTime: executedAt.getTime() } as ScheduledController,
+        testEnv,
+        {
+          waitUntil: (promise: Promise<unknown>) => pending.push(promise),
+          passThroughOnException() {},
+        } as unknown as ExecutionContext,
+      );
+      await Promise.all(pending);
+      vi.useRealTimers();
+    }
+
+    expect(await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toMatchObject({ deleted_at: expect.any(String) });
+    expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB).get(lateKey, 'legacy'))
+      .toMatchObject({ suppressionStartedAt: expect.any(String) });
+    expect(await testEnv.MEDIA_BUCKET.head(lateKey)).toBeNull();
+  });
+
+  it('does not enter relational purge when a canonical object lands before the independent zero proof', async () => {
+    const access = await eventAccess();
+    const prefix = `events/${access.event.id}/`;
+    const lateKey = `${prefix}media/final/late-canonical`;
+    const originalList = testEnv.CANONICAL_MEDIA_BUCKET.list.bind(testEnv.CANONICAL_MEDIA_BUCKET);
+    let listCalls = 0;
+    const list = vi.spyOn(testEnv.CANONICAL_MEDIA_BUCKET, 'list').mockImplementation(async (options) => {
+      listCalls += 1;
+      if (listCalls === 2) await testEnv.CANONICAL_MEDIA_BUCKET.put(lateKey, png());
+      return originalList(options);
+    });
+
+    const first = await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2026-07-21T12:00:00.000Z'),
+    );
+    expect(first).toMatchObject({ phase: 'r2', remainder: true });
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ id: access.event.id });
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(lateKey)).not.toBeNull();
+
+    list.mockRestore();
+    const second = await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2026-07-21T12:01:00.000Z'),
+    );
+    expect(second).toMatchObject({ phase: 'complete', remainder: false });
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(lateKey)).toBeNull();
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+  });
+
   it('purges an event that still holds stored media and a guest note', async () => {
     const access = await rsvpReady();
-    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
-      method: 'POST',
-      headers: writeHeaders(access.guest),
-      body: JSON.stringify({
-        filename: 'keeper.png', mimeType: 'image/png', byteSize: 128,
-        idempotencyKey: 'keeper', guestName: 'Avery', caption: null,
-      }),
-    }, testEnv);
-    const media = (await initiated.json<any>()).data.media;
-    await testEnv.MEDIA_BUCKET.put(media.objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
-    await createApp().request(`/api/event/${access.event.slug}/uploads/${media.id}/finalize`, {
-      method: 'POST', headers: writeHeaders(access.guest), body: '{}',
-    }, testEnv);
+    await uploadPending(access, 'keeper');
     await createApp().request(`/api/event/${access.event.slug}/messages`, {
       method: 'POST',
       headers: writeHeaders(access.guest),
-      body: JSON.stringify({ guestName: 'Avery', body: 'A lovely evening.' }),
+      body: JSON.stringify({
+        idempotencyKey: 'event-purge-note', guestName: 'Avery', body: 'A lovely evening.',
+      }),
     }, testEnv);
     await householdSession(access, 'Henry Perkins');
 
     // `media` and `guest_messages` reference event sessions with ON DELETE
     // RESTRICT, so deleting the event without clearing them first would fail.
-    await deleteEventData(testEnv, access.event.id, new Date('2026-07-21T12:00:00.000Z'));
+    expect(await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2099-08-13T10:00:00.000Z'),
+    )).toMatchObject({ phase: 'fences', remainder: true });
+    await promoteLegacyStoredMedia(testEnv, new Date('2099-08-13T10:21:00.000Z'));
+    expect(await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2099-08-13T10:22:00.000Z'),
+    )).toMatchObject({ phase: 'complete', remainder: false });
 
     expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
       .bind(access.event.id).first()).toBeNull();
@@ -1018,6 +2507,87 @@ describe('lifecycle cleanup', () => {
     expect(windows.results.every((row: any) => row.window_started_at >= '2026-07-21T12:00:00.000Z'))
       .toBe(true);
     expect(await foreignKeyCheck()).toEqual([]);
+  });
+
+  it('keeps target-verified proof and both generations until purge hands them to permanent suppression', async () => {
+    const access = await eventAccess();
+    const media = await moveStoredMediaToLegacyKey(access, 'purge-target-verified');
+    const finalKey = finalizedMediaObjectKey(access.event.id, media.id);
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+    await promoteLegacyStoredMedia(
+      testEnv,
+      new Date('2026-08-13T10:00:00.000Z'),
+    );
+    const repository = new MediaRepository(testEnv.DB);
+    expect(await repository.getPromotion(media.id)).toMatchObject({ state: 'target_verified' });
+
+    delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+    const first = await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2099-08-13T10:00:00.000Z'),
+    );
+    expect(first).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await repository.getPromotion(media.id)).toMatchObject({ state: 'target_verified' });
+    expect(await testEnv.DB.prepare('SELECT id FROM media WHERE id = ?')
+      .bind(media.id).first()).toEqual({ id: media.id });
+    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(finalKey)).not.toBeNull();
+    expect(await foreignKeyCheck()).toEqual([]);
+
+    const handedOffAt = new Date('2099-08-13T10:21:00.000Z');
+    await promoteLegacyStoredMedia(testEnv, handedOffAt);
+    expect(await repository.getPromotion(media.id)).toBeNull();
+    await cleanupMediaObjectWriteTombstones(testEnv, handedOffAt, 100);
+
+    const complete = await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2099-08-13T10:22:00.000Z'),
+    );
+    expect(complete).toMatchObject({ phase: 'complete', remainder: false });
+    expect((await testEnv.MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` })).objects)
+      .toHaveLength(0);
+    expect((await testEnv.CANONICAL_MEDIA_BUCKET.list({ prefix: `events/${access.event.id}/` })).objects)
+      .toHaveLength(0);
+    expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toBeNull();
+    expect(await foreignKeyCheck()).toEqual([]);
+  });
+
+  it('sweeps stale guest-message rate rows in bounded pages but retains purge receipts', async () => {
+    const access = await eventAccess();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    if (!sessionId) throw new Error('Expected a guest session fixture.');
+    await batchD1Statements(testEnv.DB, Array.from({ length: 120 }, (_, index) => testEnv.DB.prepare(`
+      INSERT INTO guest_message_rate_events (
+        id, event_id, session_scope_digest, ip_scope_digest, window_started_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      crypto.randomUUID(), access.event.id, `session-${index}`, `ip-${index}`,
+      index === 0 ? '2026-07-21T12:00:00.000Z' : '2026-07-21T11:59:59.999Z',
+      '2026-07-21T12:01:00.000Z',
+    )));
+    await testEnv.DB.prepare(`
+      INSERT INTO guest_message_purge_receipts (
+        event_id, guest_session_id, idempotency_key, request_hmac, purged_at
+      ) VALUES (?, ?, 'retained-receipt', ?, '2026-07-21T11:00:00.000Z')
+    `).bind(access.event.id, sessionId, 'a'.repeat(43)).run();
+
+    await scheduledCleanup(testEnv, new Date('2026-07-21T12:15:00.000Z'));
+
+    expect(await testEnv.DB.prepare(`
+      SELECT window_started_at FROM guest_message_rate_events WHERE event_id = ?
+    `).bind(access.event.id).all()).toMatchObject({
+      results: [{ window_started_at: '2026-07-21T12:00:00.000Z' }],
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT idempotency_key FROM guest_message_purge_receipts WHERE event_id = ?
+    `).bind(access.event.id).all()).toMatchObject({
+      results: [{ idempotency_key: 'retained-receipt' }],
+    });
   });
 
   it('revokes but never deletes household data when the printed entry is disabled', async () => {

@@ -112,6 +112,7 @@ export interface EventView {
   name: string;
   eventDate: string;
   welcomeMessage: string;
+  guestbookPrompt: string;
   cover: EventCoverView;
   uploadsEnabled: boolean;
   galleryVisible: boolean;
@@ -158,6 +159,7 @@ export type GuestEventView = Pick<
   | 'name'
   | 'eventDate'
   | 'welcomeMessage'
+  | 'guestbookPrompt'
   | 'uploadsEnabled'
   | 'galleryVisible'
   | 'moderationRequired'
@@ -169,6 +171,112 @@ export type GuestEventView = Pick<
   | 'rsvpDeadlineDate'
   | 'theme'
 > & GuestPhaseView & { cover: GuestEventCoverView };
+
+export type GuestbookSource = 'guest_note' | 'photo_caption';
+export type GuestbookSharedVisibility = 'shared' | 'author_only';
+
+export interface GuestbookNoteItem {
+  id: string;
+  source: 'guest_note';
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  state: 'pending' | 'approved' | 'rejected';
+  visibility: GuestbookSharedVisibility;
+}
+
+export type DeletedGuestbookNoteItem = Omit<
+  GuestbookNoteItem,
+  'state' | 'visibility'
+> & {
+  state: 'deleted';
+  visibility: 'host_only';
+};
+
+export interface GuestbookCaptionItem {
+  id: string;
+  source: 'photo_caption';
+  mediaId: string;
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  state: 'unpublished' | 'published' | 'hidden';
+  visibility: GuestbookSharedVisibility;
+  previewAvailable: boolean;
+}
+
+export type GuestbookVisibleItem = GuestbookNoteItem | GuestbookCaptionItem;
+export type GuestbookItem = GuestbookVisibleItem | DeletedGuestbookNoteItem;
+
+export interface GuestbookNoteCompatibilityAliases {
+  /** @deprecated Use `source`. */
+  kind: 'message';
+  /** @deprecated Use the source-specific `state`. */
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  /** @deprecated Caption items carry their media ID directly. */
+  mediaId: null;
+}
+
+export interface GuestbookCaptionCompatibilityAliases {
+  /** @deprecated Use `source`. */
+  kind: 'caption';
+  /** @deprecated Use the source-specific `state`. */
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  /** @deprecated Caption items carry their media ID directly. */
+  mediaId: string;
+}
+
+export type GuestbookCompatibilityAliases =
+  | GuestbookNoteCompatibilityAliases
+  | GuestbookCaptionCompatibilityAliases;
+
+type GuestbookNoteStateAliases =
+  | { state: 'pending'; moderationStatus: 'pending' }
+  | { state: 'approved'; moderationStatus: 'approved' }
+  | { state: 'rejected'; moderationStatus: 'rejected' };
+
+export type GuestGuestbookNoteItem = Omit<GuestbookNoteItem, 'state'>
+  & { isOwn: boolean }
+  & Omit<GuestbookNoteCompatibilityAliases, 'moderationStatus'>
+  & GuestbookNoteStateAliases;
+
+type GuestbookCaptionStateAliases =
+  | { state: 'unpublished'; visibility: 'author_only'; moderationStatus: 'pending' }
+  | { state: 'published'; visibility: 'shared'; moderationStatus: 'approved' }
+  | { state: 'published'; visibility: 'author_only'; moderationStatus: 'rejected' }
+  | { state: 'hidden'; visibility: 'author_only'; moderationStatus: 'rejected' };
+
+export type GuestGuestbookCaptionItem = Omit<GuestbookCaptionItem, 'state' | 'visibility'>
+  & { isOwn: boolean }
+  & Omit<GuestbookCaptionCompatibilityAliases, 'moderationStatus'>
+  & GuestbookCaptionStateAliases;
+
+export type GuestGuestbookItem = GuestGuestbookNoteItem | GuestGuestbookCaptionItem;
+export type ManagerGuestbookItem = GuestbookItem;
+
+/** @deprecated Use the source-discriminated guestbook item contracts. */
+export interface LegacyGuestbookItem {
+  id: string;
+  kind: 'message' | 'caption';
+  guestName: string | null;
+  body: string;
+  createdAt: string;
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  mediaId: string | null;
+}
+
+export interface ManagerMediaView {
+  id: string;
+  originalFilename: string;
+  guestName: string;
+  caption: string | null;
+  publicationStatus: PublicationStatus;
+  uploadState: UploadState;
+  previewAvailable: boolean;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
+}
 
 // RSVP. Every shape below is written out rather than derived from a database
 // record, because the difference between what a household may see and what a

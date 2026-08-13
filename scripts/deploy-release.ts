@@ -26,6 +26,7 @@ import {
   type ReleaseCandidateObservationAdapter,
   type VerifiedReleaseCandidate,
 } from './release-candidate.ts';
+import { verifyPostCutoverMigrationEvidence } from './migrate-release.ts';
 
 const releaseEvidenceModulePath = './release-evidence.ts';
 const releaseEvidence: typeof ReleaseEvidenceModule = await import(releaseEvidenceModulePath);
@@ -64,6 +65,7 @@ export interface DeployReleaseRequest {
   candidateRoot: string;
   sha: string;
   manifestPath: string;
+  migrationEvidencePath?: string;
 }
 
 export interface DeployReleaseAdapters {
@@ -77,6 +79,7 @@ export interface DeployReleaseAdapters {
 export interface DeployReleaseArguments {
   sha: string;
   manifestPath: string;
+  migrationEvidencePath?: string;
 }
 
 export interface VerifiedDeploySnapshot {
@@ -232,12 +235,14 @@ export function parseDeployReleaseArgs(
 ): DeployReleaseArguments {
   let sha: string | undefined;
   let manifest: string | undefined;
+  let migrationEvidence: string | undefined;
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
     if (value === undefined) throw new Error(`Missing value for ${flag ?? 'argument'}.`);
     if (flag === '--sha' && sha === undefined) sha = value;
     else if (flag === '--manifest' && manifest === undefined) manifest = value;
+    else if (flag === '--migration-evidence' && migrationEvidence === undefined) migrationEvidence = value;
     else throw new Error(`Unknown or duplicate deploy argument ${flag}.`);
   }
   if (!sha || !SHA_PATTERN.test(sha)) throw new Error('--sha must be one full lowercase commit SHA.');
@@ -246,7 +251,15 @@ export function parseDeployReleaseArgs(
   if (basename(manifestPath) !== 'candidate-manifest.json') {
     throw new Error('Candidate manifest filename must be candidate-manifest.json.');
   }
-  return { sha, manifestPath };
+  if (migrationEvidence === undefined) return { sha, manifestPath };
+  const migrationEvidencePath = existingRegularFile(
+    resolve(cwd, migrationEvidence),
+    'Production migration evidence',
+  );
+  if (basename(migrationEvidencePath) !== 'post-cutover-migration-evidence.json') {
+    throw new Error('Production migration evidence filename is invalid.');
+  }
+  return { sha, manifestPath, migrationEvidencePath };
 }
 
 function within(container: string, target: string): boolean {
@@ -387,6 +400,10 @@ export function runDeployRelease(
   adapters: DeployReleaseAdapters = defaultAdapters,
 ): void {
   withVerifiedDeploySnapshot(request, (snapshot) => {
+    const prerequisiteEnv = sanitizedPrerequisiteEnvironment(
+      adapters.environment,
+      snapshot.candidate.manifest.bindings!.topology.requiredSecrets,
+    );
     const plan = buildDeploymentCommandPlan({
       candidateRoot: snapshot.candidate.candidateRoot,
       deployRoot: snapshot.deployRoot,
@@ -394,10 +411,7 @@ export function runDeployRelease(
       nodeExecPath: adapters.nodeExecPath,
       npmCliPath: resolveNpmCliPath(adapters.npmExecPath, adapters.nodeExecPath),
       wranglerCliPath: snapshot.wranglerCliPath,
-      prerequisiteEnv: sanitizedPrerequisiteEnvironment(
-        adapters.environment,
-        snapshot.candidate.manifest.bindings!.topology.requiredSecrets,
-      ),
+      prerequisiteEnv,
       deployEnv: snapshot.deploymentEnvironment,
     });
     assertDeploymentCommandPlan(plan, {
@@ -407,7 +421,7 @@ export function runDeployRelease(
       nodeExecPath: adapters.nodeExecPath,
       npmCliPath: resolveNpmCliPath(adapters.npmExecPath, adapters.nodeExecPath),
       wranglerCliPath: snapshot.wranglerCliPath,
-      prerequisiteEnv: plan[0]!.env,
+      prerequisiteEnv,
       deployEnv: snapshot.deploymentEnvironment,
     });
     runCommand(plan[3]!, adapters);
@@ -425,13 +439,32 @@ export function withVerifiedDeploySnapshot<T>(
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error('Candidate root must be one exact directory.');
   }
+  const declaredManifest: unknown = JSON.parse(readFileSync(request.manifestPath, 'utf8'));
+  releaseEvidence.assertRedactedCandidateManifest(declaredManifest);
+  if (declaredManifest.status !== 'passed' || declaredManifest.candidate === null
+    || declaredManifest.migrations === null || declaredManifest.bindings === null
+    || declaredManifest.artifacts === null) {
+    throw new Error('Only one complete passed candidate manifest is eligible.');
+  }
+  const declaredMigrationCount = declaredManifest.migrations.verification.migrationCount;
+  if (declaredMigrationCount !== 14 && declaredMigrationCount !== 15) {
+    throw new Error('Deployment candidate is not at a supported historical or post-cutover boundary.');
+  }
   const initialCandidate = verifyExactReleaseCandidate({
     candidateRoot,
     sha: request.sha,
     manifestPath: request.manifestPath,
     approvedBaseSha: APPROVED_BASE_SHA,
-    expectedMigrationCount: 14,
+    expectedMigrationCount: declaredMigrationCount,
   }, releaseCandidateAdapters(adapters));
+  if (declaredMigrationCount === 15) {
+    if (request.migrationEvidencePath === undefined) {
+      throw new Error('A 15-migration deployment requires exact post-cutover migration evidence.');
+    }
+    verifyPostCutoverMigrationEvidence(request.migrationEvidencePath, initialCandidate);
+  } else if (request.migrationEvidencePath !== undefined) {
+    throw new Error('Historical deployment must not accept post-cutover migration evidence.');
+  }
   const manifest = initialCandidate.manifest;
   if (manifest.bindings === null || manifest.artifacts === null) {
     throw new Error('Verified candidate is missing deployment evidence.');
@@ -491,19 +524,22 @@ export function withVerifiedDeploySnapshot<T>(
   runCommand(plan[1]!, adapters);
   runCommand(plan[2]!, adapters);
 
-  const rebuiltCandidate = verifyExactReleaseCandidate({
+  const recheckedCandidate = verifyExactReleaseCandidate({
     candidateRoot,
     sha: request.sha,
     manifestPath: request.manifestPath,
     approvedBaseSha: APPROVED_BASE_SHA,
-    expectedMigrationCount: 14,
+    expectedMigrationCount: declaredMigrationCount,
   }, releaseCandidateAdapters(adapters));
+  if (declaredMigrationCount === 15) {
+    verifyPostCutoverMigrationEvidence(request.migrationEvidencePath!, recheckedCandidate);
+  }
   const rebuilt = collectDeployableArtifacts(candidateRoot);
 
   const deployRoot = createVerifiedDeploySnapshot(candidateRoot, rebuilt);
   try {
     return action({
-      candidate: rebuiltCandidate,
+      candidate: recheckedCandidate,
       deployRoot,
       wranglerCliPath,
       deploymentEnvironment: deployEnv,

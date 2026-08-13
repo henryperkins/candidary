@@ -12,7 +12,10 @@ import { randomUUID } from 'node:crypto';
 
 import { canonicalJson, sha256 } from './release-evidence.ts';
 import { PHASE_2_MIGRATION, PHASE_3_MIGRATION } from './release-candidate.ts';
-import { PRODUCTION_TRIGGER_NAMES } from './migrate-release.ts';
+import {
+  POST_CUTOVER_PRODUCTION_TRIGGER_NAMES,
+  PRODUCTION_TRIGGER_NAMES,
+} from './migrate-release.ts';
 import {
   RUN_ID_PATTERN,
   SHA256_PATTERN,
@@ -404,6 +407,33 @@ export interface StagingConformanceArtifactV1 {
   finishedAt: string;
 }
 
+export interface StagingConformanceArtifactV2 extends Omit<StagingConformanceArtifactV1,
+  'schemaVersion' | 'sources' | 'migrations' | 'deployments'> {
+  schemaVersion: 2;
+  sources: {
+    phase2: StagingConformanceArtifactV1['sources']['phase2'];
+    postCutover: StagingConformanceArtifactV1['sources']['phase3'];
+  };
+  migrations: {
+    phase2Ledger: string[];
+    postCutoverLedger: string[];
+    bootstrapSha256: string;
+    postCutoverMigrationsSha256: string;
+    postCutoverBundleSha256: string;
+    triggerNames: string[];
+    zeroCounts: StagingConformanceArtifactV1['migrations']['zeroCounts'];
+    integrity: 'ok';
+    foreignKeyRows: 0;
+  };
+  deployments: {
+    workflowConformance: StagingDeploymentEvidence;
+    phase2Cutover: StagingDeploymentEvidence;
+    postCutoverCutover: StagingDeploymentEvidence;
+  };
+}
+
+export type StagingConformanceArtifact = StagingConformanceArtifactV1 | StagingConformanceArtifactV2;
+
 export interface StagingDeploymentEvidence {
   versionId: string;
   tagSha: string;
@@ -411,7 +441,76 @@ export interface StagingDeploymentEvidence {
   trafficPercent: number;
 }
 
+export const MEDIA_CUTOVER_READINESS_QUERY = `SELECT
+  count(*) AS live_legacy_count,
+  COALESCE(sum(CASE WHEN NOT EXISTS (
+    SELECT 1 FROM media_object_promotions AS p
+    WHERE p.media_id = m.id AND p.event_id = m.event_id
+      AND p.source_bucket_generation = m.object_bucket_generation
+      AND p.source_object_key = m.object_key
+      AND p.source_mime_type = m.mime_type
+      AND p.source_byte_size = m.byte_size
+      AND p.source_width = m.width AND p.source_height = m.height
+      AND p.state = 'target_verified'
+      AND p.source_etag IS NOT NULL AND p.source_sha256 IS NOT NULL
+      AND p.final_etag IS NOT NULL AND p.target_verified_at IS NOT NULL
+      AND p.final_object_key = ('events/' || m.event_id || '/media/final/' || m.id)
+      AND EXISTS (
+        SELECT 1 FROM media_object_write_tombstones AS t
+        WHERE t.bucket_generation = p.final_bucket_generation
+          AND t.object_key = p.final_object_key
+          AND t.event_id = p.event_id AND t.media_id = p.media_id
+          AND t.object_kind = 'final' AND t.suppression_started_at IS NULL
+      )
+  ) THEN 1 ELSE 0 END), 0) AS unverified_live_legacy_count
+FROM media AS m
+JOIN events AS e ON e.id = m.event_id AND e.deleted_at IS NULL
+WHERE m.upload_state = 'stored' AND m.deleted_at IS NULL
+  AND m.object_bucket_generation = 'legacy';`;
+
+export const MEDIA_CUTOVER_READINESS_QUERY_SHA256 = sha256(MEDIA_CUTOVER_READINESS_QUERY);
+
+export interface MediaCutoverReadinessEvidence {
+  querySha256: string;
+  liveLegacyCount: number;
+  unverifiedLiveLegacyCount: 0;
+  observedAt: string;
+}
+
+interface MediaCutoverCandidateEvidenceBase {
+  candidateSha: string;
+  candidateManifestSha256: string;
+  mediaUploadReleaseConfigSha256: string;
+  migrationCount: 15;
+  deployment: StagingDeploymentEvidence;
+  observedAt: string;
+}
+
+export interface MediaCutoverPhaseEvidenceV1 {
+  kind: 'candidary.media-cutover-phase-evidence';
+  schemaVersion: 1;
+  status: 'passed';
+  runId: string;
+  candidateA: MediaCutoverCandidateEvidenceBase & {
+    mode: 'canonical-cutover-disabled';
+    productionMigrationEvidenceSha256: string;
+  };
+  copyOnly: MediaCutoverCandidateEvidenceBase & {
+    mode: 'canonical-copy-only';
+    readiness: MediaCutoverReadinessEvidence;
+  };
+  candidateB: MediaCutoverCandidateEvidenceBase & {
+    mode: 'canonical-live';
+    readinessBeforePointerCutover: MediaCutoverReadinessEvidence;
+    readinessAfterPointerCutover: MediaCutoverReadinessEvidence & { liveLegacyCount: 0 };
+  };
+  legacyMediaScannerConfigSha256: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
 export interface StagingArtifactBindings {
+  schemaVersion?: 1;
   candidateSha: string;
   phase2Sha: string;
   approvedMainSha: string;
@@ -428,6 +527,26 @@ export interface StagingArtifactBindings {
   phase3BundleSha256: string;
 }
 
+export interface PostCutoverStagingArtifactBindings {
+  schemaVersion: 2;
+  candidateSha: string;
+  phase2Sha: string;
+  approvedMainSha: string;
+  phase2ManifestSha256: string;
+  candidateManifestSha256: string;
+  phase2MigrationManifestSha256: string;
+  postCutoverMigrationManifestSha256: string;
+  reviewAuthorizationSha256: string;
+  stagingAuthorizationSha256: string;
+  workflowTargetSha256: string;
+  cutoverTargetSha256: string;
+  bootstrapSha256: string;
+  postCutoverMigrationsSha256: string;
+  postCutoverBundleSha256: string;
+}
+
+export type AnyStagingArtifactBindings = StagingArtifactBindings | PostCutoverStagingArtifactBindings;
+
 const PHASE_2_LEDGER = [
   '0001_core.sql',
   '0002_wedding_photo_drop.sql',
@@ -443,6 +562,7 @@ const PHASE_2_LEDGER = [
   '0012_event_cover_storage.sql',
   PHASE_2_MIGRATION,
 ] as const;
+const POST_CUTOVER_LEDGER = [...PHASE_2_LEDGER, PHASE_3_MIGRATION, '0015_curated_private_guestbook.sql'] as const;
 
 function exactString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
@@ -531,6 +651,155 @@ function assertDeployment(value: unknown, label: string): StagingDeploymentEvide
   };
 }
 
+function assertMediaCutoverReadiness(
+  value: unknown,
+  label: string,
+  requireNoLegacyPointers: boolean,
+): MediaCutoverReadinessEvidence {
+  const readiness = assertPlainRecord(value, label);
+  assertExactKeys(readiness, [
+    'querySha256', 'liveLegacyCount', 'unverifiedLiveLegacyCount', 'observedAt',
+  ], label);
+  if (assertSha256(readiness.querySha256, `${label}.querySha256`)
+    !== MEDIA_CUTOVER_READINESS_QUERY_SHA256) {
+    throw new Error(`${label} does not bind the primary D1 readiness query.`);
+  }
+  if (!Number.isSafeInteger(readiness.liveLegacyCount)
+    || (readiness.liveLegacyCount as number) < 0) {
+    throw new Error(`${label}.liveLegacyCount must be a nonnegative integer.`);
+  }
+  if (readiness.unverifiedLiveLegacyCount !== 0) {
+    throw new Error(`${label} must have zero unverified live legacy rows.`);
+  }
+  if (requireNoLegacyPointers && readiness.liveLegacyCount !== 0) {
+    throw new Error(`${label} must have zero remaining live legacy pointers.`);
+  }
+  assertRecordedAt(readiness.observedAt);
+  return value as MediaCutoverReadinessEvidence;
+}
+
+function assertMediaCutoverCandidate(
+  value: unknown,
+  label: string,
+  mode: 'canonical-cutover-disabled' | 'canonical-copy-only' | 'canonical-live',
+  extraKeys: readonly string[],
+): { record: Record<string, unknown>; candidateSha: string; observedAt: string } {
+  const candidate = assertPlainRecord(value, label);
+  assertExactKeys(candidate, [
+    'candidateSha', 'candidateManifestSha256', 'mediaUploadReleaseConfigSha256',
+    'mode', 'migrationCount', 'deployment', 'observedAt', ...extraKeys,
+  ], label);
+  if (candidate.mode !== mode || candidate.migrationCount !== 15) {
+    throw new Error(`${label} has the wrong runtime mode or migration boundary.`);
+  }
+  const candidateSha = assertCandidateSha(candidate.candidateSha);
+  assertSha256(candidate.candidateManifestSha256, `${label}.candidateManifestSha256`);
+  assertSha256(
+    candidate.mediaUploadReleaseConfigSha256,
+    `${label}.mediaUploadReleaseConfigSha256`,
+  );
+  const deployment = assertDeployment(candidate.deployment, `${label}.deployment`);
+  if (deployment.tagSha !== candidateSha || deployment.metadataSha !== candidateSha) {
+    throw new Error(`${label} deployment does not bind its exact candidate SHA.`);
+  }
+  return {
+    record: candidate,
+    candidateSha,
+    observedAt: assertRecordedAt(candidate.observedAt),
+  };
+}
+
+export function assertMediaCutoverPhaseEvidence(value: unknown): MediaCutoverPhaseEvidenceV1 {
+  const artifact = assertPlainRecord(value, 'Media cutover phase evidence');
+  assertExactKeys(artifact, [
+    'kind', 'schemaVersion', 'status', 'runId', 'candidateA', 'copyOnly', 'candidateB',
+    'legacyMediaScannerConfigSha256', 'startedAt', 'finishedAt',
+  ], 'Media cutover phase evidence');
+  if (artifact.kind !== 'candidary.media-cutover-phase-evidence'
+    || artifact.schemaVersion !== 1 || artifact.status !== 'passed') {
+    throw new Error('Media cutover phase evidence identity or status is invalid.');
+  }
+  assertCanonicalRunId(artifact.runId);
+  const candidateA = assertMediaCutoverCandidate(
+    artifact.candidateA,
+    'Candidate A disabled phase',
+    'canonical-cutover-disabled',
+    ['productionMigrationEvidenceSha256'],
+  );
+  assertSha256(
+    candidateA.record.productionMigrationEvidenceSha256,
+    'Candidate A production migration evidence SHA-256',
+  );
+  const copyOnly = assertMediaCutoverCandidate(
+    artifact.copyOnly,
+    'Canonical copy-only phase',
+    'canonical-copy-only',
+    ['readiness'],
+  );
+  const copyReadiness = assertMediaCutoverReadiness(
+    copyOnly.record.readiness,
+    'Canonical copy-only readiness',
+    false,
+  );
+  const candidateB = assertMediaCutoverCandidate(
+    artifact.candidateB,
+    'Candidate B live phase',
+    'canonical-live',
+    ['readinessBeforePointerCutover', 'readinessAfterPointerCutover'],
+  );
+  const beforePointerCutover = assertMediaCutoverReadiness(
+    candidateB.record.readinessBeforePointerCutover,
+    'Candidate B pre-pointer readiness',
+    false,
+  );
+  const afterPointerCutover = assertMediaCutoverReadiness(
+    candidateB.record.readinessAfterPointerCutover,
+    'Candidate B post-pointer readiness',
+    true,
+  );
+  const candidateShas = [candidateA.candidateSha, copyOnly.candidateSha, candidateB.candidateSha];
+  if (new Set(candidateShas).size !== candidateShas.length) {
+    throw new Error('Media cutover phases must use three separate candidate SHAs.');
+  }
+  const configShas = [
+    candidateA.record.mediaUploadReleaseConfigSha256,
+    copyOnly.record.mediaUploadReleaseConfigSha256,
+    candidateB.record.mediaUploadReleaseConfigSha256,
+  ];
+  if (new Set(configShas).size !== configShas.length) {
+    throw new Error('Media cutover phases must bind three distinct runtime contract byte sets.');
+  }
+  assertSha256(
+    artifact.legacyMediaScannerConfigSha256,
+    'Legacy media scanner config SHA-256',
+  );
+  const startedAt = assertRecordedAt(artifact.startedAt);
+  const finishedAt = assertRecordedAt(artifact.finishedAt);
+  const instants = [
+    startedAt,
+    candidateA.observedAt,
+    copyOnly.observedAt,
+    copyReadiness.observedAt,
+    candidateB.observedAt,
+    beforePointerCutover.observedAt,
+    afterPointerCutover.observedAt,
+    finishedAt,
+  ];
+  if (instants.some((instant, index) => index > 0 && instant < instants[index - 1]!)) {
+    throw new Error('Media cutover phase evidence chronology is invalid.');
+  }
+  assertSanitizedValue(artifact);
+  return value as MediaCutoverPhaseEvidenceV1;
+}
+
+export function writeMediaCutoverPhaseEvidence(
+  path: string,
+  value: unknown,
+): WrittenEvidence {
+  const artifact = assertMediaCutoverPhaseEvidence(value);
+  return { path, sha256: writeExclusiveCanonical(path, artifact) };
+}
+
 function assertZeroProof(value: unknown): StagingConformanceArtifactV1['migrations']['zeroCounts'] {
   const counts = assertPlainRecord(value, 'Staging zero counts');
   assertExactKeys(counts, [
@@ -542,7 +811,7 @@ function assertZeroProof(value: unknown): StagingConformanceArtifactV1['migratio
   return value as StagingConformanceArtifactV1['migrations']['zeroCounts'];
 }
 
-export function assertStagingConformanceArtifact(value: unknown): StagingConformanceArtifactV1 {
+function assertStagingConformanceArtifactV1(value: unknown): StagingConformanceArtifactV1 {
   const artifact = assertPlainRecord(value, 'Staging conformance artifact');
   assertExactKeys(artifact, [
     'kind', 'schemaVersion', 'status', 'candidateSha', 'runId', 'approvedMainSha',
@@ -653,6 +922,80 @@ export function assertStagingConformanceArtifact(value: unknown): StagingConform
   };
 }
 
+function assertStagingConformanceArtifactV2(value: unknown): StagingConformanceArtifactV2 {
+  const artifact = assertPlainRecord(value, 'Post-cutover staging conformance artifact');
+  assertExactKeys(artifact, [
+    'kind', 'schemaVersion', 'status', 'candidateSha', 'runId', 'approvedMainSha',
+    'sources', 'authorizations', 'targets', 'migrations', 'deployments', 'matrices',
+    'cleanup', 'startedAt', 'finishedAt',
+  ], 'Post-cutover staging conformance artifact');
+  if (artifact.kind !== 'candidary.staging-conformance'
+    || artifact.schemaVersion !== 2 || artifact.status !== 'passed') {
+    throw new Error('Staging conformance artifact is not one passing post-cutover v2 artifact.');
+  }
+  const sources = assertPlainRecord(artifact.sources, 'Post-cutover staging sources');
+  assertExactKeys(sources, ['phase2', 'postCutover'], 'Post-cutover staging sources');
+  const phase2 = assertSource(sources.phase2, 'Phase-2 source');
+  const postCutover = assertSource(sources.postCutover, 'Post-cutover source');
+  if (postCutover.sha !== artifact.candidateSha) {
+    throw new Error('Staging candidate does not match its post-cutover source.');
+  }
+  const migrations = assertPlainRecord(artifact.migrations, 'Post-cutover migrations');
+  assertExactKeys(migrations, [
+    'phase2Ledger', 'postCutoverLedger', 'bootstrapSha256', 'postCutoverMigrationsSha256',
+    'postCutoverBundleSha256', 'triggerNames', 'zeroCounts', 'integrity', 'foreignKeyRows',
+  ], 'Post-cutover migrations');
+  const phase2Ledger = exactStringArray(migrations.phase2Ledger, 'Phase-2 ledger');
+  const postCutoverLedger = exactStringArray(migrations.postCutoverLedger, 'Post-cutover ledger');
+  if (!sameStrings(phase2Ledger, PHASE_2_LEDGER)
+    || !sameStrings(postCutoverLedger, POST_CUTOVER_LEDGER)) {
+    throw new Error('Post-cutover staging migration ledgers are incomplete or out of order.');
+  }
+  const deployments = assertPlainRecord(artifact.deployments, 'Post-cutover deployments');
+  assertExactKeys(deployments, [
+    'workflowConformance', 'phase2Cutover', 'postCutoverCutover',
+  ], 'Post-cutover deployments');
+  const postCutoverTriggerNames = exactStringArray(
+    migrations.triggerNames,
+    'Post-cutover trigger names',
+  );
+  if (!sameStrings(postCutoverTriggerNames, [...POST_CUTOVER_PRODUCTION_TRIGGER_NAMES])) {
+    throw new Error('Post-cutover trigger evidence is incomplete or unexpected.');
+  }
+  const synthetic: StagingConformanceArtifactV1 = {
+    ...(artifact as unknown as StagingConformanceArtifactV2),
+    schemaVersion: 1,
+    sources: { phase2, phase3: postCutover },
+    migrations: {
+      phase2Ledger,
+      phase3Ledger: postCutoverLedger.slice(0, 14),
+      bootstrapSha256: assertSha256(migrations.bootstrapSha256, 'bootstrapSha256'),
+      phase3MigrationSha256: assertSha256(migrations.postCutoverMigrationsSha256, 'postCutoverMigrationsSha256'),
+      phase3BundleSha256: assertSha256(migrations.postCutoverBundleSha256, 'postCutoverBundleSha256'),
+      // Reuse every v1 structural check while preserving its historical
+      // twelve-trigger contract; the exact v2 set was checked immediately above.
+      triggerNames: [...PRODUCTION_TRIGGER_NAMES],
+      zeroCounts: assertZeroProof(migrations.zeroCounts),
+      integrity: migrations.integrity as 'ok', foreignKeyRows: migrations.foreignKeyRows as 0,
+    },
+    deployments: {
+      workflowConformance: deployments.workflowConformance as StagingDeploymentEvidence,
+      phase2Cutover: deployments.phase2Cutover as StagingDeploymentEvidence,
+      phase3Cutover: deployments.postCutoverCutover as StagingDeploymentEvidence,
+    },
+  };
+  assertStagingConformanceArtifactV1(synthetic);
+  assertSanitizedValue(artifact);
+  return value as StagingConformanceArtifactV2;
+}
+
+export function assertStagingConformanceArtifact(value: unknown): StagingConformanceArtifact {
+  const record = assertPlainRecord(value, 'Staging conformance artifact');
+  return record.schemaVersion === 2
+    ? assertStagingConformanceArtifactV2(value)
+    : assertStagingConformanceArtifactV1(value);
+}
+
 export function writeStagingConformanceArtifact(
   path: string,
   value: unknown,
@@ -669,10 +1012,26 @@ function assertRegularEvidenceFile(path: string, label: string): string {
 }
 
 function assertArtifactBindings(
-  artifact: StagingConformanceArtifactV1,
-  expected: StagingArtifactBindings,
+  artifact: StagingConformanceArtifact,
+  expected: AnyStagingArtifactBindings,
 ): void {
-  const actual: StagingArtifactBindings = {
+  const actual: AnyStagingArtifactBindings = artifact.schemaVersion === 2 ? {
+    schemaVersion: 2,
+    candidateSha: artifact.candidateSha,
+    phase2Sha: artifact.sources.phase2.sha,
+    approvedMainSha: artifact.approvedMainSha,
+    phase2ManifestSha256: artifact.sources.phase2.manifestSha256,
+    candidateManifestSha256: artifact.sources.postCutover.manifestSha256,
+    phase2MigrationManifestSha256: artifact.sources.phase2.migrationManifestSha256,
+    postCutoverMigrationManifestSha256: artifact.sources.postCutover.migrationManifestSha256,
+    reviewAuthorizationSha256: artifact.authorizations.reviewSha256,
+    stagingAuthorizationSha256: artifact.authorizations.stagingSha256,
+    workflowTargetSha256: artifact.targets.workflowConformanceSha256,
+    cutoverTargetSha256: artifact.targets.cutoverSha256,
+    bootstrapSha256: artifact.migrations.bootstrapSha256,
+    postCutoverMigrationsSha256: artifact.migrations.postCutoverMigrationsSha256,
+    postCutoverBundleSha256: artifact.migrations.postCutoverBundleSha256,
+  } : {
     candidateSha: artifact.candidateSha,
     phase2Sha: artifact.sources.phase2.sha,
     approvedMainSha: artifact.approvedMainSha,
@@ -695,8 +1054,8 @@ function assertArtifactBindings(
 
 export function verifyStagingConformanceArtifactFile(
   path: string,
-  expected: StagingArtifactBindings,
-): { artifact: StagingConformanceArtifactV1; sha256: string } {
+  expected: AnyStagingArtifactBindings,
+): { artifact: StagingConformanceArtifact; sha256: string } {
   const artifactPath = assertRegularEvidenceFile(path, 'Staging artifact');
   const sidecarPath = assertRegularEvidenceFile(`${artifactPath}.sha256`, 'Staging artifact sidecar');
   const bytes = readFileSync(artifactPath, 'utf8');

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { EventView } from '../../shared/contracts';
+import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import {
   mergeCoverResponse,
@@ -34,7 +35,7 @@ const covered = {
 
 const current: EventView = {
   id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
-  welcomeMessage: 'Welcome.', cover: covered,
+  welcomeMessage: 'Welcome.', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT, cover: covered,
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
@@ -51,7 +52,8 @@ const current: EventView = {
 // What a settings PATCH answered with, built from a view that predates the newer
 // theme and cover the host has since confirmed, and the early opening too.
 const staleElsewhere: EventView = {
-  ...current, name: 'Renamed', rsvpEnabled: true, rsvpRosterVersion: 8,
+  ...current, name: 'Renamed', guestbookPrompt: 'Tell us your favorite memory.',
+  rsvpEnabled: true, rsvpRosterVersion: 8,
   eventStartAt: '2026-09-19T23:00:00.000Z', eventStartTime: '18:00',
   rsvpDeadlineAt: '2026-09-05T04:59:59.999Z', rsvpDeadlineDate: '2026-09-04',
   photosOpen: false, photoIntakeState: 'scheduled', photoIntakeRecheckAfterMs: 7_200_000,
@@ -71,6 +73,7 @@ describe('manager event merges', () => {
     expect(merged.name).toBe('Renamed');
     expect(merged.rsvpEnabled).toBe(true);
     expect(merged.rsvpRosterVersion).toBe(8);
+    expect(merged.guestbookPrompt).toBe('Tell us your favorite memory.');
     expect(merged.theme).toBe(garden);
     expect(merged.cover).toBe(covered);
   });

@@ -16,8 +16,8 @@ full route, state, width, and baseline matrix.
 | Capture and selection | `Take a photo` primary; `Choose recent photos` secondary | `guest-long-welcome-320.png`, `guest-landscape-844x390.png`, responsive boundary and input-contract tests | The camera control invokes a single file input with `capture="environment"`; the library control accepts multiple recents. Both targets stay reachable in portrait, at 844 x 500/520/567, and at the 640 x 450 zoom equivalent; the 844 x 390 case proves a full camera target. |
 | Review before transfer | Selected-photo grid, edit/remove controls, explicit send | `guest-review-320.png`, automated core journey | Selection never starts a network transfer. Guests can inspect and remove files, then use one count-aware `Send` action. Unsupported or oversized files stay visible with a specific error inside the 12–14 px caption band. |
 | Reliable progress | At most two active uploads with per-file progress, retries, and removal | Queue unit tests and core-journey partial-failure test | Reservation is batched, transfers run two at a time, and every file reports its own state. A partial failure preserves delivered items and exposes a retry for only the unresolved file. |
-| Terminal receipt | Delivered count, host name, guest thanks, and no next action | Automated core journey, `guest-responsive.spec.ts` receipt case | The receipt replaces the entire guest journey after every deliverable photo is delivered. Validation-rejected choices are summarized by its caveat rather than counted as delivered. It has no redirect, gallery prompt, or fourth step. |
-| Secondary features | Gallery, previous deliveries, and notes remain available but subordinate | `guest-secondary-long-content-320.png`, `fullscreen-long-caption-320.png` | These features are collapsed under `More from the event`, below the primary canvas, and disappear with the rest of the page after the terminal receipt. 80-character filenames wrap inside their column rather than widening the page. |
+| Terminal receipt | Delivered count, host name, guest thanks, and one quiet Guestbook follow-on | Automated core journey, `guest-responsive.spec.ts` receipt case, and `guest-coastal-receipt-390.png` | The receipt replaces the photo-delivery journey after every deliverable photo is delivered. Validation-rejected choices are summarized by its caveat rather than counted as delivered. Its sole follow-on is `Leave a guestbook note`; there is no redirect, gallery prompt, or fourth step. |
+| Secondary features | Guestbook, gallery, and previous deliveries remain available but subordinate | `guest-secondary-long-content-320.png`, `guest-default-guestbook-390.png`, `fullscreen-long-caption-320.png` | These features remain under the secondary region below the primary canvas. Guestbook is the first disclosure and is the only secondary surface the terminal receipt can reopen. 500-character notes, 160-character prompts, and 80-character filenames wrap rather than widening the page. |
 | Private-by-default delivery | Every original reaches the host; sharing is a separate decision | `manager-actions-320.png` and manager API tests | Gallery visibility defaults off. New photos arrive as `Unpublished` private originals in Live intake; publish/hide actions affect gallery projection without changing delivery or export inclusion. |
 | Host operating view | Live intake first, with guest lookup, QR/link, capacity, originals, and export | Layout and reachability: `manager-nav-768.png`, `manager-nav-count-390.png`, `manager-export-first-390.png`, `manager-responsive.spec.ts` across 320–1440. Behaviour behind it, which no baseline can carry: `tests/worker/manage-api.test.ts` (guest-name filtered intake), `tests/worker/upload-api.test.ts` (the original served to the manager session and refused to the guest one), `tests/worker/export-api.test.ts` (bounded parts, manifest, manager-only URLs) | The manager opens on the recent private collection, can filter by required guest name, download any original, and prepare a complete partitioned export. The six destinations stay labelled from 320 px to 1440 px, and the 184 px navigation rail with the 330 px utility rail returns at 1101 px. |
 | Visual system | Warm parchment, paper surfaces, chestnut actions, denim accents, moss completion | Every baseline above plus both theme suites | The established Chestnut/Denim global tokens remain binding for public, account, create, host, Manager, browser, and installed-app chrome. Event theming does not mutate those global tokens: its scoped 45-property overlay adds four guest appearances, with `candidary-default` remapped to the Chestnut/Denim compatibility appearance and the documented Default input/placeholder/Notes corrections, while danger and delivery semantics, typography, spacing, and host chrome remain fixed. The automated engine reports no contrast violation on the rendered public, create, guest, full-screen, Manager, and manager credential-recovery surfaces; that claim excludes unrendered failed/action-refusal states and physical-device conformance. |
@@ -29,7 +29,7 @@ full route, state, width, and baseline matrix.
 | --- | --- | --- | --- |
 | Preset compatibility | Four stable presets: `candidary-default` (Candidary Default), `garden-party` (Garden Party), `midnight-film` (Midnight Film), and `coastal-light` (Coastal Light) | Unit tests pin all 45 values for each preset: 180 version-1 token values, stable IDs/names, deterministic serialization, and the fixed 45-key CSS adapter | Preset IDs never branch components or CSS. Default values and fallbacks reproduce the Chestnut/Denim Candidary Default on the three approved event scopes. |
 | Constrained overrides | Optional primary and accent colors only | Unit, Worker, UI, and browser cases cover strict six-digit lowercase normalization, malicious/unknown input, custom black, white, dark/light colors, and custom `#767676` mid-tone | Primary and accent resolve only their documented families. Focus, danger, delivery, fonts, spacing, and hierarchy remain outside host control. |
-| Guest lifecycle scope | One resolved theme across entry, cover, remembered/invalid name, review, reservation, queue, transfer, finalize, cancel, retry/failure, receipt, gallery, deliveries, Notes, footer, and full screen | `event-theming.spec.ts` rotates the eight primary state rows across 320 × 568, 390 × 844, and 1280 × 900; targeted lifecycle, keyboard, target-size, zoom, reduced-motion, and containment cases supplement the matrix | Loading and authorization errors remain globally branded. Fixed semantic labels, glyphs, retry behavior, failure red, delivered moss, and caption gradient remain recognizable in every preset. |
+| Guest lifecycle scope | One resolved theme across entry, cover, remembered/invalid name, review, reservation, queue, transfer, finalize, cancel, retry/failure, receipt, gallery, deliveries, Guestbook, footer, and full screen | `event-theming.spec.ts` rotates the eight primary state rows across 320 × 568, 390 × 844, and 1280 × 900; targeted lifecycle, keyboard, target-size, zoom, reduced-motion, and containment cases supplement the matrix | Loading and authorization errors remain globally branded. Fixed semantic labels, glyphs, retry behavior, failure red, delivered moss, and caption gradient remain recognizable in every preset. |
 | No-cover and cover contrast | Preset-owned gradients; current revisioned cover plus localized runtime treatment | All 720 preset/effect/theme/profile assets are checked by the deterministic compositor, and uploaded-cover monotonicity is proved against the brightest possible source. Twelve inspected directional profile crops additionally prove image → optional grain → scrim → copy order without treating screenshots or axe as pixel-contrast measurement. | Normal/control copy clears 4.5:1. Input boundary and focus checks clear 3:1 against applicable surfaces. Delivery uses only same-origin current-revision slots; no storage key, master fallback, or lazy transform was added. |
 | Manager appearance isolation | One live guest canvas inside existing Settings, with global Manager controls outside its theme layer | UI and browser evidence proves Manager chrome receives no event variables; theme edits, Cover Studio presets/uploads/effects/focus, Reset, and the live canvas remain local until the Worker confirms them. A failed theme autosave retains the newest draft and retry action; an accepted cover publication remains owned by one Manager reconciler across Studio close/reopen, hidden tabs, dropped responses, and access recovery. | The editor adds no sixth destination, duplicate page heading, second preview, or themed Manager action. `Change cover` opens the one sheet/dialog flow; its summary/progress/retry controls remain global. |
 | Responsive cover delivery | Six total measured profiles and server-qualified density candidates | Browser evidence pins 360/361, 390/391, 599/600/601, 699/700, and 759/760 boundaries; WebP→JPEG recovery, final gradient fallback, one sanitized refresh, unchanged-revision anti-loop, and newer-revision reset pass for Manager and guest surfaces. | Nested views and revisioned same-origin routes replace the compatibility sentinel/reader. A missing current slot never causes an old revision, legacy object, cross-event set, or normalized master to render. |
@@ -41,20 +41,20 @@ full route, state, width, and baseline matrix.
 | Tracked file | Accepted state | Pixels |
 | --- | --- | ---: |
 | `guest-default-cover-390-mobile-win32.png` | Default cover, localized scrim, and first-fold hierarchy | 390 × 844 |
-| `guest-default-notes-390-mobile-win32.png` | Default Notes form, placeholder, feed, and divider crop | 390 × 1050 |
+| `guest-default-guestbook-390-mobile-win32.png` | Default Guestbook prompt, composer, maximum RTL entry, and inherited event tokens | 390 × 1682 |
 | `guest-garden-cover-390-mobile-win32.png` | Garden Party cover first fold | 390 × 844 |
 | `guest-midnight-review-progress-320-mobile-win32.png` | Midnight Film review and getting-ready state | 320 × 625 |
 | `guest-coastal-entry-390-mobile-win32.png` | Coastal Light no-cover entry | 390 × 844 |
 | `guest-coastal-receipt-390-mobile-win32.png` | Coastal Light terminal delivery receipt | 390 × 844 |
-| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview with global chrome outside scope | 390 × 4212 |
+| `manager-event-appearance-390-mobile-win32.png` | Complete Settings editor/preview, including Guestbook settings, with global chrome outside scope | 390 × 4218 |
 | `fullscreen-midnight-1280x900-desktop-win32.png` | Six-photo Midnight Film full-screen composition | 1280 × 900 |
 
-The Default Notes image is a new approved theme baseline, not one of the three
-existing Default baseline updates. The final event-theming Task 8 evidence revision changed
-no PNG. A later independent-review correction replaced the Manager color
-input's undefined border variable with the global `--border` token and, at that feature head,
-regenerated only `manager-event-appearance-390-mobile-win32.png`. The Chestnut/Denim integration
-then regenerated the combined Default and global-chrome baselines against the final token registry.
+The Default Guestbook image supersedes the removed
+`guest-default-notes-390-mobile-win32.png` baseline. The Guestbook evidence revision also
+re-captured the complete Manager Settings state because prompt and review controls now precede the
+event-appearance editor. The eight 350 × 415 Manager theme-canvas baselines were re-rasterized after
+that approved Settings insertion shifted the live canvas within the document; original-resolution
+inspection confirmed that their theme composition and Manager/event-scope boundary remain unchanged.
 
 Three existing Default baselines changed intentionally:
 
@@ -98,6 +98,39 @@ This is Chromium automation against local stateful route fixtures and determinis
 does not prove real Cloudflare Images codecs/HEIC/metadata stripping, Workflow lifecycle behavior,
 remote D1, a deployed route, Safari/WebKit, a native picker, a physical device, VoiceOver, or TalkBack.
 Those remain staging, production, and physical gates in `docs/deployment.md`.
+
+## Curated private Guestbook evidence
+
+Reviewed locally on 2026-08-12 against
+`docs/superpowers/specs/2026-08-12-curated-private-guestbook-design.md` with contract-version-2 guest
+and safe Manager route fixtures.
+
+| Contract point | Local automated result | Evidence boundary |
+| --- | --- | --- |
+| Guest placement and receipt | `core-journey.spec.ts`, `guest-responsive.spec.ts`, and `accessibility.spec.ts` cover the first secondary `Guestbook`, the sole terminal `Leave a guestbook note` action, post-commit heading focus, keyboard-only send, polite confirmation, gallery-off privacy, and reduced-motion `auto` rather than smooth scrolling. | The focused four-file Chromium matrix passed 116 cases with 12 intentional project skips. It does not establish native screen-reader or physical-device behavior. |
+| Responsive and text containment | Guest and Manager cases exercise 320 × 844, 390 × 844, representative desktop, 640 × 450 as a 1280-at-200%-zoom equivalent, and 320-pixel 400%-zoom-equivalent containment with the 160-character prompt, 500-character body, 80-character name, Unicode, RTL, `dir="auto"`, 44-pixel targets, focus indicators, and no horizontal document overflow. | These are CSS-viewport Chromium checks, not browser UI zoom certification or Safari/WebKit evidence. |
+| Manager curation | `manager-responsive.spec.ts` covers the `Guestbook` destination, `Guestbook from the day`, pending-only badge, all visibility/source controls, gallery-off captions, keyboard-only moderation, row-local live announcements, focus restoration with `preventScroll`, and preservation of the scroll position captured immediately before the confirmed row update. | Stubbed safe Manager endpoints prove client behavior, not deployed authorization, remote D1 state, or production polling. |
+| Printable and private artifacts | `accessibility.spec.ts` renders the real `buildGuestbookHtml` output with `page.setContent`, verifies semantic `article[dir="auto"]`, escaped contributed text, no script/form/remote asset, zero requests, at least 7:1 body contrast, axe-clean screen and emulated print media, white print background, and `break-inside: avoid`. The printable HTML remains shared-keepsake-only; the complete non-deleted private CSV remains a separate labelled artifact. | Local Chromium screen and print-media emulation is not an operating-system print-dialog check, common-browser manual print proof, or common-spreadsheet CSV opening. Physical iPhone/Android, VoiceOver/TalkBack, degraded-network rehearsal, immutable release-candidate verification, remote migration, deployment, and runtime certification remain separate gates. |
+
+The final zero-tolerance snapshot matrix was inspected at original resolution. New evidence is
+`guest-default-guestbook-390-mobile-win32.png` (390 × 1682) and
+`manager-guestbook-390-mobile-win32.png` (390 × 1079). Intentional updates are
+`guest-coastal-receipt-390-mobile-win32.png` (390 × 844),
+`guest-secondary-long-content-320-mobile-win32.png` (320 × 1655),
+`manager-event-appearance-390-mobile-win32.png` (390 × 4218),
+`manager-nav-768-mobile-win32.png` (104 × 1244),
+`manager-nav-count-390-mobile-win32.png` (390 × 112), and the eight theme canvases
+`manager-candidary-default-preset-film-mobile-win32.png`,
+`manager-candidary-default-upload-natural-mobile-win32.png`,
+`manager-garden-party-preset-film-mobile-win32.png`,
+`manager-garden-party-upload-warm-mobile-win32.png`,
+`manager-midnight-film-preset-film-mobile-win32.png`,
+`manager-midnight-film-upload-soft-mobile-win32.png`,
+`manager-coastal-light-preset-film-mobile-win32.png`, and
+`manager-coastal-light-upload-monochrome-mobile-win32.png` (each 350 × 415). The prior
+`guest-default-notes-390-mobile-win32.png` (390 × 1050) was removed as superseded evidence. The 15
+current named snapshot cases passed without update mode after inspection; no unrelated baseline was
+accepted.
 
 ## RSVP and durable-entry evidence
 

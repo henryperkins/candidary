@@ -42,6 +42,7 @@ describe('complete private event journey', () => {
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
       body: JSON.stringify({
+        guestbookPrompt: access.event.guestbookPrompt,
         galleryVisible: true, moderationRequired: true,
         eventTimezone: 'America/Chicago', eventStartTime: '00:00',
         rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,
@@ -339,6 +340,7 @@ describe('server-owned event configuration and phase', () => {
       method: 'PATCH',
       headers: writeHeaders(manager),
       body: JSON.stringify({
+        guestbookPrompt: body.data.event.guestbookPrompt,
         galleryVisible: body.data.event.galleryVisible,
         moderationRequired: body.data.event.moderationRequired,
         eventTimezone: 'America/New_York',

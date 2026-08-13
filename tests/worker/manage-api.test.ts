@@ -1,11 +1,21 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
+import {
+  DEFAULT_GUESTBOOK_PROMPT,
+  MANAGER_BULK_SELECTION_MAX,
+  MAX_GUESTBOOK_PROMPT_LENGTH,
+} from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { EventEntriesRepository } from '../../worker/db/event-entries';
 import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
+import { MediaObjectWriteTombstoneRepository } from '../../worker/db/media-write-tombstones';
+import {
+  cleanupMediaObjectWriteTombstones,
+  deleteEventData,
+  promoteLegacyStoredMedia,
+} from '../../worker/workflows/cleanup';
 import {
   applySettings,
   cookiesFrom,
@@ -21,6 +31,9 @@ import {
 } from './helpers';
 
 beforeEach(resetDatabase);
+afterEach(() => {
+  delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+});
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 type SeededMedia = { id: string; storedAt: string };
@@ -55,16 +68,18 @@ async function seedStoredMedia(access: Access, indexes: readonly number[], group
     const createdAt = seedCreatedAt(index);
     await env.DB.prepare(`
       INSERT INTO media (
-        id, event_id, uploader_session_id, object_key, original_filename, mime_type,
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type,
         declared_byte_size, byte_size, width, height, guest_name, caption, upload_state,
         publication_status, idempotency_key, reservation_expires_at, created_at, stored_at
       )
-      VALUES (?, ?, ?, ?, ?, 'image/png', 128, 128, 800, 600, ?, NULL, 'stored', 'unpublished', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, 'canonical', ?, 'image/png', 128, 128, 800, 600,
+        ?, NULL, 'stored', 'unpublished', ?, ?, ?, ?)
     `).bind(
       id,
       access.event.id,
       session.id,
-      `events/${access.event.id}/media/${id}`,
+      `events/${access.event.id}/media/final/${id}`,
       `seed-${index}.png`,
       index % 2 === 0 ? 'Avery Stone' : 'Jordan Lee',
       `seed-${group}-${index}`,
@@ -149,13 +164,14 @@ describe('manager media pagination', () => {
     const access = await eventAccess();
     const seeded = await seedStoredMedia(access, range(5));
     const order = expectedOrder(seeded);
+    const lateBytes = png();
     const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST',
       headers: writeHeaders(access.guest),
       body: JSON.stringify({
         filename: 'late.png',
         mimeType: 'image/png',
-        byteSize: 128,
+        byteSize: lateBytes.byteLength,
         idempotencyKey: 'late-finalization',
         guestName: 'Avery Stone',
       }),
@@ -165,17 +181,24 @@ describe('manager media pagination', () => {
     await env.DB.prepare('UPDATE media SET created_at = ? WHERE id = ?')
       .bind(behindCursor, reserved.id)
       .run();
-    await testEnv.MEDIA_BUCKET.put(reserved.objectKey, png(), {
-      httpMetadata: { contentType: 'image/png' },
-    });
-
     const first = await managerMediaPage(access, '?limit=2');
     expect(first.ids).toEqual(order.slice(0, 2));
     expect(first.nextCursor).toEqual(expect.any(String));
 
     const finalized = await createApp().request(
-      `/api/event/${access.event.slug}/uploads/${reserved.id}/finalize`,
-      { method: 'POST', headers: writeHeaders(access.guest), body: '{}' },
+      `/api/event/${access.event.slug}/uploads/${reserved.id}/content`,
+      {
+        method: 'PUT',
+        headers: {
+          ...writeHeaders(access.guest),
+          'content-type': 'image/png',
+          'content-length': String(lateBytes.byteLength),
+        },
+        body: lateBytes.buffer.slice(
+          lateBytes.byteOffset,
+          lateBytes.byteOffset + lateBytes.byteLength,
+        ) as ArrayBuffer,
+      },
       testEnv,
     );
     expect(finalized.status).toBe(200);
@@ -286,6 +309,119 @@ describe('manager media pagination', () => {
 });
 
 describe('manager settings and private photo intake', () => {
+  it('returns allowlisted Manager media and caption projections without private storage fields', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'safe-manager-media', 'A safe caption');
+
+    const listed = await createApp().request(`/api/manage/events/${access.event.id}/media`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const listedBody = await listed.json<any>();
+    expect(listedBody.data.media).toEqual([{
+      id: media.id,
+      originalFilename: 'safe-manager-media.png',
+      guestName: 'Avery',
+      caption: 'A safe caption',
+      publicationStatus: 'unpublished',
+      uploadState: 'stored',
+      previewAvailable: false,
+      width: 800,
+      height: 600,
+      createdAt: media.createdAt,
+    }]);
+
+    const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
+      method: 'PATCH',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({ action: 'publish', expectedStatus: 'unpublished' }),
+    }, testEnv);
+    const publishedBody = await published.json<any>();
+    expect(publishedBody.data.media).toMatchObject({
+      id: media.id,
+      publicationStatus: 'published',
+      previewAvailable: false,
+    });
+    expect(publishedBody.data.item).toMatchObject({
+      id: media.id,
+      source: 'photo_caption',
+      mediaId: media.id,
+      state: 'published',
+      visibility: 'author_only',
+      previewAvailable: false,
+    });
+    expect(JSON.stringify([listedBody, publishedBody]))
+      .not.toMatch(/objectKey|object_key|previewObjectKey|preview_object_key|uploaderSessionId|idempotencyKey/u);
+  });
+
+  it('defaults the guestbook prompt on creation and returns it to guests and managers', async () => {
+    const access = await eventAccess();
+
+    expect(access.event.guestbookPrompt).toBe(DEFAULT_GUESTBOOK_PROMPT);
+    const guest = await createApp().request(`/api/event/${access.event.slug}`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect((await guest.json<any>()).data.event.guestbookPrompt).toBe(DEFAULT_GUESTBOOK_PROMPT);
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: DEFAULT_GUESTBOOK_PROMPT });
+  });
+
+  it('trims and persists a valid guestbook prompt', async () => {
+    const access = await eventAccess();
+
+    const response = await applySettings(access, {
+      guestbookPrompt: '  Leave us a favorite memory.  ',
+    });
+
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.event.guestbookPrompt)
+      .toBe('Leave us a favorite memory.');
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: 'Leave us a favorite memory.' });
+  });
+
+  it('requires the guestbook prompt in the complete settings payload without changing storage', async () => {
+    const access = await eventAccess();
+    const storedPrompt = 'Tell us what made you smile.';
+    expect((await applySettings(access, { guestbookPrompt: storedPrompt })).status).toBe(200);
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
+      method: 'PATCH',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        galleryVisible: access.event.galleryVisible,
+        moderationRequired: access.event.moderationRequired,
+        eventTimezone: access.event.eventTimezone,
+        eventStartTime: access.event.eventStartTime,
+        rsvpDeadlineDate: access.event.rsvpDeadlineDate,
+        rsvpEnabled: access.event.rsvpEnabled,
+        rsvpRosterVersion: access.event.rsvpRosterVersion,
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).fieldErrors.guestbookPrompt).toEqual(expect.any(String));
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: storedPrompt });
+  });
+
+  it.each([
+    ['', 'String must contain at least 1 character(s)'],
+    [' '.repeat(4), 'String must contain at least 1 character(s)'],
+    ['g'.repeat(MAX_GUESTBOOK_PROMPT_LENGTH + 1),
+      `String must contain at most ${MAX_GUESTBOOK_PROMPT_LENGTH} character(s)`],
+  ])('rejects an invalid guestbook prompt without changing the stored value', async (value) => {
+    const access = await eventAccess();
+
+    const response = await applySettings(access, { guestbookPrompt: value });
+
+    expect(response.status).toBe(422);
+    const body = await response.json<any>();
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.fieldErrors.guestbookPrompt).toEqual(expect.any(String));
+    expect(await env.DB.prepare('SELECT guestbook_prompt FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toEqual({ guestbook_prompt: DEFAULT_GUESTBOOK_PROMPT });
+  });
+
   it('rejects an implausible RSVP deadline year before storing it', async () => {
     const access = await eventAccess();
 
@@ -399,6 +535,7 @@ describe('manager settings and private photo intake', () => {
     await createApp().request(`/api/manage/events/${access.event.id}/settings`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
       body: JSON.stringify({
+        guestbookPrompt: access.event.guestbookPrompt,
         galleryVisible: true, moderationRequired: true,
         eventTimezone: 'America/Chicago', eventStartTime: '00:00',
         rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,
@@ -438,7 +575,50 @@ describe('manager settings and private photo intake', () => {
     const rows = await env.DB.prepare('SELECT id, publication_status FROM media ORDER BY id').all<any>();
     const states = Object.fromEntries(rows.results.map((row: any) => [row.id, row.publication_status]));
     expect(states).toMatchObject({ [first.id]: 'published', [second.id]: 'published', [untouched.id]: 'unpublished' });
-    expect((await response.json<any>()).data.changed).toEqual([first.id, second.id]);
+    expect((await response.json<any>()).data.changed.map((item: any) => item.id)).toEqual([first.id, second.id]);
+  });
+
+  it('returns only ManagerMediaView fields for every bulk moderation result', async () => {
+    const access = await eventAccess();
+    const first = await uploadPending(access, 'bulk-safe-1', 'First caption');
+    const second = await uploadPending(access, 'bulk-safe-2', 'Second caption');
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/media/bulk`, {
+      method: 'POST',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        ids: [first.id, second.id],
+        action: 'publish',
+        expectedStatus: 'unpublished',
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(200);
+    const changed = (await response.json<any>()).data.changed;
+    const expectedKeys = [
+      'caption',
+      'createdAt',
+      'guestName',
+      'height',
+      'id',
+      'originalFilename',
+      'previewAvailable',
+      'publicationStatus',
+      'uploadState',
+      'width',
+    ];
+    expect(changed).toHaveLength(2);
+    for (const item of changed) {
+      expect(Object.keys(item).sort()).toEqual(expectedKeys);
+    }
+    expect(changed.map((item: any) => item.id)).toEqual([first.id, second.id]);
+    expect(changed).toEqual([
+      expect.objectContaining({ publicationStatus: 'published', previewAvailable: false }),
+      expect.objectContaining({ publicationStatus: 'published', previewAvailable: false }),
+    ]);
+    expect(JSON.stringify(changed)).not.toMatch(
+      /objectKey|previewObjectKey|uploaderSessionId|idempotencyKey|byteSize|mimeType|reservationExpiresAt/u,
+    );
   });
 
   it('supports the maximum bulk selection through D1 in request order', async () => {
@@ -461,7 +641,7 @@ describe('manager settings and private photo intake', () => {
     }, testEnv);
 
     expect(response.status).toBe(200);
-    expect((await response.json<any>()).data.changed).toEqual(selectedIds);
+    expect((await response.json<any>()).data.changed.map((item: any) => item.id)).toEqual(selectedIds);
     const rows = await env.DB.prepare(`
       SELECT id, publication_status
       FROM media
@@ -577,12 +757,16 @@ describe('manager settings and private photo intake', () => {
     }
   });
 
-  it('deletes the cached preview with an individual private original', async () => {
+  it('durably schedules original/final/preview deletion when R2 cleanup fails', async () => {
     const access = await eventAccess();
     const media = await uploadPending(access, 'delete-preview');
     const previewObjectKey = `events/${access.event.id}/previews/${media.id}.webp`;
     await testEnv.MEDIA_BUCKET.put(previewObjectKey, new Uint8Array([1, 2, 3]));
-    await new MediaRepository(env.DB).setPreviewObjectKey(media.id, previewObjectKey);
+    // Model a pointer admitted by an old Worker immediately before the
+    // canonical-generation guard became visible. New code cannot persist it.
+    await testEnv.DB.exec('DROP TRIGGER media_object_write_tombstone_guard_update;');
+    await testEnv.DB.prepare('UPDATE media SET preview_object_key = ? WHERE id = ?')
+      .bind(previewObjectKey, media.id).run();
 
     const deleted = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
       method: 'PATCH', headers: writeHeaders(access.manager),
@@ -590,8 +774,86 @@ describe('manager settings and private photo intake', () => {
     }, testEnv);
 
     expect(deleted.status).toBe(200);
-    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(previewObjectKey)).not.toBeNull();
+    expect(await new MediaRepository(env.DB).getPromotion(media.id)).not.toBeNull();
+    await promoteLegacyStoredMedia(testEnv, new Date('2099-08-13T10:21:00.000Z'));
+    expect(await new MediaRepository(env.DB).getPromotion(media.id)).toBeNull();
+
+    const deleteSpy = vi.spyOn(testEnv.CANONICAL_MEDIA_BUCKET, 'delete')
+      .mockRejectedValueOnce(new Error('R2 unavailable'));
+    await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2099-08-13T10:22:00.000Z'),
+    );
+    deleteSpy.mockRestore();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+
+    await cleanupMediaObjectWriteTombstones(
+      testEnv,
+      new Date('2099-08-13T11:23:00.000Z'),
+    );
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).toBeNull();
     expect(await testEnv.MEDIA_BUCKET.head(previewObjectKey)).toBeNull();
+  });
+
+  it('preserves target-verified proof until manager deletion is handed to permanent suppression', async () => {
+    const access = await eventAccess();
+    const uploaded = await uploadPending(access, 'manager-delete-target-verified');
+    const canonicalKey = uploaded.objectKey;
+    const canonical = await testEnv.CANONICAL_MEDIA_BUCKET.get(canonicalKey);
+    if (!canonical?.body) throw new Error('Expected canonical fixture bytes.');
+    const legacyKey = `events/${access.event.id}/media/${uploaded.id}`;
+    await testEnv.MEDIA_BUCKET.put(legacyKey, canonical.body, {
+      httpMetadata: { contentType: uploaded.mimeType },
+    });
+    await testEnv.DB.prepare('DELETE FROM media_object_promotions WHERE media_id = ?')
+      .bind(uploaded.id).run();
+    await testEnv.DB.exec('DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;');
+    await testEnv.DB.prepare(`
+      UPDATE media SET object_key = ?, object_bucket_generation = 'legacy',
+        reservation_expires_at = ? WHERE id = ?
+    `).bind(legacyKey, '2026-08-13T09:59:00.000Z', uploaded.id).run();
+    await testEnv.CANONICAL_MEDIA_BUCKET.delete(canonicalKey);
+
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = 'copy-only';
+    await promoteLegacyStoredMedia(testEnv, new Date('2026-08-13T10:00:00.000Z'));
+    const repository = new MediaRepository(env.DB);
+    const proof = await repository.getPromotion(uploaded.id);
+    expect(proof).toMatchObject({ state: 'target_verified', finalObjectKey: canonicalKey });
+
+    const deleted = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${uploaded.id}`,
+      {
+        method: 'PATCH',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ action: 'delete', expectedStatus: 'unpublished' }),
+      },
+      testEnv,
+    );
+
+    expect(deleted.status).toBe(200);
+    expect(await repository.getById(uploaded.id)).toMatchObject({
+      uploadState: 'deleted', deletedAt: expect.any(String),
+    });
+    expect(await repository.getPromotion(uploaded.id)).toEqual(proof);
+    expect(await testEnv.MEDIA_BUCKET.head(legacyKey)).not.toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalKey)).not.toBeNull();
+
+    delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+    const handedOffAt = new Date('2099-08-13T10:21:00.000Z');
+    await promoteLegacyStoredMedia(testEnv, handedOffAt);
+    expect(await repository.getPromotion(uploaded.id)).toBeNull();
+    await cleanupMediaObjectWriteTombstones(testEnv, handedOffAt, 100);
+    expect(await testEnv.MEDIA_BUCKET.head(legacyKey)).toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalKey)).toBeNull();
+    const tombstones = new MediaObjectWriteTombstoneRepository(testEnv.DB);
+    expect(await tombstones.get(legacyKey, 'legacy')).toMatchObject({
+      suppressionStartedAt: expect.any(String),
+    });
+    expect(await tombstones.get(canonicalKey, 'canonical')).toMatchObject({
+      suppressionStartedAt: expect.any(String),
+    });
   });
 
   it('uses a domain refusal when a photo belongs to another event', async () => {
@@ -824,6 +1086,35 @@ describe('access link rotation', () => {
 });
 
 describe('host-initiated event deletion', () => {
+  it('soft-deletes and revokes without sweeping either bucket in Candidate A', async () => {
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = false;
+    const access = await eventAccess();
+    const legacyKey = `events/${access.event.id}/uploads/candidate-a-late`;
+    const canonicalKey = `events/${access.event.id}/media/final/candidate-a-final`;
+    await testEnv.MEDIA_BUCKET.put(legacyKey, png());
+    await testEnv.CANONICAL_MEDIA_BUCKET.put(canonicalKey, png());
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      method: 'DELETE',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({ confirmation: access.event.name }),
+    }, testEnv);
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      data: { deletionScheduled: true },
+      requestId: expect.any(String),
+    });
+    expect(await testEnv.DB.prepare('SELECT deleted_at FROM events WHERE id = ?')
+      .bind(access.event.id).first()).toMatchObject({ deleted_at: expect.any(String) });
+    expect(await testEnv.MEDIA_BUCKET.head(legacyKey)).not.toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(canonicalKey)).not.toBeNull();
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_access_tokens
+      WHERE event_id = ? AND revoked_at IS NULL
+    `).bind(access.event.id).first<number>('count')).toBe(0);
+  });
+
   it('returns the exact scheduled-deletion contract while a fence remains parked', async () => {
     const access = await eventAccess();
     const graph = await seedEventCoverGraph(testEnv.DB, access.event.id);
@@ -872,11 +1163,18 @@ describe('host-initiated event deletion', () => {
       headers: writeHeaders(access.manager),
       body: JSON.stringify({ confirmation: access.event.name }),
     }, testEnv);
-    expect(deleted.status).toBe(200);
+    expect(deleted.status).toBe(202);
     expect(await deleted.json()).toEqual({
-      data: { deleted: true },
+      data: { deletionScheduled: true },
       requestId: expect.any(String),
     });
+
+    await promoteLegacyStoredMedia(testEnv, new Date('2099-08-13T10:21:00.000Z'));
+    expect(await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2099-08-13T10:22:00.000Z'),
+    )).toMatchObject({ phase: 'complete', remainder: false });
 
     // The row is gone rather than soft-deleted, so a purge that already ran does
     // not leave the event waiting for a later scheduled pass.

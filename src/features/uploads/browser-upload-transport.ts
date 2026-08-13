@@ -16,13 +16,20 @@ const FINALIZE_REUPLOAD_CODES = new Set([
 interface BatchResponseItem {
   idempotencyKey: string;
   status: 'accepted' | 'rejected';
-  media?: { id: string; mimeType: string };
+  alreadyDelivered?: boolean;
+  media?: { id: string; mimeType: string; uploadState: 'reserved' | 'stored' | 'failed' | 'deleted' };
   uploadUrl?: string;
   error?: { message: string };
 }
 
 function cancellation() {
   return new DOMException('Sending was cancelled.', 'AbortError');
+}
+
+function eventCsrf(): string | undefined {
+  return document.cookie.split('; ')
+    .find((part) => part.startsWith('candidary_csrf='))
+    ?.split('=')[1];
 }
 
 function backoff(attempt: number, signal?: AbortSignal) {
@@ -59,6 +66,12 @@ export function xhrUpload(
       finish();
     };
     request.open('PUT', reservation.uploadUrl);
+    const target = new URL(reservation.uploadUrl, window.location.href);
+    if (target.origin === window.location.origin) {
+      request.withCredentials = true;
+      const csrf = eventCsrf();
+      if (csrf) request.setRequestHeader('x-candidary-csrf', decodeURIComponent(csrf));
+    }
     request.setRequestHeader('Content-Type', reservation.mimeType);
     request.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) progress((event.loaded / event.total) * 100);
@@ -94,6 +107,9 @@ export function createBrowserTransport(slug: string, guestName: string): UploadT
           }),
         });
         results.push(...response.items.map((item) => {
+          if (item.status === 'accepted' && item.alreadyDelivered && item.media?.uploadState === 'stored') {
+            return { id: item.idempotencyKey, status: 'delivered' as const };
+          }
           if (item.status === 'accepted' && item.media && item.uploadUrl) {
             return {
               id: item.idempotencyKey,
