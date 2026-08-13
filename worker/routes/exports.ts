@@ -3,6 +3,7 @@ import { Hono, type Context } from 'hono';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
 import { ExportsRepository } from '../db/exports';
+import type { ExportRecord } from '../db/types';
 import type { AppBindings } from '../env';
 import { presignDownload } from '../storage/presign';
 
@@ -16,12 +17,32 @@ async function ownedJob(context: Context<AppBindings>) {
   return job;
 }
 
+function managerExport(job: ExportRecord) {
+  return {
+    id: job.id,
+    state: job.state,
+    snapshotAt: job.snapshotAt,
+    mediaCount: job.mediaCount,
+    totalBytes: job.totalBytes,
+    attempt: job.attempt,
+    partCount: job.partCount,
+    expiresAt: job.expiresAt,
+    guestbookEntryCount: job.guestbookEntryCount,
+    guestbookSharedCount: job.guestbookSharedCount,
+    guestbookEventName: job.guestbookEventName,
+    guestbookEventDate: job.guestbookEventDate,
+    guestbookEventTimezone: job.guestbookEventTimezone,
+    guestbookPrompt: job.guestbookPrompt,
+    guestbookGalleryVisible: job.guestbookGalleryVisible,
+  };
+}
+
 export const exportRoutes = new Hono<AppBindings>();
 
 exportRoutes.get('/manage/events/:eventId/exports', async (context) => {
   await manager(context);
   const jobs = await new ExportsRepository(context.env.DB).listForEvent(context.req.param('eventId'));
-  return context.json({ data: { exports: jobs }, requestId: context.get('requestId') });
+  return context.json({ data: { exports: jobs.map(managerExport) }, requestId: context.get('requestId') });
 });
 
 exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
@@ -32,13 +53,13 @@ exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
     createdAt: snapshotAt,
   });
   await context.env.EXPORT_WORKFLOW.create({ id: job.id, params: { jobId: job.id } });
-  return context.json({ data: { export: job }, requestId: context.get('requestId') }, 202);
+  return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 
 exportRoutes.get('/manage/events/:eventId/exports/:jobId', async (context) => {
   await manager(context);
   const job = await ownedJob(context);
-  return context.json({ data: { export: job }, requestId: context.get('requestId') });
+  return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') });
 });
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context) => {
@@ -60,7 +81,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
   if (keys.length) await context.env.MEDIA_BUCKET.delete(keys);
   const job = await repository.retry(current.id);
   await context.env.EXPORT_WORKFLOW.create({ id: `${job.id}-${job.attempt}`, params: { jobId: job.id } });
-  return context.json({ data: { export: job }, requestId: context.get('requestId') }, 202);
+  return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (context) => {

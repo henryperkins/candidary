@@ -40,7 +40,9 @@ export async function processExport(
   let job = await exports.getById(jobId);
   if (!job) return null;
   if (job.state === 'ready') return job;
-  job = await exports.markRunning(jobId, now.toISOString());
+  const claim = await exports.claimRunning(jobId, now.toISOString());
+  if (!claim.owned) return claim.job;
+  job = claim.job;
 
   const baseKey = `events/${job.eventId}/exports/${job.id}/attempt-${job.attempt}`;
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;

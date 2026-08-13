@@ -44,8 +44,7 @@ export interface ExportView {
   mediaCount: number;
   totalBytes: number;
   attempt: number;
-  manifestObjectKey?: string | null;
-  partCount?: number;
+  partCount: number;
   expiresAt: string | null;
   guestbookEntryCount: number | null;
   guestbookSharedCount: number | null;

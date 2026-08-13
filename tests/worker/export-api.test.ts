@@ -7,6 +7,28 @@ import { ExportsRepository } from '../../worker/db/exports';
 import { processExport } from '../../worker/workflows/export';
 import { eventAccess, resetDatabase, testEnv, uploadPending, writeHeaders } from './helpers';
 
+const managerExportKeys = [
+  'attempt',
+  'expiresAt',
+  'guestbookEntryCount',
+  'guestbookEventDate',
+  'guestbookEventName',
+  'guestbookEventTimezone',
+  'guestbookGalleryVisible',
+  'guestbookPrompt',
+  'guestbookSharedCount',
+  'id',
+  'mediaCount',
+  'partCount',
+  'snapshotAt',
+  'state',
+  'totalBytes',
+].sort();
+
+function expectManagerExport(value: Record<string, unknown>) {
+  expect(Object.keys(value).sort()).toEqual(managerExportKeys);
+}
+
 describe('manager exports', () => {
   beforeEach(resetDatabase);
 
@@ -250,6 +272,40 @@ describe('manager exports', () => {
     expect((await retry.json<any>()).data.export.attempt).toBe(2);
   });
 
+  it('returns only the Manager export allowlist from create, get, list, and retry', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'safe-manager-export', 'Visible caption');
+    const app = createApp();
+    const created = await app.request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const createdJob = (await created.json<any>()).data.export;
+    expectManagerExport(createdJob);
+
+    const fetched = await app.request(
+      `/api/manage/events/${access.event.id}/exports/${createdJob.id}`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+    expectManagerExport((await fetched.json<any>()).data.export);
+
+    const listed = await app.request(`/api/manage/events/${access.event.id}/exports`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const listedJobs = (await listed.json<any>()).data.exports;
+    expect(listedJobs).toHaveLength(1);
+    expectManagerExport(listedJobs[0]);
+
+    await new ExportsRepository(testEnv.DB).markFailed(createdJob.id, 'EXPORT_SOURCE_MISSING');
+    const retried = await app.request(
+      `/api/manage/events/${access.event.id}/exports/${createdJob.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(retried.status).toBe(202);
+    expectManagerExport((await retried.json<any>()).data.export);
+  });
+
   it('cleans every object from repeated failed attempts and keeps deterministic prefixes', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'failure-cleanup-a', null);
@@ -274,6 +330,98 @@ describe('manager exports', () => {
     expect((await testEnv.MEDIA_BUCKET.list({
       prefix: `events/${access.event.id}/exports/${job.id}/attempt-2/`,
     })).objects).toEqual([]);
+  });
+
+  it('lets only the queued-to-running transition owner process one attempt', async () => {
+    const access = await eventAccess();
+    const snapshotAt = new Date().toISOString();
+    const repository = new ExportsRepository(testEnv.DB);
+    const job = await repository.createActive({
+      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
+      mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
+    });
+    await testEnv.DB.prepare(`
+      UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
+    `).bind(snapshotAt, job.id).run();
+
+    const duplicate = await processExport(testEnv, job.id, new Date());
+
+    expect(duplicate).toMatchObject({ state: 'running', startedAt: snapshotAt });
+    expect(await repository.getById(job.id)).toMatchObject({
+      state: 'running', startedAt: snapshotAt, errorCode: null,
+    });
+    expect((await testEnv.MEDIA_BUCKET.list({
+      prefix: `events/${access.event.id}/exports/${job.id}/`,
+    })).objects).toEqual([]);
+  });
+
+  it('returns an already-Ready job without trying to claim or process it again', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'already-ready', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    const returned = await processExport(testEnv, job.id, new Date(Date.now() + 60_000));
+
+    expect(returned).toEqual(ready);
+  });
+
+  it('does not mutate winner parts when markReady loses the running-state transition', async () => {
+    const access = await eventAccess();
+    const snapshotAt = new Date().toISOString();
+    const repository = new ExportsRepository(testEnv.DB);
+    const job = await repository.createActive({
+      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
+      mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
+    });
+    await testEnv.DB.prepare(`
+      UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
+    `).bind(snapshotAt, job.id).run();
+
+    let interleaved = false;
+    const interleavingDb = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!interleaved) {
+              interleaved = true;
+              await testEnv.DB.batch([
+                testEnv.DB.prepare(`
+                  UPDATE export_jobs SET state = 'ready', manifest_object_key = 'winner-manifest',
+                    part_count = 1, completed_at = ?, expires_at = ?, error_code = NULL
+                  WHERE id = ? AND state = 'running'
+                `).bind(snapshotAt, new Date(Date.now() + 60_000).toISOString(), job.id),
+                testEnv.DB.prepare(`
+                  INSERT INTO export_parts (
+                    id, export_job_id, part_number, object_key, media_count, source_bytes, created_at
+                  ) VALUES ('winner-part-id', ?, 1, 'winner-part', 1, 64, ?)
+                `).bind(job.id, snapshotAt),
+              ]);
+            }
+            return testEnv.DB.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const staleRepository = new ExportsRepository(interleavingDb);
+
+    await expect(staleRepository.markReady(job.id, {
+      manifestObjectKey: 'stale-manifest',
+      parts: [{ partNumber: 1, objectKey: 'stale-part', mediaCount: 1, sourceBytes: 64 }],
+      guestbook: null,
+    }, snapshotAt, new Date(Date.now() + 120_000).toISOString()))
+      .rejects.toThrow('Export job was not running.');
+
+    expect(await repository.getById(job.id)).toMatchObject({
+      state: 'ready', manifestObjectKey: 'winner-manifest', partCount: 1,
+    });
+    expect(await repository.listParts(job.id)).toMatchObject([{
+      id: 'winner-part-id', partNumber: 1, objectKey: 'winner-part',
+    }]);
   });
 
   it('keeps count-drift failure behavior without publishing partial artifacts', async () => {
@@ -393,7 +541,7 @@ describe('manager exports', () => {
     }, testEnv);
     const job = (await created.json<any>()).data.export;
     const repository = new ExportsRepository(testEnv.DB);
-    await repository.markRunning(job.id, new Date().toISOString());
+    await repository.claimRunning(job.id, new Date().toISOString());
     await expect(repository.markReady(job.id, {
       manifestObjectKey: null,
       parts: [],
@@ -431,7 +579,7 @@ describe('manager exports', () => {
       method: 'POST', headers: writeHeaders(notesAccess.manager), body: '{}',
     }, testEnv);
     const notesJob = (await notesCreated.json<any>()).data.export;
-    await repository.markRunning(notesJob.id, new Date().toISOString());
+    await repository.claimRunning(notesJob.id, new Date().toISOString());
     await expect(repository.markReady(notesJob.id, {
       manifestObjectKey: null, parts: [], guestbook: null,
     }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))

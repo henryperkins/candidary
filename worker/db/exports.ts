@@ -76,6 +76,10 @@ export interface ReadyExportInventory {
   guestbook: GuestbookArtifactInventory | null;
 }
 
+export type ExportRunClaim =
+  | { owned: true; job: ExportRecord }
+  | { owned: false; job: ExportRecord | null };
+
 function mapExport(row: ExportRow): ExportRecord {
   return {
     id: row.id,
@@ -274,12 +278,15 @@ export class ExportsRepository {
     return result.results.map(mapPart);
   }
 
-  async markRunning(id: string, startedAt: string): Promise<ExportRecord> {
-    await this.db.prepare(`
+  async claimRunning(id: string, startedAt: string): Promise<ExportRunClaim> {
+    const result = await this.db.prepare(`
       UPDATE export_jobs SET state = 'running', started_at = ?, error_code = NULL
       WHERE id = ? AND state = 'queued'
     `).bind(startedAt, id).run();
-    return (await this.getById(id))!;
+    const job = await this.getById(id);
+    return (result.meta.changes ?? 0) === 1 && job?.state === 'running'
+      ? { owned: true, job }
+      : { owned: false, job };
   }
 
   async markReady(
@@ -316,22 +323,40 @@ export class ExportsRepository {
       throw new Error('Photo inventory does not match the export snapshot.');
     }
     const guestbook = inventory.guestbook;
+    const readyClaim = `ready:${crypto.randomUUID()}`;
     const statements = [
-      this.db.prepare('DELETE FROM export_parts WHERE export_job_id = ?').bind(id),
+      // State ownership is the first statement in the transaction. The
+      // temporary claim is never externally visible: D1 batch is atomic, and a
+      // later failure rolls this transition back with every part mutation.
+      this.db.prepare(`
+        UPDATE export_jobs SET state = 'ready', error_code = ?
+        WHERE id = ? AND state = 'running'
+      `).bind(readyClaim, id),
+      this.db.prepare(`
+        DELETE FROM export_parts WHERE export_job_id = ? AND EXISTS (
+          SELECT 1 FROM export_jobs
+          WHERE id = ? AND state = 'ready' AND error_code = ?
+        )
+      `).bind(id, id, readyClaim),
       ...inventory.parts.map((part) => this.db.prepare(`
         INSERT INTO export_parts (
           id, export_job_id, part_number, object_key, media_count, source_bytes, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
+          SELECT 1 FROM export_jobs
+          WHERE id = ? AND state = 'ready' AND error_code = ?
+        )
       `).bind(
         crypto.randomUUID(), id, part.partNumber, part.objectKey,
         part.mediaCount, part.sourceBytes, completedAt,
+        id, readyClaim,
       )),
       this.db.prepare(`
-        UPDATE export_jobs SET state = 'ready', object_key = NULL, manifest_object_key = ?,
+        UPDATE export_jobs SET object_key = NULL, manifest_object_key = ?,
           part_count = ?, guestbook_html_object_key = ?, guestbook_html_bytes = ?,
           guestbook_html_sha256 = ?, guestbook_csv_object_key = ?, guestbook_csv_bytes = ?,
           guestbook_csv_sha256 = ?, completed_at = ?, expires_at = ?, error_code = NULL
-        WHERE id = ? AND state = 'running'
+        WHERE id = ? AND state = 'ready' AND error_code = ?
       `).bind(
         inventory.manifestObjectKey,
         inventory.parts.length,
@@ -344,10 +369,13 @@ export class ExportsRepository {
         completedAt,
         expiresAt,
         id,
+        readyClaim,
       ),
     ];
     const results = await this.db.batch(statements);
-    if ((results.at(-1)?.meta.changes ?? 0) !== 1) throw new Error('Export job was not running.');
+    if ((results[0]?.meta.changes ?? 0) !== 1 || (results.at(-1)?.meta.changes ?? 0) !== 1) {
+      throw new Error('Export job was not running.');
+    }
     return (await this.getById(id))!;
   }
 
