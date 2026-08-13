@@ -109,6 +109,36 @@ describe('guest-facing Guestbook', () => {
     expect(screen.getByText('Your entry')).toBeVisible();
     expect(screen.getByText((_, node) => node?.tagName === 'SMALL' && node.textContent?.includes('Photo caption') === true)).toBeVisible();
     expect(requested).toContain('/api/event/maya-theo/messages?contract=2');
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Change' }));
+    expect(screen.getByRole('textbox', { name: 'Name for this and future contributions' }))
+      .toHaveAttribute('dir', 'auto');
+  });
+
+  it('renders an on-demand thumbnail when a photo caption has no stored preview', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/messages?contract=2')) return success({
+        items: [{ ...SHARED_CAPTION, previewAvailable: false }],
+        nextCursor: null,
+        ownUnshared: [],
+        ownUnsharedCount: 0,
+        ownUnsharedNextCursor: null,
+      });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+
+    render(<Guestbook
+      event={EVENT}
+      contributionEnabled
+      guestName=""
+      onGuestNameChange={vi.fn()}
+      openRequest={0}
+    />);
+    await userEvent.setup().click(screen.getByText(/Guestbook/, { selector: 'span' }));
+
+    const entry = (await screen.findByText('Golden hour.')).closest('article');
+    expect(entry?.querySelector('img')).toHaveAttribute('src', '/api/media/shared-caption/preview');
   });
 
   it('keeps the composer usable when the feed fails and leaves an unsigned draft local', async () => {
@@ -132,24 +162,40 @@ describe('guest-facing Guestbook', () => {
     expect(screen.getByRole('button', { name: 'Send note' })).toBeEnabled();
   });
 
-  it('renders the book read-only outside photos-primary', async () => {
-    const waiting = { ...EVENT, phase: 'waiting' as const, uploadsEnabled: false };
+  it.each(['rsvp-primary', 'before-start', 'waiting'] as const)(
+    'does not mount or request the Guestbook during %s',
+    async (phase) => {
+    const unavailable: GuestEventView = {
+      ...EVENT,
+      phase,
+      uploadsEnabled: false,
+      rsvpState: phase === 'rsvp-primary' ? 'open' : 'closed',
+      rsvpAccess: phase === 'rsvp-primary'
+        ? 'editable'
+        : phase === 'before-start' ? 'read-only' : 'unavailable',
+    };
+    const requested: string[] = [];
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.endsWith('/api/event/maya-theo')) return success({ event: waiting, role: 'guest' });
-      if (path.endsWith('/messages?contract=2')) return success({
-        items: [SHARED_CAPTION], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0,
-        ownUnsharedNextCursor: null,
-      });
+      requested.push(path);
+      if (path.endsWith('/api/event/maya-theo')) return success({ event: unavailable, role: 'guest' });
+      if (path.endsWith('/rsvp/household')) return Promise.resolve(new Response(JSON.stringify({
+        code: 'RSVP_SESSION_REQUIRED', message: 'Find your invitation.', requestId: 'request-rsvp',
+      }), { status: 401, headers: { 'content-type': 'application/json' } }));
       throw new Error(`Unexpected request ${path}`);
     }));
 
-    renderEvent(waiting);
-    await userEvent.setup().click(await screen.findByText(/Guestbook/, { selector: 'span' }));
+    renderEvent(unavailable);
+    if (phase === 'rsvp-primary') {
+      await screen.findByRole('button', { name: 'Find my invitation' });
+    } else if (phase === 'before-start') {
+      await screen.findByRole('heading', { name: "The event hasn't started yet" });
+    } else {
+      await screen.findByRole('heading', { name: 'Photo delivery is paused' });
+    }
 
-    expect(await screen.findByText('Golden hour.')).toBeVisible();
-    expect(screen.queryByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Send note' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Guestbook/, { selector: 'span' })).not.toBeInTheDocument();
+    expect(requested.some((path) => path.includes('/messages'))).toBe(false);
   });
 
   it('advances shared and private cursors independently without replacing retained rows', async () => {
@@ -186,6 +232,67 @@ describe('guest-facing Guestbook', () => {
     expect(screen.getByText('Golden hour.')).toBeVisible();
     expect(paths).toContain('/api/event/maya-theo/messages?contract=2&cursor=shared-next');
     expect(paths).toContain('/api/event/maya-theo/messages?contract=2&ownCursor=private-next');
+  });
+
+  it('ignores an earlier-page response after a newer first-page refresh', async () => {
+    const stalePage = deferred<Response>();
+    const paths: string[] = [];
+    let firstPageReads = 0;
+    const freshItem = {
+      ...SHARED_CAPTION,
+      id: 'fresh-shared',
+      mediaId: 'fresh-shared',
+      body: 'Fresh first page.',
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      paths.push(path);
+      if (path.endsWith('/api/event/maya-theo')) return success({ event: EVENT, role: 'guest' });
+      if (path.endsWith('/messages?contract=2')) {
+        firstPageReads += 1;
+        return firstPageReads === 1
+          ? success({
+            items: [SHARED_CAPTION], nextCursor: 'stale-cursor', ownUnshared: [],
+            ownUnsharedCount: 0, ownUnsharedNextCursor: null,
+          })
+          : success({
+            items: [freshItem], nextCursor: 'fresh-cursor', ownUnshared: [],
+            ownUnsharedCount: 0, ownUnsharedNextCursor: null,
+          });
+      }
+      if (path.endsWith('/messages?contract=2&cursor=stale-cursor')) return stalePage.promise;
+      if (path.endsWith('/messages?contract=2&cursor=fresh-cursor')) return success({
+        items: [{ ...freshItem, id: 'fresh-earlier', mediaId: 'fresh-earlier', body: 'Fresh earlier page.' }],
+        nextCursor: null, ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null,
+      });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+
+    renderEvent();
+    const summary = await screen.findByText(/Guestbook/, { selector: 'span' });
+    await user.click(summary);
+    expect(await screen.findByText('Golden hour.')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Show earlier shared entries' }));
+    await waitFor(() => expect(paths).toContain('/api/event/maya-theo/messages?contract=2&cursor=stale-cursor'));
+
+    await user.click(summary);
+    await user.click(summary);
+    expect(await screen.findByText('Fresh first page.')).toBeVisible();
+
+    stalePage.resolve(await success({
+      items: [{ ...SHARED_CAPTION, id: 'stale-earlier', mediaId: 'stale-earlier', body: 'Stale earlier page.' }],
+      nextCursor: 'stale-next', ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null,
+    }));
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: 'Show earlier shared entries' }),
+    ).toBeEnabled());
+
+    expect(screen.queryByText('Stale earlier page.')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Show earlier shared entries' }));
+    expect(await screen.findByText('Fresh earlier page.')).toBeVisible();
+    expect(paths).toContain('/api/event/maya-theo/messages?contract=2&cursor=fresh-cursor');
+    expect(paths).not.toContain('/api/event/maya-theo/messages?contract=2&cursor=stale-next');
   });
 
   it('derives private-section presence from ownUnsharedCount rather than array membership', async () => {
@@ -243,6 +350,35 @@ describe('guest-facing Guestbook', () => {
     expect(attempts).toHaveLength(2);
     expect(attempts[1]).toEqual(attempts[0]);
     expect(screen.getAllByText('A private memory.')).toHaveLength(1);
+  });
+
+  it('shows a rounded static wait from Retry-After when note submission is rate limited', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/api/event/maya-theo')) return success({ event: EVENT, role: 'guest' });
+      if (path.endsWith('/messages?contract=2')) return success({
+        items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0,
+        ownUnsharedNextCursor: null,
+      });
+      if (path.endsWith('/messages') && init?.method === 'POST') return Promise.resolve(new Response(JSON.stringify({
+        code: 'RATE_LIMITED', message: 'Too many notes were sent.', requestId: 'request-rate',
+      }), {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'retry-after': '899' },
+      }));
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+
+    renderEvent();
+    await user.click(await screen.findByText(/Guestbook/, { selector: 'span' }));
+    await user.type(screen.getByRole('textbox', { name: 'Your note for Maya & Theo' }), 'Please try this later.');
+    await user.click(screen.getByRole('button', { name: 'Send note' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Too many notes were sent. Try again in about 15 minutes. Reference request-rate.',
+    );
   });
 
   it('rotates a failed draft key after body or signature edits and preserves the remembered name when unsigned', async () => {

@@ -81,6 +81,20 @@ describe('photo upload queue', () => {
     expect(getReceiptCount(resolved)).toBe(1);
   });
 
+  it('marks an idempotently replayed stored reservation delivered without uploading or finalizing it again', async () => {
+    const transport = acceptingTransport({
+      reserve: async ([queued]) => [{ id: queued!.id, status: 'delivered' as const }],
+    });
+    const upload = vi.spyOn(transport, 'upload');
+    const finalize = vi.spyOn(transport, 'finalize');
+
+    const result = await runUploadQueue([item('already-stored')], transport);
+
+    expect(result[0]).toMatchObject({ state: 'delivered', progress: 100 });
+    expect(upload).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
   it('counts delivered photos when validation failures remain', () => {
     const delivered = { ...item('sent'), state: 'delivered' as const };
     const invalid = {

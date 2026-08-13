@@ -90,8 +90,7 @@ export function ManagerGuestbookPanel({
   const [loading, setLoading] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [loadFailure, setLoadFailure] = useState<string | null>(null);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<GuestbookRowAction | null>(null);
+  const [busyRows, setBusyRows] = useState<Record<string, GuestbookRowAction>>({});
   const [rowFailures, setRowFailures] = useState<Record<string, RowFailure>>({});
   const [undoItem, setUndoItem] = useState<ManagerGuestbookItem | null>(null);
   const [announcement, setAnnouncement] = useState('');
@@ -100,9 +99,12 @@ export function ManagerGuestbookPanel({
   const rowElements = useRef(new Map<string, HTMLLIElement>());
   const mounted = useRef(true);
 
-  useEffect(() => () => {
-    mounted.current = false;
-    requestGeneration.current += 1;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestGeneration.current += 1;
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -132,6 +134,7 @@ export function ManagerGuestbookPanel({
     try {
       const page = await api<ManagerGuestbookPage>(listPath(requestedCursor ?? undefined));
       if (!mounted.current || generation !== requestGeneration.current) return false;
+      if (mode === 'replace') setRowFailures({});
       setRows((current) => mode === 'append' ? [...current, ...page.items] : page.items);
       setNextCursor(page.nextCursor);
       onSummaryObserved?.(page.summary);
@@ -177,14 +180,13 @@ export function ManagerGuestbookPanel({
 
   const runAction = async (item: ManagerGuestbookItem, action: GuestbookRowAction) => {
     const key = guestbookItemKey(item);
-    if (busyKey) return;
+    if (busyRows[key]) return;
     if (action === 'purge' && !window.confirm(
       'Permanently delete this note? This cannot be undone and releases one retained-note capacity slot.',
     )) return;
     const rowIndex = rows.findIndex((candidate) => guestbookItemKey(candidate) === key);
     const nextKey = rowIndex >= 0 && rowIndex + 1 < rows.length ? guestbookItemKey(rows[rowIndex + 1]!) : null;
-    setBusyKey(key);
-    setBusyAction(action);
+    setBusyRows((current) => ({ ...current, [key]: action }));
     setRowFailures((current) => {
       const next = { ...current };
       delete next[key];
@@ -249,8 +251,11 @@ export function ManagerGuestbookPanel({
       restoreFocus(key, null, failureScrollY);
     } finally {
       if (mounted.current) {
-        setBusyKey(null);
-        setBusyAction(null);
+        setBusyRows((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
       }
     }
   };
@@ -310,7 +315,8 @@ export function ManagerGuestbookPanel({
       <ul className="manager-guestbook__list">
         {rows.map((item) => {
           const key = guestbookItemKey(item);
-          const rowBusy = busyKey === key;
+          const busyAction = busyRows[key];
+          const rowBusy = Boolean(busyAction);
           const actions = guestbookActions(item);
           const failure = rowFailures[key];
           const busy = rowBusy ? actions.find(({ action }) => action === busyAction) : null;
@@ -320,7 +326,7 @@ export function ManagerGuestbookPanel({
             aria-label={`${item.guestName || 'Unsigned'} ${guestbookSourceLabel(item)}`}
             aria-busy={rowBusy || undefined}
           >
-            {item.source === 'photo_caption' && item.previewAvailable && <img
+            {item.source === 'photo_caption' && <img
               className="manager-guestbook__preview"
               src={mediaPreview(item.mediaId)}
               alt=""
@@ -373,7 +379,7 @@ export function ManagerGuestbookPanel({
 
     {undoItem && <div className="manager-guestbook__undo" role="status" aria-live="polite" aria-atomic="true">
       <span>Note deleted.</span>
-      <button type="button" className="button button--secondary" disabled={busyKey !== null} onClick={() => void runAction(undoItem, 'restore')}>Undo</button>
+      <button type="button" className="button button--secondary" disabled={Boolean(busyRows[guestbookItemKey(undoItem)])} onClick={() => void runAction(undoItem, 'restore')}>Undo</button>
     </div>}
     <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
   </section>;

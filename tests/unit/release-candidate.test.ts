@@ -28,8 +28,14 @@ import {
   buildAtomicMigrationBundle,
   buildPhase2BootstrapBundle,
   verifyExactReleaseCandidate,
+  verifyMediaCutoverReleaseCandidateContract,
   type ReleaseCandidateObservationAdapter,
 } from '../../scripts/release-candidate';
+import {
+  CANONICAL_COPY_ONLY_CAPABILITIES,
+  CANONICAL_LIVE_CAPABILITIES,
+  CUTOVER_DISABLED_CAPABILITIES,
+} from '../../scripts/media-cutover-release-contract';
 
 const SHA = 'a'.repeat(40);
 const TREE = 'b'.repeat(40);
@@ -264,6 +270,46 @@ describe('exact release candidate verification', () => {
       approvedBaseSha: APPROVED_BASE,
       expectedMigrationCount: 15,
     }, observation())).not.toThrow();
+  });
+
+  it('classifies the three exact schema-v2 media cutover candidate contracts', () => {
+    const fixture = candidateFixture(15);
+    const verified = verifyExactReleaseCandidate({
+      candidateRoot: fixture.root,
+      sha: SHA,
+      manifestPath: fixture.manifestPath,
+      approvedBaseSha: APPROVED_BASE,
+      expectedMigrationCount: 15,
+    }, observation());
+    for (const [mode, capabilities] of [
+      ['canonical-cutover-disabled', CUTOVER_DISABLED_CAPABILITIES],
+      ['canonical-copy-only', CANONICAL_COPY_ONLY_CAPABILITIES],
+      ['canonical-live', CANONICAL_LIVE_CAPABILITIES],
+    ] as const) {
+      put(fixture.root, 'config/media-upload-release.json', `${canonicalJson({
+        kind: 'candidary.media-upload-release', schemaVersion: 2, mode, capabilities,
+      })}\n`);
+      expect(verifyMediaCutoverReleaseCandidateContract(verified, mode))
+        .toMatchObject({ artifact: { mode } });
+    }
+    expect(() => verifyMediaCutoverReleaseCandidateContract(verified, 'canonical-copy-only'))
+      .toThrow(/copy-only|mode/iu);
+  });
+
+  it('rejects post-cutover migration byte drift after the candidate manifest is published', () => {
+    const fixture = candidateFixture(15);
+    put(
+      fixture.root,
+      'migrations/0015_curated_private_guestbook.sql',
+      'CREATE TABLE fixture_15 (id INTEGER, drifted INTEGER);\n',
+    );
+    expect(() => verifyExactReleaseCandidate({
+      candidateRoot: fixture.root,
+      sha: SHA,
+      manifestPath: fixture.manifestPath,
+      approvedBaseSha: APPROVED_BASE,
+      expectedMigrationCount: 15,
+    }, observation())).toThrow(/migration/iu);
   });
 
   it('rejects wrong commit, HEAD, tree, dirt, base, sidecar, migration, artifact, and symlink identity', () => {

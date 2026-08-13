@@ -11,6 +11,7 @@
     "verify:cover-presets": "node --experimental-strip-types scripts/verify-cover-presets.ts",
     "verify:pwa-build": "node scripts/verify-pwa-build.mjs",
     "deploy": "node --experimental-strip-types scripts/deploy-release.ts",
+    "release:bridge": "node --experimental-strip-types scripts/bridge-release.ts",
     "release:staging": "node --experimental-transform-types scripts/staging-release.ts",
     "release:staging:task11": "node --experimental-transform-types scripts/task11-staging-release-cli.ts",
     "release:migrate": "node --experimental-strip-types scripts/migrate-release.ts",

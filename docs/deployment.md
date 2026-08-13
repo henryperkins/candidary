@@ -137,26 +137,30 @@ Expected `1`. A `2` means the zone's own HSTS setting is on as well and is appen
 
 ## Secrets
 
-Generate independent 32-byte values and store them with Wrangler. The guest encryption value is base64url-encoded for AES-256-GCM.
+Generate independent 32-byte values and store them with Wrangler. The guest encryption value is base64url-encoded for AES-256-GCM. Use the Versions command deliberately: unlike `wrangler secret put`, which creates a version and immediately deploys it to traffic, `wrangler versions secret put` creates a non-traffic version for later guarded promotion.
 
 ```powershell
-npx wrangler secret put TOKEN_HMAC_KEY
-npx wrangler secret put SESSION_HMAC_KEY
-npx wrangler secret put GUEST_TOKEN_ENCRYPTION_KEY
-npx wrangler secret put LOGIN_HMAC_KEY
-npx wrangler secret put ENTRY_HMAC_KEY
-npx wrangler secret put ENTRY_ENCRYPTION_KEY
-npx wrangler secret put RSVP_LOOKUP_HMAC_KEY
-npx wrangler secret put GUEST_MESSAGE_HMAC_KEY
-npx wrangler secret put R2_ACCESS_KEY_ID
-npx wrangler secret put R2_SECRET_ACCESS_KEY
+npx wrangler versions secret put TOKEN_HMAC_KEY --name candidary
+npx wrangler versions secret put SESSION_HMAC_KEY --name candidary
+npx wrangler versions secret put GUEST_TOKEN_ENCRYPTION_KEY --name candidary
+npx wrangler versions secret put LOGIN_HMAC_KEY --name candidary
+npx wrangler versions secret put ENTRY_HMAC_KEY --name candidary
+npx wrangler versions secret put ENTRY_ENCRYPTION_KEY --name candidary
+npx wrangler versions secret put RSVP_LOOKUP_HMAC_KEY --name candidary
+npx wrangler versions secret put GUEST_MESSAGE_HMAC_KEY --name candidary
 ```
 
-Scope the R2 credentials to the single Candidary bucket with object read/write permissions. Never reuse the token or session HMAC key. Both encryption values are base64url-encoded 32-byte keys.
+The post-0015 Worker has no R2 signing credential. Both bucket bindings are direct Worker bindings,
+and all five historical presign/download capabilities remain false in every schema-v2 runtime mode.
+Do not provision `R2_ACCESS_KEY_ID` or `R2_SECRET_ACCESS_KEY` to a schema-v2 candidate. The exact old
+R2 token is handled only by the separately authorized revocation procedure below. Never reuse the
+session HMAC key. Both encryption values are base64url-encoded 32-byte keys.
 
 Four of these are **persisted-data keys, not rotation controls**. `ENTRY_HMAC_KEY` digests the credential printed on every invitation, `ENTRY_ENCRYPTION_KEY` encrypts the same credential for redisplay, `RSVP_LOOKUP_HMAC_KEY` keys every stored name digest and RSVP rate-limit scope, and `GUEST_MESSAGE_HMAC_KEY` keys durable Guestbook replay receipts plus session/IP rate-window digests. Rotating the Guestbook key requires a coordinated re-HMAC migration or an explicit invalidation decision; ordinary credential rotation is unsafe while receipts remain. Signing guest devices out and rotating a management link must never touch these four. Verify only their names in release evidence, never their values, and provision them through secret-safe tooling rather than shell history.
 
-All ten are listed under `secrets.required` in `wrangler.jsonc`. That declaration is the source of truth for generated binding types and makes Wrangler refuse to deploy a Worker whose required secret is missing, so a forgotten value fails the upload rather than the first Guestbook submission. Run `npm run cf-typegen` after changing it.
+All eight are listed under `secrets.required` in `wrangler.jsonc`. That declaration is the source of truth for generated binding types and makes Wrangler refuse to deploy a Worker whose required secret is missing, so a forgotten value fails the upload rather than the first Guestbook submission. Run `npm run cf-typegen` after changing it.
+
+Secret provisioning remains a separately authorized remote write. Record the resulting undeployed version identity, do not route traffic to it, and do not use it as migration or runtime evidence. Only `npm run deploy` may promote the exact candidate after its required migration evidence closes.
 
 ## Rate-limiting bindings
 
@@ -308,7 +312,7 @@ modes/crons, all three expected schema digests, issue/expiry times, and cleanup 
 The sanitized evidence input and final output use the exact
 `candidary.staging-conformance` v1 schema: `status: passed`, candidate/run/approved-main identity;
 Phase-2 and Phase-3 source/manifest/migration-manifest digests; both authorization and target digests;
-the 13- and 14-file ledgers, bootstrap/migration/bundle hashes, nine trigger names, integrity,
+the 13- and 14-file ledgers, bootstrap/migration/bundle hashes, all twelve user-trigger names, integrity,
 foreign-key result, and four zero counts; three deployment version/tag/metadata/100%-traffic records;
 complete Images, Backfill Workflow, Render Workflow, route, and browser case matrices; complete
 absence booleans for both topologies; and start/finish times. It is written as canonical JSON plus
@@ -326,6 +330,17 @@ one atomic suffix bundle containing both `0014_event_cover_invariants.sql` and
 `0015_curated_private_guestbook.sql`. This is a new baseline, not a relabeling of Phase 3. Required
 secret names are compared as a canonically sorted set so missing, extra, or foreign names fail
 closed without making source order a runtime property.
+
+Schema v2 still binds the historical 13-migration `phase2Sha`: initialization and the compatibility
+cutover deployment use that exact source. Only the suffix migration and final deployment use the
+15-migration `candidateSha`. Database observations enumerate every user trigger rather than filtering
+an allowlist. The historical 0014 boundary contains exactly twelve triggers: the nine Cover triggers,
+both RSVP-deadline triggers, and `media_stamp_stored_at_compat`. The post-0015 boundary contains those
+twelve plus fifteen 0015 triggers: two permanent scanner triggers, five promotion inventory/proof
+triggers, six permanent write-tombstone inventory/guard triggers, and two categorical Stored+legacy
+guards. A missing or unexpected trigger blocks staging before deployment, and the schema-v2
+conformance artifact records the exact 27-name post-cutover set. Fresh-D1 additionally pins every
+trigger body by normalized SQL SHA-256, so a right name with a drifted body also fails closed.
 
 #### Guarded staging commands
 
@@ -386,7 +401,7 @@ npm run deploy -- --sha $candidateSha --manifest $candidateManifest
 `release:migrate` accepts only those four flags, verifies the exact clean landed 14-migration
 candidate, canonical production topology, bookmark/authorization digests, 13-file ledger, sole pending
 0014, four zero counts, integrity, foreign keys, and pre-schema hash before it runs the hashed atomic
-single-file import. It then requires the exact 14-file ledger, nine triggers, post-schema hash, zero
+single-file import. It then requires the exact 14-file ledger, all twelve user triggers, post-schema hash, zero
 counts, integrity, and foreign keys. `npm run deploy` remains the only Worker deployment command and
 does not migrate. Require one 100% version whose tag and `CF_VERSION_METADATA` equal the reviewed SHA,
 then verify protected negatives, nested projections, current/stale slots, preset redirect, upload
@@ -398,6 +413,106 @@ repair or restore after accounting for post-bookmark writes. If Phase-3 upload o
 keep or restore the exact Phase-2 Worker; do not drop triggers, edit the ledger, enable a legacy reader,
 or return a normalized master. Only after all runtime evidence correlates to one SHA may the no-deploy
 window close. Physical device and assistive-technology acceptance remains a later, separate gate.
+
+#### Post-cutover production 0015 contract
+
+Schema v2 is a distinct-bucket cutover, not the historical same-bucket alias cleanup. The legacy
+binding remains `MEDIA_BUCKET` / `candidary-media`; the canonical binding is
+`CANONICAL_MEDIA_BUCKET` / `candidary-media-canonical-v2`. The canonical bucket must be distinct,
+empty, private, without CORS or a development URL, and its exact provisioning evidence must be bound
+to the bridge and migration authorization.
+
+All schema-v2 modes keep the five historical signer/download capabilities false. The remaining four
+capabilities are ordered as `authenticatedWorkerIngress`, `legacyMediaCopy`,
+`legacyPointerCutover`, and `eventRelationalPurge`:
+
+| Runtime config | Four dynamic capabilities | Purpose |
+| --- | --- | --- |
+| `canonical-cutover-disabled` (Candidate A) | `FFFF` | Dual-bucket containment; no new uploads, copy, pointer cutover, or hard purge. |
+| `canonical-copy-only` | `FTFF` | Copy and completely verify legacy Stored bytes in the canonical bucket without changing live pointers. |
+| `canonical-live` (Candidate B) | `TTTT` | Accept authenticated same-origin upload bytes, continue copy, perform proof-bound pointer CAS, and permit relational purge. |
+
+`config/media-upload-release.json` is canonical JSON for the exact candidate mode.
+`config/legacy-media-scanner.json` and its SHA-256 sidecar are also canonical inputs; the scanner's
+`retention.runtimeModes` must contain all three schema-v2 modes. The schema-1 bridge keeps its own
+separate exact eight-false contract and must never be parsed as a schema-v2 Candidate A.
+
+The schema-14 bridge must reach 100% before 0015. While the exact old R2 token is still active, create
+short-lived unique signed PUT probes for both legacy and canonical buckets and retain only their
+redacted digests, signing times, expiry times, and exact keys. Deploy the exact signer-free bridge with
+`release:bridge`, and require the same exact version around an authenticated same-origin ranged or
+conditional export-part canary. Then revoke that exact token through separately authorized token
+management. Before the probes expire, both saved PUTs must return 403; the exact legacy probe key must
+be absent; a complete nontruncated canonical listing must remain empty; and the authenticated bridge
+export canary must still pass. Never print or persist either signed URL.
+
+Only the canonical revocation artifact may close that boundary. A TTL, wait, repeated HEAD, token
+status alone, same-bucket tombstone, or R2 bucket lock is not a substitute. The permanent legacy
+bucket scanner remains required after revocation because no finite wait proves that every operation
+admitted before revocation has drained.
+
+The schema-v2 production authorization names only `0015_curated_private_guestbook.sql` and binds the
+exact 15-migration Candidate A manifest, post-cutover topology, migration/bundle hashes, the
+14-migration pre-schema, the 15-migration post-schema, the bridge/revocation/bucket evidence, config
+digests, authorization lifetime, no-deploy owner, and rollback owner. Production must still have the
+exact 14-file ledger ending in `0014_event_cover_invariants.sql`, sole pending 0015, the exact twelve
+historical triggers, zero counts, integrity, and foreign keys.
+
+Migration 0015 adds distinct legacy/canonical generation columns, permanent non-FK write tombstones,
+the permanent legacy scanner state and quarantine, and the RESTRICT-backed
+`media_object_promotions` proof inventory. It seeds every legacy pointer, including inactive rows that
+could still receive an already-admitted write. The categorical Stored+legacy guards prevent a new live
+legacy Stored row after the migration boundary. The exact post-migration inventory is 15 migrations
+and 27 user triggers.
+
+```powershell
+npm run release:migrate -- --sha $candidateSha --manifest $candidateManifest --authorization $postCutoverProductionAuthorization --bookmark $timeTravelBookmarkArtifact --bridge-evidence $bridgeEvidence --revocation-evidence $revocationEvidence --canonical-bucket-evidence $canonicalBucketEvidence
+if ($LASTEXITCODE -ne 0) { throw 'Post-cutover migration failed; do not deploy.' }
+$migrationEvidence = Join-Path $candidateRoot "output/production-migration/$candidateSha/$runId/post-cutover-migration-evidence.json"
+npm run deploy -- --sha $candidateSha --manifest $candidateManifest --migration-evidence $migrationEvidence
+```
+
+The migrator applies one manifest-hashed atomic file containing only 0015. On a failed command it
+must observe byte-for-byte equivalent schema/ledger evidence before reporting rollback; any residue
+fails closed. Success writes canonical `post-cutover-migration-evidence.json` plus its SHA-256
+sidecar. The artifact binds candidate SHA, manifest, deployable artifact tree, binding topology,
+production topology, authorization digest, exact pre/post ledgers and schemas, sole migration,
+integrity, foreign keys, triggers, zero counts, and Time Travel rollback record. A 15-migration
+`npm run deploy` refuses to run without that exact candidate-bound artifact and revalidates it after
+the local rebuild. Historical 14-migration deployment remains unchanged and must not accept this
+schema-v2 artifact.
+
+The 0015 bytes are release identity. Any edit—including a proof column, seed predicate, CHECK, or
+trigger body—invalidates the migration file SHA/byte count, migration-manifest digest, candidate
+manifest and sidecar, staging review/authorization/conformance hashes, production authorization
+migration/bundle/pre/post-schema hashes, and production migration evidence. Rebuild and independently
+review the exact 15-migration candidate; never carry authorization or evidence over from earlier 0015
+bytes.
+
+Candidate A remains at 100% immediately after migration. A separately reviewed copy-only candidate may
+then process every live legacy Stored row. Each copy conditionally reads the exact legacy ETag,
+validates complete bytes plus MIME, size, SHA-256, width, and height, creates the deterministic canonical
+key only if absent, re-reads and hashes the complete canonical object, and persists immutable
+`target_verified` proof without changing `media.object_key` or its generation. `source_writable_until`
+is only scheduling metadata; it is never terminality evidence.
+
+Readiness is one primary D1 query whose SHA-256 is exported as
+`MEDIA_CUTOVER_READINESS_QUERY_SHA256`. Before Candidate B, it may report live legacy pointers, but
+`unverified_live_legacy_count` must be zero. Candidate B then performs only the exact proof-bound
+legacy-to-canonical pointer CAS and clears the legacy preview pointer. After cutover, the same primary
+query must report both counts as zero. Content, export, delete, and cleanup routes select the bucket
+recorded by each row's generation; no fallback guesses a bucket.
+
+`candidary.media-cutover-phase-evidence` is the additive machine record for the distinct Candidate A,
+copy-only, and Candidate B deployments, their exact manifests/config digests, 100% observations, the
+copy-only readiness result, and the pre/post-pointer readiness results. Writing that requested record
+does not change the existing deploy or migration CLI acceptance rules and is not an additional release
+prerequisite.
+
+After the first canonical pointer, rollback may target only a reviewed schema-15 dual-bucket,
+uploads/promotion/purge-disabled Candidate A-compatible version. Never roll back to the old Worker,
+schema 14, or a raw pre-0015 D1 Time Travel state. Keep the legacy scanner and permanent tombstone
+janitor active forever so arbitrarily late legacy writes are rediscovered and suppressed.
 
 `placement.mode` is `smart`, and it is in `wrangler.jsonc` because anything the live Worker has that the
 repository does not declare is silently dropped by the next deploy. It arrived the other way around: an

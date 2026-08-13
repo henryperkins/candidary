@@ -335,5 +335,8 @@ messageRoutes.patch('/manage/events/:eventId/messages/:messageId', async (contex
   );
   const item = await new GuestbookRepository(context.env.DB).noteItemById(message.id);
   if (!item) throw new Error('Updated note projection was not found.');
-  return context.json({ data: { item }, requestId: context.get('requestId') });
+  return context.json({
+    data: { item, message: legacyMessageView(message) },
+    requestId: context.get('requestId'),
+  });
 });

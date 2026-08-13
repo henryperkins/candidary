@@ -33,6 +33,7 @@ import { resolveEventSchedule } from '../http/event-schedule';
 import { eventStartTime, selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { deleteEventData } from '../workflows/cleanup';
+import { deleteMediaObjectAliases } from '../storage/media';
 
 const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 
@@ -348,10 +349,12 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
     ? await repository.delete(media.id, changedAt)
     : await repository.setPublication(media.id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), changedAt);
   if (parsed.data.action === 'delete') {
-    await context.env.MEDIA_BUCKET.delete([
-      media.objectKey,
-      ...(media.previewObjectKey ? [media.previewObjectKey] : []),
-    ]);
+    await deleteMediaObjectAliases(
+      context.env.MEDIA_BUCKET,
+      context.env.CANONICAL_MEDIA_BUCKET,
+      repository,
+      media,
+    ).catch(() => undefined);
   }
   const item = parsed.data.action === 'delete'
     ? null

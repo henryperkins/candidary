@@ -623,14 +623,20 @@ export async function uploadPending(
   const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
     method: 'POST', headers: writeHeaders(access.guest),
     body: JSON.stringify({
-      filename: `${key}.png`, mimeType: 'image/png', byteSize: 128,
+      filename: `${key}.png`, mimeType: 'image/png', byteSize: png().byteLength,
       idempotencyKey: key, guestName, caption,
     }),
   }, testEnv);
   const media = (await initiated.json<any>()).data.media;
-  await env.MEDIA_BUCKET.put(media.objectKey, png(), { httpMetadata: { contentType: 'image/png' } });
-  const finalized = await createApp().request(`/api/event/${access.event.slug}/uploads/${media.id}/finalize`, {
-    method: 'POST', headers: writeHeaders(access.guest), body: '{}',
+  const bytes = png();
+  const finalized = await createApp().request(`/api/event/${access.event.slug}/uploads/${media.id}/content`, {
+    method: 'PUT',
+    headers: {
+      ...writeHeaders(access.guest),
+      'content-type': 'image/png',
+      'content-length': String(bytes.byteLength),
+    },
+    body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   }, testEnv);
   return (await finalized.json<any>()).data.media;
 }

@@ -1,5 +1,6 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -122,6 +123,61 @@ describe('Manager Guestbook', () => {
     expect(requested.filter(({ pathname }) => pathname.endsWith('/guestbook'))).toHaveLength(0);
   });
 
+  it('completes its initial list load under React StrictMode', async () => {
+    const listResolvers: Array<(response: Response) => void> = [];
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => {
+      listResolvers.push(resolve);
+    })));
+
+    render(<StrictMode>
+      <ManagerGuestbookPanel
+        eventId="event-a"
+        eventTimezone="America/Chicago"
+        summary={emptySummary}
+        onSummaryRefresh={vi.fn(async () => undefined)}
+        onOpenSettings={vi.fn()}
+      />
+    </StrictMode>);
+    await waitFor(() => expect(listResolvers).toHaveLength(2));
+
+    for (const resolve of listResolvers) {
+      resolve(await success({
+        items: [{
+          id: 'strict-row', source: 'guest_note', guestName: 'Avery', body: 'Loaded in StrictMode.',
+          createdAt: '2026-09-19T22:00:00.000Z', state: 'approved', visibility: 'shared',
+        }],
+        nextCursor: null,
+        summary: { ...emptySummary, sharedCount: 1 },
+      }));
+    }
+
+    expect(await screen.findByText('Loaded in StrictMode.')).toBeVisible();
+    expect(screen.queryByText('Loading Guestbook entries…')).not.toBeInTheDocument();
+  });
+
+  it('renders an on-demand thumbnail when a photo caption has no stored preview', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => success({
+      items: [{
+        id: 'on-demand-preview', source: 'photo_caption', mediaId: 'on-demand-preview',
+        guestName: 'Avery', body: 'Generated on demand.', createdAt: '2026-09-19T22:00:00.000Z',
+        state: 'unpublished', visibility: 'author_only', previewAvailable: false,
+      }],
+      nextCursor: null,
+      summary: { ...emptySummary, needsReviewCount: 1 },
+    })));
+
+    render(<ManagerGuestbookPanel
+      eventId="event-a"
+      eventTimezone="America/Chicago"
+      summary={{ ...emptySummary, needsReviewCount: 1 }}
+      onSummaryRefresh={vi.fn(async () => undefined)}
+      onOpenSettings={vi.fn()}
+    />);
+
+    const row = (await screen.findByText('Generated on demand.')).closest('li');
+    expect(row?.querySelector('img')).toHaveAttribute('src', '/api/media/on-demand-preview/preview');
+  });
+
   it('chooses Needs review, lazily appends opaque cursor pages, and resets rows for every view or source', async () => {
     const requested: URL[] = [];
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -186,22 +242,14 @@ describe('Manager Guestbook', () => {
   it('uses exact note and caption action routes with row-only busy state and summary-only reconciliation', async () => {
     let resolveShare!: (response: Response) => void;
     const shareResponse = new Promise<Response>((resolve) => { resolveShare = resolve; });
+    let resolvePublish!: (response: Response) => void;
+    const publishResponse = new Promise<Response>((resolve) => { resolvePublish = resolve; });
     const requests: Array<{ url: URL; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), 'https://candidary.test');
       requests.push({ url, init });
       if (init?.method === 'PATCH' && url.pathname.endsWith('/messages/note-a')) return shareResponse;
-      if (init?.method === 'PATCH' && url.pathname.endsWith('/media/media-a')) return success({
-        media: {
-          id: 'media-a', originalFilename: 'speech.jpg', guestName: 'Morgan', caption: 'The speech.',
-          publicationStatus: 'published', uploadState: 'stored', previewAvailable: true,
-          width: 1200, height: 800, createdAt: '2026-09-19T22:05:00.000Z',
-        },
-        item: {
-          id: 'media-a', source: 'photo_caption', mediaId: 'media-a', guestName: 'Morgan', body: 'The speech.',
-          createdAt: '2026-09-19T22:05:00.000Z', state: 'published', visibility: 'shared', previewAvailable: true,
-        },
-      });
+      if (init?.method === 'PATCH' && url.pathname.endsWith('/media/media-a')) return publishResponse;
       return success({
         items: [{
           id: 'note-a', source: 'guest_note', guestName: 'Avery', body: 'A perfect evening.',
@@ -234,18 +282,32 @@ describe('Manager Guestbook', () => {
 
     await user.click(within(noteRow).getByRole('button', { name: 'Share' }));
     expect(within(noteRow).getByRole('button', { name: 'Sharing…' })).toBeDisabled();
-    expect(within(captionRow).getByRole('button', { name: 'Publish photo & caption' })).toBeEnabled();
+    const publish = within(captionRow).getByRole('button', { name: 'Publish photo & caption' });
+    expect(publish).toBeEnabled();
+    await user.click(publish);
+    expect(within(captionRow).getByRole('button', { name: 'Publishing…' })).toBeDisabled();
+    expect(requests.filter(({ init }) => init?.method === 'PATCH')).toHaveLength(2);
+
+    resolvePublish(await success({
+      media: {
+        id: 'media-a', originalFilename: 'speech.jpg', guestName: 'Morgan', caption: 'The speech.',
+        publicationStatus: 'published', uploadState: 'stored', previewAvailable: true,
+        width: 1200, height: 800, createdAt: '2026-09-19T22:05:00.000Z',
+      },
+      item: {
+        id: 'media-a', source: 'photo_caption', mediaId: 'media-a', guestName: 'Morgan', body: 'The speech.',
+        createdAt: '2026-09-19T22:05:00.000Z', state: 'published', visibility: 'shared', previewAvailable: true,
+      },
+    }));
     resolveShare(await success({ item: {
       id: 'note-a', source: 'guest_note', guestName: 'Avery', body: 'A perfect evening.',
       createdAt: '2026-09-19T22:00:00.000Z', state: 'approved', visibility: 'shared',
     } }));
     await waitFor(() => expect(screen.queryByText('A perfect evening.')).not.toBeInTheDocument());
-    expect(onSummaryRefresh).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onSummaryRefresh).toHaveBeenCalledTimes(2));
     const notePatch = requests.find(({ url, init }) => init?.method === 'PATCH' && url.pathname.includes('/messages/'))!;
     expect(JSON.parse(String(notePatch.init?.body))).toEqual({ action: 'approve', expectedState: 'pending' });
 
-    await user.click(within(captionRow).getByRole('button', { name: 'Publish photo & caption' }));
-    await waitFor(() => expect(onSummaryRefresh).toHaveBeenCalledTimes(2));
     const captionPatch = requests.find(({ url, init }) => init?.method === 'PATCH' && url.pathname.includes('/media/'))!;
     expect(captionPatch.url.pathname).toBe('/api/manage/events/event-a/media/media-a');
     expect(JSON.parse(String(captionPatch.init?.body))).toEqual({ action: 'publish', expectedStatus: 'unpublished' });
@@ -497,6 +559,9 @@ describe('Manager Guestbook', () => {
     expect(await within(row).findByRole('alert')).toHaveTextContent('This entry changed.');
     await user.click(within(row).getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('Server row.')).toBeVisible();
+    const refreshedRow = screen.getByRole('listitem', { name: /Avery guest note/i });
+    expect(within(refreshedRow).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(refreshedRow).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
     expect(patches).toBe(1);
     expect(listReads).toBe(2);
   });

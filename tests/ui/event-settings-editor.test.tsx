@@ -125,6 +125,13 @@ describe('event settings editor', () => {
     expect(screen.getByText('Event settings saved')).toBeInTheDocument();
   });
 
+  it('lets the Guestbook prompt derive its writing direction from the authored text', () => {
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT })));
+    render(<Harness />);
+
+    expect(screen.getByLabelText('Guestbook prompt')).toHaveAttribute('dir', 'auto');
+  });
+
   it('treats a legacy null deadline as a clean confirmed baseline', async () => {
     const legacyEvent = { ...EVENT, rsvpDeadlineAt: null, rsvpDeadlineDate: null };
     vi.stubGlobal('fetch', vi.fn(() => json({ event: legacyEvent })));

@@ -3,6 +3,7 @@ import type { AppEnv } from '../env';
 import { ExportsRepository, type ReadyExportPart } from '../db/exports';
 import { GuestbookRepository } from '../db/guestbook';
 import { MediaRepository } from '../db/media';
+import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { buildExportManifest } from '../export/csv';
 import { buildGuestbookPrivateCsv, type GuestbookPhotoArchiveLocation } from '../export/guestbook-csv';
 import { buildGuestbookHtml } from '../export/guestbook-html';
@@ -66,6 +67,15 @@ export async function processExport(
   job = claim.job;
 
   const baseKey = `events/${job.eventId}/exports/${job.id}/attempt-${job.attempt}`;
+  const writeTombstones = new MediaObjectWriteTombstoneRepository(env.DB);
+  const inventoryExportWrite = (objectKey: string) => writeTombstones.ensure({
+    bucketGeneration: 'legacy',
+    objectKey,
+    eventId: job.eventId,
+    mediaId: job.id,
+    objectKind: 'export',
+    recordedAt: claimStartedAt,
+  });
   // A callback retry resumes the same Workflow claim after an exception. No
   // Ready inventory exists while the job is Running, so clear that exact
   // deterministic attempt prefix before writing it again. Keep this outside
@@ -82,6 +92,7 @@ export async function processExport(
   if (claim.resumed) await clearIncompleteAttempt(env.MEDIA_BUCKET, `${baseKey}/`);
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;
   const uploadedKeys: string[] = [];
+  let readyWriteAttempted = false;
   try {
     const snapshot = job.guestbookEntryCount === null
       ? await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt)
@@ -94,7 +105,10 @@ export async function processExport(
     for (const part of partitions) {
       const entries = [];
       for (const media of part.media) {
-        const object = await env.MEDIA_BUCKET.get(media.objectKey);
+        const bucket = media.objectBucketGeneration === 'canonical'
+          ? env.CANONICAL_MEDIA_BUCKET
+          : env.MEDIA_BUCKET;
+        const object = await bucket.get(media.objectKey);
         if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
         await exports.assertOwnedRunActive(job.id, claimStartedAt);
         entries.push({ media, body: object.body });
@@ -105,6 +119,7 @@ export async function processExport(
       }));
       const name = exportPartName(part.partNumber);
       const objectKey = `${baseKey}/${name}`;
+      await inventoryExportWrite(objectKey);
       await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
         httpMetadata: {
           contentType: 'application/zip',
@@ -122,6 +137,7 @@ export async function processExport(
 
     if (partitions.length) {
       await exports.assertOwnedRunActive(job.id, claimStartedAt);
+      await inventoryExportWrite(manifestObjectKey);
       await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
@@ -141,6 +157,8 @@ export async function processExport(
       if (entries.length !== job.guestbookEntryCount) throw new Error('EXPORT_GUESTBOOK_SNAPSHOT_INVALID');
       const htmlObjectKey = `${baseKey}/guestbook.html`;
       const csvObjectKey = `${baseKey}/guestbook-private.csv`;
+      await inventoryExportWrite(htmlObjectKey);
+      await inventoryExportWrite(csvObjectKey);
       const encoder = new TextEncoder();
       const htmlBytes = encoder.encode(buildGuestbookHtml({
         eventName: job.guestbookEventName,
@@ -179,6 +197,7 @@ export async function processExport(
     }
     const completedAt = now.toISOString();
     await exports.assertOwnedRunActive(job.id, claimStartedAt);
+    readyWriteAttempted = true;
     return await exports.markReady(
       job.id,
       {
@@ -190,6 +209,10 @@ export async function processExport(
       new Date(now.getTime() + 86_400_000).toISOString(),
     );
   } catch (error) {
+    if (readyWriteAttempted) {
+      const current = await exports.getById(job.id);
+      if (current?.state === 'ready') return current;
+    }
     if (uploadedKeys.length) await env.MEDIA_BUCKET.delete(uploadedKeys);
     const code = error instanceof Error && error.message.startsWith('EXPORT_') ? error.message : 'EXPORT_FAILED';
     return await exports.markFailed(job.id, code);

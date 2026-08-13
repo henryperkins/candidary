@@ -41,6 +41,7 @@ const LOAD_FAILURE_DECISION = {
   EXPORT_ALREADY_ACTIVE: decision('retry'),
   EXPORT_EMPTY: decision('retry'),
   EXPORT_LIMIT_EXCEEDED: decision('retry'),
+  EXPORT_MEDIA_UPGRADE_REQUIRED: decision('retry'),
   EXPORT_FAILED: decision('retry'),
   VALIDATION_FAILED: decision('retry'),
   CSRF_INVALID: decision('retry'),

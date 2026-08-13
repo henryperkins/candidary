@@ -29,6 +29,30 @@ function expectManagerExport(value: Record<string, unknown>) {
   expect(Object.keys(value).sort()).toEqual(managerExportKeys);
 }
 
+async function failedExportWithArtifacts(
+  access: Awaited<ReturnType<typeof eventAccess>>,
+  label: string,
+) {
+  await uploadPending(access, label, null);
+  const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+    method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+  }, testEnv);
+  const job = (await created.json<any>()).data.export;
+  const ready = await processExport(testEnv, job.id, new Date());
+  const repository = new ExportsRepository(testEnv.DB);
+  const parts = await repository.listParts(job.id);
+  const keys = [
+    ready!.manifestObjectKey,
+    ...parts.map(({ objectKey }) => objectKey),
+    ready!.guestbookHtmlObjectKey,
+    ready!.guestbookCsvObjectKey,
+  ].filter((key): key is string => Boolean(key));
+  await testEnv.DB.prepare(`
+    UPDATE export_jobs SET state = 'failed', error_code = 'EXPORT_TEST_FAILURE' WHERE id = ?
+  `).bind(job.id).run();
+  return { job, keys };
+}
+
 describe('manager exports', () => {
   beforeEach(resetDatabase);
 
@@ -104,8 +128,8 @@ describe('manager exports', () => {
     expect(data.printableGuestbook.filename).toBe('guestbook.html');
     expect(data.privateGuestbook.filename).toBe('guestbook-private.csv');
     expect(data.printableGuestbook.expiresAt).toBe(data.privateGuestbook.expiresAt);
-    expect(data.printableGuestbook.url).toContain('X-Amz-Expires=900');
-    expect(data.privateGuestbook.url).toContain('X-Amz-Expires=900');
+    expect(data.printableGuestbook.url).toContain('/artifact/printable-guestbook');
+    expect(data.privateGuestbook.url).toContain('/artifact/private-guestbook');
   });
 
   it('rejects an empty snapshot', async () => {
@@ -115,6 +139,40 @@ describe('manager exports', () => {
     }, testEnv);
     expect(response.status).toBe(409);
     expect((await response.json<any>()).code).toBe('EXPORT_EMPTY');
+  });
+
+  it('refuses a legacy writable photo before creating or dispatching an export', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'legacy-writable-export', 'Legacy photo');
+    await testEnv.DB.prepare('UPDATE media SET object_key = ? WHERE id = ?')
+      .bind(`events/${access.event.id}/media/${media.id}`, media.id).run();
+    let dispatches = 0;
+    const guardedEnv = Object.create(testEnv) as typeof testEnv;
+    Object.defineProperty(guardedEnv, 'EXPORT_WORKFLOW', {
+      value: {
+        async create() {
+          dispatches += 1;
+          return { id: 'unexpected-export-workflow' };
+        },
+      },
+    });
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, guardedEnv);
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({
+      code: 'EXPORT_MEDIA_UPGRADE_REQUIRED',
+      message: 'Some photos need a storage upgrade before they can be exported. Try again after the upgrade is complete.',
+    });
+    expect(dispatches).toBe(0);
+    expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM export_jobs WHERE event_id = ?')
+      .bind(access.event.id).first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM export_media_entries')
+      .first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM export_guestbook_entries')
+      .first<number>('count')).toBe(0);
   });
 
   it('discriminates active and oversized snapshots without leaving partial jobs', async () => {
@@ -247,9 +305,9 @@ describe('manager exports', () => {
     }, testEnv);
     expect(download.status).toBe(200);
     const downloadData = (await download.json<any>()).data;
-    expect(downloadData.manifest.url).toContain('X-Amz-Expires=900');
+    expect(downloadData.manifest.url).toContain('/artifact/manifest');
     expect(downloadData.parts).toHaveLength(2);
-    expect(downloadData.parts.every((part: any) => part.url.includes('X-Amz-Expires=900'))).toBe(true);
+    expect(downloadData.parts.every((part: any) => part.url.includes('/artifact/part/'))).toBe(true);
     expect(downloadData.printableGuestbook.filename).toBe('guestbook.html');
     expect(downloadData.privateGuestbook.filename).toBe('guestbook-private.csv');
 
@@ -257,6 +315,70 @@ describe('manager exports', () => {
       method: 'POST', headers: writeHeaders(access.guest), body: '{}',
     }, testEnv);
     expect(denied.status).toBe(403);
+
+    const artifact = await createApp().request(downloadData.parts[0].url, {
+      headers: { cookie: access.manager.cookie, range: 'bytes=0-9' },
+    }, testEnv);
+    expect(artifact.status).toBe(206);
+    expect(artifact.headers.get('content-range')).toMatch(/^bytes 0-9\//u);
+    expect(artifact.headers.get('content-length')).toBe('10');
+    expect(artifact.headers.get('content-disposition')).toContain('attachment');
+    expect(artifact.headers.get('cache-control')).toBe('private, no-store');
+    expect(artifact.headers.get('x-content-type-options')).toBe('nosniff');
+    expect((await artifact.arrayBuffer()).byteLength).toBe(10);
+
+    const suffix = await createApp().request(downloadData.parts[0].url, {
+      headers: { cookie: access.manager.cookie, range: 'bytes=-8' },
+    }, testEnv);
+    expect(suffix.status).toBe(206);
+    expect((await suffix.arrayBuffer()).byteLength).toBe(8);
+
+    const artifactDenied = await createApp().request(downloadData.parts[0].url, {}, testEnv);
+    expect(artifactDenied.status).toBe(401);
+    const unsatisfiable = await createApp().request(downloadData.parts[0].url, {
+      headers: { cookie: access.manager.cookie, range: 'bytes=999999999-' },
+    }, testEnv);
+    expect(unsatisfiable.status).toBe(416);
+    expect(unsatisfiable.headers.get('content-range')).toMatch(/^bytes \*\//u);
+  });
+
+  it('does not stream changed export bytes after the conditional metadata read', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'conditional-export', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    const download = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/download`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    const url = (await download.json<any>()).data.manifest.url as string;
+    let replaced = false;
+    const changingBucket = new Proxy(testEnv.MEDIA_BUCKET, {
+      get(target, property) {
+        if (property === 'get') {
+          return async (...args: Parameters<R2Bucket['get']>) => {
+            if (!replaced) {
+              replaced = true;
+              await target.put(ready!.manifestObjectKey!, 'changed-after-head');
+            }
+            return target.get(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(url, {
+      headers: { cookie: access.manager.cookie },
+    }, { ...testEnv, MEDIA_BUCKET: changingBucket });
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({ code: 'EXPORT_FAILED' });
   });
 
   it('uses an attempt-specific object key when retrying a failed job', async () => {
@@ -273,6 +395,227 @@ describe('manager exports', () => {
     }, testEnv);
     expect(retry.status).toBe(202);
     expect((await retry.json<any>()).data.export.attempt).toBe(2);
+  });
+
+  it('keeps prior-attempt objects when the retry transition fails before commit', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-before-commit');
+    const failingDb = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') return async () => { throw new Error('simulated retry failure'); };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, DB: failingDb },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'failed' });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+  });
+
+  it('recovers the exact retry transition after its committed D1 response is lost', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-response-loss');
+    let lost = false;
+    const responseLossDb = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            const result = await target.batch(statements);
+            if (!lost) {
+              lost = true;
+              throw new Error('simulated lost retry response');
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, DB: responseLossDb },
+    );
+
+    expect(response.status).toBe(202);
+    expect((await response.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('recovers a queued retry after Workflow creation fails without deleting prior-attempt objects early', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-workflow-failure');
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch' || property === 'create') {
+          return async () => { throw new Error('simulated Workflow creation failure'); };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({
+            id,
+            status: async () => ({ status: 'unknown' }),
+          });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, EXPORT_WORKFLOW: workflow },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+      state: 'queued', attempt: 2,
+    });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+
+    const recovered = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(recovered.status).toBe(202);
+    expect((await recovered.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('adopts the deterministic retry Workflow after its creation response is lost', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-workflow-response-loss');
+    let created = false;
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch' || property === 'create') {
+          return async () => {
+            if (created) throw new Error('simulated duplicate Workflow instance');
+            created = true;
+            throw new Error('simulated lost Workflow creation response');
+          };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({
+            id,
+            status: async () => ({ status: created ? 'queued' : 'unknown' }),
+          });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, EXPORT_WORKFLOW: workflow },
+    );
+
+    expect(response.status).toBe(202);
+    expect((await response.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('converges concurrent failed-job retries on one deterministic next attempt', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-concurrent');
+    let waiting = 0;
+    let release!: () => void;
+    const bothAtTransition = new Promise<void>((resolve) => { release = resolve; });
+    const synchronizedDb = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            waiting += 1;
+            if (waiting === 2) release();
+            await bothAtTransition;
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const env = { ...testEnv, DB: synchronizedDb };
+    const request = () => createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      env,
+    );
+
+    const responses = await Promise.all([request(), request()]);
+
+    expect(responses.map(({ status }) => status)).toEqual([202, 202]);
+    expect(await Promise.all(responses.map(async (response) => (
+      (await response.json<any>()).data.export.attempt
+    )))).toEqual([2, 2]);
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+      state: 'queued', attempt: 2,
+    });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('builds part bytes and source-size inventory from the immutable finalized object, not a replayed upload key', async () => {
+    const access = await eventAccess();
+    const original = png(1600, 900, 64);
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        filename: 'immutable-export.png', mimeType: 'image/png', byteSize: original.byteLength,
+        idempotencyKey: 'immutable-export', guestName: 'Avery', caption: null,
+      }),
+    }, testEnv);
+    const reserved = (await initiated.json<any>()).data.media;
+    const finalized = await createApp().request(
+      `/api/event/${access.event.slug}/uploads/${reserved.id}/content`,
+      {
+        method: 'PUT',
+        headers: {
+          ...writeHeaders(access.guest),
+          'content-type': 'image/png',
+          'content-length': String(original.byteLength),
+        },
+        body: original.buffer.slice(
+          original.byteOffset,
+          original.byteOffset + original.byteLength,
+        ) as ArrayBuffer,
+      },
+      testEnv,
+    );
+    expect(finalized.status).toBe(200);
+    const stored = (await finalized.json<any>()).data.media;
+    expect(stored.objectKey).not.toBe(reserved.objectKey);
+
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await testEnv.MEDIA_BUCKET.put(reserved.objectKey, png(320, 240, 96), {
+      httpMetadata: { contentType: 'image/png' },
+    });
+    const ready = await processExport(testEnv, job.id, new Date());
+    const parts = await new ExportsRepository(testEnv.DB).listParts(job.id);
+    const archiveObject = await testEnv.MEDIA_BUCKET.get(parts[0]!.objectKey);
+    const archive = unzipSync(new Uint8Array(await archiveObject!.arrayBuffer()));
+    const photo = archive['photos/001-immutable-export.png'];
+
+    expect(ready?.state).toBe('ready');
+    expect(parts).toHaveLength(1);
+    expect(parts[0]!.sourceBytes).toBe(original.byteLength);
+    expect(photo).toEqual(original);
+    expect(photo?.byteLength).toBe(parts[0]!.sourceBytes);
   });
 
   it('returns only the Manager export allowlist from create, get, list, and retry', async () => {
@@ -321,7 +664,7 @@ describe('manager exports', () => {
       SELECT media_id, original_filename FROM export_media_entries
       WHERE export_job_id = ? ORDER BY created_at, media_id
     `).bind(job.id).all()).results).toHaveLength(2);
-    await testEnv.MEDIA_BUCKET.delete(missing.objectKey);
+    await testEnv.CANONICAL_MEDIA_BUCKET.delete(missing.objectKey);
 
     const firstFailure = await processExport(testEnv, job.id, new Date(), 100);
     expect(firstFailure).toMatchObject({ state: 'failed', errorCode: 'EXPORT_SOURCE_MISSING' });
@@ -428,6 +771,45 @@ describe('manager exports', () => {
     expect(returned).toEqual(ready);
   });
 
+  it('keeps committed export objects when the markReady response is lost', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'ready-response-loss', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const responseLossDb = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            await target.batch(statements);
+            throw new Error('simulated lost markReady response');
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const ready = await processExport(
+      { ...testEnv, DB: responseLossDb },
+      job.id,
+      new Date('2026-08-12T12:00:00.000Z'),
+    );
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+
+    expect(ready).toMatchObject({ state: 'ready', partCount: 1 });
+    expect(keys).toHaveLength(4);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+  });
+
   it('does not mutate winner parts when markReady loses the running-state transition', async () => {
     const access = await eventAccess();
     const snapshotAt = new Date().toISOString();
@@ -502,18 +884,17 @@ describe('manager exports', () => {
   it('never substitutes a reservation finalized after snapshot for a deleted frozen photo', async () => {
     const access = await eventAccess();
     const frozen = await uploadPending(access, 'frozen-member', 'Frozen member caption');
+    const replacementBytes = png();
     const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
       method: 'POST', headers: writeHeaders(access.guest),
       body: JSON.stringify({
-        filename: 'replacement-member.png', mimeType: 'image/png', byteSize: 128,
+        filename: 'replacement-member.png', mimeType: 'image/png',
+        byteSize: replacementBytes.byteLength,
         idempotencyKey: 'replacement-member', guestName: 'Avery', caption: null,
       }),
     }, testEnv);
     expect(initiated.status).toBe(201);
     const replacement = (await initiated.json<any>()).data.media;
-    await testEnv.MEDIA_BUCKET.put(replacement.objectKey, png(), {
-      httpMetadata: { contentType: 'image/png' },
-    });
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
@@ -521,8 +902,19 @@ describe('manager exports', () => {
     await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
       .bind(new Date().toISOString(), frozen.id).run();
     const finalized = await createApp().request(
-      `/api/event/${access.event.slug}/uploads/${replacement.id}/finalize`,
-      { method: 'POST', headers: writeHeaders(access.guest), body: '{}' },
+      `/api/event/${access.event.slug}/uploads/${replacement.id}/content`,
+      {
+        method: 'PUT',
+        headers: {
+          ...writeHeaders(access.guest),
+          'content-type': 'image/png',
+          'content-length': String(replacementBytes.byteLength),
+        },
+        body: replacementBytes.buffer.slice(
+          replacementBytes.byteOffset,
+          replacementBytes.byteOffset + replacementBytes.byteLength,
+        ) as ArrayBuffer,
+      },
       testEnv,
     );
     expect(finalized.status).toBe(200);

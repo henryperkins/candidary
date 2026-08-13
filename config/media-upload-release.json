@@ -1,0 +1,1 @@
+{"capabilities":{"authenticatedWorkerIngress":false,"batchInitiationPresign":false,"eventRelationalPurge":false,"exportDownloadPresign":false,"legacyMediaCopy":false,"legacyPointerCutover":false,"reservedFinalize":false,"singleInitiationPresign":false,"storedReplayPresign":false},"kind":"candidary.media-upload-release","mode":"canonical-cutover-disabled","schemaVersion":2}

@@ -677,6 +677,15 @@ describe('guest notes and captions', () => {
       state: 'approved',
       visibility: 'shared',
     });
+    expect(patchedBody.data.message).toEqual({
+      id: createdData.item.id,
+      kind: 'message',
+      guestName: 'Avery',
+      body: 'Safe response only.',
+      createdAt: createdData.item.createdAt,
+      moderationStatus: 'approved',
+      mediaId: null,
+    });
     expect(JSON.stringify([createdData, listedBody, patchedBody]))
       .not.toMatch(/guestSessionId|guest_session_id|idempotencyKey|idempotency_key/u);
   });

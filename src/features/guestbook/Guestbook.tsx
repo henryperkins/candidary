@@ -34,8 +34,19 @@ interface GuestbookProps {
 
 function calmFailure(caught: unknown, fallback: string): string {
   if (!(caught instanceof ClientApiError)) return fallback;
+  const retryAfter = retryAfterGuidance(caught.retryAfterMs);
   const reference = caught.requestId ? ` Reference ${caught.requestId}.` : '';
-  return `${caught.message}${reference}`;
+  return `${caught.message}${retryAfter}${reference}`;
+}
+
+function retryAfterGuidance(retryAfterMs: number | null | undefined): string {
+  if (!retryAfterMs || retryAfterMs < 0) return '';
+  const seconds = Math.ceil(retryAfterMs / 1_000);
+  if (seconds < 60) {
+    return ` Try again in about ${seconds} ${seconds === 1 ? 'second' : 'seconds'}.`;
+  }
+  const minutes = Math.ceil(seconds / 60);
+  return ` Try again in about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`;
 }
 
 function remainingCharacters(count: number): string {
@@ -99,6 +110,8 @@ export function Guestbook({
     readControllers.current.add(controller);
     setReadStatus('loading');
     setFeedError(null);
+    setSharedEarlierBusy(false);
+    setPrivateEarlierBusy(false);
     setSharedEarlierError(null);
     setPrivateEarlierError(null);
     try {
@@ -283,6 +296,7 @@ export function Guestbook({
     const cursor = stream === 'shared' ? sharedCursor : privateCursor;
     if (!cursor) return;
     const lifetime = lifetimeTicket.current;
+    const firstPageTicket = loadTicket.current;
     const controller = new AbortController();
     readControllers.current.add(controller);
     const setBusy = stream === 'shared' ? setSharedEarlierBusy : setPrivateEarlierBusy;
@@ -295,7 +309,7 @@ export function Guestbook({
         `/api/event/${event.slug}/messages?contract=2&${cursorName}=${encodeURIComponent(cursor)}`,
         { signal: controller.signal },
       );
-      if (lifetimeTicket.current !== lifetime) return;
+      if (lifetimeTicket.current !== lifetime || loadTicket.current !== firstPageTicket) return;
       if (stream === 'shared') {
         setSharedItems((current) => appendGuestbookItems(current, page.items));
         setSharedCursor(page.nextCursor);
@@ -305,11 +319,11 @@ export function Guestbook({
         setPrivateCursor(page.ownUnsharedNextCursor);
       }
     } catch (caught) {
-      if (lifetimeTicket.current !== lifetime) return;
+      if (lifetimeTicket.current !== lifetime || loadTicket.current !== firstPageTicket) return;
       setError(calmFailure(caught, 'Earlier entries could not be loaded. Try again.'));
     } finally {
       readControllers.current.delete(controller);
-      if (lifetimeTicket.current === lifetime) setBusy(false);
+      if (lifetimeTicket.current === lifetime && loadTicket.current === firstPageTicket) setBusy(false);
     }
   }
 
@@ -317,7 +331,7 @@ export function Guestbook({
     const privacy = guestbookPrivacyLabel(item);
     return <li key={guestbookItemKey(item)}>
       <article className="guestbook-entry">
-        {item.source === 'photo_caption' && item.previewAvailable
+        {item.source === 'photo_caption'
           && <img className="guestbook-entry__thumbnail" src={mediaPreview(item.mediaId)} alt="" loading="lazy" />}
         <div className="guestbook-entry__body">
           <p dir="auto">{item.body}</p>
@@ -354,6 +368,7 @@ export function Guestbook({
             <span>Name for this and future contributions</span>
             <input
               autoComplete="name"
+              dir="auto"
               maxLength={80}
               value={guestName}
               onChange={(change) => updateRememberedName(change.currentTarget.value)}

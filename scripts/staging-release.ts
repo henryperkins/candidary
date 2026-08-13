@@ -29,7 +29,7 @@ import {
   sha256,
   type CandidateManifest,
   type HashedFile,
-} from './release-evidence';
+} from './release-evidence.ts';
 import {
   PHASE_2_MIGRATION,
   PHASE_3_MIGRATION,
@@ -40,18 +40,22 @@ import {
   verifyExactReleaseCandidate,
   type ReleaseCandidateVerificationRequest,
   type VerifiedReleaseCandidate,
-} from './release-candidate';
+} from './release-candidate.ts';
 import {
+  POST_CUTOVER_PRODUCTION_TRIGGER_NAMES,
   PRODUCTION_TRIGGER_NAMES,
   type ZeroLegacyObservation,
-} from './migrate-release';
+} from './migrate-release.ts';
 import {
+  MEDIA_CUTOVER_READINESS_QUERY,
   assertStagingConformanceArtifact,
   verifyStagingConformanceArtifactFile,
   writeStagingConformanceArtifact,
   type AnyStagingArtifactBindings,
   type StagingConformanceArtifact,
-} from './staging-release-evidence';
+} from './staging-release-evidence.ts';
+
+export { MEDIA_CUTOVER_READINESS_QUERY } from './staging-release-evidence.ts';
 
 const APPROVED_BASE_SHA = '0b92387d2e237d568d2514373dcc3044e7960d4b';
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -1028,7 +1032,7 @@ function assertPostCutoverState(
   if (observation.schemaSha256 !== authorization.expectedSchemaSha256s.cutoverPostCutover) {
     throw new Error('Staging post-cutover schema fingerprint does not match authorization.');
   }
-  if (!sameStrings(observation.triggerNames, [...PRODUCTION_TRIGGER_NAMES])) {
+  if (!sameStrings(observation.triggerNames, [...POST_CUTOVER_PRODUCTION_TRIGGER_NAMES])) {
     throw new Error('Staging post-cutover trigger set is incomplete or unexpected.');
   }
 }
@@ -1098,11 +1102,11 @@ function validateInputs(
     || target.cleanupOwner !== authorization.cleanupOwner) {
     throw new Error('Staging authorization does not bind this review, candidate, target, mode, and cleanup owner.');
   }
-  const expectedCount = review.schemaVersion === 2
-    ? (request.sha === review.candidateSha ? 15 : null)
-    : request.sha === review.phase2Sha
-      ? 13
-      : request.sha === review.candidateSha ? 14 : null;
+  const expectedCount = request.sha === review.phase2Sha
+    ? 13
+    : request.sha === review.candidateSha
+      ? (review.schemaVersion === 2 ? 15 : 14)
+      : null;
   if (expectedCount === null) throw new Error('Requested staging SHA is not named by review authorization.');
   const verificationRequest: ReleaseCandidateVerificationRequest = {
     candidateRoot: request.candidateRoot,
@@ -1170,7 +1174,7 @@ export function runStagingRelease(
     throw new Error('--through is valid only for staging initialization.');
   }
   if (request.mode === 'initialize'
-    && inputs.candidate.migrationCount !== (inputs.target.schemaVersion === 2 ? 15 : 13)) {
+    && inputs.candidate.migrationCount !== 13) {
     throw new Error('Staging initialization requires the exact authorized candidate boundary.');
   }
   if (request.mode === 'migrate'
@@ -1260,6 +1264,14 @@ export function runStagingRelease(
       };
     }
 
+    const deploymentDatabase = databaseObservation(adapters.observeDatabase(context));
+    if (candidate.migrationCount === 13) {
+      assertPhase2State(deploymentDatabase, candidate, inputs.target, inputs.authorization);
+    } else if (inputs.authorization.schemaVersion === 2) {
+      assertPostCutoverState(deploymentDatabase, candidate, inputs.authorization);
+    } else {
+      assertPhase3State(deploymentDatabase, candidate, inputs.authorization);
+    }
     verifySecrets(adapters.listSecretNames(context), inputs.target.requiredSecretNames);
     const exitCode = adapters.run(command('deploy', candidate, owned, owned.configPath));
     if (exitCode !== 0) throw new Error('Exact staging Worker deployment failed.');
@@ -1735,6 +1747,32 @@ function numeric(row: Record<string, unknown>, field: string): number {
   return value as number;
 }
 
+export interface MediaCutoverReadinessObservation {
+  liveLegacyCount: number;
+  unverifiedLiveLegacyCount: number;
+}
+
+export function parseMediaCutoverReadinessRows(
+  value: unknown,
+): MediaCutoverReadinessObservation {
+  if (!Array.isArray(value) || value.length !== 1) {
+    throw new Error('Media cutover readiness must contain one primary D1 row.');
+  }
+  const row = exactRecord(value[0], [
+    'live_legacy_count', 'unverified_live_legacy_count',
+  ], 'Media cutover readiness row');
+  return {
+    liveLegacyCount: numeric(row, 'live_legacy_count'),
+    unverifiedLiveLegacyCount: numeric(row, 'unverified_live_legacy_count'),
+  };
+}
+
+export function observeMediaCutoverReadiness(
+  context: StagingObservationContext,
+): MediaCutoverReadinessObservation {
+  return parseMediaCutoverReadinessRows(d1Rows(context, MEDIA_CUTOVER_READINESS_QUERY));
+}
+
 function observeStagingDatabase(context: StagingObservationContext): StagingDatabaseObservation {
   const tables = d1Rows(context, "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name;");
   const hasLedger = tables.some((row) => row.type === 'table' && row.name === 'd1_migrations');
@@ -1760,7 +1798,6 @@ function observeStagingDatabase(context: StagingObservationContext): StagingData
     foreignKeyRows: foreignKeyRows as 0,
     triggerNames: tables.filter((row) => row.type === 'trigger')
       .map((row) => textValue(row.name, 'trigger name'))
-      .filter((name) => PRODUCTION_TRIGGER_NAMES.includes(name as typeof PRODUCTION_TRIGGER_NAMES[number]))
       .sort(),
     zeroCounts: counts ? {
       legacyRows: numeric(counts, 'legacyRows'),

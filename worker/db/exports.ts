@@ -48,6 +48,7 @@ interface ExportMediaEntryRow {
   export_job_id: string;
   media_id: string;
   object_key: string;
+  object_bucket_generation: ExportMediaEntryRecord['objectBucketGeneration'];
   original_filename: string;
   mime_type: ExportMediaEntryRecord['mimeType'];
   declared_byte_size: number;
@@ -149,6 +150,7 @@ function mapMediaEntry(row: ExportMediaEntryRow): ExportMediaEntryRecord {
     exportJobId: row.export_job_id,
     id: row.media_id,
     objectKey: row.object_key,
+    objectBucketGeneration: row.object_bucket_generation,
     originalFilename: row.original_filename,
     mimeType: row.mime_type,
     declaredByteSize: row.declared_byte_size,
@@ -247,6 +249,15 @@ export class ExportsRepository {
         AND NOT EXISTS (
           SELECT 1 FROM export_jobs WHERE event_id = events.id AND state IN ('queued', 'running')
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM media
+          WHERE event_id = events.id AND upload_state = 'stored'
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND (
+              object_bucket_generation <> 'canonical'
+              OR object_key <> 'events/' || events.id || '/media/final/' || media.id
+            )
+        )
         AND COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
           WHERE event_id = events.id AND upload_state = 'stored'
             AND deleted_at IS NULL AND created_at <= ?3), 0) <= ?5
@@ -263,11 +274,12 @@ export class ExportsRepository {
         first,
         this.db.prepare(`
           INSERT INTO export_media_entries (
-            export_job_id, media_id, object_key, original_filename, mime_type,
+            export_job_id, media_id, object_key, object_bucket_generation,
+            original_filename, mime_type,
             declared_byte_size, byte_size, width, height, guest_name, caption,
             publication_status, created_at, published_at
           )
-          SELECT ?1, id, object_key, original_filename, mime_type,
+          SELECT ?1, id, object_key, object_bucket_generation, original_filename, mime_type,
             declared_byte_size, byte_size, width, height, guest_name, caption,
             publication_status, created_at, published_at
           FROM media
@@ -276,6 +288,8 @@ export class ExportsRepository {
               SELECT 1 FROM export_jobs
               WHERE id = ?1 AND event_id = ?2 AND snapshot_at = ?3 AND state = 'queued'
             )
+            AND object_bucket_generation = 'canonical'
+            AND object_key = 'events/' || ?2 || '/media/final/' || media.id
           ORDER BY created_at ASC, id ASC
         `).bind(input.id, input.eventId, input.snapshotAt),
         ...new GuestbookRepository(this.db).snapshotStatements({
@@ -301,10 +315,29 @@ export class ExportsRepository {
             AND created_at <= ?2), 0) AS total_bytes,
         CASE WHEN EXISTS (SELECT 1 FROM media
           WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
+            AND created_at <= ?2
+            AND (
+              object_bucket_generation <> 'canonical'
+              OR object_key <> 'events/' || ?1 || '/media/final/' || media.id
+            ))
+          THEN 1 ELSE 0 END AS needs_media_upgrade,
+        CASE WHEN EXISTS (SELECT 1 FROM media
+          WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
             AND created_at <= ?2) OR EXISTS (SELECT 1 FROM guest_messages
           WHERE event_id = ?1 AND deleted_at IS NULL AND created_at <= ?2)
           THEN 0 ELSE 1 END AS is_empty
-    `).bind(input.eventId, input.snapshotAt).first<{ total_bytes: number; is_empty: number }>();
+    `).bind(input.eventId, input.snapshotAt).first<{
+      total_bytes: number;
+      needs_media_upgrade: number;
+      is_empty: number;
+    }>();
+    if (discriminators?.needs_media_upgrade === 1) {
+      throw new ApiError(
+        'EXPORT_MEDIA_UPGRADE_REQUIRED',
+        'Some photos need a storage upgrade before they can be exported. Try again after the upgrade is complete.',
+        409,
+      );
+    }
     if ((discriminators?.total_bytes ?? 0) > MAX_EVENT_BYTES) {
       throw new ApiError('EXPORT_LIMIT_EXCEEDED', 'This event is too large to export.', 409);
     }

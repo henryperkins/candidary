@@ -439,6 +439,7 @@ export function EventSettingsEditor({
         <textarea
           id="settings-guestbook-prompt"
           name="guestbookPrompt"
+          dir="auto"
           rows={3}
           maxLength={MAX_GUESTBOOK_PROMPT_LENGTH}
           value={state.draft.guestbookPrompt}

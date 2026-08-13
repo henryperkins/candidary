@@ -467,6 +467,7 @@ export interface MediaRecord {
   eventId: string;
   uploaderSessionId: string;
   objectKey: string;
+  objectBucketGeneration: 'legacy' | 'canonical';
   originalFilename: string;
   mimeType: SupportedImageType;
   declaredByteSize: number;
@@ -489,6 +490,7 @@ export type ExportableMediaRecord = Pick<
   MediaRecord,
   | 'id'
   | 'objectKey'
+  | 'objectBucketGeneration'
   | 'originalFilename'
   | 'mimeType'
   | 'declaredByteSize'

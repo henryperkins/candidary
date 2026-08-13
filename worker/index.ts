@@ -5,7 +5,14 @@ import { createApp } from './app';
 import type { AppEnv } from './env';
 import { NotificationService } from './services/notifications';
 import { processExport } from './workflows/export';
-import { scheduledCleanup } from './workflows/cleanup';
+import {
+  cleanupMediaObjectWriteTombstones,
+  maintainLegacyMediaObjects,
+  promoteLegacyStoredMedia,
+  scheduledCleanup,
+} from './workflows/cleanup';
+import { legacyMediaCopyEnabled } from './media-upload-release';
+import { MediaRepository } from './db/media';
 import { EVENT_COVER_PROFILES } from '../shared/event-cover';
 import {
   coverBackfillConfirmStep,
@@ -154,8 +161,74 @@ export default {
           throw error;
         },
       ));
+      // Promotion shares the existing hourly trigger but not its failure
+      // boundary. The durable row records retry state; this promise logs only a
+      // low-cardinality aggregate and never makes notification delivery fail.
+      const mediaPromotion = legacyMediaCopyEnabled()
+        ? promoteLegacyStoredMedia(env, executedAt)
+        : new MediaRepository(env.DB).countPromotions().then((pending) => ({
+            inspected: 0,
+            verified: 0,
+            promoted: 0,
+            pending,
+          }));
+      const maintenance = maintainLegacyMediaObjects(env, executedAt);
+      context.waitUntil(mediaPromotion.then(
+        () => undefined,
+        () => {
+          console.error(JSON.stringify({ event: 'media_promotion_failed' }));
+        },
+      ));
+      context.waitUntil(maintenance.then(
+        (summary) => {
+          if (!summary.legacyMediaScan.health.lastCompletedWithinSla
+            || !summary.legacyMediaScan.health.growthWithinCeiling
+            || !summary.legacyMediaScan.health.completedEpochErrorFree) {
+            console.error(JSON.stringify({
+              event: 'legacy_media_scanner_alert',
+              scheduledAt: scheduledAt.toISOString(),
+              executedAt: executedAt.toISOString(),
+              lastCompletedWithinSla: summary.legacyMediaScan.health.lastCompletedWithinSla,
+              growthWithinCeiling: summary.legacyMediaScan.health.growthWithinCeiling,
+              completedEpochErrorFree: summary.legacyMediaScan.health.completedEpochErrorFree,
+              overdueSuppressed: summary.legacyMediaScan.health.overdueSuppressed,
+            }));
+          }
+        },
+        () => {
+          console.error(JSON.stringify({ event: 'legacy_media_maintenance_failed' }));
+        },
+      ));
+      context.waitUntil(Promise.all([mediaPromotion, maintenance]).then(
+        async ([mediaPromotionSummary, maintenanceSummary]) => {
+          // Independent maintenance already guarantees liveness. This bounded
+          // catch-up pass retains same-hour cleanup for aliases promotion
+          // handed to permanent suppression while the first janitor ran.
+          await cleanupMediaObjectWriteTombstones(env, executedAt);
+          console.log(JSON.stringify({
+            event: 'cleanup_completed',
+            scheduledAt: scheduledAt.toISOString(),
+            executedAt: executedAt.toISOString(),
+            mediaPromotion: mediaPromotionSummary,
+            ...maintenanceSummary,
+          }));
+        },
+        () => {
+          // Each phase already has an independently tracked, low-cardinality
+          // failure log. The combined success log is optional telemetry only.
+        },
+      ).catch(() => {
+        console.error(JSON.stringify({ event: 'media_maintenance_catchup_failed' }));
+      }));
       return;
     }
-    context.waitUntil(scheduledCleanup(env, executedAt));
+    context.waitUntil(scheduledCleanup(env, executedAt, (summary) => {
+      console.log(JSON.stringify({
+        event: 'cleanup_completed',
+        scheduledAt: scheduledAt.toISOString(),
+        executedAt: executedAt.toISOString(),
+        ...summary,
+      }));
+    }));
   },
 } satisfies ExportedHandler<AppEnv>;

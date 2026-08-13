@@ -128,15 +128,18 @@ infers phase — `resolveGuestEventPhase()` runs on the Worker and returns `rsvp
 
 ### Upload path (the core journey)
 
-Three phases, because originals never pass through the Worker:
+Three phases; canonical-live originals now pass through the authenticated Worker and never receive a
+presigned R2 URL:
 
 1. **Reserve** — `POST /api/event/:slug/uploads/batch` validates type/size, atomically increments event
-   counters, inserts `reserved` media rows, and returns presigned R2 PUT URLs (10 min, MIME-bound).
-2. **Transfer** — the browser PUTs bytes straight to R2 (`xhrUpload` in `GuestUploadFlow.tsx`), max two
-   concurrent per guest (`runUploadQueue` in `features/uploads/upload-queue.ts`).
-3. **Finalize** — `POST .../uploads/:mediaId/finalize` HEADs the object, checks size/content-type, sniffs
-   the file signature (`security/image-metadata.ts`), and flips the row to `stored` while moving counters
-   from reserved to stored. Failures delete the object and release the reservation.
+   counters, inserts `reserved` media rows, and returns authenticated same-origin content URLs.
+2. **Transfer** — the browser sends at most two CSRF-protected PUTs concurrently. The Worker rechecks
+   event/session ownership, buffers no more than the accepted 20 MB, validates exact size, MIME, image
+   signature, and dimensions, then writes the deterministic canonical key create-only and re-reads its
+   complete bytes before committing D1 `stored` + `canonical`.
+3. **Confirm** — `POST .../uploads/:mediaId/finalize` is an idempotent confirmation for the browser
+   queue. A committed Stored row succeeds without resending bytes; an uncommitted reservation requires
+   the content PUT again. The schema-v2 five historical presign/download capabilities stay false.
 
 Every reservation carries a client-generated `idempotencyKey` unique per `(event, session)`. Retry
 re-enters the same media row rather than creating a new one — see `MediaRepository.refreshIdempotent`.
@@ -151,6 +154,19 @@ manager-only (`GET /api/media/:id/original`); guests may read a preview only for
 a published photo in a visible gallery. Previews are always produced through the `IMAGES` binding into a
 separate R2 key so original metadata is not exposed — never fall back to serving the original bytes from
 the preview route.
+
+`0015` makes bucket generation categorical and durably inventories every legacy pointer in
+`media_object_promotions`. Candidate A disables ingress/copy/pointer/purge; copy-only validates the
+exact legacy ETag, MIME, size, SHA-256, and dimensions, creates and completely re-verifies the object
+in the distinct canonical bucket, then freezes `target_verified` proof without moving the pointer.
+Only canonical-live may perform the exact proof-bound pointer CAS, and it clears the legacy preview
+pointer in the same transaction. Exports fail closed until eligible rows are canonical, while content,
+export Workflow, deletion, and maintenance always select the bucket recorded by generation.
+
+Permanent non-FK `media_object_write_tombstones`, `legacy_media_scan_state`, and scanner quarantine
+outlive media/events. The scanner repeatedly wraps the entire legacy namespace forever; it is not a
+finite drain detector. `source_writable_until`, signer revocation, TTL expiry, and repeated HEADs do
+not prove an already-admitted legacy operation is gone.
 
 ### Event covers
 
@@ -209,8 +225,10 @@ and a separate private CSV archive. Both inherit the Ready artifact's 24-hour ob
 snapshot rows remain in D1 for authorized retry until event purge.
 
 The daily cron (`workflows/cleanup.ts`) sweeps bounded auth and RSVP scratch, releases expired
-reservations, deletes expired export objects, and purges retention-due events. The hourly cron
-dispatches the bounded host-notification outbox.
+reservations, deletes expired export objects, and purges retention-due events. Both the daily pass and
+the hourly `47 * * * *` pass independently track bounded media copy/pointer work, the permanent legacy
+scanner/tombstone janitor, and the host-notification outbox. Promoter failure or exhaustion cannot
+prevent scanner/janitor progress, and scanner failure cannot abandon the already-started janitor.
 
 `deleteEventData()` order is load-bearing: revoke every credential and disable the entry, delete the
 event's R2 prefix, then delete `media` and `guest_messages` before the event row. Those two tables

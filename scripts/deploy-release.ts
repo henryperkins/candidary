@@ -20,11 +20,13 @@ import {
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type * as ReleaseEvidenceModule from './release-evidence';
+import type * as ReleaseEvidenceModule from './release-evidence.ts';
 import {
   verifyExactReleaseCandidate,
   type ReleaseCandidateObservationAdapter,
-} from './release-candidate';
+  type VerifiedReleaseCandidate,
+} from './release-candidate.ts';
+import { verifyPostCutoverMigrationEvidence } from './migrate-release.ts';
 
 const releaseEvidenceModulePath = './release-evidence.ts';
 const releaseEvidence: typeof ReleaseEvidenceModule = await import(releaseEvidenceModulePath);
@@ -63,6 +65,7 @@ export interface DeployReleaseRequest {
   candidateRoot: string;
   sha: string;
   manifestPath: string;
+  migrationEvidencePath?: string;
 }
 
 export interface DeployReleaseAdapters {
@@ -76,6 +79,14 @@ export interface DeployReleaseAdapters {
 export interface DeployReleaseArguments {
   sha: string;
   manifestPath: string;
+  migrationEvidencePath?: string;
+}
+
+export interface VerifiedDeploySnapshot {
+  candidate: VerifiedReleaseCandidate;
+  deployRoot: string;
+  wranglerCliPath: string;
+  deploymentEnvironment: NodeJS.ProcessEnv;
 }
 
 function exactArguments(left: readonly string[], right: readonly string[]): boolean {
@@ -224,12 +235,14 @@ export function parseDeployReleaseArgs(
 ): DeployReleaseArguments {
   let sha: string | undefined;
   let manifest: string | undefined;
+  let migrationEvidence: string | undefined;
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
     if (value === undefined) throw new Error(`Missing value for ${flag ?? 'argument'}.`);
     if (flag === '--sha' && sha === undefined) sha = value;
     else if (flag === '--manifest' && manifest === undefined) manifest = value;
+    else if (flag === '--migration-evidence' && migrationEvidence === undefined) migrationEvidence = value;
     else throw new Error(`Unknown or duplicate deploy argument ${flag}.`);
   }
   if (!sha || !SHA_PATTERN.test(sha)) throw new Error('--sha must be one full lowercase commit SHA.');
@@ -238,7 +251,15 @@ export function parseDeployReleaseArgs(
   if (basename(manifestPath) !== 'candidate-manifest.json') {
     throw new Error('Candidate manifest filename must be candidate-manifest.json.');
   }
-  return { sha, manifestPath };
+  if (migrationEvidence === undefined) return { sha, manifestPath };
+  const migrationEvidencePath = existingRegularFile(
+    resolve(cwd, migrationEvidence),
+    'Production migration evidence',
+  );
+  if (basename(migrationEvidencePath) !== 'post-cutover-migration-evidence.json') {
+    throw new Error('Production migration evidence filename is invalid.');
+  }
+  return { sha, manifestPath, migrationEvidencePath };
 }
 
 function within(container: string, target: string): boolean {
@@ -378,6 +399,40 @@ export function runDeployRelease(
   request: DeployReleaseRequest,
   adapters: DeployReleaseAdapters = defaultAdapters,
 ): void {
+  withVerifiedDeploySnapshot(request, (snapshot) => {
+    const prerequisiteEnv = sanitizedPrerequisiteEnvironment(
+      adapters.environment,
+      snapshot.candidate.manifest.bindings!.topology.requiredSecrets,
+    );
+    const plan = buildDeploymentCommandPlan({
+      candidateRoot: snapshot.candidate.candidateRoot,
+      deployRoot: snapshot.deployRoot,
+      sha: snapshot.candidate.sha,
+      nodeExecPath: adapters.nodeExecPath,
+      npmCliPath: resolveNpmCliPath(adapters.npmExecPath, adapters.nodeExecPath),
+      wranglerCliPath: snapshot.wranglerCliPath,
+      prerequisiteEnv,
+      deployEnv: snapshot.deploymentEnvironment,
+    });
+    assertDeploymentCommandPlan(plan, {
+      candidateRoot: snapshot.candidate.candidateRoot,
+      deployRoot: snapshot.deployRoot,
+      sha: snapshot.candidate.sha,
+      nodeExecPath: adapters.nodeExecPath,
+      npmCliPath: resolveNpmCliPath(adapters.npmExecPath, adapters.nodeExecPath),
+      wranglerCliPath: snapshot.wranglerCliPath,
+      prerequisiteEnv,
+      deployEnv: snapshot.deploymentEnvironment,
+    });
+    runCommand(plan[3]!, adapters);
+  }, adapters);
+}
+
+export function withVerifiedDeploySnapshot<T>(
+  request: DeployReleaseRequest,
+  action: (snapshot: VerifiedDeploySnapshot) => T,
+  adapters: DeployReleaseAdapters = defaultAdapters,
+): T {
   if (!SHA_PATTERN.test(request.sha)) throw new Error('Reviewed SHA is invalid.');
   const candidateRoot = resolve(request.candidateRoot);
   const rootStat = lstatSync(candidateRoot);
@@ -402,6 +457,14 @@ export function runDeployRelease(
     approvedBaseSha: APPROVED_BASE_SHA,
     expectedMigrationCount: declaredMigrationCount,
   }, releaseCandidateAdapters(adapters));
+  if (declaredMigrationCount === 15) {
+    if (request.migrationEvidencePath === undefined) {
+      throw new Error('A 15-migration deployment requires exact post-cutover migration evidence.');
+    }
+    verifyPostCutoverMigrationEvidence(request.migrationEvidencePath, initialCandidate);
+  } else if (request.migrationEvidencePath !== undefined) {
+    throw new Error('Historical deployment must not accept post-cutover migration evidence.');
+  }
   const manifest = initialCandidate.manifest;
   if (manifest.bindings === null || manifest.artifacts === null) {
     throw new Error('Verified candidate is missing deployment evidence.');
@@ -461,38 +524,26 @@ export function runDeployRelease(
   runCommand(plan[1]!, adapters);
   runCommand(plan[2]!, adapters);
 
-  verifyExactReleaseCandidate({
+  const recheckedCandidate = verifyExactReleaseCandidate({
     candidateRoot,
     sha: request.sha,
     manifestPath: request.manifestPath,
     approvedBaseSha: APPROVED_BASE_SHA,
     expectedMigrationCount: declaredMigrationCount,
   }, releaseCandidateAdapters(adapters));
+  if (declaredMigrationCount === 15) {
+    verifyPostCutoverMigrationEvidence(request.migrationEvidencePath!, recheckedCandidate);
+  }
   const rebuilt = collectDeployableArtifacts(candidateRoot);
 
   const deployRoot = createVerifiedDeploySnapshot(candidateRoot, rebuilt);
   try {
-    plan = buildDeploymentCommandPlan({
-      candidateRoot,
+    return action({
+      candidate: recheckedCandidate,
       deployRoot,
-      sha: request.sha,
-      nodeExecPath: adapters.nodeExecPath,
-      npmCliPath,
       wranglerCliPath,
-      prerequisiteEnv,
-      deployEnv,
+      deploymentEnvironment: deployEnv,
     });
-    assertDeploymentCommandPlan(plan, {
-      candidateRoot,
-      deployRoot,
-      sha: request.sha,
-      nodeExecPath: adapters.nodeExecPath,
-      npmCliPath,
-      wranglerCliPath,
-      prerequisiteEnv,
-      deployEnv,
-    });
-    runCommand(plan[3]!, adapters);
   } finally {
     removeDeploySnapshot(deployRoot);
   }

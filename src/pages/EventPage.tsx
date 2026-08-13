@@ -185,7 +185,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
 
       {event.phase === 'waiting' && <GuestWaiting event={event} />}
 
-      <section
+      {event.phase === 'photos-primary' && <section
         className={`guest-secondary${terminal || event.phase !== 'photos-primary' ? ' guest-secondary--guestbook-only' : ''}`}
         aria-labelledby={terminal
           ? 'terminal-guestbook'
@@ -244,7 +244,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
             {contributions.length ? <ul>{contributions.map((item) => <li key={item.id}><img src={mediaPreview(item.id)} alt="" /><span>{item.originalFilename}</span><em className={`status status--${item.uploadState === 'stored' ? 'approved' : 'pending'}`}>{item.uploadState === 'stored' ? 'Delivered' : 'Not delivered'}</em></li>)}</ul> : <p>No earlier deliveries from this device.</p>}
           </div>}
         </details>}
-      </section>
+      </section>}
     </main>
     {!terminal && <footer><Brand compact /><p>Private moments, held together.</p></footer>}
     </div>
