@@ -754,6 +754,33 @@ describe('guest notes and captions', () => {
     expect((await rejected.json<any>()).code).toBe('VALIDATION_FAILED');
   });
 
+  it('defaults Manager pages to 25, accepts at most 50, and rejects unknown view or source values', async () => {
+    const access = await eventAccess();
+    const request = (query: string) => createApp().request(
+      `/api/manage/events/${access.event.id}/guestbook?${query}`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+
+    for (const query of [
+      'view=shared&source=all',
+      'view=shared&source=all&limit=25',
+      'view=shared&source=all&limit=50',
+    ]) {
+      expect((await request(query)).status).toBe(200);
+    }
+    for (const query of [
+      'view=shared&source=all&limit=0',
+      'view=shared&source=all&limit=51',
+      'view=everything&source=all',
+      'view=shared&source=media',
+    ]) {
+      const response = await request(query);
+      expect(response.status).toBe(422);
+      expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    }
+  });
+
   it('keeps a pending note private to its author until the manager approves it', async () => {
     const access = await eventAccess();
     const other = await secondGuest(access.eventLink);

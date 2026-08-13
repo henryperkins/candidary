@@ -723,6 +723,9 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+    if (url.endsWith('/guestbook/summary')) return json({ summary: {
+      needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+    } });
     if (url.includes('/media')) {
       mediaRequests.push(url);
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
@@ -771,6 +774,20 @@ describe('manager experience', () => {
       expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
     },
   );
+
+  it('uses the Guestbook summary for initial navigation without eagerly loading entries', async () => {
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    expect(within(navigation).getByRole('button', { name: 'Guestbook' })).toBeVisible();
+    const requested = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requested.filter((url) => url.endsWith('/guestbook/summary'))).toHaveLength(1);
+    expect(requested.some((url) => url.endsWith('/messages'))).toBe(false);
+    expect(requested.some((url) => /\/guestbook(?:\?|$)/u.test(url))).toBe(false);
+  });
 
   it('keeps appearance inside Settings between its form and account controls', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
