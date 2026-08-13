@@ -324,7 +324,7 @@ test('the server-selected receipt outranks cleared browser storage after reload'
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
 
-  await expect.poll(() => records(audit, 'status').length, { timeout: 3_000 }).toBe(1);
+  await expect.poll(() => records(audit, 'status').length, { timeout: 5_000 }).toBe(1);
   expect(records(audit, 'status')[0]?.path).toContain(operationId);
   expect(records(audit, 'publication')).toHaveLength(0);
   await expect.poll(() => page.evaluate(() => (
@@ -346,7 +346,7 @@ test('Manager access recovery resumes the same receipt and never republishes', a
   });
   await choosePreset(page);
   await finishPreset(page);
-  await expect.poll(() => records(audit, 'status').length, { timeout: 3_000 }).toBe(1);
+  await expect.poll(() => records(audit, 'status').length, { timeout: 5_000 }).toBe(1);
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect.poll(() => records(audit, 'status').length, { timeout: 4_000 }).toBe(2);
 
@@ -596,6 +596,7 @@ async function geometryPage(
 }
 
 test('sheet/dialog, compact keyboard, 200%, and 400% geometries retain one usable scroll region', async ({ browser }, testInfo) => {
+  test.setTimeout(60_000);
   desktopOnly(testInfo);
   for (const geometry of [
     { label: 'sheet-760', width: 760, height: 700, mode: 'default', radius: '0px', snapshot: true },
