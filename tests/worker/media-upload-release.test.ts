@@ -13,26 +13,27 @@ describe('schema 15 media upload release contract', () => {
     delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
   });
 
-  it('binds Candidate A production behavior to the exact fail-closed capability set', () => {
+  it('binds copy-only production behavior to the exact fail-closed capability set', () => {
     expect(mediaUploadRelease).toEqual({
       kind: 'candidary.media-upload-release',
       schemaVersion: 2,
-      mode: 'canonical-cutover-disabled',
+      mode: 'canonical-copy-only',
       capabilities: {
         singleInitiationPresign: false,
         batchInitiationPresign: false,
         storedReplayPresign: false,
         reservedFinalize: false,
         authenticatedWorkerIngress: false,
-        legacyMediaCopy: false,
+        legacyMediaCopy: true,
         legacyPointerCutover: false,
         eventRelationalPurge: false,
         exportDownloadPresign: false,
       },
     });
     // Worker tests are compiled with an explicit test-only live switch. The
-    // checked-in artifact above remains Candidate A and production cannot turn
-    // this on with a binding or request.
+    // checked-in artifact above copies legacy bytes only: production still
+    // cannot accept ingress, flip a pointer, or purge, and no binding or
+    // request can turn any of those on.
     expect(() => assertWorkerIngressEnabled()).not.toThrow();
     expect(() => assertLegacyMediaCopyEnabled()).not.toThrow();
     expect(() => assertLegacyPointerCutoverEnabled()).not.toThrow();

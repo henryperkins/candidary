@@ -97,15 +97,15 @@ function bucketEvidence(): CanonicalMediaBucketProvisioningEvidenceV1 {
 }
 
 describe('media upload release configs', () => {
-  it('keeps the checked-in disabled config consumable by the release verifier', () => {
+  it('keeps the checked-in copy-only config consumable by the release verifier', () => {
     expect(verifyMediaUploadReleaseContract(
       resolve('config/media-upload-release.json'),
-      'canonical-cutover-disabled',
+      'canonical-copy-only',
     ).artifact).toEqual({
       kind: 'candidary.media-upload-release',
       schemaVersion: 2,
-      mode: 'canonical-cutover-disabled',
-      capabilities: { ...CUTOVER_DISABLED_CAPABILITIES },
+      mode: 'canonical-copy-only',
+      capabilities: { ...CANONICAL_COPY_ONLY_CAPABILITIES },
     });
   });
 
