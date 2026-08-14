@@ -258,13 +258,22 @@ function assertLaunchProtocol(artifact: LaunchArtifact): void {
   }
 }
 
+function pinnedWranglerVersion(): string | undefined {
+  const rootPackageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+    devDependencies?: { wrangler?: string };
+  };
+  return rootPackageJson.devDependencies?.wrangler;
+}
+
 function wranglerEntrypoint(): string {
   const packagePath = resolve(process.cwd(), 'node_modules/wrangler/package.json');
   const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as {
     version?: string;
     bin?: { wrangler?: string };
   };
-  expect(packageJson.version).toBe('4.113.0');
+  const pinnedVersion = pinnedWranglerVersion();
+  expect(pinnedVersion).toMatch(/^\d+\.\d+\.\d+$/u);
+  expect(packageJson.version).toBe(pinnedVersion);
   expect(packageJson.bin?.wrangler).toBe('./bin/wrangler.js');
   return resolve(dirname(packagePath), packageJson.bin!.wrangler!);
 }
@@ -712,7 +721,7 @@ describe('the generated cover-backfill operator loop', () => {
     try {
       const version = spawnWrangler(['--version']);
       expect(version.status, `${version.stdout}\n${version.stderr}`).toBe(0);
-      expect(version.stdout.trim()).toBe('4.113.0');
+      expect(version.stdout.trim()).toBe(pinnedWranglerVersion());
 
       const migrationRoot = resolve(process.cwd(), 'migrations');
       const migrations = phase2MigrationNames(migrationRoot);

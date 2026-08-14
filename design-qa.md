@@ -66,96 +66,21 @@ The asset matrix is regenerated with `npm run build:cover-presets`, which needs 
 A rebuild from unchanged sources reproduces all 720 files byte for byte; if it does not, the seeds
 or the browser version moved and the manifest checksums will say so.
 
-### Phase-2 backfill evidence boundary
+### Cover verification boundary
 
-The distinct Phase-2 local rehearsal gate is:
+Focused unit and Worker tests protect cover normalization, publication, cleanup, backfill, and
+deletion behavior. The ordinary pull-request path runs those suites in parallel with the rest of the
+repository. Changes that affect the browser flow can additionally run the relevant Playwright files;
+the nightly/manual workflow keeps the complete browser matrix out of routine deployment.
 
-```powershell
-npx vitest run --config vitest.config.ts tests/unit/cover-backfill-operator-loop.test.ts
-npx vitest run --config vitest.worker.config.ts tests/worker/cover-backfill-rehearsal.test.ts
-```
+Cloudflare-specific Images, Workflow, codec, and remote-D1 behavior must be checked in the isolated
+preview environment when those surfaces change. Preview resources never share production D1, R2,
+Workflow, rate-limit, email, or secret bindings. Candidate manifests, staging evidence bundles, and
+historical cover rehearsals are not release requirements.
 
-The two Phase-2 rehearsals establish different local facts and must not be promoted beyond them:
-
-- `tests/worker/cover-backfill-rehearsal.test.ts` runs 101 migrated legacy events through literal
-  100/1/0 inventory pages and 25/25/25/25/1/0 dispatch observations. It exercises interruption,
-  deterministic IDs/generations, deletion fencing before confirmation and before R2, stale-create
-  recovery, unknown-with-no-mutation, retryable restart, paused resume, superseded resolution,
-  counters, proof, and Worker-only atomic closure. Its Images and Workflow implementations are
-  deterministic injected fakes.
-- `tests/unit/cover-backfill-operator-loop.test.ts` pins Wrangler 4.113.0, applies exactly migrations
-  `0001` through `0013` to a unique disposable local D1, walks the generated inventory/claim/read/
-  confirm/receipt/proof order, and proves a failing claim file rolls back. It inspects generated
-  Workflow command strings only and deliberately executes no trigger, terminate, resume, or restart.
-
-Together they prove local orchestration, observed Wrangler/local-D1 rollback atomicity, artifact
-ordering, replay behavior, and bounds.
-They do **not** prove Cloudflare Images output bytes, orientation/metadata stripping, JPEG/WebP codec
-limits, HEIC/vendor MIME behavior, Workflow create/status/retry/resume/restart/terminate semantics,
-completed-instance retention, or the production missing-instance discriminator. The candidate's
-matcher is empty, so certified-missing recreation is unreachable through the default adapter. Those
-behaviors require an exact-candidate staging deployment against real Images and Workflow resources
-before production backfill authorization; pinning a discriminator creates a new candidate and repeats
-both gates. The rehearsals also provide no physical-device, Safari, Android, native picker, remote D1,
-deployment, production-data, or Phase-3 evidence.
-
-### Phase-3 cover contract evidence
-
-Phase 3 ends at `0014_event_cover_invariants.sql`: 14 migrations total, with the Phase-2 proof ending
-at `0013_guest_message_hardening.sql`. Its focused static/release-tooling gate is:
-
-```powershell
-npm run verify:cover-presets
-npm run verify:bindings
-$freshRunRoot = Join-Path ([IO.Path]::GetTempPath()) 'candidary-release-<unique-run-id>'
-New-Item -ItemType Directory -Path $freshRunRoot
-npm run verify:fresh-d1 -- --run-root $freshRunRoot --report-file (Join-Path $freshRunRoot 'migration-verification.json')
-npm run test:unit -- tests/unit/release-candidate.test.ts tests/unit/deploy-release.test.ts tests/unit/migrate-release.test.ts tests/unit/staging-release-evidence.test.ts tests/unit/staging-release.test.ts
-npm run typecheck
-npm run typecheck:e2e
-npm run lint
-git diff --check
-```
-
-The aggregate `verify:release` runner creates this owned temporary root and supplies both Fresh-D1
-arguments itself. A direct focused invocation must do the same; the no-argument package command is not
-a standalone run because it has nowhere safe to publish the schema report.
-
-The release-tooling slice passed 36/36 locally. It covers exact-candidate verification, production
-deploy parity, closed staging topology overlays, owned deploy-root path resolution, strict artifact
-schemas, deterministic bootstrap/0014 bundles, pinned Wrangler 4.113.0 dry run and migration discovery,
-a real 13-file local bootstrap, local 0014 apply, and fault-injected atomic rollback. These tests prove
-the wrapper and local D1 behavior only. They do not prove a remote import, binding identity, deployed
-version metadata, Images output, Workflow lifecycle, resource destruction, or a finalized staging
-artifact.
-
-The production-build browser evidence command is:
-
-```powershell
-npm run test:e2e -- tests/e2e/event-cover-studio.spec.ts tests/e2e/accessibility.spec.ts tests/e2e/guest-responsive.spec.ts tests/e2e/guest-lifecycle.spec.ts tests/e2e/event-theming-visual.spec.ts tests/e2e/security.spec.ts
-```
-
-It passed 142 cases with 76 intentional project-specific skips and zero failures. It proves semantic
-none/preset and upload publication journeys, existing-upload editing/reset, removal/discard, one
-operation owner across dropped responses/close/reopen/hidden-tab/access recovery, Retry-After-aware
-polling, all six responsive profiles and exact 360/361, 390/391, 599/600/601, 699/700, and 759/760
-boundaries, advertised current-revision candidates, WebP-to-JPEG-to-gradient recovery, one sanitized
-refresh, unchanged-revision anti-loop, newer-revision reset, and dynamic axe across the complete
-Studio/Manager/guest states.
-
-Twenty-nine changed PNGs were inspected at original resolution: 12 profile/directional crops, five
-sheet/dialog/keyboard/zoom geometries, four intentionally invalidated hero/canvas baselines, and eight
-four-theme preset/upload-effect canvases. `design/fidelity-ledger.md` lists every exact filename and
-accepted category. The first visually identical upload-effect fixtures were rejected and replaced with
-one deterministic source rendered into distinct natural, warm, soft, and monochrome fixtures. The run
-also found and fixed a real desktop defect where `visualViewport` sheet positioning overrode centered
-dialog geometry; the inline visual-viewport bounds now apply only through 760 px.
-
-Playwright uses local stateful route fixtures and deterministic image bytes. Dynamic axe does not
-measure text-over-image pixels, so the 720 preset/effect/theme/profile contrast matrix remains a
-deterministic compositor proof and arbitrary-upload safety remains a monotonic brightest-source proof.
-No local result is promoted to real Images/HEIC/metadata, Workflow, remote D1, staging, production,
-Safari/native picker, physical-device, VoiceOver, or TalkBack evidence.
+Local Chromium fixtures and deterministic image bytes still do not prove Safari, native pickers,
+physical devices, VoiceOver, or TalkBack. Those remain separate manual acceptance checks and do not
+block an unrelated routine deployment.
 
 ## Tracked visual baselines
 

@@ -30,62 +30,18 @@ not quiescence; later safety phases still run within their own bounds, and anoth
 backlog is empty. These in-process summaries are not emitted as structured logs or exposed through an
 operator route.
 
-## Release identity and certification boundary
+## Deployment boundary
 
-The build embeds two Worker-only literals: the full clean Git SHA and the content-bound migration
-manifest SHA-256. `config/release.json` supplies the positive `guestJourneyVersion` (currently 2),
-and the `CF_VERSION_METADATA` binding supplies Cloudflare's Worker version ID, deployment tag, and
-timestamp. Runtime identity is available only when all values are well formed and the version tag is
-exactly the embedded build SHA. A missing metadata binding, empty ID or tag, tag/SHA mismatch,
-unreplaced build literal, or malformed digest produces `null`; it must never degrade to a partial or
-"probably current" identity.
+Routine code deployment is intentionally separate from operations that mutate durable data. A merge
+to protected `main` is built once by Cloudflare and that generated artifact is deployed directly.
+The full Git commit SHA is the Worker version tag. See [deployment.md](deployment.md) for the exact
+commands, required checks, isolated preview topology, and rollback procedure.
 
-`0011_release_certifications.sql` defines one row per Worker version with these exact columns:
-
-- `worker_version_id` — trimmed Cloudflare Worker version ID and primary key.
-- `build_sha` — 40 lowercase hexadecimal characters.
-- `guest_journey_version` — positive integer matching `config/release.json`.
-- `migration_manifest_sha256` — 64 lowercase hexadecimal characters for the checked-in migration
-  contents after canonical CRLF-to-LF normalization, not the filename-only fresh-D1 ledger digest.
-- `evidence_manifest_sha256` — SHA-256 of the exact canonical local candidate-manifest bytes.
-- `physical_evidence_refs_json` — a nonempty JSON array of redacted evidence references.
-- `certified_at` — canonical UTC instant with millisecond precision.
-
-Each physical reference has exactly this safe shape:
-
-```json
-{
-  "category": "printed-entry-ios",
-  "evidenceId": "123e4567-e89b-42d3-a456-426614174000",
-  "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "capturedAt": "2026-08-02T12:00:00.000Z"
-}
-```
-
-Categories are allowlisted and unique within the row. `evidenceId` is a UUID and
-`manifestSha256` identifies a separate redacted evidence manifest. Never store a raw invitation or
-management URL, credential, cookie, submitted name, device identifier, screenshot path, free-form
-note, or secret in this array.
-
-There is deliberately no HTTP route, public command, scheduled job, deploy hook, or migration hook
-that writes a certification. The repository class can validate and persist a record for a future
-explicit workflow, but it has no remotely reachable caller. `verify:release` writes only local
-candidate evidence, the guarded deploy writes only a tagged Worker version, and applying `0011`
-creates only the empty table. Do not insert a row by hand and do not document an ad hoc write command.
-
-A future readiness decision must fail closed unless all of the following are true at the same time:
-
-1. the remote migration ledger has no unapproved or pending migration;
-2. runtime identity is non-null, including an exact nonempty tag/build-SHA match;
-3. one certification matches Worker version ID, build SHA, journey version, and migration digest
-   exactly;
-4. its evidence-manifest digest matches the retained local manifest and checksum sidecar; and
-5. every required physical category has a valid redacted reference.
-
-Missing bindings, malformed metadata or evidence, an unknown certification, a pending migration, or
-any identity mismatch means **not certified**. Candidate evidence itself keeps
-`remoteMigration`, `deployment`, `physicalDevices`, and `runtimeCertification` at `not_run` and
-contains no Worker version ID, so it cannot be used to claim deployment or wedding readiness.
+Migration `0011_release_certifications.sql` remains in the immutable D1 history. Its table is unused;
+there is no repository, route, scheduled job, deploy hook, local evidence generator, or readiness gate
+that reads or writes it. Do not insert certification rows. A future schema cleanup may remove the
+unused table through a new forward migration, but an applied migration file must never be rewritten or
+deleted.
 
 ## Delivery and publication
 
@@ -314,16 +270,9 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `EXPORT_MEDIA_UPGRADE_REQUIRED` — one or more stored originals still point at the legacy bucket. Copy-only may already have verified the canonical bytes, but export remains closed until the reviewed canonical-live pointer cutover completes. Never bypass the canonical-generation snapshot rule.
 - `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED`, `EXPORT_LIMIT_EXCEEDED`, `EXPORT_SNAPSHOT_CHANGED` — inspect the active job, immutable Guestbook snapshot metadata, and persisted object inventory.
 
-These source/config and runbook updates are local implementation evidence only. Production secret
-provisioning, remote migration, deployment, runtime certification, policy/legal approval, and
-physical-device proof remain separate unauthorized gates.
-
-For production secrets, use the non-traffic `wrangler versions secret put <NAME> --name candidary`
-workflow documented in `deployment.md`; never use `wrangler secret put` during a release window,
-because it immediately deploys a new version. A 15-migration Worker release additionally requires
-the exact canonical `post-cutover-migration-evidence.json` emitted after the guarded sole-0015
-production migration. Secret-version creation, migration evidence, Worker deployment, and runtime
-certification remain separate records and authorities.
+Production secret provisioning and remote D1 migration are explicit durable-state operations, not
+steps hidden inside routine code deployment. Follow [deployment.md](deployment.md), and never rotate
+persisted-data keys merely to release application code.
 
 The active schema-v2 Worker requires eight application secrets and no R2 access-key secret. Do not
 reintroduce `R2_ACCESS_KEY_ID` or `R2_SECRET_ACCESS_KEY`; the old signer token is revocation evidence,
@@ -335,7 +284,7 @@ host whose upload was refused.
 
 - `COVER_SOURCE_UNSUPPORTED` — the file is not one of JPEG, PNG, WebP, or HEIC, or the bytes are not
   the kind of image the reservation declared. Generic HEIF and HEIC/HEIF *sequence* types are refused
-  on purpose in v1; they cannot be advertised until a deployed Images conformance gate adds them.
+  on purpose in v1; advertise them only after they work against real Images in an isolated preview.
 - `COVER_SOURCE_TOO_SMALL` — after orientation the photo is under 620 × 420, which is the floor for
   producing every 1x layout without upscaling. It is refused at inspection, never at `Done`.
 - `COVER_MASTER_BUDGET_EXHAUSTED` — no rung of the five-attempt normalization ladder produced a valid
@@ -396,7 +345,7 @@ window the inventory remains the recovery boundary; after verified cleanup, it d
 
 ### Backfill and deletion signals
 
-Document only signals this candidate actually produces:
+The current Worker exposes these support signals:
 
 - Manager event deletion returns `202` with exactly `data.deletionScheduled === true` while cover
   cleanup remains, or `200` with exactly `data.deleted === true` when the purge completes in that
@@ -411,15 +360,16 @@ Document only signals this candidate actually produces:
 - The launcher prints or writes ordered private artifacts and evaluates saved Wrangler `--json`
   payloads. Its display proof is diagnostic only. The Worker is the only writer of a verified run.
 
-The candidate emits a structured `cover_platform_observation` for every non-null platform diagnostic.
+The Worker emits a structured `cover_platform_observation` for every non-null platform diagnostic.
 It contains only a fixed `source` (`publication`, `backfill`, or `purge`) and a bounded,
 low-cardinality `code`; it never contains raw status/error text, Workflow IDs, or object keys. The
-candidate does **not** log the cleanup/reconciliation summary objects, expose a cleanup endpoint,
+Worker does **not** log the cleanup/reconciliation summary objects, expose a cleanup endpoint,
 store an `unknown` platform marker, or publish a fence-backlog metric. A diagnostic event or unchanged
-job/fence is therefore not evidence that an instance is missing. Observe the aggregate D1 JSON queries
-in [cover-backfill-runbook.md](cover-backfill-runbook.md), compare snapshots across scheduled passes,
-and stop for engineering investigation when platform status is unknown or purge/fence state remains
-unexplained. Do not fill those observability gaps with raw D1 edits or operator resume/restart calls.
+job/fence is therefore not evidence that an instance is missing. Use the read-only
+`npm run cover-backfill:inventory` and `npm run cover-backfill:verify` modes to compare snapshots
+across scheduled passes, and stop for engineering investigation when platform status is unknown or
+purge/fence state remains unexplained. Do not fill those observability gaps with raw D1 edits or
+operator resume/restart calls.
 
 ## Recovery boundaries
 

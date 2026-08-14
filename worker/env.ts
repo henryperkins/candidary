@@ -1,5 +1,4 @@
 import type { EventRecord, HostAccountRecord, HostSessionRecord, SessionRecord, TokenRecord } from './db/types';
-import type { RuntimeReleaseIdentity } from '../shared/release';
 
 // Every secret binding is declared in `wrangler.jsonc` under `secrets.required`
 // and reaches this type through the generated `Cloudflare.Env`. Redeclaring them
@@ -27,7 +26,6 @@ export type AppBindings = {
   Bindings: AppEnv;
   Variables: {
     requestId: string;
-    releaseIdentity: RuntimeReleaseIdentity | null;
     auth: AuthenticatedSession;
   };
 };

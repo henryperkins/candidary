@@ -47,6 +47,7 @@ export class EmailService {
   // that because a mail server was briefly unhappy would be worse than reporting
   // the failure and letting the host ask again.
   async send(message: OutboundEmail): Promise<SendOutcome> {
+    if (!this.env.EMAIL) return { delivered: false, code: 'E_DISABLED' };
     try {
       await this.env.EMAIL.send({
         to: message.to,

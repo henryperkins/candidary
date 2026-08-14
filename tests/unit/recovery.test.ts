@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { parseManagementLink, replaceManagementLocation } from '../../src/app/management-link';
 import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
-import { KNOWN_APPLICATION_ORIGINS } from '../../shared/origins';
+import {
+  KNOWN_APPLICATION_ORIGINS,
+  PREVIEW_APPLICATION_ROOT_ORIGIN,
+} from '../../shared/origins';
 
 const EVENT = '11111111-2222-4333-8444-555555555555';
 const ORIGIN = KNOWN_APPLICATION_ORIGINS[0];
@@ -44,6 +47,32 @@ describe('management link recovery', () => {
         expect(parseManagementLink(`${linkOrigin}/manage/${TOKEN}`, pageOrigin))
           .toBe(`/manage/${TOKEN}`);
       }
+    }
+  });
+
+  it('accepts preview management links only within the isolated preview family', () => {
+    const previewAlias = 'https://feature-release-candidary-preview.lfd.workers.dev';
+    expect(parseManagementLink(
+      `${PREVIEW_APPLICATION_ROOT_ORIGIN}/manage/${TOKEN}`,
+      previewAlias,
+    )).toBe(`/manage/${TOKEN}`);
+    expect(parseManagementLink(
+      `${previewAlias}/manage/${TOKEN}`,
+      PREVIEW_APPLICATION_ROOT_ORIGIN,
+    )).toBe(`/manage/${TOKEN}`);
+  });
+
+  it('never moves a management bearer path between production and preview', () => {
+    const previewAlias = 'https://feature-release-candidary-preview.lfd.workers.dev';
+    for (const productionOrigin of KNOWN_APPLICATION_ORIGINS) {
+      expect(parseManagementLink(
+        `${productionOrigin}/manage/${TOKEN}`,
+        previewAlias,
+      )).toBeNull();
+      expect(parseManagementLink(
+        `${previewAlias}/manage/${TOKEN}`,
+        productionOrigin,
+      )).toBeNull();
     }
   });
 

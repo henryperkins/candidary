@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   KNOWN_APPLICATION_ORIGINS,
+  PREVIEW_APPLICATION_ROOT_ORIGIN,
   isKnownApplicationOrigin,
   normalizeOrigin,
   parseOriginList,
@@ -108,5 +109,21 @@ describe('known application origins', () => {
     expect(isKnownApplicationOrigin('http://candidary.app')).toBe(false);
     expect(isKnownApplicationOrigin('candidary.app')).toBe(false);
     expect(isKnownApplicationOrigin(undefined)).toBe(false);
+  });
+
+  it('recognizes only the exact isolated preview Worker hostname family', () => {
+    expect(isKnownApplicationOrigin(PREVIEW_APPLICATION_ROOT_ORIGIN)).toBe(true);
+    expect(isKnownApplicationOrigin(
+      'https://feature-release-candidary-preview.lfd.workers.dev',
+    )).toBe(true);
+    expect(isKnownApplicationOrigin(
+      'https://feature-release-candidary-preview.lfd.workers.dev.evil.test',
+    )).toBe(false);
+    expect(isKnownApplicationOrigin(
+      'https://candidary-preview.other-account.workers.dev',
+    )).toBe(false);
+    expect(isKnownApplicationOrigin(
+      'http://feature-release-candidary-preview.lfd.workers.dev',
+    )).toBe(false);
   });
 });

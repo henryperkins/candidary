@@ -141,8 +141,8 @@ describe('the checked-in preset matrix', () => {
    *
    * It reads all 720 files — 11.6 MB — and SHA-256s every one. That fits inside
    * the jsdom project's 5-second default on a warm working copy and does not on
-   * the cold detached worktree `verify:release` builds, where several suites are
-   * also competing for the disk. Raising it here is honest about the cost;
+   * a cold CI checkout, especially when several jobs compete for disk. Raising
+   * it here is honest about the cost;
    * sampling a subset instead would quietly stop checking most of the matrix.
    */
   it('matches every checked-in file to its manifest row, ceiling, and decoded size', () => {

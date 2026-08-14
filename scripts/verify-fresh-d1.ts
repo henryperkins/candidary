@@ -25,12 +25,12 @@ import {
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type * as ReleaseEvidenceModule from './release-evidence';
-import type { MigrationVerification } from './release-evidence';
-
-const releaseEvidenceModulePath = './release-evidence.ts';
-const releaseEvidence: typeof ReleaseEvidenceModule = await import(releaseEvidenceModulePath);
-const { canonicalJson, collectMigrationManifest, sha256 } = releaseEvidence;
+import {
+  canonicalJson,
+  collectMigrationManifest,
+  sha256,
+  type MigrationVerification,
+} from './migration-manifest.ts';
 
 // `String.raw` so the SQL keeps its literal backslashes: `\_` is a literal
 // underscore to SQLite's LIKE, and an ordinary escape sequence to JavaScript.

@@ -114,5 +114,106 @@
   },
   "placement": {
     "mode": "smart"
+  },
+  "env": {
+    "preview": {
+      "name": "candidary-preview",
+      "workers_dev": true,
+      "preview_urls": true,
+      "version_metadata": {
+        "binding": "CF_VERSION_METADATA"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "candidary-preview-core",
+          "database_id": "bd816308-0c4c-48de-9ece-8d030360fb73",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "MEDIA_BUCKET",
+          "bucket_name": "candidary-preview-media"
+        },
+        {
+          "binding": "CANONICAL_MEDIA_BUCKET",
+          "bucket_name": "candidary-preview-media-canonical"
+        }
+      ],
+      "images": {
+        "binding": "IMAGES"
+      },
+      "send_email": [],
+      "ratelimits": [
+        {
+          "name": "HOST_AUTH_RATE_LIMIT",
+          "namespace_id": "2001",
+          "simple": {
+            "limit": 20,
+            "period": 60
+          }
+        },
+        {
+          "name": "RSVP_LOOKUP_RATE_LIMIT",
+          "namespace_id": "2002",
+          "simple": {
+            "limit": 30,
+            "period": 60
+          }
+        },
+        {
+          "name": "GUEST_MESSAGE_RATE_LIMIT",
+          "namespace_id": "2003",
+          "simple": {
+            "limit": 120,
+            "period": 60
+          }
+        }
+      ],
+      "workflows": [
+        {
+          "name": "candidary-preview-export",
+          "binding": "EXPORT_WORKFLOW",
+          "class_name": "ExportWorkflow"
+        },
+        {
+          "name": "candidary-preview-cover-render",
+          "binding": "COVER_RENDER_WORKFLOW",
+          "class_name": "CoverRenderWorkflow"
+        },
+        {
+          "name": "candidary-preview-cover-backfill",
+          "binding": "COVER_BACKFILL_WORKFLOW",
+          "class_name": "CoverBackfillWorkflow"
+        }
+      ],
+      "triggers": {
+        "crons": []
+      },
+      "vars": {
+        "APP_ORIGIN": "https://candidary-preview.lfd.workers.dev",
+        "ALTERNATE_ORIGINS": "",
+        "EMAIL_FROM": "hello@candidary.app"
+      },
+      "secrets": {
+        "required": [
+          "TOKEN_HMAC_KEY",
+          "SESSION_HMAC_KEY",
+          "GUEST_TOKEN_ENCRYPTION_KEY",
+          "LOGIN_HMAC_KEY",
+          "ENTRY_HMAC_KEY",
+          "ENTRY_ENCRYPTION_KEY",
+          "RSVP_LOOKUP_HMAC_KEY",
+          "GUEST_MESSAGE_HMAC_KEY"
+        ]
+      },
+      "observability": {
+        "enabled": true
+      },
+      "placement": {
+        "mode": "smart"
+      }
+    }
   }
 }

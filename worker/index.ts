@@ -28,9 +28,6 @@ import {
   coverRenderProfileStep,
   type CoverRenderPayload,
 } from './workflows/cover-render';
-import { consumeStagingFailOnce } from './workflows/staging-conformance-fault';
-
-export { StagingConformanceEntrypoint } from './staging-conformance';
 
 const app = createApp();
 
@@ -79,7 +76,7 @@ export class CoverRenderWorkflow extends WorkflowEntrypoint<AppEnv, CoverRenderP
 }
 
 /**
- * Release-only. Converts one pre-0012 legacy original onto the new pipeline.
+ * Converts one pre-0012 legacy original onto the current pipeline.
  *
  * Nine deterministically named steps rather than the render Workflow's eight:
  * normalization is its own step because, unlike a publication, a backfill job
@@ -115,10 +112,7 @@ export class CoverBackfillWorkflow extends WorkflowEntrypoint<AppEnv, CoverBackf
 
     const normalized = await step.do(
       'normalize legacy cover master',
-      async () => {
-        await consumeStagingFailOnce(this.env, event.payload, 'normalize');
-        return coverBackfillNormalize(this.env, event.payload);
-      },
+      async () => coverBackfillNormalize(this.env, event.payload),
     );
     if (!normalized.shouldContinue) return normalized.outcome;
 

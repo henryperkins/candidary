@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm audit --omit=dev
+      - run: npm run verify:bindings
+      - run: npm run typecheck:e2e
+      - run: npm run lint
+
+  unit-ui:
+    name: Unit and UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+
+  worker:
+    name: Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:worker
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WORKERS_CI_BRANCH: ${{ github.head_ref }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build:cloudflare
+      - run: npm run verify:pwa-build
+      - run: npx wrangler deploy --dry-run --strict --config dist/candidary/wrangler.json --outdir output/wrangler-dry-run
+      - uses: actions/upload-artifact@v7
+        with:
+          name: candidary-build-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    name: Smoke
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          name: candidary-build-${{ github.sha }}
+          path: dist
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:smoke
+
+  migration-safety:
+    name: Migration safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Detect migration-sensitive changes
+        id: migration
+        shell: bash
+        run: |
+          if git diff --name-only "$CI_BASE_SHA" "$CI_HEAD_SHA" | grep -Eq '^(migrations/|wrangler\.jsonc$|scripts/(verify-fresh-d1|migration-manifest)\.ts$)'; then
+            echo 'required=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'required=false' >> "$GITHUB_OUTPUT"
+            echo 'Migration safety unchanged; fresh D1 verification skipped.'
+          fi
+      - uses: actions/setup-node@v7
+        if: steps.migration.outputs.required == 'true'
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+        if: steps.migration.outputs.required == 'true'
+      - run: npm run ci:migrations
+        if: steps.migration.outputs.required == 'true'

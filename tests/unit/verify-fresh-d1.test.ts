@@ -20,7 +20,7 @@ import {
   collectMigrationManifest,
   sha256,
   type MigrationVerification,
-} from '../../scripts/release-evidence';
+} from '../../scripts/migration-manifest';
 import {
   READ_ONLY_INVARIANT_QUERY,
   assertFreshD1CommandPlan,
