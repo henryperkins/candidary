@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Convert every pre-`0012` legacy cover onto the responsive pipeline and produce the durable zero-legacy proof that phase 3 is gated on. This remediation/completion contract ends after original Task 9 and its pre-candidate local checks: it completes the dispatch, interruption recovery, platform reconciliation, guarded restart, event-purge fencing, ledger lifecycle, atomic verification edges, populated local rehearsal, and local documentation required for independent follow-up planning. It does not execute a candidate gate, deployment, staging conformance, or production backfill.
+**Goal:** Convert every pre-`0012` legacy cover onto the responsive pipeline and produce the durable zero-legacy proof that phase 3 is gated on. Phase 2 completes the dispatch, interruption recovery, platform reconciliation, guarded restart, event-purge fencing, ledger lifecycle, and atomic verification edges that the phase-1 candidate does not yet provide; rehearses the complete loop against a populated local database; passes an immutable candidate gate; and only then permits a separately authorized staging deployment and production backfill.
 
 **Architecture:** The Node launcher remains a dry-run-first **planner**, not a network driver. It reads saved `wrangler d1 execute --json` payloads and emits explicit, ordered artifacts. D1 is the durable source of truth: the launcher never reconstructs a job that already exists, never hard-codes the in-flight count, and emits a Workflow command only for a committed job selected back from D1. Each dispatch generation is claimed on the job and fence together before `wrangler workflows trigger`; the Workflow's first step requires the matching open fence and confirms the generation before Images or R2 work. A bounded Worker reconciler heals an interrupted initial create through idempotent `createBatch`, maps real platform status conservatively, persists platform failure before taking the one guarded restart edge, and leaves every unclassified lookup as `unknown` with no mutation. Event purge uses the existing `event_cover_purge_progress` table to block and settle every cover Workflow fence before deleting R2. The canonical proof has one authoritative Worker-side writer: bounded cleanup re-derives all four predicates in the same guarded D1 transition that records `verified`.
 
@@ -14,14 +14,14 @@
 
 - Implement phase 2 of `docs/superpowers/specs/2026-08-03-event-appearance-cover-studio-design.md` §9.5 plus the §9.4/§14 purge-fence coordinator that must exist before either cover Workflow may be operated remotely. This safety coordinator is not a phase-3 UI or projection feature.
 - **`migrations/` must contain exactly twelve files at candidate time.** Phase 2 adds no migration. It uses the job/fence `dispatch_generation` and timestamps already in `0012`; it does **not** invent a nonexistent `event_cover_backfill_jobs.last_dispatch_at` column.
-- Phase 2 does not merge, push, deploy, apply a remote migration, trigger a remote Workflow, mutate remote D1/R2, or run a candidate gate. This remediation/completion contract stops after original Task 9 and its pre-candidate local checks. Original Tasks 10–12 are archived future-phase reference only, are not executable under this contract, and require a new explicit plan plus separate authorization.
+- Phase 2 does not merge, push, deploy, apply a remote migration, trigger a remote Workflow, or mutate remote D1/R2 on the strength of a passing local suite. Tasks 1–9 produce a reviewable candidate. Tasks 10–11 are separately authorized release/staging activities. Task 12 is a further, separately authorized production operation.
 - Work in a new isolated worktree created from the phase-1 branch tip. Phase 1 is deliberately **not** merged to `main`, and phase 2 does not merge it: the cover-studio branch line accumulates phases and lands as one integration only after every phase of the design spec is complete. Preserve the main checkout's modified `worker/services/email.ts` and all user-owned untracked files.
 - Write a failing focused test before each new behavior. Documentation, generated operational artifacts, and recorded evidence are exempt from manufacturing a RED test.
 - No new authentication surface, operator HTTP route, release key, cron expression, or rate-limit binding.
 - Object keys, R2 pointers, recipes, checksums, raw platform status names, account tokens, and D1 payloads containing private keys never appear in a response body, client module, ticket, PR body, or committed evidence artifact.
 - Every D1 transition derived from platform status is Worker-side. The launcher may create the initial run/jobs, claim and confirm an explicitly authorized initial dispatch generation, and create a verification run; it never performs resume/restart reconciliation or writes a `verified` result.
 - Use explicit staging allowlists for every commit. Never use `git add worker scripts tests`, `git add docs`, or `git add -A`.
-- Run `npm run typecheck`, `npm run lint`, and the task's focused tests before each commit. A future explicit plan may define an immutable aggregate candidate gate after its final candidate head is fixed; this contract does not run it.
+- Run `npm run typecheck`, `npm run lint`, and the task's focused tests before each commit. Run the immutable aggregate candidate gate only after the final candidate head is fixed.
 
 ## Preconditions and authority boundaries
 
@@ -36,27 +36,25 @@ Phase-2 implementation may start only after:
 3. local/test databases contain exactly migrations `0001` through `0012`; and
 4. a new isolated phase-2 worktree has been created from that recorded tip.
 
-Merging into `main`, remote `0012`, deployment, Images conformance, Workflow lifecycle proof, and the candidate gate are outside this remediation/completion contract. They require a future explicit plan and authorization.
+Merging into `main`, remote `0012`, deployment, Images conformance, and Workflow lifecycle proof are **not** development preconditions. The merge is deferred to the whole-spec landing; the rest are release/staging gates after the phase-2 code exists.
 
 Phase 2's only overlap with `main`'s post-divergence commits is `docs/deployment.md`; no worker, shared, script, or test target collides. Rebasing the cover-studio line onto `main` is therefore optional during phase 2 and buys nothing for this phase's work. It stays available at any point before the final integration.
 
-### Historical reference only — retired original Tasks 10–12
+### Production-operation preconditions
 
-The following preconditions and original Tasks 10–12 are retained only as historical/future-phase reference. They are **not executable** under this remediation/completion contract, are not "separately authorized" work within it, and must not be used as an instruction to run a candidate gate, deploy, or mutate remote resources. Any future use requires a new explicit plan and a new explicit authorization.
-
-The historical Task 12 text required all of the following independently recorded facts:
+Task 12 must stop unless all of the following independently recorded facts are true:
 
 1. the exact phase-2 candidate SHA passed `npm run verify:release -- --sha <head> --base-sha <approved-base>`;
 2. that exact SHA was reviewed and deployed under separate authorization;
 3. `CF_VERSION_METADATA` proves the deployed Worker version corresponds to that exact phase-2 source;
 4. remote D1 has `0012_event_cover_storage.sql` and no `0013`;
 5. `COVER_RENDER_WORKFLOW`, `COVER_BACKFILL_WORKFLOW`, `DB`, `MEDIA_BUCKET`, and `IMAGES` are bound to the intended production resources, and the preset assets are present;
-6. the historical Task 11 staging artifact proves the phase-2 adapter, initial-create recovery, restart, termination, purge-fence, and Images behavior against the real platform; and
+6. Task 11's staging artifact proves the phase-2 adapter, initial-create recovery, restart, termination, purge-fence, and Images behavior against the real platform; and
 7. no other backfill run is inventorying/executing and no unresolved event purge already owns a cover fence.
 
-Local verification, merge, deployment, staging certification, production migration, production backfill, and phase-3 authorization remain distinct activities; none after the pre-candidate local checks belongs to this contract.
+Local verification, merge, deployment, staging certification, production migration, production backfill, and phase-3 authorization remain distinct activities.
 
-**Historical unresolved note.** A future plan must resolve the former Task 11/12 integration question before it can authorize any staging or production operation. It does not affect original Tasks 1–9 and must not be resolved implicitly by merging.
+**Unresolved, and to be settled when Task 11 is authorized — not before, and not by an implementing agent.** This plan defers merging to the whole-spec landing, but the design spec sequences the production backfill *before* phase 3 is built, so the spec is by definition incomplete at the moment Tasks 11–12 run. Whether those tasks deploy from the unmerged cover-studio line or force an earlier partial integration into `main` is a real conflict between the two rules. It does not affect Tasks 1–10, which is why phase-2 development proceeds without resolving it. Do not resolve it implicitly by merging.
 
 ## Current planning state
 
@@ -94,7 +92,7 @@ Primary platform references:
 
 ## Interpretation decisions
 
-1. **Missing is a classified lookup result, not a status string.** Introduce `status | missing | unknown`. The real adapter returns `missing` only for the exact absent-instance discriminator a future explicitly planned staging gate must prove. Every other exception is `unknown`, emits bounded sanitized telemetry, and performs no D1 or platform mutation. If the platform supplies no stable discriminator, confirmed-missing recreation remains disabled.
+1. **Missing is a classified lookup result, not a status string.** Introduce `status | missing | unknown`. The real adapter returns `missing` only for the exact absent-instance discriminator proven in Task 11. Every other exception is `unknown`, emits bounded sanitized telemetry, and performs no D1 or platform mutation. If the platform supplies no stable discriminator, confirmed-missing recreation remains disabled and Task 11 cannot pass.
 2. **Interrupted initial create is not missing-instance reconciliation.** A stale `creating` claim may call idempotent `createBatch()` with its already-recorded ID/payload whether the instance exists or not. That is safe because the claim represents an accepted create, not an inference from an unknown status read.
 3. **No `last_dispatch_at` is added.** A dispatch claim updates both job and fence `dispatch_generation`; the fence's `updated_at` is the durable dispatch-claim clock. Confirmation does not rewrite that fence timestamp. The launcher and Worker use it for the rolling one-minute creation/restart budget.
 4. **The Workflow preflight is a mandatory second fence.** The operator performs the generated post-trigger confirm step, but a lost terminal or interrupted shell cannot be trusted. Before Images/R2, the Workflow independently requires a present open fence whose generation matches the job and atomically confirms `creating → confirmed`. A missing fence fails closed.
@@ -133,7 +131,7 @@ export interface CoverBackfillWorkflowAccessor {
 
 Move the total platform-status vocabulary and disposition mapping into the shared Worker-only module so publication, backfill, and purge import one implementation. Keep backfill payload typing separate from publication's `{eventId, operationId}` payload.
 
-`lookup()` returns `missing` only through `isCertifiedWorkflowNotFound(error)`. Initially pin the narrowest documented/runtime shape available and keep every unmatched value `unknown`. A future explicitly planned staging gate must exercise the deployed adapter against a deliberately absent valid ID. Do not parse `error.message`, Wrangler table text, or an arbitrary numeric property without staging evidence.
+`lookup()` returns `missing` only through `isCertifiedWorkflowNotFound(error)`. Initially pin the narrowest documented/runtime shape available and keep every unmatched value `unknown`. Task 11 must exercise the deployed adapter against a deliberately absent valid ID. Do not parse `error.message`, Wrangler table text, or an arbitrary numeric property without staging evidence.
 
 - [ ] **Step 1: Write RED tests for all nine statuses, a default status, certified missing, invalid ID, and arbitrary binding failure**
 - [ ] **Step 2: Implement the adapter and move the shared map**
@@ -153,15 +151,10 @@ git commit -m "refactor: classify cover workflow lookups conservatively"
 
 **Files:**
 
-- Modify: `shared/constants.ts`
-- Modify: `worker/services/event-cover-publication.ts`
-- Modify: `worker/routes/manage.ts`
-- Modify: `src/pages/ManagerPage.tsx`
 - Modify: `worker/workflows/cleanup.ts`
 - Modify: `worker/workflows/cover-backfill.ts`
 - Modify: `worker/workflows/cover-render.ts`
 - Modify: `tests/worker/cleanup.test.ts`
-- Modify: `tests/worker/manage-api.test.ts`
 - Modify: `tests/worker/cover-backfill-workflow.test.ts`
 - Modify: `tests/worker/cover-render-workflow.test.ts`
 
@@ -187,16 +180,12 @@ export async function reconcileEventCoverPurge(
 Replace the current soft-delete → prefix-delete → relational-delete shortcut with §14's persisted phases:
 
 1. In one D1 batch, soft-delete the event, revoke all credentials, mark nonterminal publication/backfill rows `EVENT_DELETED`, change every event fence to `deletion-blocked`, and create/resume `event_cover_purge_progress`.
-2. Inspect at most `MAX_COVER_PURGE_FENCES_PER_PASS = 10` fences and perform at most
-   `MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS = 5` platform mutations. Stop on a
-   young dispatch claim or `unknown`; neither condition advances the cursor or phase.
-3. For stale claims and every other unresolved instance, apply the shared lookup result: `unknown` stops; active/paused is terminated; errored/terminated/complete is verified terminal; certified missing is materialized from the immutable receipt/job payload under the same deletion-blocked ID and then terminated. Persist the cursor/progress within the explicit fence and platform-mutation bounds.
+2. Stop while a `creating`, `resuming`, or `restarting` claim is younger than `STALE_DISPATCH_CLAIM_MS`.
+3. For stale claims and every other unresolved instance, apply the shared lookup result: `unknown` stops; active/paused is terminated; errored/terminated/complete is verified terminal; certified missing is materialized from the immutable receipt/job payload under the same deletion-blocked ID and then terminated. Persist the cursor/progress and respect `COVER_CLEANUP_ROWS_PER_CLASS`.
 4. Do not call `deletePrefix` until a fresh query proves zero unresolved cover fences for the event.
 5. Delete and verify the R2 prefix, then execute the existing load-bearing relational order and complete the progress row.
 
-Both Workflow preflights must change from “reject a present blocked fence” to “require a present open, generation-matching fence.” A missing fence is failure, never permission to work. An open fence receives the non-expiring sentinel expiry; only a terminal transition stamps `now + 31 days`.
-
-The Manager deletion route returns `202 { deletionScheduled: true }` while bounded purge work remains, and the danger-zone UI copy promises immediate access revocation plus scheduled cleanup rather than immediate physical removal.
+Both Workflow preflights must change from “reject a present blocked fence” to “require a present open, generation-matching fence.” A missing fence is failure, never permission to work. Fence expiry is stamped only after terminal verification and remains 31 days beyond it.
 
 Cover these races explicitly: deletion before create; deletion after create but before confirmation; deletion after Workflow preflight; stale create with missing instance; arbitrary lookup failure; terminate failure/retry; R2 deletion failure/retry; and a late dispatcher after relational deletion. No test may manually write `deletion-blocked` without also exercising the production coordinator.
 
@@ -205,10 +194,10 @@ Cover these races explicitly: deletion before create; deletion after create but 
 - [ ] **Step 3: Run focused gates and commit**
 
 ```powershell
-npx vitest run --config vitest.worker.config.ts tests/worker/cleanup.test.ts tests/worker/manage-api.test.ts tests/worker/cover-render-workflow.test.ts tests/worker/cover-backfill-workflow.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/cleanup.test.ts tests/worker/cover-render-workflow.test.ts tests/worker/cover-backfill-workflow.test.ts
 npm run typecheck
 npm run lint
-git add -- shared/constants.ts worker/services/event-cover-publication.ts worker/routes/manage.ts src/pages/ManagerPage.tsx worker/workflows/cleanup.ts worker/workflows/cover-backfill.ts worker/workflows/cover-render.ts tests/worker/cleanup.test.ts tests/worker/manage-api.test.ts tests/worker/cover-backfill-workflow.test.ts tests/worker/cover-render-workflow.test.ts
+git add -- worker/workflows/cleanup.ts worker/workflows/cover-backfill.ts worker/workflows/cover-render.ts tests/worker/cleanup.test.ts tests/worker/cover-backfill-workflow.test.ts tests/worker/cover-render-workflow.test.ts
 git commit -m "fix: settle cover workflow fences before event purge"
 ```
 
@@ -225,7 +214,7 @@ git commit -m "fix: settle cover workflow fences before event purge"
 **Interfaces:**
 
 ```ts
-export type CoverBackfillMode = 'inventory' | 'execute' | 'dispatch' | 'launch' | 'confirm' | 'verify';
+export type CoverBackfillMode = 'inventory' | 'execute' | 'dispatch' | 'confirm' | 'verify';
 
 export interface DurableDispatchRow {
   runId: string;
@@ -245,19 +234,16 @@ Split planning into explicit phases:
 - `inventory` emits only the next read-only page query and, from a saved page payload, ledger SQL. It records a rolling inventory digest and never emits Workflow commands.
 - `execute` creates or advances one run and inserts jobs. Resuming an existing run requires a saved run-state payload; it preserves its last durable cursor/digest, never sets the cursor back to null after an empty page, and never creates commands for proposed IDs.
 - An empty page sets `mode = 'execute'` and changes the run from `inventorying` to `executing`; that pair is the durable end-of-inventory marker.
-- `dispatch` emits a transactional claim artifact for actual committed pending/retryable rows, followed by a saved post-claim read restricted to the exact claimed identities. Only that saved post-claim read may produce Workflow trigger steps; `dispatch` itself contains zero trigger steps.
-- `launch` consumes the saved post-claim read and emits Workflow trigger, confirm-read, and receipt-read steps only for rows whose matching job/fence claim remains accepted.
+- `dispatch` first emits a read-only query for actual committed pending/retryable rows, actual nonterminal count, active-run count, and the rolling one-minute fence budget. Only a returned D1 row may appear in a dispatch artifact.
 - `confirm` consumes the saved post-trigger fence/job query for one generation. It emits a guarded confirmation statement only for an open matching fence; a blocked result emits the exact terminate/failure unit; stale, missing, malformed, or ambiguous payloads emit no success mutation.
 - `verify` prints the proof query by default. Under its separate confirmation gate it may emit an INSERT for a new `mode = 'verify', status = 'executing'` run; it never emits `status = 'verified'`.
 
 Remove `buildDispatchBatch({ nonterminal: 0 })`. A resumed page may emit guarded duplicate inserts, but the subsequent dispatch payload must contain the actual stored job ID; a newly generated ID whose insert lost `NOT EXISTS` can never be triggered.
 
-D1 commands include `--remote --config wrangler.jsonc --json`. Workflow trigger,
-terminate, resume, and restart commands include `--config wrangler.jsonc` and never
-`--local`; they do not accept `--remote` in Wrangler 4.113. Every generated command names the exact database or Workflow and follows a resource-identity check. Generated JSON records the expected account/database/Worker identity, exact command order, `generatedAt`, and `notBefore`; it never contains an object key. Raw inventory payloads remain local, ignored, and are deleted after the ledger statements are applied and verified.
+Every generated remote command must include `--remote --config wrangler.jsonc`, the exact database/workflow name, and a preceding resource-identity check. Generated JSON records the expected account/database/Worker identity, exact command order, `generatedAt`, and `notBefore`; it never contains an object key. Raw inventory payloads remain local, ignored, and are deleted after the ledger statements are applied and verified.
 
-- [ ] **Step 1: Write RED tests for cursor resumption, duplicate pages, real in-flight counts, actual stored IDs, active-run exclusion, command targeting, and the two durable dispatch stages**
-- [ ] **Step 2: Implement the six planner modes and add the `dispatch`/`launch`/`confirm` npm scripts**
+- [ ] **Step 1: Write RED tests for cursor resumption, duplicate pages, real in-flight counts, actual stored IDs, active-run exclusion, and remote targeting**
+- [ ] **Step 2: Implement the five planner modes and add the `dispatch`/`confirm` npm scripts**
 - [ ] **Step 3: Run focused gates and commit**
 
 ```powershell
@@ -294,10 +280,10 @@ export async function recoverStaleInitialBackfillDispatches(
 ): Promise<{ inspected: number; materialized: number; confirmed: number; blocked: number; remainder: boolean }>;
 ```
 
-A dispatch/launch unit has exactly four ordered parts:
+A dispatch unit has exactly four ordered parts:
 
 1. a generated transactional claim artifact changes one actual job `pending → creating`, increments its generation, applies the same generation/timestamp to its open fence, and refuses the claim when another run is active, in-flight headroom is zero, the same job was claimed inside the last minute, or 25 open fences with `dispatch_generation > 0` have a claim timestamp inside the rolling minute;
-2. a saved post-claim read restricted to the exact claimed job, event, Workflow ID, and generation; only this saved read may produce the exact PowerShell-safe `wrangler workflows trigger` command with `{runId, jobId,eventId}` and `--id`;
+2. the exact PowerShell-safe `wrangler workflows trigger` command with `{runId, jobId,eventId}` and `--id`;
 3. the post-trigger read query followed by the launcher's `confirm` mode, which emits a guarded confirm command only for the claimed generation while the fence remains open; if the saved read shows blocked state it emits the matching terminate/failure unit, and every emitted SQL statement rechecks the fence so a later deletion race records no success; and
 4. a read-only receipt query proving the job/fence generation and dispatch state after the unit.
 
@@ -361,18 +347,14 @@ Select, in one globally bounded pass:
 Apply the total lookup map:
 
 - active status → no mutation;
-- paused → resume regardless of retryable failed/nonterminal D1 status; atomically claim `resuming`, require unchanged immutable dependencies/current source, an open matching fence, rate capacity, and no purge, then call `resume()`, recheck the fence, and confirm;
-- errored/terminated → first persist a safe retryable platform failure (`status = 'failed'`, `retryable = 1`, `terminal_at`, failure code, run recount), then take Task 5's guarded restart claim;
-- complete + already-terminal D1 → no mutation; complete with D1 nonterminal → persist the same retryable divergence failure before restart;
-- certified missing + restorable confirmed job → recreate same ID; claim `creating`, call `createBatch()` with the immutable payload, recheck, and confirm;
+- paused → atomically claim `resuming`, require unchanged immutable dependencies/current source, an open matching fence, rate capacity, and no purge, then call `resume()`, recheck the fence, and confirm; it does not require `failed`, `retryable`, or `terminal_at` predicates that belong only to restart;
+- errored/terminated → first persist a safe retryable platform failure (`status = 'failed'`, `retryable = 1`, `terminal_at`, failure code, run recount), then take Task 5's guarded `failed → queued` restart claim;
+- complete with D1 nonterminal → persist the same retryable divergence failure before restart;
+- certified missing on a previously confirmed job → claim `creating`, call `createBatch()` with the immutable payload, recheck, and confirm;
 - unknown → sanitized telemetry only, no D1 write and no platform call;
-- blocked or missing fence → `EVENT_DELETED`, never resume/restart/create.
+- deleted event or blocked/missing fence → terminal `EVENT_DELETED`, never resume/restart/create.
 
-The one guarded restart edge requires all predicates together: retryable; exact `coverBackfillDependencyVersions()` equality; unchanged derived manifest digest when present; current legacy fingerprint/revision/null-set predicates; `terminal_at` inside `BACKFILL_RESTART_WINDOW_MS`; open matching fence; rolling-minute capacity; and no event purge.
-
-Restart recovery is migration-free and never guesses a Workflow history checkpoint. For pinned `master_id`, `render_set_id`, `manifest_json`, and `manifest_sha256`, validate the manifest SHA and shape, require unique known `(profile, density, format)` tuples, and query at most 24 exact `event_cover_render_objects` rows by `(render_set_id, event_id)`. Validate every actual row against the frozen manifest. Invalid manifest/object evidence refuses the guarded restart claim and makes no platform call. A profile is durably complete only when every expected tuple for that profile exists; a partial profile never counts as complete. Use that checkpoint only to set the guarded D1 status to `rendering` when any profile remains incomplete or `finalizing` when every profile is complete, preserving all four pinned fields byte-for-byte. With no pinned derived state, set `queued` for a legitimate beginning restart.
-
-In every case call `workflow.restart(id)` with no `from` option. Cloudflare requires `from.name` to exist in Workflow execution history, but object adoption may commit in D1 before that step appears in history and the binding exposes no history API. A restart begins at the start; preflight and normalization no-op for guarded `rendering`/`finalizing` jobs, and profile writes replay idempotently against frozen object keys and tuple UPSERTs. The claim clears terminal/reference/expiry fields, increments job and fence generation in one `DB.batch()`, and sets `dispatch_state = 'restarting'` before the platform call. A replay while `restarting` is a no-op and cannot call the platform twice.
+The one `failed → queued` edge requires all predicates together: retryable; exact `coverBackfillDependencyVersions()` equality; unchanged derived manifest digest when present; current legacy fingerprint/revision/null-set predicates; `terminal_at` inside `BACKFILL_RESTART_WINDOW_MS`; open matching fence; rolling-minute capacity; and no event purge. The claim clears terminal/reference/expiry fields, increments job and fence generation in one `DB.batch()`, and sets `dispatch_state = 'restarting'` before the platform call. A replay while `restarting` is a no-op and cannot call the platform twice.
 
 `scheduledCleanup` runs stale-initial recovery and reconciliation after cover ledger resolution but before event purge. A job belonging to a deleted event routes to the purge coordinator rather than ordinary reconciliation.
 
@@ -422,9 +404,7 @@ export async function closeCoverBackfillRuns(
 ): Promise<CoverBackfillLedgerSweepSummary>;
 ```
 
-Do not iterate every run and then apply a per-run limit. Select at most `COVER_CLEANUP_ROWS_PER_CLASS` blocking jobs globally, ordered by `(updated_at, id)`. A selected row is still current if and only if its event exists with `deleted_at IS NULL`, `cover_object_key IS NOT NULL`, `cover_render_set_id IS NULL`, and the exact stored legacy fingerprint matches that key. Revision movement alone is not supersession. Resolve only rows that fail this currentness predicate. Both the superseded-to-`resolved` write and the fairness-rotation write must compare-and-swap the selected job `id`, status, original `updated_at`, and stored fingerprint together with the exact observed event `cover_object_key`, `deleted_at`, `cover_render_set_id`, and `cover_revision` snapshot, including an observed missing event. Any lost CAS leaves the row unresolved and forces `remainder: true`. A successful fairness rotation sets only `updated_at` to a clock strictly later than both the sweep clock and the selected value, for example `new Date(Math.max(now.getTime(), Date.parse(selected.updated_at)) + 1).toISOString()`. This scheduling-only touch rotates still-current blockers behind previously uninspected rows and preserves every other job column. In particular, it must not change status, retryability, failure data, `terminal_at`, reference-release/expiry timestamps, identities, dependencies, or derived state. `terminal_at`, not the fairness touch, remains the restart and retention clock.
-
-Recompute only distinct runs containing a job actually resolved in the pass; rotating a blocker never recounts its run. Report `remainder` conservatively when `inspectedJobs === COVER_CLEANUP_ROWS_PER_CLASS || unresolvedInspectedJobs > 0`. Saturation therefore requires a confirming pass, while any inspected row not proven resolved keeps the result true.
+Do not iterate every run and then apply a per-run limit. Select at most `COVER_CLEANUP_ROWS_PER_CLASS` blocking jobs globally, ordered by `(updated_at, id)`, resolve only fingerprints that are no longer current, and recompute the at-most-100 affected run IDs.
 
 After Task 5's recovery/reconciliation pass, select a bounded set of closable runs. A run is not closable while inventory is incomplete, any job is nonterminal, any current `needs_replacement` exists, or a retryable failure remains inside its restart window. For a closable run, invoke Task 7's atomic proof transition: green becomes `verified`; red becomes `failed`. Stamp `expires_at` only on `verified` or `failed` runs, thirty days after the later of verification/failure closure and the last job terminal timestamp. Never stamp an `inventorying` or `executing` run.
 
@@ -432,9 +412,7 @@ Jobs retain existing rules: current `needs_replacement` and retryable-inside-win
 
 The final `scheduledCleanup` order is explicit: bounded superseded resolution → stale initial-create recovery → platform reconciliation/restart → bounded run closure/atomic proof → existing cover expiry phases → event purge coordination. An earlier phase may leave `remainder`; later safety phases still run within their own bounds, but no phase treats that remainder as proof of quiescence.
 
-- [ ] **Step 1: Write RED tests for global fairness, truthful remainder, run closure, and expiry eligibility**
-
-Prove that 100 oldest still-current blockers rotate so a newer 101st superseded row resolves on the second pass; exactly 100 all-resolved rows report `remainder: true` followed by an empty `false` pass; 99 current blockers report `true`; and equal timestamps use `id` as the deterministic tie-breaker. Assert rotated rows change only `updated_at`, current `needs_replacement` and retryable-inside-window failures receive no release or expiry, revision-only movement remains current, and classification-to-write event mutations make both resolution and rotation lose their CAS, leave the row unresolved, and report `remainder: true`. No pass may inspect more than the global bound, and only runs with actually resolved jobs are recounted.
+- [ ] **Step 1: Write RED tests for the global bound, truthful remainder, run closure, and expiry eligibility**
 - [ ] **Step 2: Implement the bounded ledger sweep and wire it before existing cover expiry phases**
 - [ ] **Step 3: Run focused gates and commit**
 
@@ -478,7 +456,7 @@ export async function recordZeroLegacyVerification(
 
 Put the four canonical predicates in one pure SQL-builder module imported by both Worker and Node so the proof query and guarded update cannot drift. The Worker function is called by `sweepCoverBackfillLedger`; it is not dead test-only code.
 
-The `verified` UPDATE itself contains all four zero predicates and requires the target run to be `executing`, mode `execute`/`verify`, and otherwise closable; an `inventorying` run is never closable. The update sets `status = 'verified'`, `verified_at`, `updated_at`, and the closed-run expiry in the same statement. If it changes zero rows, re-read the counts for diagnostics and guardedly close a genuinely closable red run as `failed`; never turn an active/incomplete run into failed merely because one count was nonzero.
+The `verified` UPDATE itself contains all four zero predicates and requires the target run to be `inventorying`/`executing`, mode `execute`/`verify`, and otherwise closable. The update sets `status = 'verified'`, `verified_at`, `updated_at`, and the closed-run expiry in the same statement. If it changes zero rows, re-read the counts for diagnostics and guardedly close a genuinely closable red run as `failed`; never turn an active/incomplete run into failed merely because one count was nonzero.
 
 The CLI's saved count payload is display evidence only. Missing/duplicate/negative count rows make its evaluation red, but even a syntactically green payload emits no verified UPDATE. Tests must include a race in which the displayed payload is green and D1 becomes red before the Worker transition; the run must not be verified. A second call must not restamp `verified_at`.
 
@@ -565,9 +543,7 @@ The runbook must stand alone and contain, in order:
 `docs/deployment.md` places phase-2 candidate verification, staging deployment/conformance, and production backfill as three separate authorization gates. `docs/operations.md` documents only support signals the candidate actually produces. `design-qa.md` distinguishes deterministic fake-transform orchestration evidence from real Images/codec evidence.
 
 - [ ] **Step 1: Write the runbook and reconcile all three documents**
-- [ ] **Step 2: Dry-walk local D1 equivalents and validate Workflow command artifacts; do not contact remote resources**
-
-Execute only D1 equivalents after substituting `--local` for `--remote` in a disposable D1 invocation. Never execute a generated Workflow command during the dry-walk, including trigger or terminate; validate Workflow syntax and ordering only as generated artifact strings. Do not add `--local` or `--remote` to production Workflow commands, which retain only `--config wrangler.jsonc`.
+- [ ] **Step 2: Dry-walk every command against a disposable local database; do not contact remote resources**
 - [ ] **Step 3: Run documentation/static checks and commit**
 
 ```powershell
@@ -580,9 +556,9 @@ git commit -m "docs: make the cover backfill operation executable"
 
 ---
 
-### Historical reference only — retired original Task 10: Fix the immutable phase-2 candidate and run the release gate
+### Task 10: Fix the immutable phase-2 candidate and run the release gate
 
-**Non-executable under this remediation/completion contract. Requires a new explicit plan and authorization.**
+**Not deployment. Not remote migration. Not staging certification. Not production execution.**
 
 - [ ] **Step 1: Confirm the worktree contains only phase-2-owned changes and every prior task is committed**
 - [ ] **Step 2: Re-read the actual `verify:release` runner and candidate-manifest schema from this head**
@@ -610,9 +586,9 @@ Any code/document change after the recorded SHA invalidates this task and requir
 
 ---
 
-### Historical reference only — retired original Task 11: phase-2 staging deployment and platform conformance
+### Task 11: Separately authorized phase-2 staging deployment and platform conformance
 
-**Non-executable under this remediation/completion contract. Requires a new explicit plan and authorization.**
+**Not part of the local candidate. Do not perform without explicit deployment/staging authorization.**
 
 Deploy the exact reviewed Phase-2 SHA to the staging resources named in the runbook, then prove:
 
@@ -631,9 +607,9 @@ Record staging account/resource identities, deployed version ID, candidate SHA, 
 
 ---
 
-### Historical reference only — retired original Task 12: production execution
+### Task 12: Separately authorized production execution
 
-**Non-executable under this remediation/completion contract. Requires a new explicit plan and authorization.**
+**Not part of the reviewable candidate or staging authorization. Execute only after a new explicit production-backfill instruction.**
 
 - [ ] **Step 1: Re-verify every production-operation precondition and record the exact identities/SHA**
 - [ ] **Step 2: Create one production inventory run; record its run ID, first digest, cursor, and starting counts**
@@ -659,7 +635,9 @@ A green proof authorizes exactly one later action: opening a phase-3 candidate f
 | Durable dispatch | 3–4 | Resumption uses stored IDs/counts and every initial create/confirmation interruption heals safely |
 | Recovery | 5 | Platform failure is persisted before one fully guarded resume/restart/recreate edge |
 | Ledger/proof | 6–7 | Resolution is globally bounded; closed runs expire; `verified` is atomic and single-writer |
-| Local evidence | 8–9 | The interrupted loop is rehearsed, documented, and stopped at pre-candidate local checks |
+| Local evidence | 8–10 | The interrupted loop is rehearsed, documented, and verified on an immutable SHA |
+| Platform evidence | 11 | The exact phase-2 deployment works against real Workflows/Images and certifies missing/purge behavior |
+| Production operation | 12 | Separately authorized; produces the only artifact that may open phase 3 |
 
 ## What this plan deliberately does not do
 
@@ -669,6 +647,5 @@ A green proof authorizes exactly one later action: opening a phase-3 candidate f
 - Let an operator bypass D1 generation/fence claims with raw resume/restart commands.
 - Implement phase-3 `0013`, projections, responsive delivery routes, Cover Studio activation, `EventAppearanceCanvas`, or client wiring.
 - Claim production readiness from local fakes, a phase-1 staging run, merge, or deployment alone.
-- Execute the archived original Tasks 10–12; any candidate, staging, or production work requires a new explicit plan and authorization.
 - Claim physical-device support.
 - Delete a legacy original outside the existing retired-object inventory and recovery-window sweep.
