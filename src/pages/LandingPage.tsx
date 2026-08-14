@@ -1,39 +1,27 @@
 import { ArrowRight, Check, ChevronDown, Eye, Image as ImageIcon, QrCode } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
+import {
+  LANDING_CAPABILITIES,
+  LANDING_FAQ,
+  LANDING_HERO,
+  LANDING_PRIVACY_NOTE,
+  LANDING_QUESTIONS,
+  LANDING_RETENTION_NOTE,
+  LANDING_WORKFLOW,
+  SITE_BLURB,
+} from '../../shared/site-content';
+import type { SiteCapability } from '../../shared/site-content';
 import { Brand, PageHeader } from '../components/Brand';
 
-/**
- * The short answers, drawn from real product limits rather than marketing copy: the upload ceiling,
- * the per-event ceiling, the ZIP part size, and the three retention dates the event page already
- * shows. Everything stated here has to stay true of the worker, so each answer names a number the
- * product enforces rather than a promise it does not.
- */
-const QUESTIONS = [
-  {
-    question: 'Do guests need an account?',
-    answer: 'No. Guests never sign in. They scan the QR code or open the link, type one name, and send.',
-  },
-  {
-    question: 'Who sees the photos first?',
-    answer: 'You do. Every photo is delivered privately to you. The shared gallery only shows what you publish.',
-  },
-  {
-    question: 'What can guests send?',
-    answer: 'JPEG, PNG, WebP, HEIC and HEIF, up to 20 MB per image. One event holds up to 10,000 photos or 100 GiB.',
-  },
-  {
-    question: 'How do I get the photos out?',
-    answer: 'Prepare a download and Candidary builds a ZIP in 2 GiB parts, with a manifest of everything received.',
-  },
-  {
-    question: 'How long do the photos stay?',
-    answer: 'Guest access ends 30 days after the event, your management link works for 90, and files are deleted at 120. The dates are shown on your event.',
-  },
-  {
-    question: 'Do I need an account to create an event?',
-    answer: 'No. Your event links are the keys. Save an event to an email address only if you want a way back to it later.',
-  },
+// The icons stay on this side of the wall: `shared/site-content.ts` is imported by the
+// Worker, which renders the same three capabilities as markdown and has no React. The
+// pairing is positional and written out, so the row an icon belongs to is readable here.
+const CAPABILITIES: readonly (readonly [LucideIcon, SiteCapability])[] = [
+  [QrCode, LANDING_CAPABILITIES[0]],
+  [ImageIcon, LANDING_CAPABILITIES[1]],
+  [Eye, LANDING_CAPABILITIES[2]],
 ];
 
 export function LandingPage() {
@@ -63,9 +51,9 @@ export function LandingPage() {
       <section className="hero">
         <div className="hero__copy">
           {/* The page says what it *is* before the headline says what it *feels like*. */}
-          <p className="section-label">Private event albums</p>
-          <h1>Gather the moments <br />you didn’t see.</h1>
-          <p>Create one private place for your guests to add photos, then choose what appears in the shared gallery.</p>
+          <p className="section-label">{LANDING_HERO.label}</p>
+          <h1>{LANDING_HERO.headline[0]} <br />{LANDING_HERO.headline[1]}</h1>
+          <p>{LANDING_HERO.lede}</p>
           <div className="button-row">
             <Link className="button button--primary" to="/create">Create your event <ArrowRight aria-hidden="true" /></Link>
             <a className="button button--quiet" href="#how-it-works">See how it works</a>
@@ -101,20 +89,18 @@ export function LandingPage() {
       {/* Three capabilities rather than three chronological steps: what the product refuses to ask
           of a guest, what it refuses to do to a photograph, and who decides what becomes public. */}
       <section className="workflow" id="how-it-works" aria-labelledby="workflow-title">
-        <div><p className="section-label">A shared point of view</p><h2 id="workflow-title">One place. Every perspective.</h2></div>
+        <div><p className="section-label">{LANDING_WORKFLOW.label}</p><h2 id="workflow-title">{LANDING_WORKFLOW.title}</h2></div>
         <ol>
-          <li><span><QrCode aria-hidden="true" /></span><div><strong>No app, no account</strong><p>Guests scan the QR code, type one name, and send. Nothing to install, nothing to sign up for.</p></div></li>
-          <li><span><ImageIcon aria-hidden="true" /></span><div><strong>Untouched originals</strong><p>Photos arrive at full resolution, up to 20 MB each. Prepare a download whenever you want them all.</p></div></li>
-          <li><span><Eye aria-hidden="true" /></span><div><strong>You choose what is shared</strong><p>Every photo is delivered privately to you first. Publish the ones you want in the shared gallery.</p></div></li>
+          {CAPABILITIES.map(([Icon, { title, body }]) => <li key={title}><span><Icon aria-hidden="true" /></span><div><strong>{title}</strong><p>{body}</p></div></li>)}
         </ol>
-        <p className="privacy-note"><Check aria-hidden="true" /> Private by design. No guest accounts required.</p>
+        <p className="privacy-note"><Check aria-hidden="true" /> {LANDING_PRIVACY_NOTE}</p>
       </section>
       {/* One column at every width: an accordion in two columns makes the reader track which panel
           moved. Native `<details>`, so the disclosures work before any script does. */}
       <section className="faq" id="questions" aria-labelledby="faq-title">
-        <p className="section-label">Questions</p><h2 id="faq-title">The short answers.</h2>
+        <p className="section-label">{LANDING_FAQ.label}</p><h2 id="faq-title">{LANDING_FAQ.title}</h2>
         <div className="faq__list">
-          {QUESTIONS.map(({ question, answer }) => <details className="faq__item" key={question}>
+          {LANDING_QUESTIONS.map(({ question, answer }) => <details className="faq__item" key={question}>
             <summary>{question}<ChevronDown aria-hidden="true" /></summary>
             <p>{answer}</p>
           </details>)}
@@ -125,7 +111,7 @@ export function LandingPage() {
       <div className="site-footer__top">
         <div>
           <Brand />
-          <p className="site-footer__blurb">A private photo drop for weddings and large events. Guests need no account, no app, and no sign-up.</p>
+          <p className="site-footer__blurb">{SITE_BLURB}</p>
         </div>
         <nav className="site-footer__groups" aria-label="Footer">
           <div>
@@ -154,7 +140,7 @@ export function LandingPage() {
       </div>
       <div className="site-footer__bottom">
         <p>© 2026 Candidary</p>
-        <p>Guest access ends 30 days after your event. Files delete at 120.</p>
+        <p>{LANDING_RETENTION_NOTE}</p>
       </div>
     </footer>
   </div>;
