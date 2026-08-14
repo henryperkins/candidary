@@ -202,7 +202,9 @@ function adapters(source: ReturnType<typeof fixture>) {
           accountId: ACCOUNT, workerName: 'candidary' as const,
           topologySha256: TOPOLOGY_SHA,
           workerSha256: WORKER_SHA,
-          allowedRemoteBindingsSha256: [REMOTE_BINDINGS_SHA, '7'.repeat(64)],
+          allowedRemoteBindingsSha256: [
+            REMOTE_BINDINGS_SHA, '7'.repeat(64), 'a'.repeat(64), 'b'.repeat(64),
+          ],
           remoteRuntimeSha256: REMOTE_RUNTIME_SHA,
           requiredSecretNames: [
             'ENTRY_ENCRYPTION_KEY', 'ENTRY_HMAC_KEY', 'GUEST_TOKEN_ENCRYPTION_KEY',
@@ -517,11 +519,13 @@ describe('guarded schema-14 bridge deployment', () => {
       secondBuildTopologySha256: sha256(canonicalJson(topology)),
       generatedTypesSha256: '9'.repeat(64),
     };
-    expect(bridgeProductionIdentity(source.candidate)).toMatchObject({
+    const productionIdentity = bridgeProductionIdentity(source.candidate);
+    expect(productionIdentity).toMatchObject({
       accountId: ACCOUNT,
       workerName: 'candidary',
       requiredSecretNames: expect.not.arrayContaining(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']),
     });
+    expect(productionIdentity.allowedRemoteBindingsSha256).toHaveLength(4);
 
     for (const mutate of [
       (value: Record<string, unknown>) => {
@@ -726,7 +730,9 @@ describe('guarded schema-14 bridge deployment', () => {
       (_source, run) => { run.adapter.productionIdentity = () => ({
         accountId: ACCOUNT, workerName: 'candidary', topologySha256: TOPOLOGY_SHA,
         workerSha256: WORKER_SHA,
-        allowedRemoteBindingsSha256: [REMOTE_BINDINGS_SHA, '7'.repeat(64)],
+        allowedRemoteBindingsSha256: [
+          REMOTE_BINDINGS_SHA, '7'.repeat(64), 'a'.repeat(64), 'b'.repeat(64),
+        ],
         remoteRuntimeSha256: REMOTE_RUNTIME_SHA,
         requiredSecretNames: [42 as unknown as string],
       }); },
