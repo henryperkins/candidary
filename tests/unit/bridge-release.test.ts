@@ -38,6 +38,7 @@ import {
   type BridgeReleaseAdapters,
   type MediaWriteBridgeAuthorizationV1,
 } from '../../scripts/bridge-release';
+import { verifyMediaWriteBridgeRuntimeContractBytes } from '../../scripts/bridge-release-contract';
 import {
   CANONICAL_MEDIA_BINDING,
   CANONICAL_MEDIA_BUCKET_NAME,
@@ -341,6 +342,21 @@ function bridgeProductionConfig(): Record<string, unknown> {
 }
 
 describe('guarded schema-14 bridge deployment', () => {
+  it('accepts the checked-in two-space runtime contract while sealing its exact bytes', () => {
+    const runtime = {
+      kind: 'candidary.media-upload-release',
+      schemaVersion: 1,
+      mode: 'bridge-disabled',
+      capabilities: { ...BRIDGE_CAPABILITIES },
+    };
+    const bytes = `${JSON.stringify(runtime, null, 2)}\n`;
+
+    const verified = verifyMediaWriteBridgeRuntimeContractBytes(bytes);
+
+    expect(verified.artifact).toEqual(runtime);
+    expect(verified.sha256).toBe(sha256(bytes));
+  });
+
   it('parses the exact native Wrangler upload receipt and tolerates unrelated untagged versions', () => {
     const session = {
       type: 'wrangler-session', version: 1, wrangler_version: '4.113.0',
