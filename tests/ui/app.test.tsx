@@ -1383,6 +1383,9 @@ describe('manager experience', () => {
   });
 
   it('keeps the manager view in place when a bulk publish, delete, or export fails', async () => {
+    // Deleting a guest's original now asks first, in the same shape the management-link rotation
+    // uses. The refusal paths under test are about the write, not the question in front of it.
+    vi.stubGlobal('confirm', vi.fn(() => true));
     const rows = makeMedia(3).slice(1);
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1624,7 +1627,43 @@ describe('manager experience', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('asks before destroying a guest original and sends nothing when the host declines', async () => {
+    let asked = '';
+    const declined = vi.fn((question?: string) => { asked = question ?? ''; return false; });
+    vi.stubGlobal('confirm', declined);
+    const writes: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
+        writes.push(url);
+        return json({});
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Delete moment-2.jpg' }));
+
+    // Download, publish and hide are reversible and ask nothing. This one destroys the guest's
+    // original, sits a thumb-width from Hide, and until now fired straight into the API on one tap.
+    expect(declined).toHaveBeenCalledTimes(1);
+    // Named the way the card names it, so the question is about the photo the host is looking at.
+    expect(asked).toContain('Moment 2');
+    expect(writes, 'a declined confirmation sends no write').toEqual([]);
+    expect(screen.getByAltText('Moment 2')).toBeVisible();
+  });
+
   it('surfaces a rejected write without inventing a recovery instruction for it', async () => {
+    // Deleting a guest's original now asks first, in the same shape the management-link rotation
+    // uses. The refusal paths under test are about the write, not the question in front of it.
+    vi.stubGlobal('confirm', vi.fn(() => true));
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if ((init?.method ?? 'GET').toUpperCase() !== 'GET') {
@@ -1767,6 +1806,37 @@ describe('manager experience', () => {
 
     expect(await screen.findByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'Live intake' })).not.toBeInTheDocument();
+  });
+
+  it('hands the printed code to the system share sheet, and offers nothing when there is none', async () => {
+    // Share exists so a code reaches paper — "Print it once." On a phone its only action wrote a PNG
+    // into Photos, which is a dead end until the host reaches a desktop. The share sheet is the way off
+    // the device, and where the API is absent the download is still the answer, so nothing is offered.
+    const shared: Array<Record<string, unknown>> = [];
+    const share = vi.fn((data: Record<string, unknown>) => { shared.push(data); return Promise.resolve(); });
+    vi.stubGlobal('navigator', Object.create(window.navigator, { share: { value: share } }) as Navigator);
+    vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Share event link' }));
+
+    expect(shared).toEqual([{
+      title: 'Maya & Theo',
+      text: 'Scan or open this to join the event.',
+      url: 'https://example.test/join#entry-id.entry-secret',
+    }]);
+
+    // A browser without the API is not offered a control that cannot work.
+    cleanup();
+    vi.stubGlobal('navigator', Object.create(window.navigator, { share: { value: undefined } }) as Navigator);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Share' }));
+    expect(screen.queryByRole('button', { name: 'Share event link' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Download QR/u })).toBeVisible();
   });
 
   it('signs guest devices out without changing the printed event link', async () => {
@@ -1924,6 +1994,9 @@ describe('manager experience', () => {
   });
 
   it('turns manager-action credential loss into access recovery without discarding usable state', async () => {
+    // Deleting a guest's original now asks first, in the same shape the management-link rotation
+    // uses. The refusal paths under test are about the write, not the question in front of it.
+    vi.stubGlobal('confirm', vi.fn(() => true));
     const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

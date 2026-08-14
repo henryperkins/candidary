@@ -359,10 +359,19 @@ test('a refused delete leaves the photo and the card it was deleted from', async
     status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
   }));
 
+  // Destroying a guest's original asks first now, the way rotating the management link does. What is
+  // under test here is what a refused write leaves behind, so the question is answered and it runs.
+  const asked: string[] = [];
+  page.on('dialog', (dialog) => { asked.push(dialog.message()); void dialog.accept(); });
+
+  // At 390 the grid is a contact sheet: its one tap target is selection, and the per-photo controls
+  // belong to the chosen card. Choosing it is how a host reaches Delete here.
   const first = page.locator('.moderation-grid article').first();
+  await first.locator('.intake-select').click();
   await first.getByRole('button', { name: `Delete ${LONG_FILENAME}` }).click();
 
   await expectRecoverableNotice(page, 'Gallery publishing');
+  expect(asked, 'the delete asked before it ran').toHaveLength(1);
   // A refused delete that removed the card anyway would be the worst possible lie about a photo.
   await expect(first.locator('strong')).toHaveText(LONG_FILENAME);
 });

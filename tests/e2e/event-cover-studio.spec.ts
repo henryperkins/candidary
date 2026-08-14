@@ -13,7 +13,6 @@ import {
   stubGuestRoutes,
   stubManagerRoutes,
 } from './fixtures/routes';
-import { settleRendering } from './helpers/rendering';
 import {
   measureDocument,
   measureFold,
@@ -21,6 +20,7 @@ import {
   measureTarget,
   measureViewportEscapes,
 } from './helpers/geometry';
+import { settleRendering } from './helpers/rendering';
 
 const UPLOAD = {
   name: 'portrait-edge-dark.png',
@@ -1017,6 +1017,12 @@ test('sheet/dialog, compact keyboard, 200%, and 400% geometries retain one usabl
     }));
     expect(measures.documentWidth, geometry.label).toBeLessThanOrEqual(measures.viewportWidth + 1);
     expect(measures.scrollableRegions, `${geometry.label} usable scroll regions`).toBe(1);
+    // The document measure above cannot see this. `.cover-studio__controls` scrolls vertically, so a
+    // control pushed past the right edge is absorbed by that pane instead of widening the page — the
+    // document stayed honest at 390 while `Choose photo` sat at x=411, off a 390px screen. Only an
+    // element-level scan reports it, and the deliberate preset scroller is exempt from it by declaring
+    // `overscroll-behavior-x: contain`.
+    expect(await measureViewportEscapes(studio), `${geometry.label} escapes the viewport`).toEqual([]);
     expect(measures.viewportMeta).not.toContain('user-scalable=no');
     if (geometry.mode === 'short') {
       expect(measures.overflowY).toBe('auto');

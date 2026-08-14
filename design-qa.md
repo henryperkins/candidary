@@ -140,8 +140,8 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `guest-secondary-long-content-320.png` | `/event/:slug` `.guest-secondary` with deliveries and gallery open on 80-character filenames | 320 x 844 |
 | `fullscreen-long-caption-320.png` | `/event/:slug/fullscreen` first figure with an 80-character caption | 320 x 844 |
 | `manager-nav-768.png` | `/manage/event/:id` compact 104 px rail | 768 x 900 |
-| `manager-nav-count-390.png` | `/manage/event/:id` stacked rail with the count at the 10,000-photo cap | 390 x 844 |
-| `manager-actions-320.png` | `/manage/event/:id` Gallery card with all four controls | 320 x 844 |
+| `manager-nav-count-390.png` | `/manage/event/:id` destination bar at the foot of the viewport, with the count at the 10,000-photo cap drawn as a dot — **pending recapture**, the tracked file still pictures the previous stacked header | 390 x 844 |
+| `manager-actions-320.png` | `/manage/event/:id` selected Gallery card with all four controls | 320 x 844 |
 | `manager-export-first-390.png` | `/manage/event/:id` Share section: event link, QR, both entry controls, and the mobile export panel | 390 wide |
 | `manager-rsvp-390.png` | `/manage/event/:id?section=rsvp` guest list: totals, filters, list, editor entry, import | 390 wide |
 | `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
@@ -172,6 +172,32 @@ correction replaced the Manager color input's undefined border variable with
 the global `--border` token and, at that feature head, regenerated only
 `manager-event-appearance-390-mobile-win32.png`. The later Chestnut/Denim integration regenerated
 the combined Default and global-chrome baselines listed here against the integrated token registry.
+
+The mobile host-workflow revision supersedes three manager baselines below the 761 px rail. They are
+**pending recapture on Windows** and the tracked `-win32` files still picture the previous layout:
+
+| Baseline | Why it is superseded |
+| --- | --- |
+| `manager-nav-count-390-mobile-win32.png` | The six destinations left the header for the foot of the viewport, so they are no longer inside `.manager-nav`'s own box. The capture follows them to `.manager-nav nav`, and the badge it pictures is now a dot rather than `10000` |
+| `manager-actions-320-mobile-win32.png` | The contact sheet is two-up at 320, which halves the card, and the four per-photo controls belong to the selected card, so the capture selects it first |
+| `manager-rsvp-390-mobile-win32.png` | Two totals lead at full size with the other six as a scrolling row of chips, search and status share one sticky row, and the CSV follows the list it exports |
+
+Both nav and card captures changed *subject*, not only rendering: before the locator fix each one
+still passed while picturing a brand row and an unselected card. A recapture that predates that fix
+would have pinned exactly that as evidence.
+
+`manager-nav-768-mobile-win32.png` and `manager-export-first-390-mobile-win32.png` are unaffected —
+768 px is above the breakpoint, and the Share section's own box is unchanged. Recapture:
+
+```powershell
+npx playwright test tests/e2e/visual-qa.spec.ts --project=mobile --grep "manager" --update-snapshots
+git diff --stat -- tests/e2e/visual-qa.spec.ts-snapshots/manager-nav-768-mobile-win32.png tests/e2e/visual-qa.spec.ts-snapshots/manager-export-first-390-mobile-win32.png
+```
+
+The second command must report no change. Verification for this revision ran on Linux against
+Chromium 1194 rather than the pinned 1228, so it could confirm which captures move and what they
+contain, but not rasterise a `-win32` baseline; the figures above are the shape of the change, not
+the authoritative Windows pixels.
 
 The following files are protected from event-theme layout or behavior churn. Their Chestnut/Denim
 palette updates are intentional and pinned by hash:
@@ -323,16 +349,16 @@ in the final handoff and are not preclaimed here.
 
 | Surface | Widths | Result |
 | --- | --- | --- |
-| Shell and media grid turnover | 320, 360, 390, 430 / 431, 470, 760 / 761, 768, 780, 860, 1024, 1100 / 1101, 1120, 1133, 1134, 1440 | 1, 2, 2 and 3 media columns; no shell tracks below 761, a 104 px rail through 1100, and 184 px + 330 px rails from 1101 |
+| Shell and media grid turnover | 320, 360, 390, 430, 431, 470, 760 / 761, 768, 780, 860, 1024, 1100 / 1101, 1120, 1133, 1134, 1440 | 2, 2 and 3 media columns; no shell tracks below 761, a 104 px rail through 1100, and 184 px + 330 px rails from 1101. The media grid no longer turns over at 431: that breakpoint excluded every shipping iPhone, so the contact sheet is two-up at every width below the rail, 320 included |
 | Destination labels | 320, 390, 761, 768, 780, 860, 1024, 1100, 1101, 1440 | Six labels rendered, each at or above 14 px, each target 44 x 44 |
 | Label contrast | 320, 390, 761, 1024, 1440 | Every destination label at or above 4.5:1, measured from resolved colours |
 | Rail packing | 761 through 1440 | Brand at or under 60 px; the six destinations occupy at most 380 px rather than stretching |
 | Manager Brand target | 320, 761, 1101 | Clickable Brand remains at least 44 x 44 when each navigation layout begins |
 | Lifecycle facts at capacity | 761 through 1440 | Each of the three facts stays on one line at 10,000 photos and 100 GiB |
-| Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide; count text is at least 12 px at the three layout starts |
+| Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width it prints one, badge at most 48 px wide. From 761 the badge prints its digits at 12 px or more; below 761 it is a 9 px dot drawing no glyph, and the figure is carried by the destination's accessible name instead — which is asserted at every width on both sides of the rail |
 | All six sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
 | All six sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
-| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
+| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit. Below 761 the Gallery card's four per-photo controls belong to the selected card, so the card is chosen before they are measured — Intake keeps its controls on every card at every width |
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |

@@ -7,6 +7,7 @@ import {
   MAX_GUESTBOOK_PROMPT_LENGTH,
 } from '../../shared/constants';
 import { api, ClientApiError } from '../app/api';
+import { knownTimeZones } from '../app/time-zones';
 import {
   createAutosaveQueue,
   type AutosaveFailure,
@@ -31,6 +32,11 @@ import { AutosaveStatus } from './AutosaveStatus';
 import { describeLoadFailure } from './States';
 
 const DOMAIN_LABEL = 'Event settings';
+
+// Enumerated once per module rather than per render: the list runs to hundreds of identifiers and does
+// not change for the life of the tab. An empty list simply means no datalist, exactly as in the create
+// form — the input still accepts and the server still validates.
+const zoneOptions = knownTimeZones();
 
 /** A roster race that has already been refused twice for the same intent. It is
  *  something the host can retry by hand, not a field they can fix, so it must
@@ -419,7 +425,95 @@ export function EventSettingsEditor({
         onRetry={() => apply(stateRef.current, 'immediate')}
       />
     </div>
+    {/* Ordered by consequence rather than by record shape. `Accept RSVPs` switches off the guest
+        surface: it is a single tap, it saves immediately rather than on a debounce, and it used to sit
+        roughly 900px down, after two text fields, a textarea, a time and a date — the things a host
+        changes at the venue were the furthest from the top. The toggles lead, then the schedule, then
+        the identity fields. The order is the same at every width deliberately: reordering only below
+        761 means CSS `order`, which moves the eye without moving the tab sequence. */}
     <form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); queue.flush(); }}>
+      {([
+        ['rsvpEnabled', 'Accept RSVPs'],
+        ['galleryVisible', 'Show the optional shared gallery'],
+        ['moderationRequired', 'Review guestbook notes before sharing'],
+      ] as const).map(([field, label]) => <div className="settings-toggle-field" key={field}>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            name={field}
+            checked={state.draft[field]}
+            aria-invalid={Boolean(errors[field])}
+            aria-describedby={describedBy(field)}
+            onChange={(change) => edit(field, change.target.checked, 'immediate')}
+          />
+          <span>{label}</span>
+        </label>
+        {fieldError(field)}
+      </div>)}
+      {/* The value has to be an exact IANA identifier, and this field offered no help producing one:
+          `autoComplete` and `spellCheck` were off but nothing stopped an iOS keyboard capitalising
+          after the slash or autocorrecting the region, so a host who retyped it got a server refusal
+          and no hint about what a valid value looks like. The create form solved this already — an
+          ordinary text input with a datalist — and Settings takes the same value, so it gets the same
+          list and the same keyboard instructions. */}
+      <div className="settings-field">
+        <label htmlFor="settings-event-timezone">Event time zone</label>
+        <input
+          id="settings-event-timezone"
+          name="eventTimezone"
+          list="settings-event-time-zones"
+          value={state.draft.eventTimezone}
+          required
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          aria-invalid={Boolean(errors.eventTimezone)}
+          aria-describedby={describedBy('eventTimezone')}
+          onChange={(change) => edit('eventTimezone', change.target.value, 'enqueue')}
+          onBlur={() => settleField(
+            'eventTimezone',
+            canonicalEventSettings(state.draft, state.rosterVersion).eventTimezone,
+          )}
+          onKeyDown={flushOnEnter}
+        />
+        {zoneOptions.length > 0 && <datalist id="settings-event-time-zones">
+          {zoneOptions.map((zone) => <option key={zone} value={zone} />)}
+        </datalist>}
+        {fieldError('eventTimezone')}
+      </div>
+      {/* The event date itself stays read-only here; only the local time the
+          host puts on it is editable, and the Worker resolves the instant. */}
+      <div className="settings-field">
+        <label htmlFor="settings-event-start-time">Event start time</label>
+        <input
+          id="settings-event-start-time"
+          name="eventStartTime"
+          type="time"
+          value={state.draft.eventStartTime}
+          required
+          aria-invalid={Boolean(errors.eventStartTime)}
+          aria-describedby={describedBy('eventStartTime')}
+          onChange={(change) => edit('eventStartTime', change.target.value, 'immediate')}
+          onKeyDown={flushOnEnter}
+        />
+        {fieldError('eventStartTime')}
+      </div>
+      <div className="settings-field">
+        <label htmlFor="settings-rsvp-deadline">RSVP deadline</label>
+        <input
+          id="settings-rsvp-deadline"
+          name="rsvpDeadlineDate"
+          type="date"
+          value={state.draft.rsvpDeadlineDate}
+          required
+          aria-invalid={Boolean(errors.rsvpDeadlineDate)}
+          aria-describedby={describedBy('rsvpDeadlineDate')}
+          onChange={(change) => edit('rsvpDeadlineDate', change.target.value, 'immediate')}
+          onKeyDown={flushOnEnter}
+        />
+        {fieldError('rsvpDeadlineDate')}
+      </div>
       <div className="settings-field">
         <label htmlFor="settings-name">Event name</label>
         <input
@@ -469,76 +563,6 @@ export function EventSettingsEditor({
         />
         {fieldError('welcomeMessage')}
       </div>
-      <div className="settings-field">
-        <label htmlFor="settings-event-timezone">Event time zone</label>
-        <input
-          id="settings-event-timezone"
-          name="eventTimezone"
-          value={state.draft.eventTimezone}
-          required
-          autoComplete="off"
-          spellCheck={false}
-          aria-invalid={Boolean(errors.eventTimezone)}
-          aria-describedby={describedBy('eventTimezone')}
-          onChange={(change) => edit('eventTimezone', change.target.value, 'enqueue')}
-          onBlur={() => settleField(
-            'eventTimezone',
-            canonicalEventSettings(state.draft, state.rosterVersion).eventTimezone,
-          )}
-          onKeyDown={flushOnEnter}
-        />
-        {fieldError('eventTimezone')}
-      </div>
-      {/* The event date itself stays read-only here; only the local time the
-          host puts on it is editable, and the Worker resolves the instant. */}
-      <div className="settings-field">
-        <label htmlFor="settings-event-start-time">Event start time</label>
-        <input
-          id="settings-event-start-time"
-          name="eventStartTime"
-          type="time"
-          value={state.draft.eventStartTime}
-          required
-          aria-invalid={Boolean(errors.eventStartTime)}
-          aria-describedby={describedBy('eventStartTime')}
-          onChange={(change) => edit('eventStartTime', change.target.value, 'immediate')}
-          onKeyDown={flushOnEnter}
-        />
-        {fieldError('eventStartTime')}
-      </div>
-      <div className="settings-field">
-        <label htmlFor="settings-rsvp-deadline">RSVP deadline</label>
-        <input
-          id="settings-rsvp-deadline"
-          name="rsvpDeadlineDate"
-          type="date"
-          value={state.draft.rsvpDeadlineDate}
-          required
-          aria-invalid={Boolean(errors.rsvpDeadlineDate)}
-          aria-describedby={describedBy('rsvpDeadlineDate')}
-          onChange={(change) => edit('rsvpDeadlineDate', change.target.value, 'immediate')}
-          onKeyDown={flushOnEnter}
-        />
-        {fieldError('rsvpDeadlineDate')}
-      </div>
-      {([
-        ['rsvpEnabled', 'Accept RSVPs'],
-        ['galleryVisible', 'Show the optional shared gallery'],
-        ['moderationRequired', 'Review guestbook notes before sharing'],
-      ] as const).map(([field, label]) => <div className="settings-toggle-field" key={field}>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            name={field}
-            checked={state.draft[field]}
-            aria-invalid={Boolean(errors[field])}
-            aria-describedby={describedBy(field)}
-            onChange={(change) => edit(field, change.target.checked, 'immediate')}
-          />
-          <span>{label}</span>
-        </label>
-        {fieldError(field)}
-      </div>)}
     </form>
   </section>;
 }

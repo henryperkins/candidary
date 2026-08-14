@@ -21,9 +21,11 @@ const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Guestbook', 'Share', 'Settin
 const RAIL_WIDTHS = [761, 768, 780, 860, 1024, 1100];
 // 1134 is the first width the old fixed tracks fit inside; everything under it pushed the page sideways.
 const WIDE_WIDTHS = [1101, 1120, 1133, 1134, 1440];
-// The stacked phone modes: one media column below 431, two from 431 up to the compact rail.
-const ONE_COLUMN_WIDTHS = [320, 360, 390, 430];
-const TWO_COLUMN_WIDTHS = [431, 470, 760];
+// The stacked phone mode, which is now one band rather than two. The second media column used to
+// arrive at 431 — a breakpoint that excluded every shipping iPhone: 390 (14/15/16), 393 (Pro), 402
+// (16 Pro) and 430 (Pro Max) all sit below it, so the phones people actually hold got one card per
+// row. The grid is a two-up contact sheet everywhere under the compact rail, and 431 means nothing.
+const STACKED_WIDTHS = [320, 360, 390, 430, 431, 470, 760];
 // Manager destinations are controls, so their labels follow the binding 14–16px control-text band.
 const MIN_LABEL_TEXT = 14;
 const MIN_COUNT_TEXT = 12;
@@ -104,16 +106,9 @@ test('manager shell and media grid turn over exactly at their breakpoints', asyn
   const shell = page.locator('.manager-shell--intake');
   const mediaGrid = page.locator('.moderation-grid');
 
-  // Under 761 the manager is the stacked two-tier header, so the shell resolves no grid tracks at all.
-  // The media grid turns over inside it at 431 regardless, which is the manager's fourth breakpoint.
-  for (const width of ONE_COLUMN_WIDTHS) {
-    await page.setViewportSize({ width, height: 844 });
-    expect(await measureGridTracks(shell), `shell tracks at ${width}`).toEqual([]);
-    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(1);
-    await expectContained(page, width);
-  }
-
-  for (const width of TWO_COLUMN_WIDTHS) {
+  // Under 761 the manager is the stacked layout, so the shell resolves no grid tracks at all, and the
+  // contact sheet inside it is two-up at every one of those widths — 320 included.
+  for (const width of STACKED_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
     expect(await measureGridTracks(shell), `shell tracks at ${width}`).toEqual([]);
     expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(2);
@@ -207,30 +202,45 @@ test('the lifecycle facts each stay on one line for an event at capacity', async
   }
 });
 
-test('manager navigation keeps the unresolved Guestbook count visible on both sides of the rail', async ({ page }) => {
+// Six destinations across 390px leave each one 65px, and the badge is placed for one or two digits, so
+// on a phone the pill covers the icon it belongs to. Below 761 it is a dot and the figure is carried by
+// the destination's own `aria-label`; from 761 the rail has the room and prints the number. Either way
+// the count has to reach a host, so this measures both halves of that promise across the breakpoint.
+test('manager navigation keeps the unresolved Guestbook count reaching the host on both sides of the rail', async ({ page }) => {
   await openManager(page);
   const guestbook = destination(page, 'Guestbook');
   const count = guestbook.locator('.manager-nav__count');
 
-  for (const width of [320, 761, 1101]) {
+  for (const width of [320, 390, 760, 761, 1101]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(guestbook, `Guestbook is the inactive destination at ${width}`).toHaveAttribute('aria-pressed', 'false');
-    await expect(count, `Guestbook count rendered at ${width}`).toBeVisible();
-    await expect(count).toHaveText('1');
+    // The figure is in the destination's own name at every width, which is the half that has to
+    // survive the badge becoming a dot.
+    await expect(guestbook, `Guestbook count announced at ${width}`).toHaveAccessibleName(/Guestbook 1\b/u);
 
+    await expect(count, `Guestbook badge rendered at ${width}`).toBeVisible();
     const box = await measureTarget(count);
-    expect(box.width, `Notes count width at ${width}`).toBeGreaterThan(0);
-    expect(box.height, `Notes count height at ${width}`).toBeGreaterThan(0);
+    expect(box.width, `Guestbook badge width at ${width}`).toBeGreaterThan(0);
+    expect(box.height, `Guestbook badge height at ${width}`).toBeGreaterThan(0);
 
     const fontSize = await count.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
-    expect(fontSize, `Notes count text size at ${width}`).toBeGreaterThanOrEqual(MIN_COUNT_TEXT);
+    if (width >= 761) {
+      await expect(count, `Guestbook badge prints its digits at ${width}`).toHaveText('1');
+      expect(fontSize, `Guestbook count text size at ${width}`).toBeGreaterThanOrEqual(MIN_COUNT_TEXT);
+    } else {
+      // A dot, not a number: no glyph is drawn, and it stays clear of the icon it marks.
+      expect(fontSize, `Guestbook badge draws no text at ${width}`).toBe(0);
+      expect(box.width, `Guestbook badge is a dot at ${width}`).toBeLessThanOrEqual(12);
+    }
   }
 });
 
 // The badge is a fixed-size box no containment assertion can reach: the digits that leave it are an
 // anonymous box, not an element, so `measureViewportEscapes` and the document scan both see nothing.
-// Only the badge's own scroll width reports it, and only the documented cap makes it happen.
-test('the intake count badge holds the whole photo cap at every width', async ({ page }) => {
+// Only the badge's own scroll width reports it, and only the documented cap makes it happen. Below 761
+// the digits are gone and the dot has nothing to overflow with, so the whole cap is measured where it
+// is still drawn — and the accessible name is what carries it everywhere else.
+test('the intake count badge holds the whole photo cap wherever it prints one', async ({ page }) => {
   await stubManagerRoutes(page, {
     mediaPages,
     messages: [NOTE],
@@ -240,8 +250,11 @@ test('the intake count badge holds the whole photo cap at every width', async ({
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   const count = destination(page, 'Intake').locator('.manager-nav__count');
   await expect(count).toHaveText(String(MAX_EVENT_MEDIA));
+  await expect(destination(page, 'Intake')).toHaveAccessibleName(
+    new RegExp(`${MAX_EVENT_MEDIA.toLocaleString('en-US')} photos`, 'u'),
+  );
 
-  for (const width of [...ONE_COLUMN_WIDTHS, ...TWO_COLUMN_WIDTHS, ...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
+  for (const width of [...STACKED_WIDTHS, ...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
     await page.setViewportSize({ width, height: 900 });
     const badge = await measureOverflow(count);
     expect(badge.scrollWidth, `intake count contains ${MAX_EVENT_MEDIA} at ${width}`)
@@ -386,7 +399,8 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
   await page.getByRole('button', { name: 'Filter', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Clear', exact: true })).toBeVisible();
 
-  // Every media-grid mode: one phone column, the 431 two-column band, and the three-column rail layout.
+  // The stacked contact sheet at three of its widths, then the three-column wide layout. 431 is no
+  // longer a turnover — it is kept only because a control that fits at 390 and 470 has to fit between.
   for (const width of [390, 431, 470, 1200]) {
     await page.setViewportSize({ width, height: 900 });
 
@@ -399,6 +413,10 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await destination(page, 'Gallery').click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
     await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
+    // Below 761 the contact sheet's one tap target is selection and the four per-photo actions belong
+    // to the chosen card, so the card has to be chosen before they can be measured. Selecting also
+    // sends the bulk bar to the foot of the viewport, which is the state a host publishes from.
+    await page.locator('.moderation-grid article:first-of-type .intake-select').click();
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
 
     // The card clips its own corners, so a control pushed past its edge still measures 44x44 and still
