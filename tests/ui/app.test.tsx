@@ -2864,7 +2864,7 @@ describe('guest event phase composition', () => {
     await user.click(screen.getByRole('button', { name: 'Leave a guestbook note' }));
 
     const heading = await screen.findByRole('heading', { name: 'Leave a note for Maya & Theo' });
-    expect(heading).toHaveFocus();
+    await waitFor(() => expect(heading).toHaveFocus());
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
     expect(await screen.findByRole('alert')).toHaveTextContent('The book is resting. Try again.');
     expect(screen.getByRole('textbox', { name: 'Your note for Maya & Theo' })).toBeEnabled();

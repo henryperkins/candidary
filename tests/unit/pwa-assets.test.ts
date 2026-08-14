@@ -120,6 +120,7 @@ describe('iOS web app metadata', () => {
     const plan = buildDeploymentCommandPlan({
       repositoryRoot: root,
       target: 'production',
+      branch: 'main',
       sha: 'a'.repeat(40),
       nodeExecPath: process.execPath,
       wranglerCliPath: fromRoot('node_modules/wrangler/bin/wrangler.js'),
