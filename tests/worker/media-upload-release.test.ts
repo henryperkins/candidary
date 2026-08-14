@@ -13,27 +13,27 @@ describe('schema 15 media upload release contract', () => {
     delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
   });
 
-  it('binds copy-only production behavior to the exact fail-closed capability set', () => {
+  it('binds Candidate B production behavior to the exact live capability set', () => {
     expect(mediaUploadRelease).toEqual({
       kind: 'candidary.media-upload-release',
       schemaVersion: 2,
-      mode: 'canonical-copy-only',
+      mode: 'canonical-live',
       capabilities: {
         singleInitiationPresign: false,
         batchInitiationPresign: false,
         storedReplayPresign: false,
         reservedFinalize: false,
-        authenticatedWorkerIngress: false,
+        authenticatedWorkerIngress: true,
         legacyMediaCopy: true,
-        legacyPointerCutover: false,
-        eventRelationalPurge: false,
+        legacyPointerCutover: true,
+        eventRelationalPurge: true,
         exportDownloadPresign: false,
       },
     });
     // Worker tests are compiled with an explicit test-only live switch. The
-    // checked-in artifact above copies legacy bytes only: production still
-    // cannot accept ingress, flip a pointer, or purge, and no binding or
-    // request can turn any of those on.
+    // checked-in artifact above is Candidate B, so ingress, copy, pointer
+    // cutover, and relational purge are all on. The five historical signer and
+    // download capabilities stay false in every schema-v2 mode.
     expect(() => assertWorkerIngressEnabled()).not.toThrow();
     expect(() => assertLegacyMediaCopyEnabled()).not.toThrow();
     expect(() => assertLegacyPointerCutoverEnabled()).not.toThrow();
