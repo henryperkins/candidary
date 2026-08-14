@@ -7,8 +7,8 @@ import { api, ClientApiError } from '../app/api';
 import {
   COVER_UPLOAD_MIME_TYPES,
   MAX_COVER_UPLOAD_BYTES,
-  MAX_EVENT_MEDIA,
 } from '../../shared/constants';
+import { CREATE_INTRO } from '../../shared/site-content';
 import type { EventThemePresetId } from '../../shared/contracts';
 import { EVENT_THEME_VERSION } from '../../shared/event-theme';
 import { PageHeader } from '../components/Brand';
@@ -181,8 +181,8 @@ export function CreatePage() {
   </main></div>;
 
   return <div className="public-shell"><PageHeader action={<Link className="text-link" to="/">Back home</Link>} /><main className="create-layout">
-    <section className="create-intro"><p className="section-label">Create your event</p><h1>A private home for every point of view.</h1><p>Start with the essentials. You can adjust sharing, moderation, and gallery visibility from your event manager.</p>
-      <ul className="trust-list"><li><Check aria-hidden="true" /> Up to {MAX_EVENT_MEDIA.toLocaleString()} original photos</li><li><Check aria-hidden="true" /> Guest access without accounts</li><li><Check aria-hidden="true" /> Fixed, clear retention dates</li></ul>
+    <section className="create-intro"><p className="section-label">{CREATE_INTRO.label}</p><h1>{CREATE_INTRO.title}</h1><p>{CREATE_INTRO.lede}</p>
+      <ul className="trust-list">{CREATE_INTRO.facts.map((fact) => <li key={fact}><Check aria-hidden="true" /> {fact}</li>)}</ul>
     </section>
     <form className="create-form" ref={formRef} onSubmit={submit} noValidate>
       <h2>Event details</h2>{error && <p className="form-error" role="alert">{error}</p>}

@@ -21,3 +21,22 @@ test('serves the canonical public-page sitemap as XML instead of the SPA shell',
     'https://candidary.app/terms',
   ]);
 });
+
+test('negotiates markdown for trailing-slash public page URLs', async ({ request }) => {
+  const pages = [
+    ['/create/', '# A private home for every point of view.'],
+    ['/privacy/', '# Privacy'],
+    ['/terms/', '# Terms'],
+  ] as const;
+
+  for (const [path, heading] of pages) {
+    const response = await request.get(path, {
+      headers: { Accept: 'text/markdown' },
+    });
+
+    expect(response.status(), `${path} status`).toBe(200);
+    expect(response.headers()['content-type'], `${path} content type`)
+      .toBe('text/markdown; charset=utf-8');
+    expect((await response.text()).startsWith(`${heading}\n`), `${path} heading`).toBe(true);
+  }
+});

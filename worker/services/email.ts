@@ -51,7 +51,7 @@ export class EmailService {
     try {
       await this.env.EMAIL.send({
         to: message.to,
-        from: this.env.EMAIL_FROM,
+        from: { email: this.env.EMAIL_FROM, name: 'Candidary' },
         subject: message.subject,
         text: message.text,
         html: message.html,

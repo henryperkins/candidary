@@ -87,6 +87,32 @@ HEAD requests, or a bucket lock cannot replace the permanent scanner/tombstone p
 
 Closed gallery, delivery-history, and notes sections do not fetch their data or previews. The manager's visible Live intake refreshes event counts and private media every five seconds; polling pauses outside Intake and while the document is hidden.
 
+## Public pages, crawlers, and agents
+
+Four URLs are public: `/`, `/create`, `/privacy`, and `/terms`. `public/sitemap.xml` lists exactly
+those, and `public/robots.txt` disallows every other prefix — `/api/`, `/event/`, `/manage/`,
+`/join`, `/recover/`, and `/host/`.
+
+`robots.txt` also declares one preference for the wildcard group,
+`Content-Signal: search=yes, ai-input=yes, ai-train=no`: indexable, readable to answer a live
+question, refused as model training data. It sits inside the group and above the first `Disallow`,
+because a blank line ends a robots group and a directive past one applies to nobody. Changing the
+declaration is that line plus its pin in `tests/unit/discoverability-assets.test.ts`.
+
+Those same four URLs answer `Accept: text/markdown` with markdown rather than the SPA shell
+(`worker/http/agent-markdown.ts`). The site is client-rendered, so an HTML-to-markdown converter at
+the edge — Cloudflare's zone-level Markdown for Agents included — would convert an empty shell. The
+documents are built in the Worker instead, from the `shared/site-content.ts` copy the React pages
+render and the `shared/constants.ts` ceilings the upload routes enforce. A negotiated answer carries
+`Content-Type: text/markdown; charset=utf-8`, `Vary: Accept`, `Cache-Control: public, max-age=300`,
+an estimated `X-Markdown-Tokens`, and a canonical `Link`. The HTML answer to the same four URLs
+carries `Vary: Accept` as well, so no cache can hand a shell to a client that asked for markdown.
+
+Only a client that names `text/markdown`, and does not rank `text/html` above it, is served markdown.
+Every browser sends a catch-all range, so a wildcard never selects it. Nothing else negotiates: no
+event, manager, host, or entry URL has a markdown form, and none should acquire one — the delivery
+routes are where authorization is written, and this middleware has none of it.
+
 ## Export jobs
 
 Only one queued or running export exists per event. A request snapshots every stored, non-deleted

@@ -274,6 +274,12 @@ objects nothing can find again.
   ordered set through `TEST_MIGRATIONS`/`TEST_MIGRATION_QUERIES`.
 - **New deep-linkable client route**: add it to `assets.run_worker_first` in `wrangler.jsonc` so the
   Worker's security headers apply before `app.notFound` falls back to `ASSETS.fetch`.
+- **New public page**: it is four edits, not one. `public/sitemap.xml`, `assets.run_worker_first`
+  (a page the Worker never sees cannot negotiate), the `MARKDOWN_PAGES` registry in
+  `worker/http/agent-markdown.ts`, and its copy in `shared/site-content.ts` — which the React page
+  renders and the `Accept: text/markdown` answer is built from, so the two can never say different
+  things. Private surfaces belong in none of them, and `public/robots.txt` must keep disallowing
+  their prefixes. That file also carries the wildcard group's `Content-Signal` preference.
 - **Lint**: `@typescript-eslint/consistent-type-imports` is an error and warnings fail the build.
   `noUncheckedIndexedAccess` is on in both projects, so indexed reads need `!` or a guard.
 

@@ -1,4 +1,11 @@
+# Preferences for automated collection, in the syntax at contentsignals.org
+# (IETF draft-romm-aipref-contentsignals). Only the four pages in sitemap.xml
+# are crawlable at all, and none of them contains event data.
+#   search    yes  appear in a search index and be linked from its results
+#   ai-input  yes  be read to answer a live question, with attribution
+#   ai-train  no   be retained as training data for a generative model
 User-agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=no
 Allow: /
 Disallow: /api/
 Disallow: /event/
