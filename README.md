@@ -27,6 +27,17 @@ The photo journey ends with an exact delivery receipt. Shared galleries, notes, 
 
 Requirements: Node.js 22+, npm 11+, and a Cloudflare account for browser-direct R2 and Images testing.
 
+For a Linux or Codex cloud checkout, the idempotent setup script installs the
+locked dependency tree, generates local-only secrets, and applies the D1
+migrations locally:
+
+```bash
+./scripts/setup-codex.sh
+npm run dev
+```
+
+For a manual Windows setup:
+
 ```powershell
 npm install
 Copy-Item .dev.vars.example .dev.vars
@@ -53,6 +64,7 @@ npm test
 npm run typecheck
 npm run typecheck:e2e
 npm run lint
+npm run check
 npm run build
 npm run verify:bindings
 npm run verify:fresh-d1 -- --run-root <absolute-candidary-release-temp-root> --report-file <root>/migration-verification.json
