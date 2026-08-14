@@ -15,6 +15,9 @@ bundle, detached release worktree, staging-conformance ceremony, or second deplo
    `dist/candidary/wrangler.json` artifact.
 5. Confirm the deployed version tag equals the merged commit and perform a lightweight live check.
 
+The GitHub workflow is pull-request-only. Merging does not rerun its six jobs or create a duplicate
+post-merge build; the Cloudflare `main` trigger owns the one production build and deployment.
+
 The local equivalent is:
 
 ```powershell
@@ -28,9 +31,10 @@ has already been built, use:
 npm run deploy:built
 ```
 
-`deploy:built` refuses malformed commit SHAs, a non-`main` Workers build targeting production, a
-missing or linked generated config, and a generated topology that does not match production. It does
-not install dependencies, rebuild, run tests, create evidence, or apply migrations.
+`deploy:built` refuses malformed or mismatched commit SHAs, missing or contradictory branch identity,
+a dirty or non-`main` production checkout, a missing or linked generated config, and any generated
+topology that does not exactly match the requested production or preview resources. It does not
+install dependencies, rebuild, run tests, create evidence, or apply migrations.
 
 ## Cloudflare Workers Builds commands
 

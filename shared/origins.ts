@@ -76,11 +76,19 @@ export function isPreviewApplicationOrigin(value: string | undefined | null): bo
   return PREVIEW_ALIAS_PATTERN.test(url.hostname.slice(0, -suffix.length));
 }
 
+export type ApplicationOriginFamily = 'production' | 'preview';
+
+export function applicationOriginFamily(
+  value: string | undefined | null,
+): ApplicationOriginFamily | null {
+  const origin = normalizeOrigin(value);
+  if (origin === null) return null;
+  if ((KNOWN_APPLICATION_ORIGINS as readonly string[]).includes(origin)) return 'production';
+  if (isPreviewApplicationOrigin(origin)) return 'preview';
+  return null;
+}
+
 /** The browser-side counterpart to the Worker's `isApplicationOrigin`. */
 export function isKnownApplicationOrigin(value: string | undefined | null): boolean {
-  const origin = normalizeOrigin(value);
-  return origin !== null && (
-    (KNOWN_APPLICATION_ORIGINS as readonly string[]).includes(origin)
-    || isPreviewApplicationOrigin(origin)
-  );
+  return applicationOriginFamily(value) !== null;
 }

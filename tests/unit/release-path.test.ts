@@ -9,6 +9,7 @@ const root = process.cwd();
 const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
   scripts?: Record<string, string>;
 };
+const ciWorkflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
 describe('routine release path', () => {
   it('smoke-tests the downloaded client artifact without rebuilding or loading Cloudflare config', () => {
@@ -23,6 +24,14 @@ describe('routine release path', () => {
     expect(packageJson.scripts).not.toHaveProperty('release:staging');
     expect(packageJson.scripts).not.toHaveProperty('release:staging:task11');
     expect(packageJson.scripts).not.toHaveProperty('release:migrate');
+  });
+
+  it('passes the real source branch into hosted CI builds', () => {
+    expect(ciWorkflow).toContain('WORKERS_CI_BRANCH: ${{ github.head_ref }}');
+  });
+
+  it('does not rerun the pull-request suite after merge', () => {
+    expect(ciWorkflow).not.toMatch(/^\s*push:/mu);
   });
 
   it.each([
