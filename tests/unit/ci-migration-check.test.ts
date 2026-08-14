@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { requiresMigrationCheck } from '../../scripts/ci-migration-check';
+import {
+  FRESH_D1_RUN_PREFIX,
+  requiresMigrationCheck,
+} from '../../scripts/ci-migration-check';
 
 describe('conditional migration verification', () => {
+  it('uses the safe run-root prefix accepted by the retained Fresh-D1 verifier', () => {
+    expect(FRESH_D1_RUN_PREFIX).toMatch(/^candidary-release-.+/u);
+  });
+
   it('skips ordinary application and documentation changes', () => {
     expect(requiresMigrationCheck([
       'src/app/router.tsx',

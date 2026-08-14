@@ -3,12 +3,20 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { SMOKE_SERVER_COMMAND } from '../../playwright.smoke.config';
+
 const root = process.cwd();
 const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
   scripts?: Record<string, string>;
 };
 
 describe('routine release path', () => {
+  it('smoke-tests the downloaded client artifact without rebuilding or loading Cloudflare config', () => {
+    expect(SMOKE_SERVER_COMMAND).toContain('--config vite.smoke.config.ts');
+    expect(SMOKE_SERVER_COMMAND).toContain('--outDir dist/client');
+    expect(SMOKE_SERVER_COMMAND).not.toMatch(/\bbuild\b/u);
+  });
+
   it('has no legacy evidence, candidate, bridge, migration, or staging commands', () => {
     expect(packageJson.scripts).not.toHaveProperty('verify:release');
     expect(packageJson.scripts).not.toHaveProperty('release:bridge');

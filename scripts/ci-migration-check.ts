@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+export const FRESH_D1_RUN_PREFIX = 'candidary-release-ci-';
 const MIGRATION_SAFETY_PATHS = new Set([
   'wrangler.jsonc',
   'scripts/verify-fresh-d1.ts',
@@ -47,7 +48,7 @@ export function runConditionalMigrationCheck(
     return;
   }
 
-  const runRoot = mkdtempSync(join(tmpdir(), 'candidary-migration-ci-'));
+  const runRoot = mkdtempSync(join(tmpdir(), FRESH_D1_RUN_PREFIX));
   try {
     const result = spawnSync(process.execPath, [
       '--experimental-strip-types',
