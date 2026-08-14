@@ -2241,6 +2241,7 @@ describe('lifecycle cleanup', () => {
             id,
             { byteSize: 64, width: 800, height: 600 },
             '2026-07-21T12:01:00.000Z',
+            { capturedAt: null, timelineAt: '2026-07-21T12:01:00.000Z' },
           );
         } catch (error) {
           legacyFinalizeRejected = /legacy stored media creation is fenced/u.test(String(error));

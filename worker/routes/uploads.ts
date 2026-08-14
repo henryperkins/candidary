@@ -157,6 +157,10 @@ uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
     context.env.CANONICAL_MEDIA_BUCKET,
     repository,
     media,
+    {
+      eventStartAt: auth.event.eventStartAt,
+      eventTimezone: auth.event.eventTimezone,
+    },
     auth.session.id,
     bytes,
     context.req.header('content-type') ?? '',

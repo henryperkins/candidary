@@ -39,6 +39,10 @@ const testEnv = env as Env & {
 };
 const now = '2026-07-21T12:00:00.000Z';
 const rateKey = 'repository-rate-key-with-at-least-32-bytes';
+const timelineContext = {
+  eventStartAt: '2026-09-19T05:00:00.000Z',
+  eventTimezone: 'America/Chicago',
+};
 
 async function seedEvent(id = 'event-a', slug = 'maya-theo') {
   const events = new EventsRepository(env.DB);
@@ -614,7 +618,12 @@ describe('media reservation and lifecycle', () => {
     });
     const bytes = png(1200, 800);
     await env.DB.exec('DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;');
-    await repository.finalize(reserved.id, { byteSize: bytes.byteLength, width: 1200, height: 800 });
+    await repository.finalize(
+      reserved.id,
+      { byteSize: bytes.byteLength, width: 1200, height: 800 },
+      '2026-07-21T12:16:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:16:00.000Z' },
+    );
     const work = await repository.listPromotionWork('2026-07-21T12:16:00.000Z', 10);
     expect(work.map(({ mediaId }) => mediaId)).toEqual([reserved.id]);
 
@@ -709,6 +718,7 @@ describe('media reservation and lifecycle', () => {
       reserved.id,
       { byteSize: 128, width: 1, height: 1 },
       '2026-07-21T12:01:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:01:00.000Z' },
     );
     await env.DB.prepare(`
       UPDATE media SET object_bucket_generation = 'canonical' WHERE id = ?
@@ -750,6 +760,7 @@ describe('media reservation and lifecycle', () => {
       env.MEDIA_BUCKET,
       guardedRepository,
       reserved,
+      timelineContext,
       sessionId,
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
       'image/png',
@@ -838,6 +849,8 @@ describe('media reservation and lifecycle', () => {
       height: 600,
       finalEtag: 'canonical-final-etag',
       committedAt: '2026-07-21T12:02:00.000Z',
+      capturedAt: null,
+      timelineAt: '2026-07-21T12:02:00.000Z',
     })).toBe(true);
     expect(await repository.ingressPromotionIsInactive(reserved.id)).toBe(true);
     expect(await repository.parkInactivePromotionCleanup(
@@ -1056,7 +1069,12 @@ describe('media reservation and lifecycle', () => {
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-delete-race',
       reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
     });
-    await media.finalize(reserved.id, { byteSize: 900, width: 800, height: 600 });
+    await media.finalize(
+      reserved.id,
+      { byteSize: 900, width: 800, height: 600 },
+      '2026-07-21T12:15:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:15:00.000Z' },
+    );
     await env.DB.prepare('DELETE FROM media_object_promotions WHERE media_id = ?')
       .bind(reserved.id).run();
 
@@ -1120,9 +1138,24 @@ describe('media reservation and lifecycle', () => {
       idempotencyKey: 'idem-a', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
     });
 
-    const finalized = await media.finalize('media-a', { byteSize: 1800, width: 1200, height: 800 });
-    const repeated = await media.finalize('media-a', { byteSize: 1800, width: 1200, height: 800 });
-    await expect(media.finalize('media-a', { byteSize: 1700, width: 1200, height: 800 }))
+    const finalized = await media.finalize(
+      'media-a',
+      { byteSize: 1800, width: 1200, height: 800 },
+      '2026-07-21T12:05:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:05:00.000Z' },
+    );
+    const repeated = await media.finalize(
+      'media-a',
+      { byteSize: 1800, width: 1200, height: 800 },
+      '2026-07-21T12:05:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:05:00.000Z' },
+    );
+    await expect(media.finalize(
+      'media-a',
+      { byteSize: 1700, width: 1200, height: 800 },
+      '2026-07-21T12:05:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:05:00.000Z' },
+    ))
       .rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT' });
     const approved = await media.setPublication('media-a', 'unpublished', 'published', '2026-07-21T12:05:00.000Z');
     await expect(media.setPublication('media-a', 'unpublished', 'hidden', now))
@@ -1160,6 +1193,7 @@ describe('media reservation and lifecycle', () => {
                 reserved.id,
                 { byteSize: 120, width: 800, height: 600 },
                 '2026-07-21T12:01:00.000Z',
+                { capturedAt: null, timelineAt: '2026-07-21T12:01:00.000Z' },
               );
             }
             return target.batch(statements);
@@ -1246,8 +1280,18 @@ describe('media reservation and lifecycle', () => {
     const metadata = { byteSize: 1800, width: 1200, height: 800 };
     const firstStoredAt = '2026-07-21T12:01:00.000Z';
 
-    await media.finalize('media-stored-at', metadata, firstStoredAt);
-    await media.finalize('media-stored-at', metadata, '2026-07-21T12:02:00.000Z');
+    await media.finalize(
+      'media-stored-at',
+      metadata,
+      firstStoredAt,
+      { capturedAt: null, timelineAt: firstStoredAt },
+    );
+    await media.finalize(
+      'media-stored-at',
+      metadata,
+      '2026-07-21T12:02:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:02:00.000Z' },
+    );
 
     const row = await env.DB.prepare('SELECT created_at, stored_at FROM media WHERE id = ?')
       .bind('media-stored-at')
@@ -1313,9 +1357,9 @@ describe('media reservation and lifecycle', () => {
     vi.useFakeTimers();
     vi.setSystemTime(expiryCheckTime);
     try {
-      const finalized = await finalizeStoredMedia(bucket, repository, reserved);
+      const finalized = await finalizeStoredMedia(bucket, repository, reserved, timelineContext);
       vi.setSystemTime(laterRetryTime);
-      await finalizeStoredMedia(bucket, repository, finalized);
+      await finalizeStoredMedia(bucket, repository, finalized, timelineContext);
 
       const row = await env.DB.prepare('SELECT stored_at FROM media WHERE id = ?')
         .bind(reserved.id)
@@ -1360,7 +1404,13 @@ describe('media reservation and lifecycle', () => {
       delete: env.MEDIA_BUCKET.delete.bind(env.MEDIA_BUCKET),
     } as unknown as R2Bucket;
 
-    await expect(finalizeStoredMedia(racingBucket, repository, reserved, new Date('2026-07-21T12:10:00.000Z')))
+    await expect(finalizeStoredMedia(
+      racingBucket,
+      repository,
+      reserved,
+      timelineContext,
+      new Date('2026-07-21T12:10:00.000Z'),
+    ))
       .rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT', status: 409 });
     expect((await repository.getById(reserved.id))?.uploadState).toBe('reserved');
     expect(await env.MEDIA_BUCKET.head(`events/event-a/media/final/${reserved.id}`)).toBeNull();
@@ -1401,6 +1451,7 @@ describe('media reservation and lifecycle', () => {
       interruptedBucket,
       repository,
       reserved,
+      timelineContext,
       new Date('2026-07-21T12:10:00.000Z'),
     )).rejects.toThrow('simulated isolate loss');
     expect((await repository.getById(reserved.id))?.uploadState).toBe('reserved');
@@ -1410,6 +1461,7 @@ describe('media reservation and lifecycle', () => {
       env.MEDIA_BUCKET,
       repository,
       reserved,
+      timelineContext,
       new Date('2026-07-21T12:10:00.000Z'),
     );
     expect(recovered).toMatchObject({
@@ -1446,6 +1498,7 @@ describe('media reservation and lifecycle', () => {
       env.MEDIA_BUCKET,
       repository,
       reserved,
+      timelineContext,
       new Date('2026-07-21T12:10:00.000Z'),
     )).rejects.toMatchObject({ code: 'UPLOAD_FINALIZE_CONFLICT', status: 409 });
     expect((await repository.getById(reserved.id))?.uploadState).toBe('reserved');
@@ -1463,7 +1516,12 @@ describe('media reservation and lifecycle', () => {
       idempotencyKey: 'idem-private', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
     });
 
-    const delivered = await repository.finalize('media-private', { byteSize: 1800, width: 1200, height: 800 });
+    const delivered = await repository.finalize(
+      'media-private',
+      { byteSize: 1800, width: 1200, height: 800 },
+      '2026-07-21T12:15:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:15:00.000Z' },
+    );
     const snapshot = await repository.exportSnapshot('event-a', '2026-07-21T12:30:00.000Z');
 
     expect((delivered as unknown as { publicationStatus: string }).publicationStatus).toBe('unpublished');

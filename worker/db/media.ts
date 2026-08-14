@@ -1,11 +1,18 @@
-import type { ManagerMediaView, PublicationStatus } from '../../shared/contracts';
+import type {
+  ManagerGalleryMediaView,
+  ManagerMediaView,
+  PublicationStatus,
+} from '../../shared/contracts';
 import {
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
+  MEDIA_TIMELINE_SENTINEL,
+  PRIVATE_GALLERY_PAGE_SIZE,
   type SupportedImageType,
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import type { GalleryCursor } from '../http/gallery-cursor';
 import type { ManagerMediaCursor } from '../http/media-cursor';
 import type { MediaRecord } from './types';
 import { MediaObjectWriteTombstoneRepository } from './media-write-tombstones';
@@ -34,6 +41,9 @@ interface MediaRow {
   reservation_expires_at: string;
   created_at: string;
   stored_at: string | null;
+  captured_at: string | null;
+  timeline_at: string;
+  favorited_at: string | null;
   published_at: string | null;
   preview_object_key: string | null;
   deleted_at: string | null;
@@ -155,6 +165,10 @@ function mapMedia(row: MediaRow): MediaRecord {
     idempotencyKey: row.idempotency_key,
     reservationExpiresAt: row.reservation_expires_at,
     createdAt: row.created_at,
+    storedAt: row.stored_at,
+    capturedAt: row.captured_at,
+    timelineAt: row.timeline_at,
+    favoritedAt: row.favorited_at,
     publishedAt: row.published_at,
     previewObjectKey: row.preview_object_key,
     deletedAt: row.deleted_at,
@@ -230,6 +244,56 @@ function mapManagerMedia(row: MediaRow): ManagerMediaView {
   };
 }
 
+export function managerGalleryMediaView(media: Pick<
+  MediaRecord,
+  | 'id'
+  | 'originalFilename'
+  | 'guestName'
+  | 'caption'
+  | 'publicationStatus'
+  | 'previewObjectKey'
+  | 'width'
+  | 'height'
+  | 'createdAt'
+  | 'storedAt'
+  | 'capturedAt'
+  | 'timelineAt'
+  | 'favoritedAt'
+>): ManagerGalleryMediaView {
+  return {
+    id: media.id,
+    originalFilename: media.originalFilename,
+    guestName: media.guestName,
+    caption: media.caption,
+    publicationStatus: media.publicationStatus,
+    previewAvailable: media.previewObjectKey !== null,
+    width: media.width,
+    height: media.height,
+    receivedAt: media.storedAt ?? media.createdAt,
+    timelineAt: media.timelineAt,
+    timelineSource: media.capturedAt !== null ? 'capture' : 'received',
+    isFavorite: media.favoritedAt !== null,
+  };
+}
+
+function mapGalleryMediaRow(row: MediaRow): ManagerGalleryMediaView {
+  return managerGalleryMediaView({
+    id: row.id,
+    originalFilename: row.original_filename,
+    guestName: row.guest_name,
+    caption: row.caption,
+    publicationStatus: row.publication_status,
+    previewObjectKey: row.preview_object_key,
+    width: row.width,
+    height: row.height,
+    createdAt: row.created_at,
+    storedAt: row.stored_at,
+    capturedAt: row.captured_at,
+    timelineAt: row.timeline_at,
+    favoritedAt: row.favorited_at,
+  });
+}
+
 export interface ManagerMediaOptions {
   status?: PublicationStatus;
   guestName?: string;
@@ -240,6 +304,18 @@ export interface ManagerMediaOptions {
 export interface ManagerMediaPage {
   media: ManagerMediaView[];
   nextCursor: ManagerMediaCursor | null;
+}
+
+export interface GalleryTimelineOptions {
+  query?: string;
+  favorites?: boolean;
+  cursor?: GalleryCursor;
+  limit?: number;
+}
+
+export interface GalleryTimelinePage {
+  media: ManagerGalleryMediaView[];
+  nextCursor: GalleryCursor | null;
 }
 
 /**
@@ -313,6 +389,117 @@ export class MediaRepository {
         ? { storedAt: last.stored_at, id: last.id }
         : null,
     };
+  }
+
+  /**
+   * The host private Gallery stream: event-scoped, stored-only, non-deleted,
+   * ordered earliest-first by `timeline_at` and ID. `event_id` is always the
+   * first bound value, so a caller-supplied cursor can only move the position
+   * inside the event the session is already authorized for. Search is a bound
+   * `instr(lower(...), lower(?))` substring match — ASCII-only folding with
+   * literal `%` and `_` — over contributor, caption, and filename.
+   */
+  async listGalleryTimeline(
+    eventId: string,
+    options: GalleryTimelineOptions = {},
+  ): Promise<GalleryTimelinePage> {
+    const limit = options.limit ?? PRIVATE_GALLERY_PAGE_SIZE;
+    const predicates = [
+      'event_id = ?',
+      "upload_state = 'stored'",
+      'deleted_at IS NULL',
+    ];
+    const bindings: unknown[] = [eventId];
+
+    if (options.query) {
+      predicates.push(`(
+        instr(lower(guest_name), lower(?)) > 0
+        OR instr(lower(COALESCE(caption, '')), lower(?)) > 0
+        OR instr(lower(original_filename), lower(?)) > 0
+      )`);
+      bindings.push(options.query, options.query, options.query);
+    }
+    if (options.favorites) {
+      predicates.push('favorited_at IS NOT NULL');
+    }
+    if (options.cursor) {
+      predicates.push('(timeline_at > ? OR (timeline_at = ? AND id > ?))');
+      bindings.push(options.cursor.timelineAt, options.cursor.timelineAt, options.cursor.id);
+    }
+    bindings.push(limit + 1);
+
+    const result = await this.db.prepare(`
+      SELECT
+        id, original_filename, guest_name, caption, publication_status,
+        upload_state, preview_object_key, width, height, created_at, stored_at,
+        captured_at, timeline_at, favorited_at
+      FROM media
+      WHERE ${predicates.join(' AND ')}
+      ORDER BY timeline_at ASC, id ASC
+      LIMIT ?
+    `).bind(...bindings).all<MediaRow>();
+    const pageRows = result.results.slice(0, limit);
+    const last = pageRows[pageRows.length - 1];
+    const hasMore = result.results.length > limit;
+    return {
+      media: pageRows.map(mapGalleryMediaRow),
+      nextCursor: hasMore && last
+        ? { timelineAt: last.timeline_at, id: last.id }
+        : null,
+    };
+  }
+
+  async setFavorite(eventId: string, mediaId: string, favoritedAt: string | null): Promise<MediaRecord> {
+    const result = await this.db.prepare(`
+      UPDATE media
+      SET favorited_at = ?
+      WHERE id = ? AND event_id = ?
+        AND upload_state = 'stored' AND deleted_at IS NULL
+      RETURNING *
+    `).bind(favoritedAt, mediaId, eventId).all<MediaRow>();
+    const row = result.results[0];
+    if (row) return mapMedia(row);
+
+    const current = await this.getById(mediaId);
+    if (!current || current.eventId !== eventId) {
+      throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
+    }
+    throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
+  }
+
+  async countStoredTimelineSentinels(eventId?: string): Promise<number> {
+    const predicates = [
+      "upload_state = 'stored'",
+      'deleted_at IS NULL',
+      'timeline_at = ?',
+    ];
+    const bindings: unknown[] = [MEDIA_TIMELINE_SENTINEL];
+    if (eventId) {
+      predicates.unshift('event_id = ?');
+      bindings.unshift(eventId);
+    }
+    const row = await this.db.prepare(`
+      SELECT COUNT(*) AS count FROM media WHERE ${predicates.join(' AND ')}
+    `).bind(...bindings).first<{ count: number }>();
+    return row?.count ?? 0;
+  }
+
+  async repairStoredTimelineSentinels(limit: number, eventId?: string): Promise<number> {
+    const predicate = eventId ? 'AND event_id = ?' : '';
+    const bindings = eventId ? [eventId, limit] : [limit];
+    const result = await this.db.prepare(`
+      UPDATE media
+      SET timeline_at = COALESCE(stored_at, created_at)
+      WHERE id IN (
+        SELECT id FROM media
+        WHERE upload_state = 'stored'
+          AND deleted_at IS NULL
+          AND timeline_at = ?
+          ${predicate}
+        LIMIT ?
+      )
+    `).bind(MEDIA_TIMELINE_SENTINEL, ...bindings).run();
+    return result.meta.changes;
   }
 
   async listGallery(eventId: string): Promise<MediaRecord[]> {
@@ -653,7 +840,12 @@ export class MediaRepository {
     height: number;
     finalEtag: string;
     committedAt: string;
+    capturedAt: string | null;
+    timelineAt: string;
   }): Promise<boolean> {
+    if (input.timelineAt === MEDIA_TIMELINE_SENTINEL) {
+      throw new Error('A stored photo requires a non-sentinel timeline instant.');
+    }
     assertWorkerIngressEnabled();
     const current = await this.getById(input.mediaId);
     if (!current || current.uploadState !== 'reserved') return false;
@@ -662,7 +854,8 @@ export class MediaRepository {
         UPDATE media
         SET object_key = ?, object_bucket_generation = 'canonical',
             byte_size = ?, width = ?, height = ?,
-            upload_state = 'stored', stored_at = ?, preview_object_key = NULL
+            upload_state = 'stored', stored_at = ?, captured_at = ?, timeline_at = ?,
+            preview_object_key = NULL
         WHERE id = ? AND upload_state = 'reserved' AND deleted_at IS NULL
           AND object_key = (
             SELECT source_object_key FROM media_object_promotions WHERE media_id = ?
@@ -696,6 +889,8 @@ export class MediaRepository {
         input.width,
         input.height,
         input.committedAt,
+        input.capturedAt,
+        input.timelineAt,
         input.mediaId,
         input.mediaId,
         input.mediaId,
@@ -1666,8 +1861,12 @@ export class MediaRepository {
         finalEtag: string;
       };
     },
-    storedAt = new Date().toISOString(),
+    storedAt: string,
+    timeline: { capturedAt: string | null; timelineAt: string },
   ): Promise<MediaRecord> {
+    if (timeline.timelineAt === MEDIA_TIMELINE_SENTINEL) {
+      throw new Error('A stored photo requires a non-sentinel timeline instant.');
+    }
     const current = await this.getById(id);
     if (!current) throw new ApiError('UPLOAD_OBJECT_MISSING', 'The upload reservation no longer exists.', 404);
     const objectKey = metadata.objectKey ?? current.objectKey;
@@ -1689,7 +1888,8 @@ export class MediaRepository {
         UPDATE media
         SET object_key = ?, object_bucket_generation = CASE
               WHEN ? <> object_key THEN 'canonical' ELSE object_bucket_generation END,
-            byte_size = ?, width = ?, height = ?, upload_state = 'stored', stored_at = ?
+            byte_size = ?, width = ?, height = ?, upload_state = 'stored',
+            stored_at = ?, captured_at = ?, timeline_at = ?
             , preview_object_key = CASE WHEN ? <> object_key THEN NULL ELSE preview_object_key END
         WHERE id = ? AND upload_state = 'reserved' AND object_key = ?
           AND (
@@ -1707,6 +1907,8 @@ export class MediaRepository {
         metadata.width,
         metadata.height,
         storedAt,
+        timeline.capturedAt,
+        timeline.timelineAt,
         objectKey,
         id,
         current.objectKey,
@@ -1750,7 +1952,7 @@ export class MediaRepository {
       ));
     }
     const results = await this.db.batch(statements);
-    if ((results[0]?.results?.length ?? 0) !== 1) return this.finalize(id, metadata);
+    if ((results[0]?.results?.length ?? 0) !== 1) return this.finalize(id, metadata, storedAt, timeline);
     if (objectKey !== current.objectKey && (results[2]?.meta.changes ?? 0) !== 1) {
       throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload changed while it was being finalized.', 409);
     }

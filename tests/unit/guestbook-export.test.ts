@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import { createElement } from 'react';
 
-import { ManagerExportPanel } from '../../src/components/ManagerExportPanel';
+import { GalleryExportControl } from '../../src/features/gallery/GalleryExportControl';
 import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
 import { buildGuestbookPrivateCsv } from '../../worker/export/guestbook-csv';
 import { buildGuestbookHtml } from '../../worker/export/guestbook-html';
@@ -117,7 +118,7 @@ describe('Guestbook export renderers', () => {
 
 describe('Manager Guestbook export downloads', () => {
   it('separates printable and private downloads while conditionally omitting absent photo artifacts', () => {
-    render(ManagerExportPanel({
+    render(createElement(GalleryExportControl, {
       job: {
         id: 'export-a', state: 'ready', snapshotAt: '2026-11-01T07:30:00.000Z',
         mediaCount: 0, totalBytes: 0, attempt: 1, partCount: 0, expiresAt: '2026-11-02T07:30:00.000Z',

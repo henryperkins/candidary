@@ -731,6 +731,7 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
       return json(pages[cursor] ?? { media: [], nextCursor: null });
     }
+    if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
     if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -890,6 +891,7 @@ describe('manager experience', () => {
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
 
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
     await user.click(await screen.findByRole('button', { name: /^Publish / }));
     await waitFor(() => expect(reads).toBe(2));
 
@@ -1382,7 +1384,7 @@ describe('manager experience', () => {
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
   });
 
-  it('keeps the manager view in place when a bulk publish, delete, or export fails', async () => {
+  it('keeps the manager view in place when a bulk publish, hide, or export fails', async () => {
     const rows = makeMedia(3).slice(1);
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1391,6 +1393,7 @@ describe('manager experience', () => {
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
       if (url.includes('/media')) return json({ media: rows, nextCursor: null });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -1402,23 +1405,35 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /gallery/i }));
+    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid article')).toHaveLength(2));
 
-    async function expectRecoverableFailure(label: string, act_: () => Promise<void>) {
+    async function expectRecoverableFailure(label: string, act_: () => Promise<void>, heading: string) {
       await act_();
       expect(await screen.findByRole('alert'), label).toHaveTextContent('That photo changed before your update.');
-      expect(screen.getByRole('heading', { name: 'Gallery publishing' }), label).toBeVisible();
+      expect(screen.getByRole('heading', { name: heading }), label).toBeVisible();
       expect(document.querySelectorAll('.moderation-grid article'), label).toHaveLength(2);
     }
 
     await user.click(screen.getByRole('checkbox', { name: 'Select moment-2.jpg' }));
-    await expectRecoverableFailure('bulk publish', () => user.click(screen.getByRole('button', { name: 'Publish selected' })));
-    await expectRecoverableFailure('delete', () => user.click(screen.getByRole('button', { name: 'Delete moment-2.jpg' })));
-    await expectRecoverableFailure('export', () => user.click(screen.getByRole('button', { name: 'Prepare download' })));
+    await expectRecoverableFailure(
+      'bulk publish',
+      () => user.click(screen.getByRole('button', { name: 'Publish selected' })),
+      'Shared gallery',
+    );
+    await expectRecoverableFailure(
+      'hide',
+      () => user.click(screen.getByRole('button', { name: 'Hide selected' })),
+      'Shared gallery',
+    );
+    await user.click(screen.getByRole('button', { name: 'Private gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Download all' }));
+    expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
+    expect(screen.getByRole('heading', { name: 'Private gallery' }), 'export').toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
   });
 
   it('caps cross-page bulk selection at 50 and submits only the selected ids', async () => {
@@ -1439,6 +1454,7 @@ describe('manager experience', () => {
           ? json({ media: rows.slice(MANAGER_BULK_SELECTION_MAX), nextCursor: null })
           : json({ media: rows.slice(0, MANAGER_BULK_SELECTION_MAX), nextCursor: 'page-two' });
       }
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -1449,7 +1465,8 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    expect(await screen.findByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    expect(await screen.findByRole('heading', { name: 'Shared gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
     const choices = await screen.findAllByRole('checkbox', { name: /^Select /u });
     expect(choices).toHaveLength(MANAGER_BULK_SELECTION_MAX + 1);
@@ -1949,7 +1966,7 @@ describe('manager experience', () => {
     expect(screen.getByLabelText('Management link')).toBeVisible();
   });
 
-  it('opens on live intake, filters by guest name, and keeps gallery publishing secondary', async () => {
+  it('opens on live intake, filters by guest name, and keeps the shared gallery secondary', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
@@ -1965,6 +1982,7 @@ describe('manager experience', () => {
           { id: 'media-b', originalFilename: 'dance.png', guestName: 'Jamie', caption: 'First dance', publicationStatus: 'unpublished', uploadState: 'stored' },
         ] });
       }
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -1991,7 +2009,8 @@ describe('manager experience', () => {
     await user.click(galleryNavigation);
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
     await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(

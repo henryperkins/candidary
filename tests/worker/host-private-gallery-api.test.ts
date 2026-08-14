@@ -1,0 +1,249 @@
+import { env } from 'cloudflare:workers';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { createApp } from '../../worker/app';
+import { eventAccess, origin, resetDatabase, testEnv, writeHeaders } from './helpers';
+
+beforeEach(resetDatabase);
+afterEach(() => {
+  delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+});
+
+type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+function mediaId(index: number) {
+  return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+}
+
+async function seedStored(
+  access: Access,
+  index: number,
+  options: {
+    timelineAt?: string;
+    guestName?: string;
+    caption?: string | null;
+    filename?: string;
+    favoritedAt?: string | null;
+    deletedAt?: string | null;
+  } = {},
+) {
+  const session = await env.DB
+    .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+    .bind(access.event.id)
+    .first<{ id: string }>();
+  if (!session) throw new Error('Expected a guest session for the seeded event.');
+  const id = mediaId(index);
+  await env.DB.prepare(`
+    INSERT INTO media (
+      id, event_id, uploader_session_id, object_key, object_bucket_generation,
+      original_filename, mime_type, declared_byte_size, byte_size, width, height,
+      guest_name, caption, upload_state, publication_status, idempotency_key,
+      reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+      favorited_at, deleted_at
+    ) VALUES (?, ?, ?, ?, 'canonical', ?, 'image/jpeg', 1024, 1024, 800, 600,
+      ?, ?, 'stored', 'unpublished', ?, ?, ?, ?, NULL, ?, ?, ?)
+  `).bind(
+    id,
+    access.event.id,
+    session.id,
+    `events/${access.event.id}/media/final/${id}`,
+    options.filename ?? `seed-${index}.jpg`,
+    options.guestName ?? 'Avery Stone',
+    options.caption ?? null,
+    `seed-${index}`,
+    '2026-09-19T00:00:00.000Z',
+    '2026-09-19T00:00:00.000Z',
+    '2026-09-19T00:00:00.000Z',
+    options.timelineAt ?? '2026-09-19T10:00:00.000Z',
+    options.favoritedAt ?? null,
+    options.deletedAt ?? null,
+  ).run();
+  return id;
+}
+
+function gallery(access: Access, query = '') {
+  return createApp().request(`/api/manage/events/${access.event.id}/gallery${query}`, {
+    headers: { cookie: access.manager.cookie },
+  }, testEnv);
+}
+
+describe('host private gallery API', () => {
+  it('refuses a private gallery read without a manager session', async () => {
+    const access = await eventAccess();
+    const missing = await createApp().request(
+      `/api/manage/events/${access.event.id}/gallery`,
+      {},
+      testEnv,
+    );
+    expect(missing.status).toBe(401);
+    expect((await missing.json<any>()).code).toBe('SESSION_REQUIRED');
+
+    const guest = await createApp().request(
+      `/api/manage/events/${access.event.id}/gallery`,
+      { headers: writeHeaders(access.guest) },
+      testEnv,
+    );
+    expect(guest.status).toBe(403);
+    expect((await guest.json<any>()).code).toBe('ROLE_FORBIDDEN');
+  });
+
+  it('returns the earliest-first gallery view and a chronological cursor', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { timelineAt: '2026-09-19T12:00:00.000Z' });
+    await seedStored(access, 2, { timelineAt: '2026-09-19T11:00:00.000Z', favoritedAt: '2026-09-19T11:30:00.000Z' });
+    await seedStored(access, 3, { timelineAt: '2026-09-19T11:00:00.000Z' });
+
+    const first = await gallery(access, '?limit=2');
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<any>();
+    expect(firstBody.data.media.map((media: { id: string }) => media.id))
+      .toEqual([mediaId(2), mediaId(3)]);
+    expect(firstBody.data.nextCursor).toEqual(expect.any(String));
+    expect(firstBody.data.media[0]).toEqual({
+      id: mediaId(2),
+      originalFilename: 'seed-2.jpg',
+      guestName: 'Avery Stone',
+      caption: null,
+      publicationStatus: 'unpublished',
+      previewAvailable: false,
+      width: 800,
+      height: 600,
+      receivedAt: '2026-09-19T00:00:00.000Z',
+      timelineAt: '2026-09-19T11:00:00.000Z',
+      timelineSource: 'received',
+      isFavorite: true,
+    });
+
+    const second = await gallery(access, `?limit=2&cursor=${encodeURIComponent(firstBody.data.nextCursor)}`);
+    const secondBody = await second.json<any>();
+    expect(secondBody.data.media.map((media: { id: string }) => media.id)).toEqual([mediaId(1)]);
+    expect(secondBody.data.nextCursor).toBeNull();
+  });
+
+  it('applies search and favorites and validates the parameter contract', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { guestName: 'Jose', timelineAt: '2026-09-19T10:00:00.000Z' });
+    await seedStored(access, 2, { guestName: 'Maya', favoritedAt: '2026-09-19T11:00:00.000Z' });
+
+    const searched = await gallery(access, '?query=JOSE');
+    expect((await searched.json<any>()).data.media.map((media: { id: string }) => media.id))
+      .toEqual([mediaId(1)]);
+    const favorites = await gallery(access, '?favorites=1');
+    expect((await favorites.json<any>()).data.media.map((media: { id: string }) => media.id))
+      .toEqual([mediaId(2)]);
+
+    expect((await gallery(access, '?favorites=0')).status).toBe(422);
+    expect((await gallery(access, `?query=${'x'.repeat(121)}`)).status).toBe(422);
+    expect((await gallery(access, '?cursor=not-a-cursor')).status).toBe(422);
+  });
+
+  it('writes and clears a favorite idempotently with CSRF and origin guards', async () => {
+    const access = await eventAccess();
+    const id = await seedStored(access, 1);
+
+    const noCsrf = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: {
+          cookie: access.manager.cookie,
+          'content-type': 'application/json',
+          origin,
+        },
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect(noCsrf.status).toBe(403);
+    expect((await noCsrf.json<any>()).code).toBe('CSRF_INVALID');
+
+    const set = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect(set.status).toBe(200);
+    expect((await set.json<any>()).data.media.isFavorite).toBe(true);
+
+    const repeated = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect((await repeated.json<any>()).data.media.isFavorite).toBe(true);
+
+    const cleared = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ favorite: false }),
+      },
+      testEnv,
+    );
+    expect((await cleared.json<any>()).data.media.isFavorite).toBe(false);
+  });
+
+  it('refuses favorite writes for invalid bodies, guests, foreign, and removed media', async () => {
+    const access = await eventAccess();
+    const other = await eventAccess('Other Event');
+    const id = await seedStored(access, 1);
+    const removedId = await seedStored(access, 2, {
+      deletedAt: '2026-09-19T12:00:00.000Z',
+    });
+
+    const invalid = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ favorite: 'yes' }),
+      },
+      testEnv,
+    );
+    expect(invalid.status).toBe(422);
+
+    const guest = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.guest),
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect(guest.status).toBe(403);
+
+    const foreign = await createApp().request(
+      `/api/manage/events/${other.event.id}/media/${id}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(other.manager),
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect(foreign.status).toBe(403);
+    expect((await foreign.json<any>()).code).toBe('RESOURCE_FORBIDDEN');
+
+    const removed = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${removedId}/favorite`,
+      {
+        method: 'PUT',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect(removed.status).toBe(409);
+    expect((await removed.json<any>()).code).toBe('MEDIA_STATE_CONFLICT');
+  });
+});

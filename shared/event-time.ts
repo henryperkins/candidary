@@ -223,9 +223,10 @@ export function localTimeForInstant(instant: string, timeZone: string): string {
 /**
  * The absolute instant of a local wall-clock date and time in `timeZone`.
  *
- * The event's start is a time the host reads off a card, not a timestamp a
- * browser computed, so the same rule as `endOfLocalDate` applies: only the
- * event's own zone may turn it into an instant.
+ * The event's start is a time the host reads off a card, and a photo's capture
+ * time is a time the device wrote down — not timestamps the process computed —
+ * so the same rule as `endOfLocalDate` applies: only the event's own zone may
+ * turn either one into an instant.
  *
  * Both discontinuities are answered explicitly rather than left to whatever a
  * conversion library would do:
@@ -243,23 +244,16 @@ export function localTimeForInstant(instant: string, timeZone: string): string {
  * is discarded. So a skipped hour produces no candidate at all, and a repeated
  * hour produces two, of which the earlier is returned.
  */
-export function instantForLocalDateTime(
+function resolveWallClockInstant(
   dateOnly: string,
-  timeOfDay: string,
+  hour: number,
+  minute: number,
+  second: number,
   timeZone: string,
 ): string {
   const formatter = requireFormatter(timeZone);
   const date = parseCalendarDate(dateOnly);
-  const match = TIME_OF_DAY.exec(timeOfDay);
-  if (!match) {
-    throw new RangeError('Choose a valid start time in 24-hour HH:MM form.');
-  }
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  if (hour > 23 || minute > 59) {
-    throw new RangeError('Choose a valid start time in 24-hour HH:MM form.');
-  }
-  const target = Date.UTC(date.year, date.month - 1, date.day, hour, minute);
+  const target = Date.UTC(date.year, date.month - 1, date.day, hour, minute, second);
 
   const offsets = new Set<number>();
   for (let probe = target - WINDOW_MS; probe <= target + WINDOW_MS; probe += PROBE_STEP_MS) {
@@ -276,4 +270,43 @@ export function instantForLocalDateTime(
     throw new RangeError('That start time does not exist on that date in this time zone.');
   }
   return new Date(earliest).toISOString();
+}
+
+export function instantForLocalDateTime(
+  dateOnly: string,
+  timeOfDay: string,
+  timeZone: string,
+): string {
+  const match = TIME_OF_DAY.exec(timeOfDay);
+  if (!match) {
+    throw new RangeError('Choose a valid start time in 24-hour HH:MM form.');
+  }
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) {
+    throw new RangeError('Choose a valid start time in 24-hour HH:MM form.');
+  }
+  return resolveWallClockInstant(dateOnly, hour, minute, 0, timeZone);
+}
+
+/**
+ * The same probe solver as `instantForLocalDateTime`, but second-precise.
+ *
+ * EXIF `DateTimeOriginal` carries a complete wall-clock second and must not be
+ * truncated to the minute before the zone resolves it: a spring-forward gap is
+ * still rejected and a fall-back overlap still resolves to the earlier
+ * occurrence, with the second preserved through the conversion.
+ */
+export function instantForLocalDateTimeSeconds(
+  dateOnly: string,
+  hour: number,
+  minute: number,
+  second: number,
+  timeZone: string,
+): string {
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || !Number.isInteger(second)
+    || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    throw new RangeError('That local time does not exist in this time zone.');
+  }
+  return resolveWallClockInstant(dateOnly, hour, minute, second, timeZone);
 }

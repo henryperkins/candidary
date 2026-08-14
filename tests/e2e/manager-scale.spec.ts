@@ -88,45 +88,41 @@ test('paginates intake instead of loading every stored photo', async ({ page }) 
   expect(secondPageSize.scrollWidth).toBeLessThanOrEqual(secondPageSize.clientWidth + 1);
 });
 
-test('exposes export in the mobile share section rather than below the intake grid', async ({ page }) => {
+test('exposes the one export control inside the private gallery', async ({ page }) => {
   await stubManagerRoutes(page, { mediaPages, event: { storedMediaCount: STORED_PHOTOS } });
 
-  // The Share placement is the phone's, so pin the phone rather than inherit the project viewport.
+  // A phone, not whichever viewport the project happens to carry.
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await expect(page.locator('.moderation-grid')).toBeVisible();
-  // Intake is where the 120-photo grid lives. At phone width it carries no export control at all, so
-  // there is nothing to bury underneath that grid — the rail copy is the only one in the document.
-  await expect(page.locator('.manager-export-panel')).toHaveCount(1);
-  await expect(page.locator('.manager-export-panel')).toBeHidden();
+  // Intake carries no export control at all: the 120-photo grid has nothing to bury underneath it.
+  await expect(page.locator('.gallery-export')).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Share', exact: true }).click();
-  const sharePanel = page.locator('.manager-export-panel--share');
-  const utilityPanel = page.locator('.manager-export-panel--utility');
-  await expect(sharePanel).toBeVisible();
-  // One presentation reused: only the Share copy is on screen at phone widths.
-  await expect(utilityPanel).toBeHidden();
+  await page.getByRole('button', { name: 'Gallery', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  const control = page.locator('.gallery-export');
+  await expect(control).toBeVisible();
+  await expect(page.locator('.gallery-export')).toHaveCount(1);
 
-  const prepare = sharePanel.getByRole('button', { name: 'Prepare download' });
+  const prepare = control.getByRole('button', { name: 'Download all' });
   await expect(prepare).toBeVisible();
   const prepareSize = await measureTarget(prepare);
   expect(prepareSize.width).toBeGreaterThanOrEqual(44);
   expect(prepareSize.height).toBeGreaterThanOrEqual(44);
 
-  // Share is short enough that the whole export panel is reached within one screen of scrolling from
-  // the top of the manager — the property that makes attaching it here worth anything.
-  const bounds = await measureFold(page, sharePanel);
+  // The export control sits beside the header, reached within one screen of the gallery.
+  const bounds = await measureFold(page, control);
   expect(bounds.bottom, 'export reached within one screen of scrolling').toBeLessThanOrEqual(bounds.fold * 2);
 
-  const shareSize = await measureDocument(page);
-  expect(shareSize.scrollWidth).toBeLessThanOrEqual(shareSize.clientWidth + 1);
+  const phoneSize = await measureDocument(page);
+  expect(phoneSize.scrollWidth).toBeLessThanOrEqual(phoneSize.clientWidth + 1);
 
-  // Past the 761 px enhancement the utility rail is on screen and carries the same panel instead.
+  // The same single control serves the wide rail layout too.
   await page.setViewportSize({ width: 768, height: 900 });
-  await expect(utilityPanel).toBeVisible();
-  await expect(sharePanel).toBeHidden();
-  await expect(utilityPanel.getByRole('button', { name: 'Prepare download' })).toBeVisible();
+  await expect(control).toBeVisible();
+  await expect(page.locator('.gallery-export')).toHaveCount(1);
+  await expect(control.getByRole('button', { name: 'Download all' })).toBeVisible();
 
   const wideSize = await measureDocument(page);
   expect(wideSize.scrollWidth).toBeLessThanOrEqual(wideSize.clientWidth + 1);

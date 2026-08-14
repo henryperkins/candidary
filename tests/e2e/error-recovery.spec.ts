@@ -304,7 +304,13 @@ async function openGallery(page: Page) {
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+}
+
+async function openSharedGallery(page: Page) {
+  await openGallery(page);
+  await page.getByRole('button', { name: 'Shared gallery' }).click();
+  await expect(page.getByRole('heading', { name: 'Shared gallery' })).toBeVisible();
   await expect(page.locator('.moderation-grid article')).toHaveCount(2);
 }
 
@@ -336,7 +342,7 @@ async function expectRecoverableNotice(page: Page, survivingHeading: string) {
 }
 
 test('a refused bulk publish keeps the gallery, its filter, and the selection', async ({ page }) => {
-  await openGallery(page);
+  await openSharedGallery(page);
   await page.route(`${MANAGER_BASE}/media/bulk`, (route) => route.fulfill({
     status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
   }));
@@ -346,15 +352,21 @@ test('a refused bulk publish keeps the gallery, its filter, and the selection', 
   await expect(page.getByText('1 selected')).toBeVisible();
   await page.getByRole('button', { name: 'Publish selected' }).click();
 
-  await expectRecoverableNotice(page, 'Gallery publishing');
+  await expectRecoverableNotice(page, 'Shared gallery');
   // The filter the host had chosen and the selection they had made are both still true.
   await expect(page.locator('.filter-tabs button.active')).toHaveText('unpublished');
   await expect(page.getByText('1 selected')).toBeVisible();
   await expect(first.getByRole('checkbox')).toBeChecked();
 });
 
-test('a refused delete leaves the photo and the card it was deleted from', async ({ page }) => {
-  await openGallery(page);
+test('a refused delete in Live Intake leaves the photo and the card it was deleted from', async ({ page }) => {
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(2, 'unpublished'), nextCursor: null } },
+    event: { storedMediaCount: 2 },
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.route(new RegExp(`/api/manage/events/${EVENT_FIXTURE.id}/media/[^/]+$`, 'u'), (route) => route.fulfill({
     status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
   }));
@@ -362,27 +374,26 @@ test('a refused delete leaves the photo and the card it was deleted from', async
   const first = page.locator('.moderation-grid article').first();
   await first.getByRole('button', { name: `Delete ${LONG_FILENAME}` }).click();
 
-  await expectRecoverableNotice(page, 'Gallery publishing');
+  await expectRecoverableNotice(page, 'Live intake');
   // A refused delete that removed the card anyway would be the worst possible lie about a photo.
   await expect(first.locator('strong')).toHaveText(LONG_FILENAME);
 });
 
-test('a refused export request keeps the share section and the control that asked for it', async ({ page }) => {
+test('a refused export request keeps the gallery and the control that asked for it', async ({ page }) => {
   await openGallery(page);
   await page.route(`${MANAGER_BASE}/exports`, (route) => route.request().method() === 'POST'
     ? route.fulfill({ status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' } })
     : route.fallback());
 
-  await page.locator('.manager-nav nav button').filter({ hasText: 'Share' }).click();
-  const panel = page.locator('.manager-export-panel--share');
-  await expect(panel).toBeVisible();
-  await panel.getByRole('button', { name: 'Prepare download' }).click();
+  const control = page.locator('.gallery-export');
+  await expect(control).toBeVisible();
+  await control.getByRole('button', { name: 'Download all' }).click();
 
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
-  await expect(page.getByRole('heading', { name: 'Share your event' })).toBeVisible();
-  // The panel that asked is still there, still able to ask again, rather than a dead section.
-  await expect(panel.getByRole('button', { name: 'Prepare download' })).toBeEnabled();
+  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  // The control that asked is still there, still able to ask again, rather than a dead section.
+  await expect(control.getByRole('button', { name: 'Download all' })).toBeEnabled();
   await expectContained(page);
 
   await page.getByRole('button', { name: 'Dismiss error', exact: true }).click();
