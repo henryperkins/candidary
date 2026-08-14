@@ -97,15 +97,15 @@ function bucketEvidence(): CanonicalMediaBucketProvisioningEvidenceV1 {
 }
 
 describe('media upload release configs', () => {
-  it('keeps the checked-in copy-only config consumable by the release verifier', () => {
+  it('keeps the checked-in live config consumable by the release verifier', () => {
     expect(verifyMediaUploadReleaseContract(
       resolve('config/media-upload-release.json'),
-      'canonical-copy-only',
+      'canonical-live',
     ).artifact).toEqual({
       kind: 'candidary.media-upload-release',
       schemaVersion: 2,
-      mode: 'canonical-copy-only',
-      capabilities: { ...CANONICAL_COPY_ONLY_CAPABILITIES },
+      mode: 'canonical-live',
+      capabilities: { ...CANONICAL_LIVE_CAPABILITIES },
     });
   });
 
