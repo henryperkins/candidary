@@ -46,6 +46,11 @@ Workers Builds supplies `WORKERS_CI_BRANCH` and `WORKERS_CI_COMMIT_SHA`. The bui
 `dist/candidary/wrangler.json`, and the deploy script validates the generated Worker's exact name and
 resource topology before upload.
 
+Use two Builds triggers against the same repository connection: the `main` trigger belongs to the
+`candidary` Worker, and the non-production trigger belongs to the `candidary-preview` Worker. Do not
+attach the non-production trigger to `candidary`; connected Builds override a mismatched generated
+Worker name with the trigger owner's name, which would defeat preview isolation.
+
 Production remains the only environment with custom domains, Cron triggers, and an email binding.
 Production bindings are:
 

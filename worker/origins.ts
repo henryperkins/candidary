@@ -53,10 +53,10 @@ export function isApplicationOrigin(env: AppEnv, value: string | undefined | nul
  * bounces their browser to the other domain mid-session.
  *
  * An unrecognized host falls back to the canonical origin rather than echoing
- * itself. The committed configuration disables public Workers development
- * routes because uploaded versions use the production bindings, but this check
- * remains the safe boundary if a dashboard change or another upload ever routes
- * an extra hostname here. Echoing one back would put that hostname into a
+ * itself. Production disables public Workers development routes. The isolated
+ * preview Worker accepts only its configured root and exact preview-alias
+ * family. This check remains the safe boundary if a dashboard change ever
+ * routes another hostname here: echoing it back would put that hostname into a
  * printed QR or a management link a host then saves.
  */
 export function requestOrigin(context: Context<AppBindings>): string {
