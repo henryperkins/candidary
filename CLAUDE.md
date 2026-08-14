@@ -14,9 +14,12 @@ npm test               # test:unit + test:worker
 npm run test:unit      # jsdom: tests/unit + tests/ui
 npm run test:worker    # workerd (vitest-pool-workers): tests/worker
 npm run test:e2e       # Playwright against a built `vite preview`
+npm run test:smoke     # one smoke case against an already-built artifact; never builds
 npm run verify:bindings    # fail if generated Worker binding types drift
-npm run verify:fresh-d1 -- --run-root <existing-absolute-temp>/candidary-release-<id> --report-file <run-root>/migration-verification.json
-npm run verify:release -- --sha <full-commit> --base-sha 0b92387d2e237d568d2514373dcc3044e7960d4b
+npm run build:cloudflare   # one typecheck and one Vite build; selects preview off main
+npm run deploy             # one build followed by deployment of that exact artifact
+npm run deploy:built       # production deploy only; never installs, builds, tests, or migrates
+npm run ci:migrations      # fresh local D1 only when migration-sensitive files changed
 npm run test:load:wedding   # dry-run plan unless CANDIDARY_LOAD_CONFIRM is set
 npm run test:load:rsvp      # dry-run plan unless CANDIDARY_RSVP_CONFIRM is set
 npm run build:cover-presets    # regenerate the 720-file preset matrix (needs headless Chromium)
@@ -52,17 +55,18 @@ binding, daily cleanup and hourly notification-dispatch scheduled jobs, and the 
 `MEDIA_BUCKET` (private R2), `IMAGES`, `EXPORT_WORKFLOW`, `COVER_RENDER_WORKFLOW`,
 `COVER_BACKFILL_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`,
 `GUEST_MESSAGE_RATE_LIMIT`, and `ASSETS`.
-`CF_VERSION_METADATA` supplies the deployed Worker version identity used by release certification.
+`CF_VERSION_METADATA` exposes Cloudflare's deployed Worker version metadata.
 
 Three build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`),
-`tsconfig.worker.json` (`worker`, `tests/worker`), and `tsconfig.scripts.json` (release and operational
+`tsconfig.worker.json` (`worker`, `tests/worker`), and `tsconfig.scripts.json` (build and operational
 scripts plus Vite/Vitest configuration). The app and Worker projects include `shared/`, which is imported by relative
 path (`../../shared/constants`) from either side — there are no path aliases. The separate
 `tsconfig.e2e.json` covers `tests/e2e`, `shared`, and `playwright.config.ts`; run
-`npm run typecheck:e2e` because `npm run typecheck` does not include it. `verify:release` is the
-immutable aggregate candidate gate: it imports the target commit's own dependency-free runner in a
-detached temporary worktree and leaves the caller checkout, including dirty or untracked files,
-untouched. It creates local evidence only; deployment and remote migration remain separate authority.
+`npm run typecheck:e2e` because `npm run typecheck` does not include it. Routine deployment is the
+short path documented in `docs/deployment.md`: protected pull request, one Cloudflare build, then
+deployment of that exact generated artifact. Full browser coverage is nightly/manual. Fresh-D1 work
+is conditional on migration-sensitive changes. There is no candidate-manifest or release-evidence
+workflow.
 
 ### Authorization
 
@@ -260,7 +264,7 @@ objects nothing can find again.
   constraint. Event covers are a separate intake with its own list: `COVER_UPLOAD_MIME_TYPES` is an
   independent literal tuple, never a filter over `SUPPORTED_IMAGE_TYPES`, so a new guest-media format
   cannot silently widen what a cover accepts. Widening it also means a new migration for the CHECK
-  constraint introduced by `0012` and the real Images conformance gate in the design spec's §15.5.
+  constraint introduced by `0012` and verification against real Images in an isolated preview.
 - **New application origin**: add it to `ALTERNATE_ORIGINS` in `wrangler.jsonc`, to
   `KNOWN_APPLICATION_ORIGINS` in `shared/origins.ts`, and to `config/r2-cors.json`, then attach it as a
   Custom Domain. Missing the first fails every write with `ORIGIN_FORBIDDEN`; missing the third fails

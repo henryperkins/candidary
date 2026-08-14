@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import { applicationOrigins, canonicalOrigin, isApplicationOrigin, requestOrigin } from '../../worker/origins';
+import { PREVIEW_APPLICATION_ROOT_ORIGIN } from '../../shared/origins';
+import type { AppEnv } from '../../worker/env';
 import { unsubscribeUrl } from '../../worker/services/notifications';
 import { cookiesFrom, exchangeEventEntry, origin, resetDatabase, testEnv } from './helpers';
 
@@ -54,6 +56,20 @@ describe('the origins a deployment answers on', () => {
       env: testEnv,
     } as unknown as Parameters<typeof requestOrigin>[0];
     expect(requestOrigin(context)).toBe(origin);
+  });
+
+  it('accepts preview aliases only when the deployment itself is the preview Worker', () => {
+    const alias = 'feature-release-candidary-preview.lfd.workers.dev';
+    const aliasOrigin = `https://${alias}`;
+    const previewEnv = {
+      ...testEnv,
+      APP_ORIGIN: PREVIEW_APPLICATION_ROOT_ORIGIN,
+      ALTERNATE_ORIGINS: '',
+    } as AppEnv;
+
+    expect(isApplicationOrigin(previewEnv, aliasOrigin)).toBe(true);
+    expect(isApplicationOrigin(testEnv, aliasOrigin)).toBe(false);
+    expect(isApplicationOrigin(previewEnv, `${aliasOrigin}.evil.test`)).toBe(false);
   });
 });
 

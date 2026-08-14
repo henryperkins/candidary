@@ -40,7 +40,11 @@ Generate independent local secrets with Node:
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Run that command seven times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, `LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY`. `GUEST_TOKEN_ENCRYPTION_KEY` and `ENTRY_ENCRYPTION_KEY` must each be exactly 32 bytes encoded as base64url. Direct upload URLs also require an R2 API token in `.dev.vars`.
+Run that command eight times. Use separate values for `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`,
+`GUEST_TOKEN_ENCRYPTION_KEY`, `LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`,
+`RSVP_LOOKUP_HMAC_KEY`, and `GUEST_MESSAGE_HMAC_KEY`. `GUEST_TOKEN_ENCRYPTION_KEY` and
+`ENTRY_ENCRYPTION_KEY` must each be exactly 32 bytes encoded as base64url. Direct upload URLs also
+require an R2 API token in `.dev.vars`.
 
 `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, and `RSVP_LOOKUP_HMAC_KEY` are persisted-data keys, not rotation controls: rotating one without a re-encryption or re-digest migration breaks every printed QR or the roster lookup. See [security.md](docs/security.md).
 
@@ -53,28 +57,22 @@ npm test
 npm run typecheck
 npm run typecheck:e2e
 npm run lint
-npm run build
 npm run verify:bindings
-npm run verify:fresh-d1 -- --run-root <absolute-candidary-release-temp-root> --report-file <root>/migration-verification.json
-npm run test:e2e
-npm run test:load:wedding
-npm run test:load:rsvp
+npm run build:cloudflare
+npm run test:smoke
 ```
 
-Both load commands are dry runs unless an operator supplies a dedicated rehearsal event and the explicit live confirmation described in [operations.md](docs/operations.md). Browser automation at 390 by 844 pixels supplements—but does not replace—physical iPhone Safari and Android Chrome acceptance.
-
-For an immutable local release candidate, commit the complete candidate first and pass both exact
-commit IDs to the aggregate gate:
+Pull requests run those checks in parallel. The build job creates one artifact and the smoke job uses
+that artifact without rebuilding. Fresh-D1 verification runs only when migration-sensitive files
+change. The complete Playwright matrix is nightly/manual and remains available on demand:
 
 ```powershell
-$reviewedSha = git rev-parse HEAD
-npm run verify:release -- --sha $reviewedSha --base-sha 0b92387d2e237d568d2514373dcc3044e7960d4b
+npm run test:e2e
 ```
 
-The command verifies a detached temporary worktree, including a fresh local D1 through
-`npm run verify:fresh-d1`, and writes redacted evidence under `output/release/`. It does not migrate
-remote D1, deploy, certify a runtime, or replace physical-device rehearsal. See
-[deployment.md](docs/deployment.md) for the evidence and authorization boundaries.
+Deploy a routine change with `npm run deploy`, or merge a protected pull request and let Cloudflare
+Workers Builds run the same one-build path. Database migrations remain explicit and conditional.
+See [deployment.md](docs/deployment.md).
 
 ## Architecture
 

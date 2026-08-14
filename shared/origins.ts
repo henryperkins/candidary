@@ -14,6 +14,12 @@ export const KNOWN_APPLICATION_ORIGINS = [
   'https://candidary.online',
 ] as const;
 
+export const PREVIEW_APPLICATION_ROOT_ORIGIN =
+  'https://candidary-preview.lfd.workers.dev' as const;
+
+const PREVIEW_APPLICATION_ROOT_HOST = new URL(PREVIEW_APPLICATION_ROOT_ORIGIN).hostname;
+const PREVIEW_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,44}$/u;
+
 const ROOT_HTTP_ORIGIN = /^https?:\/\/[^/?#\\@\s]+\/?$/iu;
 
 /**
@@ -59,8 +65,22 @@ export function parseOriginList(value: string | undefined | null): string[] {
     .filter((origin): origin is string => origin !== null);
 }
 
+export function isPreviewApplicationOrigin(value: string | undefined | null): boolean {
+  const origin = normalizeOrigin(value);
+  if (origin === null) return false;
+  const url = new URL(origin);
+  if (url.protocol !== 'https:' || url.port) return false;
+  if (url.hostname === PREVIEW_APPLICATION_ROOT_HOST) return true;
+  const suffix = `-${PREVIEW_APPLICATION_ROOT_HOST}`;
+  if (!url.hostname.endsWith(suffix)) return false;
+  return PREVIEW_ALIAS_PATTERN.test(url.hostname.slice(0, -suffix.length));
+}
+
 /** The browser-side counterpart to the Worker's `isApplicationOrigin`. */
 export function isKnownApplicationOrigin(value: string | undefined | null): boolean {
   const origin = normalizeOrigin(value);
-  return origin !== null && (KNOWN_APPLICATION_ORIGINS as readonly string[]).includes(origin);
+  return origin !== null && (
+    (KNOWN_APPLICATION_ORIGINS as readonly string[]).includes(origin)
+    || isPreviewApplicationOrigin(origin)
+  );
 }

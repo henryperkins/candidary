@@ -586,13 +586,3 @@ export interface FeedItem {
   createdAt: string;
   mediaId: string | null;
 }
-
-export interface ReleaseCertificationRow {
-  worker_version_id: string;
-  build_sha: string;
-  guest_journey_version: number;
-  migration_manifest_sha256: string;
-  evidence_manifest_sha256: string;
-  physical_evidence_refs_json: string;
-  certified_at: string;
-}

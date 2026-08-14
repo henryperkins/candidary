@@ -97,7 +97,8 @@ and the five-preview cap have separate assertions.
 This is Chromium automation against local stateful route fixtures and deterministic image bytes. It
 does not prove real Cloudflare Images codecs/HEIC/metadata stripping, Workflow lifecycle behavior,
 remote D1, a deployed route, Safari/WebKit, a native picker, a physical device, VoiceOver, or TalkBack.
-Those remain staging, production, and physical gates in `docs/deployment.md`.
+Use the isolated preview for Cloudflare platform behavior and separate manual checks for physical
+devices; neither is a blanket gate on unrelated routine changes.
 
 ## Curated private Guestbook evidence
 
@@ -110,7 +111,7 @@ and safe Manager route fixtures.
 | Guest placement and receipt | `core-journey.spec.ts`, `guest-responsive.spec.ts`, and `accessibility.spec.ts` cover the first secondary `Guestbook`, the sole terminal `Leave a guestbook note` action, post-commit heading focus, keyboard-only send, polite confirmation, gallery-off privacy, and reduced-motion `auto` rather than smooth scrolling. | The focused four-file Chromium matrix passed 116 cases with 12 intentional project skips. It does not establish native screen-reader or physical-device behavior. |
 | Responsive and text containment | Guest and Manager cases exercise 320 × 844, 390 × 844, representative desktop, 640 × 450 as a 1280-at-200%-zoom equivalent, and 320-pixel 400%-zoom-equivalent containment with the 160-character prompt, 500-character body, 80-character name, Unicode, RTL, `dir="auto"`, 44-pixel targets, focus indicators, and no horizontal document overflow. | These are CSS-viewport Chromium checks, not browser UI zoom certification or Safari/WebKit evidence. |
 | Manager curation | `manager-responsive.spec.ts` covers the `Guestbook` destination, `Guestbook from the day`, pending-only badge, all visibility/source controls, gallery-off captions, keyboard-only moderation, row-local live announcements, focus restoration with `preventScroll`, and preservation of the scroll position captured immediately before the confirmed row update. | Stubbed safe Manager endpoints prove client behavior, not deployed authorization, remote D1 state, or production polling. |
-| Printable and private artifacts | `accessibility.spec.ts` renders the real `buildGuestbookHtml` output with `page.setContent`, verifies semantic `article[dir="auto"]`, escaped contributed text, no script/form/remote asset, zero requests, at least 7:1 body contrast, axe-clean screen and emulated print media, white print background, and `break-inside: avoid`. The printable HTML remains shared-keepsake-only; the complete non-deleted private CSV remains a separate labelled artifact. | Local Chromium screen and print-media emulation is not an operating-system print-dialog check, common-browser manual print proof, or common-spreadsheet CSV opening. Physical iPhone/Android, VoiceOver/TalkBack, degraded-network rehearsal, immutable release-candidate verification, remote migration, deployment, and runtime certification remain separate gates. |
+| Printable and private artifacts | `accessibility.spec.ts` renders the real `buildGuestbookHtml` output with `page.setContent`, verifies semantic `article[dir="auto"]`, escaped contributed text, no script/form/remote asset, zero requests, at least 7:1 body contrast, axe-clean screen and emulated print media, white print background, and `break-inside: avoid`. The printable HTML remains shared-keepsake-only; the complete non-deleted private CSV remains a separate labelled artifact. | Local Chromium screen and print-media emulation is not an operating-system print-dialog check, common-browser manual print proof, or common-spreadsheet CSV opening. Physical iPhone/Android, VoiceOver/TalkBack, degraded-network rehearsal, remote migration, and deployment are separate checks when the affected surface requires them. |
 
 The final zero-tolerance snapshot matrix was inspected at original resolution. New evidence is
 `guest-default-guestbook-390-mobile-win32.png` (390 × 1682) and
@@ -246,4 +247,6 @@ automatic-transition, or manager photo-intake screenshot is claimed.
 
 No material mismatch remains between the approved wedding photo-drop journey and the reviewed browser evidence. The original serious `color-contrast` finding on the guest and landing surfaces was resolved without changing a global design-system token. The later Chestnut/Denim migration changed the documented global palette while preserving those contrast relationships; the scoped event overlay adds only the documented compatibility corrections and curated event appearances. `design-qa.md` records what moved, the resulting ratios, and the fact that global muted ink on parchment clears the threshold by only 0.0046.
 
-Physical iPhone and Android checks remain release gates because desktop browser emulation cannot prove native camera-picker behavior. The automated accessibility engine, tracked baselines, and geometry assertions are supporting evidence, not a substitute for those gates — `docs/deployment.md` lists them.
+Physical iPhone and Android checks remain separate manual acceptance checks because desktop browser
+emulation cannot prove native camera-picker behavior. They are required when accepting changes to
+that surface, not as a blanket blocker for unrelated deployments.

@@ -6,7 +6,7 @@ import { createElement } from 'react';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildDeploymentCommandPlan } from '../../scripts/deploy-release';
+import { buildDeploymentCommandPlan } from '../../scripts/deploy-built';
 import { createAppRouter } from '../../src/app/router';
 
 const root = process.cwd();
@@ -109,27 +109,23 @@ describe('iOS web app metadata', () => {
     expect(iconSource).not.toMatch(/#42103b|#f3a578/iu);
   });
 
-  it('enforces resolved PWA artifact verification in the deployment command', () => {
+  it('builds once locally and deploys only the resulting artifact', () => {
     const packageJson = JSON.parse(readText('package.json')) as {
       scripts?: Record<string, string>;
     };
 
     expect(packageJson.scripts?.deploy)
-      .toBe('node --experimental-strip-types scripts/deploy-release.ts');
+      .toBe('npm run build:cloudflare && npm run deploy:built');
 
     const plan = buildDeploymentCommandPlan({
-      candidateRoot: root,
-      deployRoot: fromRoot('output/sealed-deploy'),
+      repositoryRoot: root,
+      target: 'production',
       sha: 'a'.repeat(40),
       nodeExecPath: process.execPath,
-      npmCliPath: fromRoot('tooling/npm-cli.js'),
       wranglerCliPath: fromRoot('node_modules/wrangler/bin/wrangler.js'),
-      prerequisiteEnv: {},
-      deployEnv: {},
+      environment: {},
     });
-    expect(plan.map((command) => command.id)).toEqual([
-      'npm-ci', 'build', 'verify-pwa-build', 'deploy',
-    ]);
+    expect(plan.map((command) => command.id)).toEqual(['deploy']);
   });
 });
 

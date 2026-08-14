@@ -16,7 +16,6 @@ import { manageRoutes } from './routes/manage';
 import { manageRsvpRoutes } from './routes/manage-rsvp';
 import { messageRoutes } from './routes/messages';
 import { publicRoutes } from './routes/public';
-import { resolveRuntimeReleaseIdentity } from './release-identity';
 import { rsvpRoutes } from './routes/rsvp';
 import { uploadRoutes } from './routes/uploads';
 
@@ -25,7 +24,6 @@ export function createApp() {
 
   app.use('*', async (context, next) => {
     context.set('requestId', crypto.randomUUID());
-    context.set('releaseIdentity', resolveRuntimeReleaseIdentity(context.env));
     await next();
   });
   app.use('*', securityHeaders);

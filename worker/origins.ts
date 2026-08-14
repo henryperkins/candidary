@@ -1,6 +1,11 @@
 import type { Context } from 'hono';
 
-import { normalizeOrigin, parseOriginList } from '../shared/origins';
+import {
+  PREVIEW_APPLICATION_ROOT_ORIGIN,
+  isPreviewApplicationOrigin,
+  normalizeOrigin,
+  parseOriginList,
+} from '../shared/origins';
 import type { AppBindings, AppEnv } from './env';
 
 /**
@@ -29,7 +34,13 @@ export function applicationOrigins(env: AppEnv): string[] {
 
 export function isApplicationOrigin(env: AppEnv, value: string | undefined | null): boolean {
   const origin = normalizeOrigin(value);
-  return origin !== null && applicationOrigins(env).includes(origin);
+  return origin !== null && (
+    applicationOrigins(env).includes(origin)
+    || (
+      canonicalOrigin(env) === PREVIEW_APPLICATION_ROOT_ORIGIN
+      && isPreviewApplicationOrigin(origin)
+    )
+  );
 }
 
 /**

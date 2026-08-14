@@ -3,5 +3,10 @@
   "compilerOptions": {
     "types": ["node", "@playwright/test"]
   },
-  "include": ["tests/e2e/**/*.ts", "shared/**/*.ts", "playwright.config.ts"]
+  "include": [
+    "tests/e2e/**/*.ts",
+    "shared/**/*.ts",
+    "playwright.config.ts",
+    "playwright.smoke.config.ts"
+  ]
 }
