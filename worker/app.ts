@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 
 import { toErrorResponse } from '../shared/errors';
 import type { AppBindings } from './env';
+import { agentMarkdown } from './http/agent-markdown';
 import { securityHeaders } from './http/security-headers';
 import { entryRoutes } from './routes/entry';
 import { eventRoutes } from './routes/event';
@@ -29,6 +30,12 @@ export function createApp() {
     await next();
   });
   app.use('*', securityHeaders);
+  // Ahead of every route, because the four URLs in `sitemap.xml` answer
+  // `Accept: text/markdown` with markdown instead of the SPA shell. Mounted on `*`
+  // rather than on those four paths: the allowlist lives in the middleware, which is
+  // the only place that can also settle a trailing slash or a method that is not GET.
+  // Every other request leaves it again in one map lookup.
+  app.use('*', agentMarkdown);
   app.route('/api', publicRoutes);
   app.route('/api', entryRoutes);
   app.route('/', exchangeRoutes);
