@@ -1,2 +1,4 @@
 worker-configuration.d.ts text eol=lf
 migrations/*.sql text eol=lf
+config/*.json text eol=lf
+config/*.json.sha256 text eol=lf
