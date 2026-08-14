@@ -315,11 +315,14 @@ export function verifyMediaWriteBridgeRuntimeContractBytes(
   } catch (error) {
     throw new Error('Media upload bridge runtime contract is not valid JSON.', { cause: error });
   }
-  if (bytes !== `${canonicalJson(value)}\n`) {
+  const artifact = parseMediaWriteBridgeRuntimeContract(value);
+  const compactBytes = `${canonicalJson(value)}\n`;
+  const repositoryBytes = `${JSON.stringify(artifact, null, 2)}\n`;
+  if (bytes !== compactBytes && bytes !== repositoryBytes) {
     throw new Error('Media upload bridge runtime contract JSON is not canonical.');
   }
   return {
-    artifact: parseMediaWriteBridgeRuntimeContract(value),
+    artifact,
     sha256: sha256(bytes),
   };
 }
