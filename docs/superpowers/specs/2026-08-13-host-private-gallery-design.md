@@ -2,9 +2,11 @@
 
 **Date:** 2026-08-13
 
-**Status:** Approved direction; written specification awaiting review
+**Revised:** 2026-08-14 after implementation-readiness review
 
-**Repository baseline:** `b293ee42c35cc30c19b86cd1ff4737ad54857755`
+**Status:** Approved product direction; revised specification awaiting final review
+
+**Repository basis:** originally written against `b293ee42c35cc30c19b86cd1ff4737ad54857755`; targeted implementation files verified byte-identical through current `main` at `d1d94a2a7c59b41e7a2f63ed6b89d3cb2371eac5`
 
 ## 1. Decision
 
@@ -15,660 +17,56 @@ The host opens Gallery to a chronological stream of every stored, non-deleted ph
 The private Gallery supports only four library actions:
 
 1. search by contributor name, caption, or original filename;
-2. mark or unmark a photo as a shared event favorite;
-3. open and move through photos in the immersive viewer; and
-4. prepare the existing complete all-original export through one **Download all originals** action.
-
-The existing guest-facing shared gallery remains a separate secondary mode inside Gallery. It retains the current unpublished, published, and hidden publication workflow. Private favorites do not publish photos, and publication status does not affect the private timeline or complete export.
-
-This specification replaces the current host Gallery presentation in `src/pages/ManagerPage.tsx`. It does not replace Live Intake, the guest upload journey, the guest-facing gallery route, media retention, or the existing complete-export guarantees.
-
-## 2. Why this change
-
-The current Manager Gallery is the same media grid used by Live Intake with publication filters, selection checkboxes, and publish or hide controls added. That makes the host think about moderation even when the real post-event job is to revisit the private collection and retrieve the originals.
-
-Candidary's product hierarchy already says private delivery comes first and optional sharing comes second. The host Gallery should express that hierarchy directly:
-
-- **Private Gallery** answers, "What did everyone send, and what happened across the day?"
-- **Shared Gallery** answers, "Which previews may guests see?"
-- **Live Intake** answers, "What is arriving now, and do I need to act on an original?"
-- **Download all originals** answers, "How do I retrieve the complete collection?"
-
-The redesign separates those jobs without creating an album editor or a digital-asset-management system.
-
-## 3. Goals
-
-- Make the full private collection pleasant to revisit after an event.
-- Present photos in the most credible available chronology.
-- Keep the first Gallery view visually rich without loading every preview at once.
-- Let a host quickly find photos through one basic search field.
-- Provide one lightweight keeper signal through event-shared favorites.
-- Preserve the existing complete, source-bounded export rather than adding selective archives.
-- Keep shared-gallery publication available without letting it dominate the private experience.
-- Remain usable at the documented 10,000-photo event limit.
-- Preserve Candidary's privacy, accessibility, responsive-layout, and server-authoritative-state commitments.
-- Keep the implementation isolated from Live Intake and the guest upload flow.
-
-## 4. Non-goals
-
-This version does not include:
-
-- manual moment names;
-- moment merge, split, or boundary editing;
-- dragging or manually reordering photos;
-- a host-selected lead image;
-- automatic visual similarity detection;
-- face recognition, object recognition, or semantic image search;
-- custom albums, collections, tags, notes, or keeper categories;
-- photo comparison;
-- per-manager or private favorites;
-- selective ZIP exports;
-- individual-original download controls inside Gallery;
-- batch selection inside the private Gallery;
-- editing guest captions or filenames;
-- publishing from the private viewer;
-- a redesign of the guest-facing shared gallery;
-- a legacy-object metadata backfill;
-- live five-second polling or automatic reordering while the host is browsing; or
-- changes to event quotas, retention, accepted image formats, or export partitioning.
-
-Deleting an original remains a Live Intake action. Gallery does not become a second deletion surface.
-
-## 5. Product model
-
-### 5.1 Private Gallery is the default
-
-Selecting **Gallery** opens the private timeline. The host does not first encounter publication statuses, checkboxes, or moderation language.
-
-The private timeline includes every media row that is:
-
-- scoped to the authorized event;
-- in the `stored` upload state;
-- not deleted; and
-- available to the manager regardless of publication status.
-
-A favorite is an event-level property of the photo. Any authorized manager sees the same favorite state. Favoriting does not change chronology, mosaic prominence, publication, retention, or export membership.
-
-### 5.2 Shared Gallery is a secondary mode
-
-Gallery contains a two-option mode switch:
-
-- **Private gallery**
-- **Shared gallery**
-
-The private mode is selected whenever Gallery is entered unless the same mounted Gallery workspace already has Shared gallery open.
-
-Shared gallery preserves the existing publication concepts:
-
-- unpublished;
-- published; and
-- hidden.
-
-It retains batch publish and batch hide. It does not inherit private favorites, timeline moments, the immersive private viewer, or Download all behavior. The guest-facing `/api/event/:slug/gallery` contract remains limited to stored, published, non-deleted media.
-
-### 5.3 Live Intake remains operational
-
-Live Intake remains the place for current arrivals, contributor filtering during the event, individual-original retrieval, and irreversible deletion. It may continue visibility-aware polling.
-
-Private Gallery is deliberately calmer. It loads on entry and on explicit search, clear, favorite, pagination, or retry actions. It does not reorder itself beneath the host when delayed uploads arrive. Re-entering or reloading Gallery produces the latest canonical timeline.
-
-## 6. Private Gallery interface
-
-### 6.1 Header
-
-The Gallery header contains:
-
-- the Private gallery / Shared gallery mode switch;
-- the title **Private gallery**;
-- a quiet total such as **842 photos**;
-- one **Download all originals** action; and
-- the existing export progress or ready state after that action is used.
-
-The export action always means every stored, non-deleted original in the event. Search text, favorite state, current moment expansion, and publication status never narrow it.
-
-The existing export Workflow may still produce multiple numbered ZIP parts under its source-byte cap. The host starts that complete export from one action and sees one logical job. Gallery does not promise one physical ZIP file.
-
-The duplicate manager export entry point currently placed in Share or the responsive utility treatment should be removed or replaced with a plain route back to Gallery. There should be one canonical **Download all originals** action, backed by the existing export job.
-
-### 6.2 Search and favorites
-
-The private Gallery has one search form:
-
-- label: **Find photos**
-- placeholder: **Contributor, caption, or filename**
-- submit action: **Search**
-- clear action when a query is active
-
-Search is case-insensitive substring matching across:
-
-- `guest_name`;
-- `caption`; and
-- `original_filename`.
-
-Search does not inspect pixels or infer who or what appears in a photo.
-
-Beside search is one toggle labeled **Favorites**. When active, the result set contains only favorited photos. Search and Favorites may be combined.
-
-Changing search or Favorites:
-
-1. clears the current timeline cursor;
-2. closes the immersive viewer;
-3. discards moment expansion state;
-4. requests the first page for the new result set; and
-5. moves focus to the result summary or empty-state heading.
-
-No date picker, contributor facet, chronology-confidence control, status filter, or saved search is added.
-
-### 6.3 Timeline and moment grouping
-
-The result set is ordered from earliest to latest by `timeline_at`, then by media ID for a deterministic tie break.
-
-The browser groups the ordered result stream into unnamed moments. A new moment begins when either:
-
-- the event-local calendar date changes; or
-- the gap from the previous result exceeds 45 minutes.
-
-Moment grouping is derived, not stored. It is recomputed over the active result set. A search or Favorites-only view may therefore contain fewer, simpler moments than the complete timeline. There are no moment IDs, names, edit controls, or persistence rules.
-
-A moment heading uses factual time language only:
-
-- same-day example: **5:42â€“6:18 PM**
-- multi-day example: **Saturday, August 15 Â· 11:48 PMâ€“12:24 AM**
-- one-photo example: **7:06 PM**
-
-Each heading also shows the number of currently loaded photos in the moment. It must not guess labels such as "Ceremony," "Cocktail hour," or "Dance floor."
-
-Pagination may append additional photos to the last rendered moment. When that happens, its end time and loaded count update without changing the order of existing photos.
-
-### 6.4 Responsive mosaic
-
-Each moment initially presents up to eight photos in a responsive mosaic.
-
-The mosaic follows these rules:
-
-- DOM order remains chronological.
-- Visual placement never uses CSS `order` or any other technique that changes reading and keyboard order.
-- A deterministic positional pattern controls which cells span rows or columns.
-- The pattern does not inspect faces, aesthetics, favorite state, or publication status.
-- Reloading the same ordered media produces the same layout.
-- Portrait and landscape previews use their known dimensions to choose safe cropping within the fixed pattern, but dimensions do not reorder photos.
-- Previews use `object-fit: cover`; the immersive viewer shows the complete preview without mosaic cropping.
-- Favorites display a clear pressed-state control and text-accessible name but do not receive a larger tile.
-
-At narrow phone widths the mosaic becomes a two-column contact-style layout with a limited number of spans. At wide widths it may use three or four columns. The existing 44-by-44-pixel target floor remains binding.
-
-If a moment contains more than eight currently loaded photos, it shows **Show more photos**. Activating it reveals the rest of the currently loaded photos inline. **Show fewer photos** collapses the moment and restores focus to the moment heading or expansion control.
-
-The page retains one chronological **Load more photos** control at the end of the loaded result set. New pages are appended to the existing timeline. This avoids a separate route or API for every derived moment.
-
-### 6.5 Photo interaction and immersive viewer
-
-Selecting a mosaic photo opens a modal-style immersive viewer over the Gallery.
-
-The viewer contains:
-
-- the complete browser-compatible preview;
-- contributor name;
-- guest caption when present, otherwise original filename;
-- factual timing copy: **Takenâ€¦** when a trusted capture time exists, otherwise **Receivedâ€¦**;
-- a Favorite toggle;
-- previous and next controls within the active loaded result set; and
-- a close control.
-
-The viewer does not include download, publish, hide, delete, compare, edit, or move actions.
-
-Keyboard and focus behavior:
-
-- Enter or Space opens a focused photo.
-- Left and Right Arrow move to the previous or next loaded photo.
-- Escape closes the viewer.
-- Focus is trapped while the viewer is open.
-- Closing returns focus to the exact originating photo.
-- Reaching a loaded boundary may prefetch the next chronological page, but navigation never skips to an unloaded photo without a visible loading state.
-- Browser Back closes the viewer before leaving the Manager when practical within the existing routing model.
-
-Touch behavior:
-
-- horizontal swipe may move to the adjacent loaded photo;
-- tapping outside the media does not close the viewer accidentally;
-- all explicit controls remain at least 44 by 44 CSS pixels; and
-- the viewer respects safe-area insets.
-
-### 6.6 Favorite behavior
-
-The Favorite control is available on each mosaic photo and in the viewer. It is represented as a toggle, not a one-way action.
-
-Favoriting is:
-
-- event-scoped;
-- visible to every authorized manager;
-- idempotent;
-- independent of publication status; and
-- excluded from export selection semantics.
-
-The UI may update optimistically, but a refused or failed request must restore the last confirmed state and show the existing dismissible manager notice. A second manager's later confirmed write may replace the first state; no conflict dialog or per-user merge model is introduced.
-
-## 7. Chronology
-
-### 7.1 Effective timeline time
-
-Every stored media row has one non-null `timeline_at`.
-
-For newly finalized media:
-
-1. use a trusted embedded capture time when one is available;
-2. otherwise use `stored_at`; and
-3. use `created_at` only as a defensive fallback for migrated rows that lack `stored_at`.
-
-The API also exposes whether the effective value came from capture metadata or receipt time so the viewer can say **Taken** or **Received** accurately.
-
-### 7.2 Trusted capture-time rule
-
-Capture metadata extraction is best-effort and cannot make an otherwise valid delivery fail.
-
-A candidate capture time is accepted only when:
-
-- it is parsed from a supported embedded photo timestamp;
-- it represents a complete date and time;
-- an embedded offset is honored when present;
-- a timestamp without an offset can be interpreted in the event's configured time zone;
-- the resulting instant is no more than 24 hours before the event start; and
-- the resulting instant is no later than five minutes after `stored_at`.
-
-A candidate outside those bounds, a malformed timestamp, an unsupported metadata container, or a parser failure results in `captured_at = NULL` and `timeline_at = stored_at`.
-
-This rule is intentionally conservative. It favors a believable received-time position over an obviously incorrect device clock.
-
-Only the normalized capture instant is retained. Raw EXIF, GPS coordinates, camera model, serial identifiers, thumbnails, and other embedded metadata are neither stored in D1 nor exposed through the API. Existing preview behavior continues to strip source metadata.
-
-### 7.3 Existing media
-
-The migration does not reread deployed originals.
-
-Existing stored rows receive:
-
-- `captured_at = NULL`;
-- `timeline_at = COALESCE(stored_at, created_at)`; and
-- `favorited_at = NULL`.
-
-They therefore appear immediately in the new Gallery using received chronology. A future bounded metadata backfill would require a separate approved design and operational plan.
-
-## 8. Data model
-
-A migration adds these fields to `media`:
-
-```sql
-captured_at TEXT NULL,
-timeline_at TEXT NOT NULL,
-favorited_at TEXT NULL
-```
-
-`timeline_at` must contain a canonical UTC ISO-8601 instant. `favorited_at` is null when the photo is not a favorite and contains the confirmed write time when it is.
-
-The migration backfills `timeline_at` before enforcing its non-null contract. It adds indexes supporting:
-
-- event-scoped chronological reads over stored, non-deleted media; and
-- event-scoped Favorites-only chronological reads.
-
-The exact index form should be validated against D1 query plans. The design requirement is that the Gallery query must not scan unrelated events or sort all 10,000 rows in application memory.
-
-The manager media view gains:
-
-```ts
-interface ManagerGalleryMediaView {
-  id: string;
-  originalFilename: string;
-  guestName: string;
-  caption: string | null;
-  publicationStatus: 'unpublished' | 'published' | 'hidden';
-  previewAvailable: boolean;
-  width: number | null;
-  height: number | null;
-  receivedAt: string;
-  timelineAt: string;
-  timelineSource: 'capture' | 'received';
-  isFavorite: boolean;
-}
-```
-
-Private Gallery does not need original object keys, raw metadata, uploader-session identifiers, or retention internals.
-
-## 9. API and repository boundaries
-
-### 9.1 Timeline read
-
-Add:
-
-```http
-GET /api/manage/events/:eventId/gallery
-```
-
-Supported query parameters:
-
-- `query`: optional trimmed search string;
-- `favorites`: omitted or `1`;
-- `cursor`: optional opaque chronological cursor; and
-- `limit`: bounded by a Gallery-specific server maximum, with a default of 48.
-
-The route:
-
-1. authorizes the current manager for the path event;
-2. validates and normalizes parameters;
-3. performs an event-scoped, stored-only, non-deleted query;
-4. applies case-insensitive bound search predicates when requested;
-5. applies `favorited_at IS NOT NULL` when requested;
-6. orders by `timeline_at ASC, id ASC`;
-7. fetches one extra row to determine continuation; and
-8. returns media plus an opaque next cursor.
-
-The cursor carries the last `timeline_at` and media ID and is versioned separately from the current Live Intake cursor. Private Gallery does not reuse the descending `stored_at` cursor contract.
-
-A query or Favorites change always starts without a cursor. Invalid or empty cursor values receive the existing validation envelope rather than silently restarting.
-
-### 9.2 Favorite write
-
-Add:
-
-```http
-PUT /api/manage/events/:eventId/media/:mediaId/favorite
-Content-Type: application/json
-
-{ "favorite": true }
-```
-
-The route:
-
-- requires manager write authorization, matching Origin, and the existing CSRF contract;
-- accepts exactly one boolean;
-- verifies the media belongs to the path event and is stored and non-deleted;
-- sets `favorited_at` to the server time or null;
-- is idempotent when the requested state already matches; and
-- returns the updated Gallery media view.
-
-A deleted, missing, or cross-event media ID receives the existing resource refusal semantics. Favorite state never grants access to a photo.
-
-### 9.3 Complete export
-
-No selective-export endpoint is added.
-
-**Download all originals** invokes the existing event export creation, status, retry, and download APIs. Export membership remains every stored, non-deleted original at the job's snapshot time. The manifest and partitioned ZIP behavior remain authoritative.
-
-### 9.4 Shared Gallery
-
-Shared mode continues to use the existing manager media read and publication mutation routes. The current publication status filters and batch maximum remain unchanged.
-
-Implementation should extract the current Gallery publishing markup from `ManagerPage.tsx` into a focused component rather than mixing it into the private timeline. No backend publication migration is required.
-
-## 10. Component boundaries
-
-The Manager should not gain another large inline branch in `ManagerPage.tsx`.
-
-Recommended boundaries:
-
-- `ManagerGalleryWorkspace`
-  - owns Private / Shared mode;
-  - coordinates the one export action and common heading.
-
-- `ManagerPrivateGallery`
-  - owns query state, Favorites state, chronological pagination, notices, and viewer state.
-
-- `GalleryTimeline`
-  - groups ordered rows through a pure function and renders moment sections.
-
-- `GalleryMoment`
-  - renders the compact or expanded deterministic mosaic.
-
-- `GalleryViewer`
-  - owns modal focus, keyboard navigation, adjacent-page prefetch, and favorite action.
-
-- `ManagerSharedGallery`
-  - contains the existing publication filters, selection, publish, and hide behavior.
-
-- `gallery-timeline.ts`
-  - pure chronology and 45-minute grouping rules with event-time-zone inputs.
-
-- `MediaRepository.listGalleryTimeline`
-  - owns the bounded D1 query and chronological cursor.
-
-Capture-time extraction belongs at the media-finalization boundary, behind a focused metadata-normalization helper. Gallery rendering must not inspect original bytes.
-
-Each unit should expose a small typed interface and remain independently testable.
-
-## 11. Loading, pagination, and state preservation
-
-The Gallery loads only after the Gallery destination is opened. Its request does not join the Manager's initial event, Live Intake, RSVP, Guestbook, or Share reads.
-
-The first successful page replaces the current result set. A continuation page appends only when:
-
-- its cursor still matches the current result stream;
-- query and Favorites state have not changed; and
-- the request has not been superseded or aborted.
-
-Duplicate media IDs are discarded defensively.
-
-When the host switches between Private and Shared mode during one mounted Gallery visit:
-
-- each mode preserves its confirmed rows, current filters, and scroll position;
-- an open private viewer closes;
-- pending writes finish through the existing manager write guard; and
-- stale read responses cannot overwrite the newly active mode.
-
-Leaving Gallery and returning during the same Manager mount may preserve private query and Favorites state. A full page reload starts at the unfiltered private timeline.
-
-## 12. Empty, loading, and error states
-
-### No private photos
-
-Heading: **No photos have been delivered yet.**
-
-Copy directs the host to Live Intake without suggesting publication or setup work.
-
-### No search matches
-
-Heading: **No photos match this search.**
-
-The active query remains visible and a **Clear search** action is available.
-
-### No favorites
-
-Heading: **No favorites yet.**
-
-Copy explains that the heart on any photo adds it to this shared event list. It does not introduce albums or keeper language.
-
-### Missing preview
-
-A delivered original with no available preview remains in chronology. The tile shows a stable placeholder, filename or caption, contributor, and Favorite action. Opening it produces the same placeholder and metadata. Preview failure never removes the original from Download all.
-
-### Timeline read failure
-
-If no Gallery data has rendered, show the standard retry state.
-
-If a later pagination or search request fails, retain the last confirmed timeline and show a dismissible manager notice with a retry for that exact request. Do not blank the Gallery or move the host to another section.
-
-### Favorite failure
-
-Restore the last confirmed favorite state, retain the open moment or viewer, and show a manager notice. A favorite failure does not refresh the entire event or media list.
-
-### Export failure
-
-Use the existing export failure, retry, expiry, and recovery states. Gallery does not reinterpret them as timeline failures.
-
-## 13. Privacy, authorization, and logging
-
-- Every Gallery read and favorite write requires manager authorization for the path event.
-- Search predicates are bound parameters and cannot broaden the authorized event scope.
-- Opaque cursors contain no credential and cannot move a request into another event.
-- Guest sessions cannot access the private Gallery endpoint or favorite route.
-- Private Gallery previews continue through the authorized preview route.
-- Originals remain private and are exposed only through existing manager-authorized original or export delivery.
-- Raw embedded metadata is not logged.
-- Normalized capture time may appear in manager responses but not in guest-facing gallery responses unless a separately approved guest design adds it.
-- Search text and guest captions must not be copied into infrastructure logs beyond the application's existing bounded request logging policy.
-- Favorite writes should log event ID, media ID, requested state, result, and request ID without logging credentials or original object keys.
-
-## 14. Accessibility and responsive behavior
-
-The redesign must continue to target WCAG 2.2 AA and the repository's physical-device acceptance requirements.
-
-Required behavior:
-
-- Gallery mode controls expose selected state programmatically.
-- Search has a persistent visible label.
-- Favorites is a toggle with `aria-pressed`.
-- Every photo has one primary open-viewer action; favorite remains a separate named control.
-- Mosaic DOM order matches chronology and screen-reader order.
-- Moment expansion uses `aria-expanded` and identifies the controlled region.
-- Result counts and completed favorite changes are announced politely without repeated live-region noise.
-- The immersive viewer has an accessible name, trapped focus, explicit close control, and reliable focus restoration.
-- Keyboard navigation does not depend on hover.
-- Status, favorite, and publication meaning never rely on color alone.
-- Touch targets remain at least 44 by 44 CSS pixels.
-- At 320 CSS pixels wide, the Gallery has no document-level horizontal scrolling.
-- At 200% zoom, search, mode switch, moment controls, and viewer controls remain operable.
-- Reduced motion removes animated mosaic expansion and viewer transitions.
-- Image alternatives continue to prefer the guest caption and otherwise use a safe filename-derived label; decorative mosaic treatment is not announced separately.
-
-## 15. Performance and scale
-
-The design must remain bounded at 10,000 photos.
-
-- Do not return all media metadata in the initial response.
-- Default timeline pages contain 48 rows and may never exceed the server maximum.
-- Use keyset pagination over `timeline_at` and ID; do not use offset pagination.
-- Fetch preview-sized assets only. Mosaic and viewer never fetch an original.
-- Apply `loading="lazy"` and `decoding="async"` outside the first visible mosaic.
-- Preload at most the adjacent viewer previews.
-- Abort or supersede stale search and pagination requests.
-- Do not poll Private Gallery.
-- Group moments incrementally in the browser without retaining duplicate representations of the same media rows.
-- Verify the timeline and Favorites query plans against an event at the 10,000-photo cap.
-- Measure narrow-phone memory, scroll responsiveness, and layout stability with mixed portrait, landscape, missing-dimension, and missing-preview rows.
-
-The implementation must preserve Live Intake's independent newest-first polling and cursor behavior.
-
-## 16. Migration and rollout
-
-### Phase 1: compatible schema and API
-
-- Add and backfill `captured_at`, `timeline_at`, and `favorited_at`.
-- Add timeline indexes.
-- Extend finalization to set trusted capture time best-effort.
-- Add Gallery read and favorite routes.
-- Keep the current Manager UI unchanged until API verification passes.
-
-### Phase 2: private Gallery UI
-
-- Extract the existing publication workspace as Shared Gallery.
-- Add the Private / Shared mode switch with Private as default.
-- Add private search, Favorites, timeline grouping, mosaics, viewer, and the single complete-export action.
-- Remove publication status and delete controls from the private mode.
-- Remove or redirect duplicate complete-export entry points.
-
-### Phase 3: evidence and release
-
-- Run migration verification against fresh and upgraded databases.
-- Run full unit, Worker, UI, accessibility, responsive, and end-to-end suites.
-- Exercise 10,000-photo timeline and export fixtures.
-- Complete physical iPhone Safari and Android Chrome acceptance.
-- Deploy only after existing media appear through received-time fallback and complete export membership remains unchanged.
-
-No background capture-time backfill is part of rollout.
-
-## 17. Verification strategy
-
-### Unit tests
-
-Cover:
-
-- capture-time parsing, timezone interpretation, and plausibility bounds;
-- fallback to received time;
-- no failure of delivery when metadata parsing fails;
-- 45-minute and event-local-date moment boundaries;
-- deterministic grouping across page boundaries;
-- deterministic mosaic placement without reordering;
-- search normalization;
-- favorite state reducers and rollback; and
-- viewer previous, next, close, and focus-return state.
-
-### Worker and repository tests
-
-Cover:
-
-- manager-only Gallery authorization;
-- cross-event refusal;
-- stored-only and non-deleted filtering;
-- ascending `timeline_at`, ID ordering;
-- opaque chronological cursor validation;
-- search over contributor, caption, and filename;
-- combined search plus Favorites;
-- idempotent favorite and unfavorite writes;
-- favorite refusal for deleted or foreign media;
-- migration backfill for legacy rows;
-- query-plan evidence at 10,000 rows;
-- guest-facing gallery remaining published-only; and
-- complete export membership remaining independent of search, favorite, and publication state.
-
-### UI and browser tests
-
-Cover:
-
-- Gallery opens in Private mode;
-- switching to Shared preserves the existing publication workflow;
-- no publication or deletion controls appear in Private mode;
-- initial compact mosaic and inline expansion;
-- append across a moment boundary and within the same moment;
-- search, clear, Favorites, and combined empty states;
-- favorite from mosaic and viewer;
-- failed favorite rollback;
-- viewer keyboard, swipe where supported, focus trap, Escape, and focus restoration;
-- missing preview behavior;
-- one Download all originals action invoking the existing export;
-- export job progress and ready parts;
-- narrow widths, wide rails, 200% zoom, reduced motion, and no horizontal overflow; and
-- stale request suppression when search or mode changes.
-
-### Physical-device acceptance
-
-On current iPhone Safari and Android Chrome:
-
-1. open an event with a mixed-orientation private collection;
-2. enter Gallery and see Private mode first;
-3. search by contributor;
-4. clear search and favorite a photo;
-5. open the Favorites-only result;
-6. expand a moment inline;
-7. open the viewer, swipe or use controls, favorite, and close to the originating tile;
-8. switch to Shared gallery and publish or hide a photo;
-9. return to Private gallery without losing confirmed state; and
-10. start Download all originals and observe the existing export state.
-
-Desktop emulation supplements but does not replace these checks.
-
-## 18. Acceptance criteria
-
-The design is complete when all of the following are true:
-
-- Gallery opens to the host's complete private collection rather than a publication queue.
-- Every stored, non-deleted original appears regardless of publication status.
-- New media uses a trusted capture time when available and received time otherwise.
-- Existing media works immediately through received-time fallback without object backfill.
-- Photos are ordered earliest to latest and grouped by event-local date or a gap greater than 45 minutes.
-- Each moment begins as a deterministic responsive mosaic of no more than eight photos and expands inline.
-- The private Gallery contains no selection checkboxes, publish, hide, delete, compare, edit, or individual-download actions.
-- Search matches contributor, caption, and original filename only.
-- Favorites are event-shared, reversible, and independent of publication and export.
-- The immersive viewer preserves chronology and returns focus to the originating photo.
-- Gallery exposes one Download all originals action backed by the existing complete export.
-- Search and Favorites never narrow export membership.
-- Shared Gallery retains the current unpublished, published, and hidden publication workflow as a separate mode.
-- Guest access to private media does not change.
-- Timeline reads remain paginated and bounded at the 10,000-photo limit.
-- Required automated, accessibility, responsive, scale, and physical-device evidence passes.
-
-## 19. Explicit scope guard
-
-Implementation review should reject additions that turn this work into an album editor, automated image-analysis feature, or selective-export system.
-
-The product improvement is deliberately simple:
-
-> Give the host a calm chronological place to relive every private delivery, mark favorites, find a known photo, open it fully, and download the complete collection.
+2. mark or unmašÈHÝÈ\ÈHÚ\™Y]™[˜]›Üš]NÂŒËˆÜ[ˆ[™[Ý™H›ÝYÚÝÜÈ[ˆH[[Y\œÚ]™HšY]Ù\ŽÈ[™ˆ™\\™HH^\Ý[™ÈÛÛ\]H]™[^Ü›ÝYÚÛ™H
+Š‘ÝÛ›ØY[
+ŠˆXÝ[Û‹‚‚•H^\Ý[™ÈÝY\ÝY˜XÚ[™ÈÚ\™YØ[\žH™[XZ[œÈHÙ\\˜]HÙXÛÛ™\žH[ÙH[œÚYHØ[\žKˆ]™]Z[œÈHÝ\œ™[[œX›\ÚYX›\ÚY[™Y[ˆX›XØ][ÛˆÛÜšÙ›ÝËˆš]˜]H˜]›Üš]\ÈÈ›ÝX›\ÚÝÜË[™X›XØ][ÛˆÝ]\ÈÙ\È›ÝY™™XÝHš]˜]H[Y[[™HÜˆÛÛ\]H^Ü‚‚•\ÈÜXÚYšXØ][Ûˆ™\XÙ\ÈHÝ\œ™[ÜÝØ[\žH™\Ù[][Ûˆ[ˆÜ˜ËÜYÙ\ËÓX[˜YÙ\”YÙKÞˆ]Ù\È›Ý™\XÙH]™H[ZÙKHÝY\Ý\ØY›Ý\›™^KHÝY\ÝY˜XÚ[™ÈØ[\žH›Ý]KYYXH™][[Û‹ÜˆH^\Ý[™ÈÛÛ\]KY^ÜÝX\˜[Y\Ë‚‚ˆÈÈ‹ˆÚH\ÈÚ[™ÙB‚•HÝ\œ™[X[˜YÙ\ˆØ[\žH\ÈHØ[YHYYXHÜšY\ÙYžH]™H[ZÙHÚ]X›XØ][Ûˆš[\œËÙ[XÝ[ÛˆÚXÚØ›Þ\Ë[™X›\ÚÜˆYHÛÛ›ÛÈYYˆ]XZÙ\ÈHÜÝ[šÈX›Ý][Ù\˜][Ûˆ]™[ˆÚ[ˆH™X[ÜÝY]™[›Øˆ\ÈÈ™]š\Ú]Hš]˜]HÛÛXÝ[Ûˆ[™™]šY]™HHÜšYÚ[˜[Ë‚‚Ø[™Y\žIÜÈ›ÙXÝY\˜\˜ÚH[™XYHØ^\Èš]˜]H[]™\žHÛÛY\Èš\œÝ[™Ü[Û˜[Ú\š[™ÈÛÛY\ÈÙXÛÛ™ˆHÜÝØ[\žHÚÝ[^™\ÜÈ]Y\˜\˜ÚH\™XÝN‚‚‹H
+Š”š]˜]HØ[\žJŠˆ[œÝÙ\œË•Ú]Y]™\ž[Û™HÙ[™[™Ú]\[™YXÜ›ÜÜÈH^OÈ‚‹H
+Š”Ú\™YØ[\žJŠˆ[œÝÙ\œË•ÚXÚ™]šY]ÜÈX^HÝY\ÝÈÙYOÈ‚‹H
+Š“]™H[ZÙJŠˆ[œÝÙ\œË•Ú]\È\œš]š[™È›ÝË[™ÈH™YYÈXÝÛˆ[ˆÜšYÚ[˜[È‚‹H
+Š‘ÝÛ›ØY[
+Šˆ[œÝÙ\œË’ÝÈÈH™]šY]™HHÛÛ\]H]™[\˜Ú]™OÈ‚‚•H™Y\ÚYÛˆÙ\\˜]\ÈÜÙH›ØœÈÚ]Ý]Ü™X][™È[ˆ[[HY]ÜˆÜˆHYÚ][X\ÜÙ][X[˜YÙ[Y[Þ\Ý[K‚‚ˆÈÈËˆÛØ[Â‚‹HXZÙHH[š]˜]HÛÛXÝ[ÛˆX\Ø[È™]š\Ú]Y\ˆ[ˆ]™[‚‹H™\Ù[ÝÜÈ[ˆH[ÜÝÜ™YX›H]˜Z[X›HÚ›Û›ÛÙÞK‚‹HÙY\Hš\œÝØ[\žHšY]Èš\ÝX[HšXÚÚ]Ý]ØY[™È]™\žH™]šY]È]Û˜ÙK‚‹H]HÜÝ]ZXÚÛHš[™ÝÜÈ›ÝYÚÛ™H˜\ÚXÈÙX\˜ÚšY[‚‹H›ÝšYHÛ™HYÚÙZYÚÙY\\ˆÚYÛ˜[›ÝYÚ]™[\Ú\™Y˜]›Üš]\Ë‚‹H™\Ù\™HH^\Ý[™ÈÛÛ\]KÛÝ\˜ÙKX›Ý[™Y^Ü˜]\ˆ[ˆY[™ÈÙ[XÝ]™H\˜Ú]™\Ë‚‹HÙY\Ú\™YYØ[\žHX›XØ][Ûˆ]˜Z[X›HÚ]Ý]][™È]ÛZ[˜]HHš]˜]H^\šY[˜ÙK‚‹H™[XZ[ˆ\ØX›H]HØÝ[Y[YL\ÝÈ]™[[Z]‚‹H™\Ù\™HØ[™Y\žIÜÈš]˜XÞKXØÙ\ÜÚXš[]K™\ÜÛœÚ]™K[^[Ý][™Ù\™\‹X]]Üš]]]™K\Ý]HÛÛ[Z]Y[Ë‚‹HÙY\H[\[Y[][Ûˆ\ÛÛ]Yœ›ÛH]™H[ZÙH[™HÝY\Ý\ØY›ÝË‚‚ˆÈÈˆ›Û‹YÛØ[Â‚•\È™\œÚ[ÛˆÙ\È›Ý[˜ÛYN‚‚‹HX[X[[ÛY[˜[Y\ÎÂ‹H[ÛY[Y\™ÙKÜ]Üˆ›Ý[™\žHY][™ÎÂ‹H˜YÙÚ[™ÈÜˆX[X[H™[Ü™\š[™ÈÝÜÎÂ‹HHÜÝ\Ù[XÝYXY[XYÙNÂ‹H]]ÛX]XÈš\ÝX[Ú[Z[\š]H]XÝ[ÛŽÂ‹H˜XÙH™XÛÙÛš][Û‹Øš™XÝ™XÛÙÛš][Û‹ÜˆÙ[X[XÈ[XYÙHÙX\˜ÚÂ‹HÝ\ÝÛH[[\ËÛÛXÝ[ÛœËYÜË›Ý\ËÜˆÙY\\ˆØ]YÛÜšY\ÎÂ‹HÝÈÛÛ\\š\ÛÛŽÂ‹H\‹[X[˜YÙ\ˆÜˆš]˜]H˜]›Üš]\ÎÂ‹HÙ[XÝ]™H’T^ÜÎÂ‹H[™]šYX[[ÜšYÚ[˜[ÝÛ›ØYÛÛ›ÛÈ[œÚYHØ[\žNÂ‹H˜]ÚÙ[XÝ[Ûˆ[œÚYHHš]˜]HØ[\žNÂ‹HY][™ÈÝY\ÝØ\[ÛœÈÜˆš[[˜[Y\ÎÂ‹HX›\Ú[™Èœ›ÛHHš]˜]HšY]Ù\ŽÂ‹HH™Y\ÚYÛˆÙˆHÝY\ÝY˜XÚ[™ÈÚ\™YØ[\žNÂ‹HHYØXÞK[Øš™XÝY]Y]H˜XÚÙš[Â‹H]™Hš]™K\ÙXÛÛ™Û[™ÈÜˆ]]ÛX]XÈ™[Ü™\š[™ÈÚ[HHÜÝ\Èœ›ÝÜÚ[™ÎÈÜ‚‹HÚ[™Ù\ÈÈ]™[][Ý\Ë™][[Û‹XØÙ\Y[XYÙH›Ü›X]ËÜˆ^Ü\][Ûš[™Ë‚‚‘[][™È[ˆÜšYÚ[˜[™[XZ[œÈH]™H[ZÙHXÝ[Û‹ˆØ[\žHÙ\È›Ý™XÛÛYHHÙXÛÛ™[][ÛˆÝ\™˜XÙK‚‚ˆÈÈKˆ›ÙXÝ[Ù[‚ˆÈÈÈKŒHš]˜]HØ[\žH\ÈHY˜][‚”Ù[XÝ[™È
+Š‘Ø[\žJŠˆÜ[œÈHš]˜]H[Y[[™KˆHÜÝÙ\È›Ýš\œÝ[˜ÛÝ[\ˆX›XØ][ÛˆÝ]\Ù\ËÚXÚØ›Þ\ËÜˆ[Ù\˜][Ûˆ[™ÝXYÙK‚‚•Hš]˜]H[Y[[™H[˜ÛY\È]™\žHYYXH›ÝÈ]\Î‚‚‹HØÛÜYÈH]]Üš^™Y]™[Â‹H[ˆHÝÜ™Y\ØYÝ]NÂ‹H›Ý[]YÈ[™‹H]˜Z[X›HÈHX[˜YÙ\ˆ™YØ\™\ÜÈÙˆX›XØ][ÛˆÝ]\Ë‚‚H˜]›Üš]H\È[ˆ]™[[]™[›Ü\HÙˆHÝËˆ[žH]]Üš^™YX[˜YÙ\ˆÙY\ÈHØ[YH˜]›Üš]HÝ]Kˆ˜]›Üš][™ÈÙ\È›ÝÚ[™ÙHÚ›Û›ÛÙÞK[ÜØZXÈ›ÛZ[™[˜ÙKX›XØ][Û‹™][[Û‹Üˆ^ÜY[X™\œÚ\‚‚ˆÈÈÈKŒˆÚ\™YØ[\žH\ÈHÙXÛÛ™\žH[ÙB‚‘Ø[\žHÛÛZ[œÈHÛË[Ü[Ûˆ[ÙHÝÚ]Ú‚‚‹H
+Š”š]˜]HØ[\žJŠ‚‹H
+Š”Ú\™YØ[\žJŠ‚‚•Hš]˜]H[ÙH\ÈÙ[XÝYÚ[™]™\ˆØ[\žH\È[\™Y[›\ÜÈHØ[YH[Ý[YØ[\žHÛÜšÜÜXÙH[™XYH\ÈÚ\™YØ[\žHÜ[‹‚‚”Ú\™YØ[\žH™\Ù\™\ÈH^\Ý[™ÈX›XØ][ÛˆÛÛ˜Ù\Î‚‚‹H[œX›\ÚYÂ‹HX›\ÚYÈ[™‹HY[‹‚‚•Hš\œÝ[YHÚ\™YØ[\žHÜ[œÈ\š[™ÈHX[˜YÙ\ˆ[Ý[]ÈX›XØ][Ûˆš[\ˆ\È
+Š[œX›\ÚY
+Š‹X]Ú[™ÈHÝ\œ™[Ø[\žH[žH™Z]š[Ü‹ˆH]\ˆš]˜]HÈÚ\™YÝÚ]Ú\š[™È]Ø[YH[Ý[™\Ù\™\ÈH\ÝÛÛ™š\›YYÚ\™Yš[\ˆ[™ØYYYÙK‚‚”Ú\™YØ[\žH™]Z[œÈ˜]ÚX›\Ú[™˜]ÚYKˆ]Ù\È›Ý[š\š]š]˜]H˜]›Üš]\Ë[Y[[™H[ÛY[ËH[[Y\œÚ]™Hš]˜]HšY]Ù\‹ÜˆÝÛ›ØY[™Z]š[Ü‹ˆHÝY\ÝY˜XÚ[™ÈØ\KÙ]™[ÎœÛYËÙØ[\žXÛÛ˜XÝ™[XZ[œÈ[Z]YÈÝÜ™YX›\ÚY›Û‹Y[]YYYXK‚‚ˆÈÈÈKŒÈ]™H[ZÙH™[XZ[œÈÜ\˜][Û˜[‚“]™H[ZÙH™[XZ[œÈHXÙH›ÜˆÝ\œ™[\œš]˜[ËÛÛšX]Üˆš[\š[™È\š[™ÈH]™[[™]šYX[[ÜšYÚ[˜[™]šY]˜[[™\œ™]™\œÚX›H[][Û‹ˆ]X^HÛÛ[YHš\ÚXš[]KX]Ø\™HÛ[™Ë‚‚”š]˜]HØ[\žH\È[X™\˜][HØ[Y\‹ˆ]ØYÈÛˆ[žH[™Ûˆ^XÚ]ÙX\˜ÚÛX\‹˜]›Üš]\ËYš[\‹YÚ[˜][Û‹Üˆ™]žHXÝ[ÛœËˆH˜]›Üš]HÜš]H\]\ÈHÛÛ™š\›YY›ÝÈ[ˆXÙH[™Ù\È›Ý™[ØYH[Y[[™Kˆš]˜]HØ[\žHÙ\È›Ý™[Ü™\ˆ]Ù[ˆ™[™X]HÜÝÚ[ˆ[^YY\ØYÈ\œš]™Kˆ™KY[\š[™ÈÜˆ™[ØY[™ÈØ[\žH›ÙXÙ\ÈH]\ÝØ[›ÛšXØ[[Y[[™K‚‚ˆÈÈ‹ˆš]˜]HØ[\žH[\™˜XÙB‚ˆÈÈÈ‹ŒHXY\‚‚•HØ[\žHXY\ˆÛÛZ[œÎ‚‚‹HHš]˜]HØ[\žHÈÚ\™YØ[\žH[ÙHÝÚ]ÚÂ‹HH]H
+Š”š]˜]HØ[\žJŠŽÂ‹HH]ZY]ÛÛ\]KXÛÛXÝ[ÛˆÝ[ÝXÚ\È
+ŠŽˆÝÜÊŠŽÂ‹HÛ™H
+Š‘ÝÛ›ØY[
+ŠˆXÝ[ÛŽÈ[™‹HH^\Ý[™È^Ü›ÙÜ™\ÜÈÜˆ™XYHÝ]HY\ˆ]XÝ[Ûˆ\È\ÙY‚‚•HXY\‰ÜÈÝÈÝ[ÛÛY\Èœ›ÛHH]™[	ÜÈ^\Ý[™ÈÝÜ™YYYXPÛÝ[[™[Ø^\È\ØÜšX™\ÈHÛÛ\]Hš]˜]HÛÛXÝ[Û‹ˆÙX\˜Ú[™˜]›Üš]\È™\Ý[È\ÙHHÙ\\˜]HÝ]\ÈY\ÜØYÙH›ÜˆH[X™\ˆÝ\œ™[HØYYÈHTHÙ\È›ÝY[ˆ^[œÚ]™H^XÝ[X]ÚÛÝ[]Y\žK‚‚ŠŠ‘ÝÛ›ØY[
+Šˆ[Ø^\ÈÝ\ÈH^\Ý[™ÈÛÛ\]H]™[^Üˆ]ÈÝ\Ü[™ÈÛÜHÝ]\È]H^ÜÛÛZ[œÈ[ÝÜ™Y›Û‹Y[]YÜšYÚ[˜[ÝÜËH^ÜX[šY™\Ý[™[žHš[X›HÜˆš]˜]HÝY\Ý›ÛÚÈ\Y˜XÝÈ›ÙXÙYžHH^\Ý[™ÈÛÜšÙ›ÝËˆÙX\˜Ú^˜]›Üš]HÝ]KÝ\œ™[[ÛY[^[œÚ[Û‹[™X›XØ][ÛˆÝ]\È™]™\ˆ˜\œ›ÝÈ]‚‚•H^\Ý[™È^ÜÛÜšÙ›ÝÈX^HÝ[›ÙXÙH][\H[X™\™Y’T\È[™\ˆ]ÈÛÝ\˜ÙKXž]HØ\ˆHÜÝÝ\È]ÛÛ\]H^Üœ›ÛHÛ™HXÝ[Ûˆ[™ÙY\ÈÛ™HÙÚXØ[›Ø‹ˆØ[\žHÙ\È›Ý›ÛZ\ÙHÛ™H\ÚXØ[’Tš[K‚‚•H\XØ]HX[˜YÙ\ˆ^Ü[žHÚ[Ý\œ™[HXÙY[ˆÚ\™HÜˆH™\ÜÛœÚ]™H][]H™X]Y[ÚÝ[™H™[[Ý™YÜˆ™\XÙYÚ]HZ[ˆ›Ý]H˜XÚÈÈØ[\žKˆ\™HÚÝ[™HÛ™HØ[›ÛšXØ[
+Š‘ÝÛ›ØY[
+ŠˆXÝ[Û‹˜XÚÙYžHH^\Ý[™È^Ü›Ø‹‚‚ˆÈÈÈ‹ŒˆÙX\˜Ú[™˜]›Üš]\Â‚•Hš]˜]HØ[\žH\ÈÛ™HÙX\˜Ú›Ü›N‚‚‹HX™[ˆ
+Š‘š[™ÝÜÊŠ‚‹HXÙZÛ\Žˆ
+ŠÛÛšX]Ü‹Ø\[Û‹Üˆš[[˜[YJŠ‚‹HÝX›Z]XÝ[ÛŽˆ
+Š”ÙX\˜Ú
+Š‚‹HÛX\ˆXÝ[ÛˆÚ[ˆH]Y\žH\ÈXÝ]™B‚•HÙ\™\ˆš[\ÈH]Y\žK™Z™XÝÈ[Ü™H[ˆLŒ[šXÛÙHÛÙHÚ[Ë[™\™›Ü›\È]\˜[ÝXœÝš[™ÈX]Ú[™ÈXÜ›ÜÜÎ‚‚‹HÝY\ÝÛ˜[YXÂ‹HØ\[Û˜È[™‹HÜšYÚ[˜[Ùš[[˜[YX‚‚•HÔS›Ü›H\Ù\È[œÝŠÝÙ\ŠÛÛ[[ŠKÝÙ\ŠÊJHˆÚ]›Ý[™\˜[Y]\œËˆ	X[™Ø\™H\™Y›Ü™HÜ™[˜\žHÚ\˜XÝ\œÈ˜]\ˆ[ˆÚ[Ø\™Ë‚‚‘IÜÈZ[Z[ˆÝÙ\Š
+X›ÝšY\ÈTÐÒRHØ\ÙH›Û[™ÈÛ›KˆH›ÙXÝ›ÛZ\ÙH\ÈÛÜœ™\ÜÛ™[™ÛH^XÚ]‚‚‹HTÐÒRH]\œÈX]ÚØ\ÙKZ[œÙ[œÚ]]™[NÂ‹H›Û‹PTÐÒRH]\œËXØÙ[Ë[™Ý\ˆÛÙHÚ[ÈX]Ú^XÝH\È[\™YÈ[™‹H›È˜[œÛ]\˜][Û‹XØÙ[›Û[™ËÝ[[Z[™ËÜˆ^žžHX]Ú[™ÈØØÝ\œË‚‚”ÙX\˜ÚÙ\È›Ý[œÜXÝ^[ÈÜˆ[™™\ˆÚÈÜˆÚ]\X\œÈ[ˆHÝË‚‚™\ÚYHÙX\˜Ú\ÈÛ™HÙÙÛHX™[Y
+Š‘˜]›Üš]\ÊŠ‹ˆÚ[ˆXÝ]™KH™\Ý[Ù]ÛÛZ[œÈÛ›H˜]›Üš]YÝÜËˆÙX\˜Ú[™˜]›Üš]\ÈX^H™HÛÛXš[™Y‚‚Ú[™Ú[™ÈÙX\˜ÚÜˆ˜]›Üš]\Î‚‚ŒKˆÛX\œÈHÝ\œ™[[Y[[™HÝ\œÛÜŽÂŒ‹ˆÛÜÙ\ÈH[[Y\œÚ]™HšY]Ù\ŽÂŒËˆ\ØØ\™È[ÛY[^[œÚ[ÛˆÝ]NÂˆ™\]Y\ÝÈHš\œÝYÙH›ÜˆH™]È™\Ý[Ù]È[™Kˆ[Ý™\È›ØÝ\ÈÈH™\Ý[Ý[[X\žHÜˆ[\K\Ý]HXY[™Ë‚‚“›È]HXÚÙ\‹ÛÛšX]Üˆ˜XÙ]Ú›Û›ÛÙÞKXÛÛ™šY[˜ÙHÛÛ›ÛÝ]\Èš[\‹^žžHÙX\˜ÚÜˆØ]™YÙX\˜Ú\ÈYY‚‚ˆÈÈÈ‹ŒÈ[Y[[™H[™[ÛY[Ü›Ý\[™Â‚•H™\Ý[Ù]\ÈÜ™\™Yœ›ÛHX\›Y\ÝÈ]\ÝžH[Y[[™WØ][ˆžHYYXHQ›ÜˆH]\›Z[š\ÝXÈYHœ™XZË‚‚•Hœ›ÝÜÙ\ˆÜ›Ý\ÈHÜ™\™Y™\Ý[Ý™X[H[È[›˜[YY[ÛY[ËˆH™]È[ÛY[™YÚ[œÈÛ›HÚ[ˆHØ\œ›ÛHH™]š[Ý\È™\Ý[\ÈÜ™X]\ˆ[ˆHZ[]\ËˆHØØ[XØ[[™\ˆ]HÚ[™ÙHÙ\È›Ý›Ü˜ÙHH›Ý[™\žKÛÈÛ™H[ÛY[X^HÜ›ÜÜÈZYšYÚÚ[ˆÝÜÈ™[XZ[ˆ[\Ü˜[HÛÜÙK‚‚“[ÛY[Ü›Ý\[™È\È\š]™Y›ÝÝÜ™Yˆ]\È™XÛÛ\]YÝ™\ˆHXÝ]™H™\Ý[Ù]ˆHÙX\˜ÚÜˆ˜]›Üš]\Ë[Û›HšY]ÈX^H\™Y›Ü™HÛÛZ[ˆ™]Ù\‹Ú[\\ˆ[ÛY[È[ˆHÛÛ\]H[Y[[™Kˆ\™H\™H›È[ÛY[QË˜[Y\ËY]ÛÛ›ÛËÜˆ\œÚ\Ý[˜ÙH[\Ë‚‚H[ÛY[XY[™È\Ù\È˜XÝX[]™[[ØØ[[YH[™ÝXYÙHÛ›N‚‚‹HÛ™HØØ[]Nˆ
+ŠN¸ $ÍŽŒNJŠ‚‹HÜ›ÜÜÚ[™ÈZYšYÚˆ
+Š”Ø]\™^K]YÝ\ÝMKLNx $ÔÝ[™^K]YÝ\ÝM‹LŽŒSJŠ‚‹HÛ™HÝÎˆ
+ŠÎŒˆJŠ‚‚‘XXÚXY[™È[ÛÈÚÝÜÈH[X™\ˆÙˆÝ\œ™[HØYYÝÜÈ[ˆH[ÛY[ˆ]]\Ý›ÝÝY\ÜÈX™[ÈÝXÚ\ÈÙ\™[[ÛžKˆÛØÚÝZ[Ý\‹ˆÜˆ‘[˜ÙH›ÛÜ‹ˆ‚‚”YÚ[˜][ÛˆX^H\[™Y][Û˜[ÝÜÈÈH\Ý™[™\™Y[ÛY[ˆÚ[ˆ]\[œË]È[™[YH[™ØYYÛÝ[\]HÚ]Ý]Ú[™Ú[™ÈHÜ™\ˆÙˆ^\Ý[™ÈÝÜË‚‚ˆÈÈÈ‹™\ÜÛœÚ]™H[ÜØZ\Â‚‘XXÚ[ÛY[[š]X[H™\Ù[È\ÈZYÚÝÜÈ[ˆH™\ÜÛœÚ]™H[ÜØZXË‚‚•H[ÜØZXÈ™\Ù\™\ÈÚ›Û›ÛÙÚXØ[ÓHÜ™\ˆ[™\Ù\ÈÔÔÈÜšYÚ][ˆØ\[™ÜšYX]]ËY›ÝÎˆ›ÝØ™]™\ˆ[œÙX™]™\ˆÔÔÈÜ™\˜[™›ÈXœÛÛ]HÜÚ][Ûš[™È]Ú[™Ù\È™XY[™ÈÜˆÙ^X›Ø\™Ü™\‹ˆHš\œÝZYÚÝÜÈ\ÙH\Èš^YÜÚ][Û˜[]\›Ž‚‚‹H
+Š™[ÝÈÍŒHÔÔÈ^[ÎŠŠˆÛÈÛÛ[[œÎÈÝÈHÜ[œÈÛÈÛÛ[[œÈ[™ÛÈ›ÝÜÎÈÝÜÈˆ[™È\™HÛ™HÙ[XXÚÈÝÈÜ[œÈÛÈÛÛ[[œÈ[™Û™H›ÝÎÈÝÜÈx $Î\™HÛ™HÙ[XXÚ‚‹H
+ŠÍŒx $ÌLLÔÔÈ^[ÎŠŠˆ™YHÛÛ[[œÎÈÝÈHÜ[œÈÛÈÛÛ[[œÈ[™ÛÈ›ÝÜÎÈÝÜÈˆ[™Èš[H\™ÛÛ[[ŽÈÝÈÜ[œÈÛÈÛÛ[[œÈ[™Û™H›ÝÎÈÝÜÈx $Î\™HÛ™HÙ[XXÚ‚‹H
+ŠŒLLHÔÔÈ^[È[™ÚY\ŽŠŠˆ›Ý\ˆÛÛ[[œÎÈÝÈHÜ[œÈÛÈÛÛ[[œÈ[™ÛÈ›ÝÜÎÈÝÜÈ¸ $ÍHš[H™[XZ[š[™ÈÛÈÛÛ[[œÈXÜ›ÜÜÈÜÙH›ÝÜÎÈÝÈˆÜ[œÈÛÈÛÛ[[œÈ[™Û™H›ÝÎÈÝÜÈÈ[™\™HÛ™HÙ[XXÚ‚‚•HÛÜœ™\ÜÛ™[™ÈÜšY›ÝÈÚ^™\È\™N‚‚‹H™[ÝÈÍŒNˆÛ[\
+LLœÌËM
+XÂ‹HÍŒx $ÌLLˆMLœÈ[™‹HLLH[™ÚY\ŽˆMŽ‚‚”ÝÜÈH[™]\‹Ú[ˆH[ÛY[\È^[™Y\[™Y\ˆH]\›™Y›ØÚÈ\È[šY›Ü›HÛ™KXÛÛ[[‹Û™K\›ÝÈÙ[È]HXÝ]™Hœ™XZÜÚ[ˆHÜÚ][Û˜[ÞXÛHÙ\È›Ý™\X]‚‚Y][Û˜[[\Î‚‚‹HH]\›ˆÙ\È›Ý[œÜXÝ˜XÙ\ËY\Ý]XÜË˜]›Üš]HÝ]KX›XØ][ÛˆÝ]\ËÜšY[][Û‹Üˆš[H\NÂ‹H™[ØY[™ÈHØ[YHÜ™\™YYYXH›ÙXÙ\ÈHØ[YH^[Ý]Â‹HÛ›ÝÛˆÜ˜Z]Üˆ[™ØØ\H[Y[œÚ[ÛœÈY™™XÝÛ›HØš™XÝ\ÜÚ][Û˜[™XÙZÛ\ˆ\ÜXÝ™X]Y[›ÝÙ[\ÜÚYÛ›Y[ÜˆÜ™\š[™ÎÂ‹H™]šY]ÜÈ\ÙHØš™XÝYš]ˆÛÝ™\˜Â‹HH[[Y\œÚ]™HšY]Ù\ˆÚÝÜÈHÛÛ\]H™]šY]ÈÚ]Ý][ÜØZXÈÜ›Ü[™ÎÈ[™‹H˜]›Üš]\È\Ü^HHÛX\ˆ™\ÜÙY\Ý]HÛÛ›Û[™XØÙ\ÜÚX›H˜[YH]™]™\ˆ™XÙZ]™HH\™Ù\ˆ[K‚‚’YˆH[ÛY[ÛÛZ[œÈ[Ü™H[ˆZYÚÝ\œ™[HØYYÝÜË]ÚÝÜÈ
+Š”ÚÝÈ[Ü™HÝÜÊŠ‹ˆXÝ]˜][™È]™]™X[ÈH™\ÝÙˆHÝ\œ™[HØYYÝÜÈ[›[™Kˆ
+Š”ÚÝÈ™]Ù\ˆÝÜÊŠˆÛÛ\Ù\ÈH[ÛY[[™™\ÝÜ™\È›ØÝ\ÈÈH^[œÚ[ÛˆÛÛ›Û‚‚•HYÙH™]Z[œÈÛ™HÚ›Û›ÛÙÚXØ[
+Š“ØY[Ü™HÝÜÊŠˆÛÛ›Û]H[™ÙˆHØYY™\Ý[Ù]ˆ™]ÈYÙ\È\™H\[™YÈH^\Ý[™È[Y[[™Kˆ\È]›ÚYÈHÙ\\˜]H›Ý]HÜˆTH›Üˆ]™\žH\š]™Y[ÛY[‚‚ˆÈÈÈ‹HÝÈ[\˜XÝ[Ûˆ[™[[Y\œÚ]™HšY]Ù\‚‚”Ù[XÝ[™ÈH[ÜØZXÈÝÈÜ[œÈH[Ù[\Ý[H[[Y\œÚ]™HšY]Ù\ˆÝ™\ˆHØ[\žK‚‚•HšY]Ù\ˆÛÛZ[œÎ‚‚‹HHÛÛ\]Hœ›ÝÜÙ\‹XÛÛ\]X›H™]šY]ÎÂ‹HÛÛšX]Üˆ˜[YNÂ‹HÝY\ÝØ\[ÛˆÚ[ˆ™\Ù[Ý\Ú\ÙHÜšYÚ[˜[š[[˜[YNÂ‹H˜XÝX[[Z[™ÈÛÜNˆ
+Š•ZÙ[¸ )ŠŠˆÚ[ˆH\ÝYØ\\™H[YH^\ÝËÝ\Ú\ÙH
+Š”™XÙZ]™Y8 )ŠŠŽÂ‹HH˜]›Üš]HÙÙÛNÂ‹H™]š[Ý\È[™™^ÛÛ›ÛÈÚ][ˆHXÝ]™HØYY™\Ý[Ù]È[™‹HHÛÜÙHÛÛ›Û‚‚•HšY]Ù\ˆÙ\È›Ý[˜ÛYHÝÛ›ØYX›\ÚYK[]KÛÛ\\™KY]Üˆ[Ý™HXÝ[ÛœË‚‚’Ù^X›Ø\™[™›ØÝ\È™Z]š[ÜŽ‚‚‹H[\ˆÜˆÜXÙHÜ[œÈH›ØÝ\ÙYÝË‚‹HY[™šYÚ\œ›ÝÈ[Ý™HÈH™]š[Ý\ÈÜˆ™^ØYYÝË‚‹H\ØØ\HÛÜÙ\ÈHšY]Ù\‹‚‹H›ØÝ\È\È˜\YÚ[HHšY]Ù\ˆ\ÈÜ[‹‚‹HÛÜÚ[™È™]\›œÈ›ØÝ\ÈÈH^XÝÜšYÚ[˜][™ÈÝË‚‹H™XXÚ[™ÈHØYY›Ý[™\žHX^H™Y™]ÚH™^Ú›Û›ÛÙÚXØ[YÙK]˜]šYØ][Ûˆ™]™\ˆÚÚ\ÈÈ[ˆ[›ØYYÝÈÚ]Ý]Hš\ÚX›HØY[™ÈÝ]K‚‹Hœ›ÝÜÙ\ˆ˜XÚÈÛÜÙ\ÈHšY]Ù\ˆ™Y›Ü™HX]š[™ÈHX[˜YÙ\ˆÚ[ˆ˜XÝXØ[Ú][ˆH^\Ý[™È›Ý][™È[Ù[‚‚•ÝXÚ™Z]š[ÜŽ‚‚‹HÜš^›Û[ÝÚ\HX^H[Ý™HÈHY˜XÙ[ØYYÝÎÂ‹H\[™ÈÝ]ÚYHHYYXHÙ\È›ÝÛÜÙHHšY]Ù\ˆXØÚY[[NÂ‹H[^XÚ]ÛÛ›ÛÈ™[XZ[ˆ]X\ÝžHÔÔÈ^[ÎÈ[™‹HHšY]Ù\ˆ™\ÜXÝÈØY™KX\™XH[œÙ]Ë‚‚ˆÈÈÈ‹ˆ˜]›Üš]H™Z]š[Ü‚‚•H˜]›Üš]HÛÛ›Û\È]˜Z[X›HÛˆXXÚ[ÜØZXÈÝÈ[™[ˆHšY]Ù\‹ˆ]\È™\™\Ù[Y\ÈHÙÙÛK›ÝHÛ™K]Ø^HXÝ[Û‹‚‚‘˜]›Üš][™È\Î‚‚‹H]™[\ØÛÜYÂ‹Hš\ÚX›HÈ]™\žH]]Üš^™YX[˜YÙ\ŽÂ‹HY[\Ý[Â‹H[™\[™[ÙˆX›XØ][ÛˆÝ]\ÎÈ[™‹H^ÛYYœ›ÛH^ÜÙ[XÝ[ÛˆÙ[X[XÜË‚‚HÝXØÙ\ÜÙ[˜]›Üš]H™\ÜÛœÙH\]\ÈHX]Ú[™ÈØYY›ÝÈ[ˆXÙKˆ]Ù\È›Ý™[ØY]™[]HÜˆHØ[\žHYÙK‚‚•Ú[ˆ˜]›Üš]\Ë[Û›H\È[˜XÝ]™KÚ[™Ú[™È˜]›Üš]HÝ]HX]™\ÈHÝÈ[ˆ]ÈÝ\œ™[ÜÚ][Û‹ˆÚ[ˆ˜]›Üš]\Ë[Û›H\ÈXÝ]™K[™˜]›Üš][™È™[[Ý™\È]ÝÈœ›ÛHHØYY™\Ý[Ù][™™XÛÛ\]\ÈH\š]™Y[ÛY[›Ý[™\šY\ÈÝ™\ˆH™[XZ[š[™ÈØYY›ÝÜËˆH˜Z[YÜ[Z\ÝXÈÜš]H™\ÝÜ™\ÈH\ÝÛÛ™š\›YY›ÝÈ[™[žH™[[Ý™Y[K™]Z[œÈHÜ[ˆ[ÛY[ÜˆšY]Ù\‹[™ÚÝÜÈH^\Ý[™È\ÛZ\ÜÚX›HX[˜YÙ\ˆ›ÝXÙK‚‚HÙXÛÛ™X[˜YÙ\‰ÜÈ]\ˆÛÛ™š\›YYÜš]HX^H™\XÙHHš\œÝÝ]NÈ›ÈÛÛ™›XÝX[ÙÈÜˆ\‹]\Ù\ˆY\™ÙH[Ù[\È[›ÙXÙY‚‚ˆÈÈËˆÚ›Û›ÛÙÞB‚ˆÈÈÈËŒHY™™XÝ]™H[Y[[™H[YB‚‘]™\žHÝÜ™YYYXH›ÝÈ\ÈÛ™H›Û‹[[[Y[[™WØ]‚‚‘›Üˆ™]ÛHš[˜[^™YYYXN‚‚ŒKˆ\ÙHH\ÝY[X™YYØ\\™H[YHÚ[ˆÛ™H\È]˜Z[X›NÂŒ‹ˆÝ\Ú\ÙH\ÙHÝÜ™YØ]È[™ŒËˆ\ÙHÜ™X]YØ]Û›H\ÈHY™[œÚ]™H˜[˜XÚÈ›ÜˆZYÜ˜]Y›ÝÜÈ]XÚÈÝÜ™YØ]‚‚•HTH[ÛÈ^ÜÙ\ÈÚ]\ˆHY™™XÝ]™H˜[YHØ[YHœ›ÛHØ\\™HY]Y]HÜˆ™XÙZ\[YHÛÈHšY]Ù\ˆØ[ˆØ^H
+Š•ZÙ[ŠŠˆÜˆ
+Š”™XÙZ]™Y
+ŠˆXØÝ\˜][K‚‚ˆÈÈÈËŒˆ\ÝYØ\\™K][YH[B‚Ø\\™HY]Y]H^˜XÝ[Ûˆ\È™\ÝYY™›Ü[™Ø[››ÝXZÙH[ˆÝ\Ú\ÙH˜[Y[]™\žH˜Z[‚‚•™\œÚ[ÛˆHÝ\ÜÈÛ™H[Y\Ý[\˜[Z[NˆQ‘‹ÑVQˆ]U[YSÜšYÚ[˜[
+LØ
+KÚ]Ü[Û˜[ÝX”ÙXÕ[YSÜšYÚ[˜[
+LŽLX
+H[™Ù™œÙ][YSÜšYÚ[˜[
+LLX
+Kˆ][X™\˜][HYÛ›Ü™\È]]X›H]U[YX]U[YQYÚ]^™YÔÈ[YKTš[\Þ\Ý[H[Y\Ý[\Ë[™™[™Ü‹\ÜXÚYšXÈ]HšY[Ë‚‚Y\ˆš[[Z[™È\›Z[˜[•S[™ÜXÙHž]\Î‚‚‹H]U[YSÜšYÚ[˜[]\Ý™H^XÝHVVVN“SN‘“SN”ÔØÚ]H™X[Ø[[™\ˆ]H[™ÙXÛÛ™Èœ›ÛH›ÝYÚNXÂ‹HÝX”ÙXÕ[YSÜšYÚ[˜[Ú[ˆ™\Ù[]\ÝÛÛZ[ˆx $ÎHTÐÒRHYÚ]ÎÈ]\ÈšYÚ\YYÜˆ[˜Ø]YÈ™YHYÚ]È›ÜˆZ[\ÙXÛÛ™ÎÈ[™‹HÙ™œÙ][YSÜšYÚ[˜[Ú[ˆ™\Ù[]\Ý™H^XÝH
+Ò“SXÜˆR“SX\ÙHZ[]\Èœ›ÛH›ÝYÚNX[™]™H[ˆXœÛÛ]HÙ™œÙ]›ÈÜ™X]\ˆ[ˆMŒ‚‚[žHÝ\ˆ™\™\Ù[][Ûˆ\È[œÝ\ÜY[™˜[È˜XÚÈÈ™XÙZ]™Y[YK‚‚•H›Ý[™Y\œÙ\ˆØØ]\È]Q‘‹ÑVQˆ^[ØYÛ›H[Ž‚‚‹H”QÈTH^Y—Â‹HÙX”VQ˜Ú[šÜÎÈ[™‹H‘ÈVY˜Ú[šÜË‚‚’][œÜXÝÈ][ÜÝHš\œÝMˆÚPˆÙˆÛÛZ[™\ˆÝXÝ\™H[™™Z™XÝÈÝ][Ù‹\˜[™ÙHÙ™œÙ]Ë™XÝ\œÚ]™HQ‘ÛÜËX[›Ü›YY[™X[ˆX\šÙ\œËÝ™\œÚ^™Y˜[Y\Ë[™[˜Ø]Y[šY\ËˆRPËRQ‹RPË\Ù\]Y[˜ÙK[™RQ‹\Ù\]Y[˜ÙHØ\\™H[Y\Ý[\È\™H^XÚ]H[œÝ\ÜY[ˆ\È™\œÚ[ÛŽÈÜÙH›Ü›X]ÈÝ[˜[Y]K™]šY]Ë[™^Ü›Ü›X[H]\ÙH™XÙZ]™Y[YKˆ^[™[™È[Y\Ý[\^˜XÝ[ÛˆÈTÓËP“Q‘ˆ^Yˆ][\È™\]Z\™\ÈHÙ\\˜]H\ÚYÛˆ™]š\Ú[Û‹‚‚”ÝXÝ\˜[[XYÙH˜[Y][Ûˆ™[XZ[œÈX[™]ÜžNˆ[ˆ[˜[Y[XYÙHÚYÛ˜]\™HÜˆ[œ™XYX›H[Y[œÚ[ÛœÈØ[ˆÝ[™Y\ÙH[]™\žKˆØ\\™K][YH^˜XÝ[Ûˆ\ÈHÙ\\˜]H›Û‹Y˜][Ý\[œÚYHHØ[YH[\ŽÈX[›Ü›YYÜˆXœÙ[[Y\Ý[\Y]Y]H™]\›œÈ›ÈØ\\™HØ[™Y]H˜]\ˆ[ˆ[˜[Y][™ÈH[XYÙK‚‚‘XXÚ˜[œÚ][ÛˆÚÛÜÙ\ÈÛ™HÙ\™\‹[ÝÛ™YÝÜ™Y][œÝ[™Y›Ü™H\Z[™ÈH]\ÚXš[]H[Kˆ]^XÝ[œÝ[\È\œÚ\ÝY\ÈÝÜ™YØ]\ÙY\ÈH™XÙZ]™Y][YH˜[˜XÚË[™\ÙY›ÜˆHš]™K[Z[]H\\ˆ›Ý[™‚‚•H[\ˆ™XÙZ]™\ÈHØ\\™U[YPÛÛ^ÛÛZ[š[™ÈÝÜ™Y]]™[]X]™[[Y^›Û™X[™]™[Ý\]ˆ™\]Y\Ý]È\ÜÈH[™XYKX]]Üš^™Y]™[ˆ[XšYÝ[Ý\ËZ[™Ü™\ÜÈ™XÛÝ™\žH™\™XYÈHÝ[[]™H]™[™Y›Ü™HYÜ[Û‹ˆ[ˆ[œ™XYX›HÜˆZ\ÜÚ[™È]™[[YHÛÛ^XZÙ\È[Y\Ý[\^˜XÝ[Ûˆ™]\›ˆ›ÈØ[™Y]H˜]\ˆ[ˆ›ØÚÚ[™ÈÝÜ˜YÙK‚‚•HÚ\™YY]Y]H[\ˆ\È[›ÚÙYÚ]H[˜[Y]Yž]\È]]™\žH›ÙXÝ[Ûˆ™\Ù\™Y8¡¤ˆÝÜ™YÜš]N‚‚‹Hš[˜[^™TÝÜ™YYYXX™Y›Ü™HYYXT™\ÜÚ]ÜžK™š[˜[^™XÂ‹H™XÙZ]™SYYXU\ØY™Y›Ü™HYYXT™\ÜÚ]ÜžK˜ÛÛ[Z]™\Ù\˜][Û’[™Ü™\ÜØÈ[™‹H[XšYÝ[Ý\ËZ[™Ü™\ÜÈ™XÛÝ™\žH[ˆÛX[\Ø™Y›Ü™HYYXT™\ÜÚ]ÜžK˜YÜ™\Ù[[™Ü™\ÜÑš[˜[‚‚•H™XÛÝ™\žH][™XYH™XYÈHÛÛ\]HØ[›ÛšXØ[Øš™XÝÈ™\šYžH]ÈÒKLMˆYÙ\Ýˆ]™]\Ù\ÈÜÙHž]\È›ÜˆY]Y]H[œÜXÝ[Ûˆ[™\ÜÙ\ÈØ\\™Y][Y[[™P][™HØ[YHÛÛ[Z]Y][ÈYÜ™\Ù[[™Ü™\ÜÑš[˜[È]Ù\È›Ý\™›Ü›H[›Ý\ˆØš™XÝ™XY‚‚“YØXÞK[Øš™XÝ›Û[Ý[ÛˆÙ\È›ÝÚ[™ÙHÚ›Û›ÛÙÞH™XØ]\ÙHHYYXH›ÝÈ\È[™XYHÝÜ™Yˆ›ÈÝ\ˆÛÙH]X^H˜[œÚ][ÛˆH™\Ù\˜][ÛˆÈÝÜ™YÚ]Ý]Z]\ˆÝ\Z[™ÈH™YHÚ›Û›ÛÙÞH˜[Y\ÈÜˆ[ÝÚ[™ÈZYÜ˜][ÛˆM‰ÜÈÛÛ\]Xš[]HšYÙÙ\ˆÈÝ[\™XÙZ]™Y[YK‚‚HØ[™Y]HØ\\™H[YH\ÈXØÙ\YÛ›HÚ[Ž‚‚‹HH]U[YSÜšYÚ[˜[˜[YH\ÈHÛÛ\]HVQˆØØ[]H[™[YNÂ‹HH˜[Y[X™YYÙ™œÙ]\ÈÛ›Ü™YÚ[ˆ™\Ù[Â‹HH˜[YHÚ]Ý][ˆÙ™œÙ]™\ÛÛ™\È[ˆH]™[	ÜÈÛÛ™šYÝ\™YPSH[YH›Û™NÂ‹HH˜[X˜XÚÈÝ™\›\ÚÛÜÙ\ÈHX\›Y\ˆÙˆHÛÈÜÜÚX›H[œÝ[ÎÂ‹HHÜš[™ËY›ÜØ\™ØØ[[YH]Ù\È›Ý^\Ý\È™Z™XÝY˜]\ˆ[ˆÚYYÂ‹HH™\Ý[[™È[œÝ[\È›È]\ˆ[ˆš]™HZ[]\ÈY\ˆÝÜ™YØ]È[™‹HÚ[ˆH]™[\ÈH\ÝÛÜHÝ\[œÝ[H™\Ý[\È›È[Ü™H[ˆÝ\œÈ™Y›Ü™H]Ý\‚‚•HÝÙ\ˆ›Ý[™\ÈÛÛœÚY\™Y[˜]˜Z[x %[™\ÈÚÚ\Y8 %Ú[ˆ]™[ÜÝ\Ø]\ÈH^XÝ\ØÚÙ[[™[NMÌLKLUŒŒŒ˜ÜˆHZYÜ˜][Ûˆ\›Þ[X][Ûˆ	Ù]™[Ù]_UŒŒŒ˜ˆ\È[[[Û˜[H™Y™\œÈH\›Z\ÜÚ]™HØ\\™K][YHÚXÚÈÝ™\ˆ™X][™ÈYØXÞHØÚY[HØØY™›Û[™È\È›ÙXÝ]ˆH\\ˆ›Ý[™Ý[\Y\Ë‚‚HØ[™Y]HÝ]ÚYHÜÙH›Ý[™ËHX[›Ü›YY[Y\Ý[\[ˆ[œÝ\ÜYÛÛZ[™\‹Üˆ[žH\œÙ\ˆ˜Z[\™H™\Ý[È[ˆØ\\™YØ]H•S[™[Y[[™WØ]HÝÜ™YØ]‚‚•\È[H\È[[[Û˜[HÛÛœÙ\˜]]™Kˆ]˜]›ÜœÈH™[Y]˜X›H™XÙZ]™Y][YHÜÚ][ÛˆÝ™\ˆ[ˆ[˜ÛÜœ™XÝ]šXÙHÛØÚË‚‚“Û›HH›Ü›X[^™YØ\\™H[œÝ[\È™]Z[™Yˆ˜]ÈVQ‹ÔÈÛÛÜ™[˜]\ËØ[Y\˜H[Ù[Ù\šX[Y[YšY\œË[X›˜Z[Ë[™Ý\ˆ[X™YYY]Y]H\™H™Z]\ˆÝÜ™Y[ˆH›Üˆ^ÜÙY›ÝYÚHTKˆ^\Ý[™È™]šY]È™Z]š[ÜˆÛÛ[Y\ÈÈÝš\ÛÝ\˜ÙHY]Y]K‚‚ˆÈÈÈËŒÈ^\Ý[™ÈYYXB‚•HZYÜ˜][ÛˆÙ\È›Ý™\™XY\ÞYYÜšYÚ[˜[Ë‚‚‘^\Ý[™ÈÝÜ™Y›ÝÜÈ™XÙZ]™N‚‚‹HØ\\™YØ]H•SÂ‹H[Y[[™WØ]HÓÐSTÐÑJÝÜ™YØ]Ü™X]YØ]
+XÈ[™‹H˜]›Üš]YØ]H•S‚‚•^H\™Y›Ü™H\X\ˆ[[YYX][H[ˆH™]ÈØ[\žH\Ú[™È™XÙZ]™YÚ›Û›ÛÙÞKˆH]\™H›Ý[™YY]Y]H˜XÚÙš[ÛÝ[™\]Z\™HHÙ\\˜]H\›Ý™Y\ÚYÛˆ[™Ü\˜][Û˜[[‹‚‚ˆÈÈˆ]H[Ù[‚“ZYÜ˜][ÛˆM—ÚÜÝÜš]˜]WÙØ[\žKœÜ[[œÈY\ˆ\ÞYYZYÜ˜][ÛˆMWØÝ\˜]YÜš]˜]WÙÝY\Ý›ÛÚËœÜ[ˆ›ÝZYÜ˜][ÛœÈ[\ˆYYXXÈ™[X\ÙHÛÛ[™Ëœ™\Ú\ØÚ[XH™\šYšXØ][Û‹[™\Ü˜YH\ÝÈ]\Ý™\Ù\™H]^XÝÜ™\‹ˆH\ÚYÛˆÙ\È›Ý™XZ[HYYXHX›K‚‚”ÔS]HØ[››ÝYH›Û‹[[ÛÛ[[ˆÈHÜ[]YX›HÚ]Ý]HÛÛœÝ[Y˜][[™Ø[››Ý]\ˆYÚ[ˆ[Xš[]H[ˆXÙKˆZYÜ˜][ÛˆMˆ\™Y›Ü™H\Ù\È\ÈÛÛ˜Ü™]H\[™[Û›HÚ\N‚‚˜Ü[STˆP“HYYXHQÓÓSSˆØ\\™YØ]VÂ‚STˆP“HYYXHQÓÓSSˆ[Y[[™WØ]V“Õ•SˆQUS	ÌKLKLUŒŒŒ‰ÎÂ‚STˆP“HYYXHQÓÓSSˆ˜]›Üš]YØ]VÂ‚•TUHYYXB”ÑU[Y[[™WØ]HÓÐSTÐÑJÝÜ™YØ]Ü™X]YØ]
+B•ÒT‘H\ØYÜÝ]HH	ÜÝÜ™Y	ÂˆS‘[Y[[™WØ]H	ÌKLKLUŒŒŒ‰ÎÂ˜‚•HÛÛœÝ[\È[ˆ[\›˜[[œÙ]Ù[[™[›Üˆ™\Ù\˜][ÛœË›ÝH˜[YÝÜ™Y[YYXH[Y[[™H˜[YKˆÛÈ^XÚ]ÛÛ\]Xš[]HšYÙÙ\œÈXZÙHHZYÜ˜][ÛˆØY™HÚ[H[ˆÛ\ˆÛÜšÙ\ˆX^HÝ[™HÙ\š[™È˜Y™šXÎ‚‚˜Ü[Ô‘PUH’QÑÑTˆYYXWÙØ[\žWÝ[Y[[™WÚ[œÙ\ØÛÛ\]Q•TˆS”ÑT•ÓˆYYXB‘“ÔˆPPÒ“ÕÂ•ÒSˆ‘UË\ØYÜÝ]HH	ÜÝÜ™Y	ÂˆS‘‘UË[Y[[™WØ]H	ÌKLKLUŒŒŒ‰Â‘QÒS‚ˆTUHYYXBˆÑU[Y[[™WØ]HÓÐSTÐÑJˆ‘UËœÝÜ™YØ]ˆ‘UË˜Ü™X]YØ]ˆÝ™[YJ	ÉVKI[KIY	R‰SN‰Y–‰Ë	Û›ÝÉÊBˆ
+BˆÒT‘HYH‘UËšYˆS‘[Y[[™WØ]H	ÌKLKLUŒŒŒ‰ÎÂ‘S‘Â‚Ô‘PUH’QÑÑTˆYYXWÙØ[\žWÝ[Y[[™WÜÝÜ™WØÛÛ\]Q•TˆTUHÑˆ\ØYÜÝ]HÓˆYYXB‘“ÔˆPPÒ“ÕÂ•ÒSˆÓ\ØYÜÝ]HH	Ü™\Ù\™Y	ÂˆS‘‘UË\ØYÜÝ]HH	ÜÝÜ™Y	ÂˆS‘‘UË[Y[[™WØ]H	ÌKLKLUŒŒŒ‰Â‘QÒS‚ˆTUHYYXBˆÑU[Y[[™WØ]HÓÐSTÐÑJˆ‘UËœÝÜ™YØ]ˆÝ™[YJ	ÉVKI[KIY	R‰SN‰Y–‰Ë	Û›ÝÉÊKˆ‘UË˜Ü™X]YØ]ˆ
+BˆÒT‘HYH‘UËšYˆS‘[Y[[™WØ]H	ÌKLKLUŒŒŒ‰ÎÂ‘S‘Â˜‚•H™]ÈÛÜšÙ\ˆ^[™ÈYYXT™\ÜÚ]ÜžK™š[˜[^™XÛÛ[Z]™\Ù\˜][Û’[™Ü™\ÜØ[™YÜ™\Ù[[™Ü™\ÜÑš[˜[ÛÈXXÚ˜[œÚ][ÛˆÜš]\ÈÝÜ™YØ]Ø\\™YØ][™[Y[[™WØ][ˆHØ[YHÝX\™YÝ][Y[]ÝÜ™\Èž]HÚ^™H[™[Y[œÚ[ÛœËˆHšYÙÙ\œÈ\™HH™XÙZ]™Y][YHÛÛ\]Xš[]H˜[˜XÚË›ÛÝÚ[™ÈH^\Ý[™ÈYYXWÜÝ[\ÜÝÜ™YØ]ØÛÛ\]™XÙY[È^HÈ›Ý][\Y]Y]H^˜XÝ[Û‹ˆZ\ˆÛÜœ™XÝ™\ÜÈ]\Ý›Ý\[™ÛˆšYÙÙ\ˆ^XÝ][ÛˆÜ™\ˆ™[]]™HÈYYXWÜÝ[\ÜÝÜ™YØ]ØÛÛ\]ˆZYÜ˜][Ûˆ[™™\ÜÚ]ÜžH\ÝÈ]\Ý›Ý™H]›ÈÝÜ™Y›Û‹Y[]Y›ÝÈ™]Z[œÈHÙ[[™[‚‚˜[Y[[™WØ]Ý\Ú\ÙHÛÛZ[œÈHØ[›ÛšXØ[UÈTÓËNŒH[œÝ[ˆ˜]›Üš]YØ]\È[Ú[ˆHÝÈ\È›ÝH˜]›Üš]H[™ÛÛZ[œÈHÛÛ™š\›YYÙ\™\ˆÜš]H[YHÚ[ˆ]\Ë‚‚“ZYÜ˜][ÛˆMˆYÎ‚‚˜Ü[Ô‘PUHS‘VYYXWÙØ[\žWÝ[Y[[™B“ÓˆYYXJ]™[ÚY[Y[[™WØ]TÐËYTÐÊB•ÒT‘H\ØYÜÝ]HH	ÜÝÜ™Y	ÈS‘[]YØ]TÈ•SÂ‚Ô‘PUHS‘VYYXWÙØ[\žWÙ˜]›Üš]\×Ý[Y[[™B“ÓˆYYXJ]™[ÚY[Y[[™WØ]TÐËYTÐÊB•ÒT‘H\ØYÜÝ]HH	ÜÝÜ™Y	ÂˆS‘[]YØ]TÈ•SˆS‘˜]›Üš]YØ]TÈ“Õ•SÂ˜‚•H^XÝVRSˆUQT–HS˜Ý]]\È™XÛÜ™Y[ˆ™\šYšXØ][Û‹ˆH\ÚYÛˆ™\]Z\™[Y[\È][™š[\™Y[™˜]›Üš]\Ë[Û›H™XYÈ\ÙH]™[\ØÛÜYÚ›Û›ÛÙÚXØ[[™^\È[™™]™\ˆÛÜ[]™[›ÝÜÈ[ˆ\XØ][ÛˆY[[ÜžK‚‚•HX[˜YÙ\ˆYYXHšY]ÈØZ[œÎ‚‚˜Âš[\™˜XÙHX[˜YÙ\‘Ø[\žSYYXUšY]ÈÂˆYˆÝš[™ÎÂˆÜšYÚ[˜[š[[˜[YNˆÝš[™ÎÂˆÝY\Ý˜[YNˆÝš[™ÎÂˆØ\[ÛŽˆÝš[™È[ÂˆX›\ÚYÝ]\Îˆ	Ý[œX›\ÚY	È	ÜX›\ÚY	È	ÚY[‰ÎÂˆ™]šY]Ð]˜Z[X›Nˆ›ÛÛX[ŽÂˆÚYˆ[X™\ˆ[ÂˆZYÚˆ[X™\ˆ[Âˆ™XÙZ]™Y]ˆÝš[™ÎÂˆ[Y[[™P]ˆÝš[™ÎÂˆ[Y[[™TÛÝ\˜ÙNˆ	ØØ\\™IÈ	Ü™XÙZ]™Y	ÎÂˆ\Ñ˜]›Üš]Nˆ›ÛÛX[ŽÂŸB˜‚”š]˜]HØ[\žHÙ\È›Ý™YYÜšYÚ[˜[Øš™XÝÙ^\Ë˜]ÈY]Y]K\ØY\‹\Ù\ÜÚ[ÛˆY[YšY\œËÜˆ™][[Ûˆ[\›˜[Ë‚‚ˆÈÈKˆTH[™™\ÜÚ]ÜžH›Ý[™\šY\Â‚ˆÈÈÈKŒH[Y[[™H™XY‚Y‚‚˜‘ÑUØ\KÛX[˜YÙKÙ]™[ËÎ™]™[YÙØ[\žB˜‚“™]ÈÛÛœÝ[È[ˆÚ\™YØÛÛœÝ[ËØ\™N‚‚˜Â™^ÜÛÛœÝPSQÑT—ÑÐST–WÔQÑWÔÒV‘HHÂ™^ÜÛÛœÝPSQÑT—ÑÐST–WÓPVÔQÑWÔÒV‘HHMŽÂ™^ÜÛÛœÝPVÑÐST–WÔÑPTÒÐÓÑWÔÒS•ÈHLŒÂ˜‚”Ý\ÜY]Y\žH\˜[Y]\œÎ‚‚‹H]Y\žXˆÜ[Û˜[š[[YYÙX\˜ÚÝš[™ÈÙˆ][ÜÝLŒ[šXÛÙHÛÙHÚ[ËYX\Ý\™YÚ]\œ˜^K™œ›ÛJ˜[YJK›[™ÝÂ‹H˜]›Üš]\ØˆÛZ]YÜˆXÂ‹HÝ\œÛÜ˜ˆÜ[Û˜[Ü\]YHÚ›Û›ÛÙÚXØ[Ý\œÛÜŽÈ[™‹H[Z]ˆ[YÙ\ˆœ›ÛHH›ÝYÚM‹Y˜][‚‚•H›Ý]N‚‚ŒKˆ]]Üš^™\ÈHÝ\œ™[X[˜YÙ\ˆ›ÜˆH]]™[ÂŒ‹ˆ˜[Y]\È[™›Ü›X[^™\È\˜[Y]\œÎÂŒËˆ\™›Ü›\È[ˆ]™[\ØÛÜYÝÜ™Y[Û›K›Û‹Y[]Y]Y\žNÂˆ\Y\ÈH]\˜[TÐÒRKXØ\ÙKZ[œÙ[œÚ]]™H[œÝŠÝÙ\Š‹‹ŠBÂÆ÷vW"ƒò’–&VF–6FW2v†Vâ&WVW7FVC°£RâÆ–W2ff÷&—FVEöB•2äõBåTÄÆv†Vâ&WVW7FVC°£bâ÷&FW'2'’F–ÖVÆ–æUöB42Â–B46°£râfWF6†W2öæRW‡G&&÷rFòFWFW&Ö–æR6öçF–çVF–öã²æ@£‚â&WGW&ç2ÖVF–ÇW2â÷VRæW‡B7W'6÷"à ¥F†RF‡&VR6V&6‚&VF–6FW2&R&÷VæBæB¦ö–æVBv—F‚õ&â6F–öæ—2w&VB–â4ôÄU44R†6F–öâÂrr–â&V6W6RÆVF–ær7V'7G&–ær6V&6‚6ææ÷BW6RF†R6‡&öæöÆöv–6Â–æFW‚FòVÆ–Ö–æFR6æF–FFW2Â6V&6‚—2W‡Æ–6—FÇ’&÷VæFVB66â–ç6–FRF†RÇ&VG’WF†÷&—¦VBWfVçBÂv†÷6R†&B6—2Ã7F÷&VB†÷F÷2âeE2ÂG&–w&Ò–æFW†–ærÂVæ–6öFR66RföÆF–ærÂ66VçBföÆF–ærÂgW§§’ÖF6†–ærÂæB6VÖçF–26V&6‚&R÷WBöb66÷Rà ¥F†R7W'6÷"6'&–W2F†RÆ7BF–ÖVÆ–æUöFæBÖVF–”BæB—2fW'6–öæVB6W&FVÇ’g&öÒF†R7W'&VçBÆ—fR–çF¶R7W'6÷"â&—fFRvÆÆW'’FöW2æ÷B&WW6RF†RFW66VæF–ær7F÷&VEöF7W'6÷"6öçG&7Bà ¤VW'’÷"ff÷&—FW2Öf–ÇFW"6†ævRÇv—27F'G2v—F†÷WB7W'6÷"â–çfÆ–B÷"V×G’7W'6÷"fÇVW2&V6V—fRF†RW†—7F–ærfÆ–FF–öâVçfVÆ÷R&F†W"F†â6–ÆVçFÇ’&W7F'F–ærà ¢222’ã"ff÷&—FRw&—FP ¤FC  ¦‡GG ¥UBö’öÖævRöWfVçG2ó¦WfVçD–BöÖVF–ó¦ÖVF––Böff÷&—FP¤6öçFVçBÕG—S¢Æ–6F–öâö§6öà §²&ff÷&—FR#¢G'VRÐ¦  ¥F†R&÷WFS  ¢Ò&WV—&W2ÖævW"w&—FRWF†÷&—¦F–öâÂÖF6†–ær÷&–v–âÂæBF†RW†—7F–ær55$b6öçG&7C°¢Ò66WG2W†7FÇ’öæR&ööÆVã°¢ÒfW&–f–W2F†RÖVF–&VÆöæw2FòF†RF‚WfVçBæB—27F÷&VBæBæöâÖFVÆWFVC°¢Ò6WG2ff÷&—FVEöFFòF†R6W'fW"F–ÖR÷"çVÆÃ°¢Ò—2–FV×÷FVçBv†VâF†R&WVW7FVB7FFRÇ&VG’ÖF6†W3²æ@¢Ò&WGW&ç2F†RWFFVBvÆÆW'’ÖVF–f–Wrà ¤FVÆWFVBÂÖ—76–ærÂ÷"7&÷72ÖWfVçBÖVF–”B&V6V—fW2F†RW†—7F–ær&W6÷W&6R&VgW6Â6VÖçF–72âff÷&—FR7FFRæWfW"w&çG266W72Fò†÷Fòà ¢222’ã26ö×ÆWFRW‡÷'@ ¤æò6VÆV7F—fRÖW‡÷'BVæGö–çB—2FFVBà ¢¢¤F÷væÆöBÆÂ¢¢–çfö¶W2F†RW†—7F–ærWfVçBW‡÷'B7&VF–öâÂ7FGW2Â&WG'’ÂæBF÷væÆöB—2âW‡÷'BÖVÖ&W'6†—&VÖ–ç2WfW'’7F÷&VBÂæöâÖFVÆWFVB÷&–v–æÂBF†R¦ö"w26æ6†÷BF–ÖRâF†RW†—7F–ærÖæ–fW7BÂçVÖ&W&VB†÷Fò¤•'G2Â&–çF&ÆRwVW7F&öö²ÂæB&—fFRwVW7F&öö²'F–f7G2&VÖ–âWF†÷&—FF—fRâF†R7F–öâÆ&VÂFW67&–&W2öæR6ö×ÆWFRÆöv–6ÂW‡÷'BÂæ÷BöæR‡—6–6Â&6†—fRà ¢222’ãB6†&VBvÆÆW' ¥6†&VBÖöFR6öçF–çVW2FòW6RF†RW†—7F–ærÖævW"ÖVF–&VBæBV&Æ–6F–öâ×WFF–öâ&÷WFW2â—G2f—'7BÖVçG'’f–ÇFW"—2VçV&Æ—6†VF²F†R7W'&VçBV&Æ–6F–öâ7FGW2f–ÇFW'2æB&F6‚Ö†–×VÒ&VÖ–âVæ6†ævVBà ¤–×ÆVÖVçFF–öâ6†÷VÆBW‡G&7BF†R7W'&VçBvÆÆW'’V&Æ—6†–ærÖ&·Wg&öÒÖævW%vRçG7†–çFòfö7W6VB6ö×öæVçB&F†W"F†âÖ—†–ær—B–çFòF†R&—fFRF–ÖVÆ–æRâæò&6¶VæBV&Æ–6F–öâÖ–w&F–öâ—2&WV—&VBà ¢22â6ö×öæVçB&÷VæF&–W0 ¥F†RÖævW"6†÷VÆBæ÷Bv–âæ÷F†W"Æ&vR–æÆ–æR'&æ6‚–âÖævW%vRçG7†à ¥&V6öÖÖVæFVB&÷VæF&–W3  ¢ÒÖævW$vÆÆW'•v÷&·76V ¢Ò÷vç2&—fFRò6†&VBÖöFS°¢Ò6ö÷&F–æFW2F†RöæRW‡÷'B7F–öâæB6öÖÖöâ†VF–ærà ¢ÒÖævW%&—fFTvÆÆW'– ¢Ò÷vç2VW'’7FFRÂff÷&—FW27FFRÂ6‡&öæöÆöv–6Âv–æF–öâÂæ÷F–6W2ÂæBf–WvW"7FFRà ¢ÒvÆÆW'•F–ÖVÆ–æV ¢Òw&÷W2÷&FW&VB&÷w2F‡&÷Vv‚W&RgVæ7F–öâæB&VæFW'2ÖöÖVçB6V7F–öç2à ¢ÒvÆÆW'”ÖöÖVçF ¢Ò&VæFW'2F†R6ö×7B÷"W‡æFVBFWFW&Ö–æ—7F–2Ö÷6–2à ¢ÒvÆÆW'•f–WvW& ¢Ò÷vç2ÖöFÂfö7W2Â¶W–&ö&Bæf–vF–öâÂF¦†6VçB×vR&VfWF6‚ÂæBff÷&—FR7F–öâà ¢ÒÖævW%6†&VDvÆÆW'– ¢Ò6öçF–ç2F†RW†—7F–ærV&Æ–6F–öâf–ÇFW'2Â6VÆV7F–öâÂV&Æ—6‚ÂæB†–FR&V†f–÷"à ¢ÒvÆÆW'’×F–ÖVÆ–æRçG6 ¢ÒW&R6‡&öæöÆöw’æBCRÖÖ–çWFRw&÷W–ær'VÆW2v—F‚WfVçB×F–ÖR×¦öæR–çWG2à ¢ÒÖVF–&W÷6—F÷'’æÆ—7DvÆÆW'•F–ÖVÆ–æV ¢Ò÷vç2F†R&÷VæFVBCVW'’æB6‡&öæöÆöv–6Â7W'6÷"à ¤6GW&R×F–ÖRW‡G&7F–öâ&VÆöæw2–âöæR&÷VæFVB–ç7V7D–ÖvTÖWFFF†'—FW2Â6öçFW‡B–†VÇW"W6VB'’f–æÆ—¦U7F÷&VDÖVF–Â&V6V—fTÖVF–WÆöFÂæBF†RÖ&–wV÷W2Ö–æw&W72&V6÷fW'’'&æ6‚–â6ÆVçWçG6â—BW‡FVæG2F†R7W'&VçBF–ÖVç6–öâ–ç7V7F÷"v—F‚F†RW‡Æ–6—BD”dbôU„”b7V'6WB–â*srã"æB&WGW&ç2&WV—&VBF–ÖVç6–öç2ÇW2â÷F–öæÂæ÷&ÖÆ—¦VB6GW&R×F–ÖR6æF–FFRâ6öçFW‡F—2F†R6W'fW"Ö÷væVB6GW&UF–ÖT6öçFW‡FFVf–æVB–â*srã"âvÆÆW'’&VæFW&–ær×W7Bæ÷B–ç7V7B÷&–v–æÂ'—FW2à ¤V6‚Væ—B6†÷VÆBW‡÷6R6ÖÆÂG—VB–çFW&f6RæB&VÖ–â–æFWVæFVçFÇ’FW7F&ÆRà ¢22âÆöF–ærÂv–æF–öâÂæB7FFR&W6W'fF–öà ¥F†RvÆÆW'’ÆöG2öæÇ’gFW"F†RvÆÆW'’FW7F–æF–öâ—2÷VæVBâ—G2&WVW7BFöW2æ÷B¦ö–âF†RÖævW"w2–æ—F–ÂWfVçBÂÆ—fR–çF¶RÂ%5eÂwVW7F&öö²Â÷"6†&R&VG2à ¥F†Rf—'7B7V66W76gVÂvR&WÆ6W2F†R7W'&VçB&W7VÇB6WBâ6öçF–çVF–öâvRVæG2öæÇ’v†Vã  ¢Ò—G27W'6÷"7F–ÆÂÖF6†W2F†R7W'&VçB&W7VÇB7G&VÓ°¢ÒVW'’æBff÷&—FW2Öf–ÇFW"7FFR†fRæ÷B6†ævVC²æ@¢ÒF†R&WVW7B†2æ÷B&VVâ7WW'6VFVB÷"&÷'FVBà ¤GWÆ–6FRÖVF–”G2&RF—66&FVBFVfVç6—fVÇ’à ¤ff÷&—FRUBæWfW"G&–vvW'2vÆÆW'’&VBâ—BWFFW2F†RÖF6†–ær&÷r–âÆ6S²v†VâF†R7F—fRff÷&—FW2f–ÇFW"W†6ÇVFW2F†RæWr7FFRÂF†R&÷r—2–ç6W'FVB÷"&VÖ÷fVBg&öÒF†RÆöFVB&W7VÇB2FVf–æVB–â*sbãbà ¥v†VâF†R†÷7B7v—F6†W2&WGvVVâ&—fFRæB6†&VBÖöFRGW&–æröæRÖ÷VçFVBvÆÆW'’f—6—C  ¢ÒV6‚ÖöFR&W6W'fW2—G26öæf—&ÖVB&÷w2Â7W'&VçBf–ÇFW'2ÂæB67&öÆÂ÷6—F–öã°¢Òâ÷Vâ&—fFRf–WvW"6Æ÷6W3°¢ÒVæF–ærw&—FW2f–æ—6‚F‡&÷Vv‚F†RW†—7F–ærÖævW"w&—FRwV&C²æ@¢Ò7FÆR&VB&W7öç6W26ææ÷B÷fW'w&—FRF†RæWvÇ’7F—fRÖöFRà ¤ÆVf–ærvÆÆW'’æB&WGW&æ–ærGW&–ærF†R6ÖRÖævW"Ö÷VçBÖ’&W6W'fR&—fFRVW'’æBff÷&—FW27FFRâgVÆÂvR&VÆöB7F'G2BF†RVæf–ÇFW&VB&—fFRF–ÖVÆ–æRà ¢22"âV×G’ÂÆöF–ærÂæBW'&÷"7FFW0 ¢222æò&—fFR†÷F÷0 ¤†VF–æs¢¢¤æò†÷F÷2†fR&VVâFVÆ—fW&VB–WBâ¢  ¤6÷’F—&V7G2F†R†÷7BFòÆ—fR–çF¶Rv—F†÷WB7VvvW7F–ærV&Æ–6F–öâ÷"6WGWv÷&²à ¢222æò6V&6‚ÖF6†W0 ¤†VF–æs¢¢¤æò†÷F÷2ÖF6‚F†—26V&6‚â¢  ¥F†R7F—fRVW'’&VÖ–ç2f—6–&ÆRæB¢¤6ÆV"6V&6‚¢¢7F–öâ—2f–Æ&ÆRà ¢222æòff÷&—FW0 ¤†VF–æs¢¢¤æòff÷&—FW2–WBâ¢  ¤6÷’W‡Æ–ç2F†BF†R†V'Böâç’†÷FòFG2—BFòF†—26†&VBWfVçBÆ—7Bâ—BFöW2æ÷B–çG&öGV6RÆ'V×2÷"¶VWW"ÆæwVvRà ¢222Ö—76–ær&Wf–Wp ¤FVÆ—fW&VB÷&–v–æÂv—F‚æòf–Æ&ÆR&Wf–Wr&VÖ–ç2–â6‡&öæöÆöw’âF†RF–ÆR6†÷w27F&ÆRÆ6V†öÆFW"Âf–ÆVæÖR÷"6F–öâÂ6öçG&–'WF÷"ÂæBff÷&—FR7F–öââ÷Væ–ær—B&öGV6W2F†R6ÖRÆ6V†öÆFW"æBÖWFFFâ&Wf–Wrf–ÇW&RæWfW"&VÖ÷fW2F†R÷&–v–æÂg&öÒF÷væÆöBÆÂà ¢222F–ÖVÆ–æR&VBf–ÇW&P ¤–bæòvÆÆW'’FF†2&VæFW&VBÂ6†÷rF†R7FæF&B&WG'’7FFRà ¤–bÆFW"v–æF–öâ÷"6V&6‚&WVW7Bf–Ç2Â&WF–âF†RÆ7B6öæf—&ÖVBF–ÖVÆ–æRæB6†÷rF—6Ö—76–&ÆRÖævW"æ÷F–6Rv—F‚&WG'’f÷"F†BW†7B&WVW7BâFòæ÷B&Ææ²F†RvÆÆW'’÷"Ö÷fRF†R†÷7BFòæ÷F†W"6V7F–öâà ¢222ff÷&—FRf–ÇW&P ¥&W7F÷&RF†RÆ7B6öæf—&ÖVBff÷&—FR7FFRÂ&WF–âF†R÷VâÖöÖVçB÷"f–WvW"ÂæB6†÷rÖævW"æ÷F–6Râff÷&—FRf–ÇW&RFöW2æ÷B&Vg&W6‚F†RVçF—&RWfVçB÷"ÖVF–Æ—7Bà ¢222W‡÷'Bf–ÇW&P ¥W6RF†RW†—7F–ærW‡÷'Bf–ÇW&RÂ&WG'’ÂW‡—'’ÂæB&V6÷fW'’7FFW2âvÆÆW'’FöW2æ÷B&V–çFW'&WBF†VÒ2F–ÖVÆ–æRf–ÇW&W2à ¢222â&—f7’ÂWF†÷&—¦F–öâÂæBÆövv–æp ¢ÒWfW'’vÆÆW'’&VBæBff÷&—FRw&—FR&WV—&W2ÖævW"WF†÷&—¦F–öâf÷"F†RF‚WfVçBà¢Ò6V&6‚&VF–6FW2&R&÷VæB&ÖWFW'2æB6ææ÷B'&öFVâF†RWF†÷&—¦VBWfVçB66÷Rà¢Ò÷VR7W'6÷'26öçF–âæò7&VFVçF–ÂæB6ææ÷BÖ÷fR&WVW7B–çFòæ÷F†W"WfVçBà¢ÒwVW7B6W76–öç26ææ÷B66W72F†R&—fFRvÆÆW'’VæGö–çB÷"ff÷&—FR&÷WFRà¢Ò&—fFRvÆÆW'’&Wf–Ww26öçF–çVRF‡&÷Vv‚F†RWF†÷&—¦VB&Wf–Wr&÷WFRà¢Ò÷&–v–æÇ2&VÖ–â&—fFRæB&RW‡÷6VBöæÇ’F‡&÷Vv‚W†—7F–ærÖævW"ÖWF†÷&—¦VB÷&–v–æÂ÷"W‡÷'BFVÆ—fW'’à¢Ò&rVÖ&VFFVBÖWFFF—2æ÷BÆövvVBà¢Òæ÷&ÖÆ—¦VB6GW&RF–ÖRÖ’V"–âÖævW"&W7öç6W2'WBæ÷B–âwVW7BÖf6–ærvÆÆW'’&W7öç6W2VæÆW726W&FVÇ’&÷fVBwVW7BFW6–vâFG2—Bà¢Ò6V&6‚FW‡BæBwVW7B6F–öç2×W7Bæ÷B&R6÷–VB–çFò–æg&7G'V7GW&RÆöw2&W–öæBF†RÆ–6F–öâw2W†—7F–ær&÷VæFVB&WVW7BÆövv–æröÆ–7’à¢Òff÷&—FRw&—FW26†÷VÆBÆörWfVçB”BÂÖVF–”BÂ&WVW7FVB7FFRÂ&W7VÇBÂæB&WVW7B”Bv—F†÷WBÆövv–ær7&VFVçF–Ç2÷"÷&–v–æÂö&¦V7B¶W—2à ¢22Bâ66W76–&–Æ—G’æB&W7öç6—fR&V†f–÷  ¥F†R&VFW6–vâ×W7B6öçF–çVRFòF&vWBt4r"ã"æBF†R&W÷6—F÷'’w2‡—6–6ÂÖFWf–6R66WFæ6R&WV—&VÖVçG2à ¥&WV—&VB&V†f–÷#  ¢ÒvÆÆW'’ÖöFR6öçG&öÇ2W‡÷6R6VÆV7FVB7FFR&öw&ÖÖF–6ÆÇ’à¢Ò6V&6‚†2W'6—7FVçBf—6–&ÆRÆ&VÂà¢Òff÷&—FW2—2FövvÆRv—F‚&–×&W76VFà¢ÒWfW'’†÷Fò†2öæR&–Ö'’÷Vâ×f–WvW"7F–öã²ff÷&—FR&VÖ–ç26W&FRæÖVB6öçG&öÂà¢ÒÖ÷6–2DôÒ÷&FW"ÖF6†W26‡&öæöÆöw’æB67&VVâ×&VFW"÷&FW"à¢ÒÖöÖVçBW‡ç6–öâW6W2&–ÖW‡æFVFæB–FVçF–f–W2F†R6öçG&öÆÆVB&Vv–öâà¢Ò&W7VÇB6÷VçG2æB6ö×ÆWFVBff÷&—FR6†ævW2&Rææ÷Væ6VBöÆ—FVÇ’v—F†÷WB&WVFVBÆ—fR×&Vv–öâæö—6Rà¢ÒF†R–ÖÖW'6—fRf–WvW"†2â66W76–&ÆRæÖRÂG&VBfö7W2ÂW‡Æ–6—B6Æ÷6R6öçG&öÂÂæB&VÆ–&ÆRfö7W2&W7F÷&F–öâà¢Ò¶W–&ö&Bæf–vF–öâFöW2æ÷BFWVæBöâ†÷fW"à¢Ò7FGW2Âff÷&—FRÂæBV&Æ–6F–öâÖVæ–æræWfW"&VÇ’öâ6öÆ÷"ÆöæRà¢ÒF÷V6‚F&vWG2&VÖ–âBÆV7BCB'’CB552—†VÇ2à¢ÒB3#552—†VÇ2v–FRÂF†RvÆÆW'’†2æòFö7VÖVçBÖÆWfVÂ†÷&—¦öçFÂ67&öÆÆ–ærà¢ÒB#R¦ööÒÂ6V&6‚ÂÖöFR7v—F6‚ÂÖöÖVçB6öçG&öÇ2ÂæBf–WvW"6öçG&öÇ2&VÖ–â÷W&&ÆRà¢Ò&VGV6VBÖ÷F–öâ&VÖ÷fW2æ–ÖFVBÖ÷6–2W‡ç6–öâæBf–WvW"G&ç6—F–öç2à¢Ò–ÖvRÇFW&æF—fW26öçF–çVRFò&VfW"F†RwVW7B6F–öâæB÷F†W'v—6RW6R6fRf–ÆVæÖRÖFW&—fVBÆ&VÃ²FV6÷&F—fRÖ÷6–2G&VFÖVçB—2æ÷Bææ÷Væ6VB6W&FVÇ’à ¢22RâW&f÷&Öæ6RæB66ÆP ¥F†RFW6–vâ×W7B&VÖ–â&÷VæFVBBÃ†÷F÷2à ¢ÒFòæ÷B&WGW&âÆÂÖVF–ÖWFFF–âF†R–æ—F–Â&W7öç6Rà¢ÒFVfVÇBF–ÖVÆ–æRvW26öçF–âC‚&÷w3²F†R6W'fW"Ö†–×VÒ—2“bà¢ÒW6R¶W—6WBv–æF–öâ÷fW"F–ÖVÆ–æUöFæB”C²Fòæ÷BW6Röfg6WBv–æF–öâà¢ÒfWF6‚&Wf–Wr×6—¦VB76WG2öæÇ’âÖ÷6–2æBf–WvW"æWfW"fWF6‚â÷&–v–æÂà¢ÒÇ’ÆöF–æsÒ&Æ§’&æBFV6öF–æsÒ&7–æ2&÷WG6–FRF†Rf—'7Bf—6–&ÆRÖ÷6–2à¢Ò&VÆöBBÖ÷7BF†RF¦6VçBf–WvW"&Wf–Ww2à¢Ò&÷'B÷"7WW'6VFR7FÆR6V&6‚æBv–æF–öâ&WVW7G2à¢ÒFòæ÷BöÆÂ&—fFRvÆÆW'’à¢Òw&÷WÖöÖVçG2–æ7&VÖVçFÆÇ’–âF†R'&÷w6W"v—F†÷WB&WF–æ–ærGWÆ–6FR&W&W6VçFF–öç2öbF†R6ÖRÖVF–&÷w2à¢ÒfW&–g’Væf–ÇFW&VBÂff÷&—FW2ÖöæÇ’Â6V&6‚ÖöæÇ’ÂæB6öÖ&–æVB6V&6‚×ÇW2Ôff÷&—FW2VW'’Æç2v–ç7BâWfVçBBF†RÃ×†÷Fò6à¢Ò6V&6‚Ö’66âBÖ÷7BF†RWF†÷&—¦VBWfVçBw2Ã&÷w3²Wf–FVæ6R×W7B6†÷r—BFöW2æ÷B66âVç&VÆFVBWfVçG2÷"&WV—&RâÆ–6F–öâÖÖVÖ÷'’6÷'Bà¢Ò&V6÷&B&W&W6VçFF—fRCÆFVæ7’f÷"F†Rf÷W"VW'’6†W3²eE2÷"æ÷F†W"6V&6‚–æFW‚—2FVfW'&VBVæÆW72F†B&÷VæFVBWf–FVæ6Rf–Ç2à¢ÒÖV7W&Ræ'&÷r×†öæRÖVÖ÷'’Â67&öÆÂ&W7öç6—fVæW72ÂæBÆ–÷WB7F&–Æ—G’v—F‚Ö—†VB÷'G&—BÂÆæG66RÂÖ—76–ærÖF–ÖVç6–öâÂæBÖ—76–ær×&Wf–Wr&÷w2à ¥F†R–×ÆVÖVçFF–öâ×W7B&W6W'fRÆ—fR–çF¶Rw2–æFWVæFVçBæWvW7BÖf—'7BöÆÆ–æræB7W'6÷"&V†f–÷"à ¢22bâÖ–w&F–öâæB&öÆÆ÷W@ ¢222†6R¢Ö–w&F–öâbæB6ö×F–&ÆRW'6—7FVæ6P ¢ÒFBeö†÷7E÷&—fFUövÆÆW'’ç7ÆgFW"Rv—F‚F†R6öç7FçBÖFVfVÇBF–ÖVÆ–æUöFÂ&V6V—fVB×F–ÖR&6¶f–ÆÂÂ6ö×F–&–Æ—G’G&–vvW'2ÂæB6‡&öæöÆöv–6Â–æFW†W27V6–f–VB–â*s‚à¢ÒFBg&W6‚×66†VÖæB^(i#bWw&FRFW7G2à¢ÒfW&–g’æò7F÷&VBÂæöâÖFVÆWFVB&÷r&WF–ç2F†RVç6WB6VçF–æVÂà¢Ò¶VWF†R6ö×F–&–Æ—G’G&–vvW'27F—fR6òâöÆBv÷&¶W"f–æÆ—¦–ærGW&–ær&öÆÆ÷WB&V6V—fW2fÆ–B&V6V—fVB×F–ÖRF–ÖVÆ–æRà¢Ò¶VWF†R7W'&VçBÖævW"T’Væ6†ævVBà ¢222†6R#¢6GW&RÖWFFFæBvÆÆW'’ ¢ÒW‡FVæBF†R6†&VBÖWFFF–ç7V7F÷"öæÇ’v—F‚¥TrÂvV%U„”bÂæBärU„–bFFUF–ÖT÷&–v–æÆ7W÷'Bà¢Ò6ÆÂ—BBÆÂF‡&VR&öGV7F–öâ&W6W'fF–öâ×Fò×7F÷&VBw&—FW2Â&WW6–ærF†R6æöæ–6Â'—FW2Ç&VG’&VBGW&–ærÖ&–wV÷W2Ö–æw&W72&V6÷fW'’à¢ÒFBvÆÆW'’&VBæBff÷&—FR&÷WFW2à¢Ò&V6÷&BVW'’Æç2æB&÷VæFVBÃ×&÷r6V&6‚Wf–FVæ6R&Vf÷&RVæ&Æ–ærF†RT’à ¢222†6R3¢&—fFRvÆÆW'’T ¢ÒW‡G&7BF†RW†—7F–ærV&Æ—6†–ærv÷&·76R26†&VBvÆÆW'’v—F‚VçV&Æ—6†VF2—G2f—'7BÖVçG'’f–ÇFW"à¢ÒFBF†R&—fFRò6†&VBÖöFR7v—F6‚v—F‚&—fFR2FVfVÇBà¢ÒFB&—fFR6V&6‚Âff÷&—FW2ÂCRÖÖ–çWFRÖöÖVçBw&÷W–ærÂF†Rf—†VBÖ÷6–2GFW&âÂf–WvW"ÂæBF†R6–ævÆR6ö×ÆWFRÖW‡÷'B7F–öâà¢Ò&VÖ÷fRV&Æ—6†–öâ7FGW2æBFVÆWFR6öçG&öÇ2g&öÒF†R&—fFRÖöFRà¢Ò&VÖ÷fR÷"&VF—&V7BGWÆ–6FR6ö×ÆWFRÖW‡÷'BVçG'’ö–çG2à ¢222†6RC¢Wf–FVæ6RæB&VÆV6P ¢Ò'VâgVÆÂVæ—BÂv÷&¶W"ÂT’Â66W76–&–Æ—G’Â&W7öç6—fRÂæBVæB×FòÖVæB7V—FW2à¢ÒW†W&6—6RÃ×†÷FòF–ÖVÆ–æRÂ6V&6‚Âff÷&—FW2ÂæBW‡÷'Bf—‡GW&W2à¢Ò6ö×ÆWFR‡—6–6Â•†öæR6f&’æBæG&ö–B6‡&öÖR66WFæ6Rà¢ÒFWÆ÷’öæÇ’gFW"W†—7F–ærÖVF–V"F‡&÷Vv‚&V6V—fVB×F–ÖRfÆÆ&6²ÂæWr¥TrõvV%õärÖWFFF66W2W6RG'W7FVB6GW&RF–ÖRÂVç7W÷'FVBf÷&ÖG2fÆÂ&6²6ÆVæÇ’ÂæB6ö×ÆWFRW‡÷'BÖVÖ&W'6†—&VÖ–ç2Væ6†ævVBà ¤æò&6¶w&÷VæB6GW&R×F–ÖR&6¶f–ÆÂæBæò„T”2ô„T”bF–ÖW7F×'6W"&R'Böb&öÆÆ÷WBà ¢22râfW&–f–6F–öâ7G&FVw ¢222Væ—BFW7G0 ¤6÷fW#  ¢ÒW†7BFFUF–ÖT÷&–v–æÆÂ7V'6V6öæBÂæBöfg6WB7–çF‚7&÷72¥TrÂvV%U„”bÂæBärU„–c°¢Ò7W÷'FVB7V'6V6öæBFF–ær÷G'Væ6F–öâæBöfg6WB&÷VæG3°¢ÒW‡Æ–6—B„T”2ô„T”b&V6V—fVB×F–ÖRfÆÆ&6³°¢ÒÖÆf÷&ÖVBVæF–âÖ&¶W'2Âöfg6WG2ÂÆö÷2Â÷fW'6—¦VBfÇVW2ÂG'Væ6F–öâÂæBF†R#SbÔ¶”"66â&÷VæC°¢ÒWfVçB×F–ÖR×¦öæR–çFW'&WFF–öâæBÖ—76–ærÖ6öçFW‡BfÆÆ&6³°¢ÒV&Æ–W"Öö67W'&Væ6R&W6öÇWF–öâGW&–ærE5BfÆÂÖ&6²÷fW&Æ°¢Ò&V¦V7F–öâöbæöæW†—7FVçB7&–ærÖf÷'v&BF–ÖW3°¢ÒWö6‚×6VçF–æVÂæBUD2ÖÖ–Fæ–v‡BÖ&÷†–ÖF–öâÆ÷vW"Ö&÷VæB&V†f–÷#°¢ÒÆW6–&–Æ—G’&÷VæG2æBfÆÆ&6²Fò&V6V—fVBF–ÖS°¢Òæòf–ÇW&RöbFVÆ—fW'’v†VâF–ÖW7F×'6–ærf–Ç3°¢ÒCRÖÖ–çWFRÖöÖVçB&÷VæF&–W2Â–æ6ÇVF–æröæRÖöÖVçB7&÷76–ærÖ–Fæ–v‡C°¢ÒFWFW&Ö–æ—7F–2w&÷W–ær7&÷72vR&÷VæF&–W3°¢ÒF†RW†7BGvòÒÂF‡&VRÒÂæBf÷W"Ö6öÇVÖâÖ÷6–2Æ6VÖVçG2v—F†÷WB&V÷&FW&–æs°¢Ò44”’66RföÆF–ærÂW†7BæöâÔ44”’&V†f–÷"ÂæBÆ—FW&ÂVòö6V&6‚–çWC°¢Òff÷&—FR7FFR&VGV6W'2Â–â×Æ6RWFFW2Âff÷&—FW2Öf–ÇFW"&VÖ÷fÂÂæB&öÆÆ&6³²æ@¢Òf–WvW"&Wf–÷W2ÂæW‡BÂ6Æ÷6RÂæBfö7W2×&WGW&â7FFRà ¢222Ö–w&F–öâÂv÷&¶W"ÂæB&W÷6—F÷'’FW7G0 ¤6÷fW#  ¢Òb'Vææ–æröæÇ’gFW"S°¢Òg&W6‚×66†VÖæB÷VÆFVB^(i#bWw&FW3°¢Ò6öç7FçBÖFVfVÇBFBæB7F÷&VB×&÷r&6¶f–ÆÃ°¢ÒöÆBÕv÷&¶W"Ö6ö×F–&ÆR&W6W'fVB×Fò×7F÷&VBæBF—&V7B×7F÷&VBG&–vvW"7F×–æs°¢Òæò7F÷&VBÂæöâÖFVÆWFVB6VçF–æVÂfÇVW3°¢ÒÆÂF‡&VR&öGV7F–öâ&W6W'fF–öâ×Fò×7F÷&VBw&—FW2W'6—7F–ær6GW&R÷"&V6V—fVB6‡&öæöÆöw“°¢ÒÖævW"ÖöæÇ’vÆÆW'’WF†÷&—¦F–öã°¢Ò7&÷72ÖWfVçB&VgW6Ã°¢Ò7F÷&VBÖöæÇ’æBæöâÖFVÆWFVBf–ÇFW&–æs°¢Ò66VæF–ærF–ÖVÆ–æUöFÂ”B÷&FW&–æs°¢Ò÷VR6‡&öæöÆöv–6Â7W'6÷"fÆ–FF–öã°¢ÒÆ–Ö—B&ævR(	3“bæBFVfVÇBCƒ°¢Ò6V&6‚÷fW"6öçG&–'WF÷"Â6F–öâÂæBf–ÆVæÖS°¢Ò6öÖ&–æVB6V&6‚ÇW2ff÷&—FW3°¢ÒÆ—FW&Âv–ÆF6&B6†&7FW'3°¢Ò–FV×÷FVçBff÷&—FRæBVæff÷&—FRw&—FW3°¢Òff÷&—FR&VgW6Âf÷"FVÆWFVB÷"f÷&V–vâÖVF–°¢ÒVW'’×ÆâWf–FVæ6Rf÷"Væf–ÇFW&VBÂff÷&—FW2ÖöæÇ’Â6V&6‚ÖöæÇ’ÂæB6öÖ&–æVB6V&6‚6†W2BÃ&÷w3°¢ÒwVW7BÖf6–ærvÆÆW'’&VÖ–æ–ærV&Æ—6†VBÖöæÇ“²æ@¢Ò6ö×ÆWFRW‡÷'BÖVÖ&W'6†—æBwVW7F&öö²'F–f7G2&VÖ–æ–ær–æFWVæFVçBöb6V&6‚Âff÷&—FRÂæBV&Æ–6F–öâ7FFRà ¢222T’æB'&÷w6W"FW7G0 ¤6÷fW#  ¢ÒvÆÆW'’÷Vç2–â&—fFRÖöFS°¢Ò6†&VBf—'7B÷Vç2öâVçV&Æ—6†VF°¢Ò7v—F6†–ærÖöFW2&W6W'fW2V6‚6öæf—&ÖVBf–ÇFW"æB&W7VÇB6WC°¢ÒæòV&Æ—6†–ær÷"FVÆWF–öâ6öçG&öÇ2V"–â&—fFRÖöFS°¢Ò–æ—F–Â6ö×7BÖ÷6–2æB–æÆ–æRW‡ç6–öâW6–ærF†RW†7B'&V·ö–çBGFW&ç3°¢ÒVæB7&÷72ÖöÖVçB&÷VæF'’Âv—F†–âF†R6ÖRÖöÖVçBÂæB7&÷72Ö–Fæ–v‡C°¢Ò6V&6‚Â6ÆV"Âff÷&—FW2Â6öÖ&–æVBf–ÇFW'2ÂæBF†V—"V×G’7FFW3°¢Òff÷&—FRg&öÒÖ÷6–2æBf–WvW"v—F†÷WBF–ÖVÆ–æR&VÆöC°¢Òff÷&—FW2ÖöæÇ’Væff÷&—FR&VÖ÷fÂæBf–ÆVB×w&—FR&W7F÷&F–öã°¢Òf–WvW"¶W–&ö&BÂ7v—Rv†W&R7W÷'FVBÂfö7W2G&ÂW66RÂæBfö7W2&W7F÷&F–öã°¢ÒÖ—76–ær&Wf–Wr&V†f–÷#°¢ÒöæRF÷væÆöBÆÂ7F–öâ–çfö¶–ærF†RW†—7F–ær6ö×ÆWFRW‡÷'C°¢Ò67W&FR†VÇW"6÷’f÷"†÷FòÂÖæ–fW7BÂæBwVW7F&öö²'F–f7G3°¢ÒW‡÷'B¦ö"&öw&W72æB&VG’'G3°¢Òæ'&÷rv–GF‡2Âv–FR&–Ç2Â#R¦ööÒÂ&VGV6VBÖ÷F–öâÂæBæò†÷&—¦öçFÂ÷fW&fÆ÷s²æ@¢Ò7FÆR&WVW7B7W&W76–öâv†Vâ6V&6‚÷"ÖöFR6†ævW2à ¢222‡—6–6ÂÖFWf–6R66WFæ6P ¤öâ7W'&VçB•†öæR6f&’æBæG&ö–B6‡&öÖS  £â÷VââWfVçBv—F‚Ö—†VBÖ÷&–VçFF–öâ&—fFR6öÆÆV7F–öã°£"âVçFW"vÆÆW'’æB6VR&—fFRÖöFRf—'7C°£2â6V&6‚'’6öçG&–'WF÷#°£Bâ6V&6‚öæ6Rv—F‚V÷"öæBfW&–g’—B—2Æ—FW&Ã°£Râ6ÆV"6V&6‚æBff÷&—FR†÷Fó°£bâ÷VâF†Rff÷&—FW2ÖöæÇ’&W7VÇBæBVæff÷&—FRöæR†÷Fó°£râW‡æBÖöÖVçB–æÆ–æS°£‚â÷VâF†Rf–WvW"Â7v—R÷"W6R6öçG&öÇ2Âff÷&—FRÂæB6Æ÷6RFòF†R÷&–v–æF–ærF–ÆS°£’â7v—F6‚Fò6†&VBvÆÆW'’æB6VRVçV&Æ—6†VBf—'7C°£âV&Æ—6‚÷"†–FR†÷Fó°£â&WGW&âFò&—fFRvÆÆW'’v—F†÷WBÆ÷6–ær6öæf—&ÖVB7FFS²æ@£"â7F'BF÷væÆöBÆÂæBö'6W'fRF†RW†—7F–ær6ö×ÆWFRW‡÷'B7FFRà ¤FW6·F÷V×VÆF–öâ7WÆVÖVçG2'WBFöW2æ÷B&WÆ6RF†W6R6†V6·2à ¢22‚â66WFæ6R7&—FW&– ¥F†RFW6–vâ—26ö×ÆWFRv†VâÆÂöbF†RföÆÆ÷v–ær&RG'VS  ¢ÒvÆÆW'’÷Vç2FòF†R†÷7Bw26ö×ÆWFR&—fFR6öÆÆV7F–öâ&F†W"F†âV&Æ–6F–öâVWVRà¢ÒWfW'’7F÷&VBÂæöâÖFVÆWFVB÷&–v–æÂV'2&Vv&FÆW72öbV&Æ–6F–öâ7FGW2à¢ÒÖ–w&F–öâbföÆÆ÷w2RÂW6W26öç7FçBÖFVfVÇBæöâÖçVÆÂF–ÖVÆ–æUöFÂ&6¶f–ÆÇ2W†—7F–ær7F÷&VB&÷w2ÂæB6fVÇ’7F×2&V6V—fVBF–ÖRf÷"öÆBÕv÷&¶W"G&ç6—F–öç2à¢Òæò7F÷&VBÂæöâÖFVÆWFVB&÷r&WF–ç2F†R–çFW&æÂF–ÖVÆ–æR6VçF–æVÂà¢ÒæWr¥TrÂvV%ÂæBärÖVF–W6W2G'W7FVBFFUF–ÖT÷&–v–æÆv†VâF†R7W÷'FVBU„”b7V'6WBæBÆW6–&–Æ—G’'VÆW27V66VVBà¢Ò„T”2Â„T”bÂÖÆf÷&ÖVBÖWFFFÂæBVç7W÷'FVBÖWFFFW6R&V6V—fVBF–ÖRv—F†÷WBf–Æ–ærFVÆ—fW'’à¢ÒÆÂF‡&VR&öGV7F–öâ&W6W'fF–öâ×Fò×7F÷&VBw&—FW2W'6—7B6‡&öæöÆöw’à¢ÒW†—7F–ærÖVF–v÷&·2–ÖÖVF–FVÇ’F‡&÷Vv‚&V6V—fVB×F–ÖRfÆÆ&6²v—F†÷WBö&¦V7B&6¶f–ÆÂà¢Ò†÷F÷2&R÷&FW&VBV&Æ–W7BFòÆFW7BæBw&÷WVBöæÇ’'’vw&VFW"F†âCRÖ–çWFW3²ÖöÖVçBÖ’7&÷72Ö–Fæ–v‡Bà¢ÒV6‚ÖöÖVçB&Vv–ç2v—F‚F†R7V6–f–VBFWFW&Ö–æ—7F–2GvòÒÂF‡&VRÒÂ÷"f÷W"Ö6öÇVÖâÖ÷6–2öbæòÖ÷&RF†âV–v‡B†÷F÷2æBW‡æG2–æÆ–æRà¢ÒF†R&—fFRvÆÆW'’6öçF–ç2æò6VÆV7F–öâ6†V6¶&÷†W2ÂV&Æ—6‚Â†–FRÂFVÆWFRÂ6ö×&RÂVF—BÂ÷"–æF—f–GVÂÖF÷væÆöB7F–öç2à¢Ò6V&6‚ÖF6†W26öçG&–'WF÷"Â6F–öâÂæB÷&–v–æÂf–ÆVæÖRöæÇ’ÂW6W2Æ—FW&Â7V'7G&–ær6VÖçF–72ÂföÆG244”’66RöæÇ’ÂæB66ç2æòÖ÷&RF†âF†RWF†÷&—¦VBWfVçBà¢Òff÷&—FW2&RWfVçB×6†&VBÂ&WfW'6–&ÆRÂWFFVB–âÆ6RÂæB–æFWVæFVçBöbV&Æ—6†–æræBW‡÷'Bà¢ÒF†R–ÖÖW'6—fRf–WvW"&W6W'fW26‡&öæöÆöw’æB&WGW&ç2fö7W2FòF†R÷&–v–æF–ær†÷Fòà¢ÒvÆÆW'’W‡÷6W2öæRF÷væÆöBÆÂ7F–öâ&6¶VB'’F†RW†—7F–ær6ö×ÆWFRW‡÷'BÂ–æ6ÇVF–ær÷&–v–æÇ2ÂÖæ–fW7BÂæBW†—7F–ærwVW7F&öö²'F–f7G2à¢Ò6V&6‚æBff÷&—FW2æWfW"æ'&÷rW‡÷'BÖVÖ&W'6†—à¢Ò6†&VBvÆÆW'’f—'7B÷Vç2öâVçV&Æ—6†VBæB&WF–ç2F†R7W'&VçBVçV&Æ—6†VBÂV&Æ—6†VBÂæB†–FFVâv÷&¶fÆ÷r26W&FRÖöFRà¢ÒwVW7B66W72Fò&—fFRÖVF–FöW2æ÷B6†ævRà¢ÒF–ÖVÆ–æR&VG2FVfVÇBFòC‚Â&V¦V7BÆ–Ö—G2&÷fR“bÂæB&VÖ–â¶W—6WB×v–æFVBBF†RÃ×†÷FòÆ–Ö—Bà¢Ò&WV—&VBWFöÖFVBÂÖ–w&F–öâÂVW'’×ÆâÂ66W76–&–Æ—G’Â&W7öç6—fRÂ66ÆRÂæB‡—6–6ÂÖFWf–6RWf–FVæ6R76W2à ¢22’âW‡Æ–6—B66÷RwV&@ ¤–×ÆVÖVçFF–öâ&Wf–Wr6†÷VÆB&V¦V7BFF—F–öç2F†BGW&âF†—2v÷&²–çFòâÆ'VÒVF—F÷"ÂWFöÖFVB–ÖvRÖæÇ—6—2fVGW&RÂ÷"6VÆV7F—fRÖW‡÷'B7—7FVÒà ¥F†R&öGV7B–×&÷fVÖVçB—2FVÆ–&W&FVÇ’6–×ÆS  £âv—fRF†R†÷7B6ÆÒ6‡&öæöÆöv–6ÂÆ6RFò&VÆ—fRWfW'’&—fFRFVÆ—fW'’ÂÖ&²ff÷&—FW2Âf–æB¶æ÷vâ†÷FòÂ÷Vâ—BgVÆÇ’ÂæBF÷væÆöBF†R6ö×ÆWFRWfVçB&6†—fRà
