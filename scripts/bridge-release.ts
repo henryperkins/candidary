@@ -381,8 +381,8 @@ function validatedProductionIdentity(value: BridgeProductionIdentity): BridgePro
     || value.requiredSecretNames.some((name) => typeof name !== 'string')
     || !SHA256_PATTERN.test(value.workerSha256)
     || !Array.isArray(value.allowedRemoteBindingsSha256)
-    || value.allowedRemoteBindingsSha256.length !== 2
-    || new Set(value.allowedRemoteBindingsSha256).size !== 2
+    || value.allowedRemoteBindingsSha256.length !== 4
+    || new Set(value.allowedRemoteBindingsSha256).size !== 4
     || value.allowedRemoteBindingsSha256.some((digest) => !SHA256_PATTERN.test(digest))
     || !SHA256_PATTERN.test(value.remoteRuntimeSha256)) {
     throw new Error('Bridge production topology identity is invalid.');
@@ -1142,9 +1142,16 @@ export function bridgeProductionIdentity(
   }
   const requiredSecretNames = [...secrets.required].map(String).sort();
   const legacySignerSecretNames = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
+  const preprovisionedGuestbookSecretNames = ['GUEST_MESSAGE_HMAC_KEY'];
   const allowedRemoteBindingsSha256 = [
     requiredSecretNames,
     [...requiredSecretNames, ...legacySignerSecretNames].sort(),
+    [...requiredSecretNames, ...preprovisionedGuestbookSecretNames].sort(),
+    [
+      ...requiredSecretNames,
+      ...legacySignerSecretNames,
+      ...preprovisionedGuestbookSecretNames,
+    ].sort(),
   ].map((secretNames) => sha256(canonicalJson(remoteBindingsFromConfig(config, secretNames))));
   return {
     accountId,
