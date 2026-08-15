@@ -10,6 +10,7 @@ import {
   assertLegacyMediaCopyEnabled,
   assertWorkerIngressEnabled,
 } from '../media-upload-release';
+import { resolveMediaTimeline, type MediaTimelineContext } from '../media-timeline';
 import { inspectImageHeader } from '../security/image-metadata';
 import { finalizedMediaObjectKey, legacyMediaPreviewObjectKey } from './media-keys';
 
@@ -69,6 +70,7 @@ export async function finalizeStoredMedia(
   bucket: R2Bucket,
   repository: MediaRepository,
   media: MediaRecord,
+  timelineContext: MediaTimelineContext,
   expirationCheckTime = new Date(),
 ): Promise<MediaRecord> {
   const finalObjectKey = finalizedMediaObjectKey(media.eventId, media.id);
@@ -165,6 +167,17 @@ export async function finalizeStoredMedia(
   );
   if ((stored && stored.size !== object.size) || !verifiedFinal) throw versionChanged();
 
+  // Chosen immediately before the D1 transition, not when the helper entered:
+  // validation and the R2 copy may take a while, and the receipt time the
+  // capture-trust window is evaluated against must be the time that is written.
+  const storedAt = new Date().toISOString();
+  const timeline = resolveMediaTimeline({
+    mimeType: media.mimeType,
+    bytes: new Uint8Array(sourceBytes),
+    eventStartAt: timelineContext.eventStartAt,
+    eventTimezone: timelineContext.eventTimezone,
+    storedAt,
+  });
   let finalized: MediaRecord;
   try {
     finalized = await repository.finalize(media.id, {
@@ -178,6 +191,9 @@ export async function finalizeStoredMedia(
         sha256: digestHex(sourceDigest),
         finalEtag: verifiedFinal.etag,
       },
+    }, storedAt, {
+      capturedAt: timeline.capturedAt,
+      timelineAt: timeline.timelineAt,
     });
   } catch (error) {
     const current = await repository.getById(media.id);
@@ -197,6 +213,7 @@ export async function receiveMediaUpload(
   canonicalBucket: R2Bucket,
   repository: MediaRepository,
   media: MediaRecord,
+  timelineContext: MediaTimelineContext,
   uploaderSessionId: string,
   bytes: ArrayBuffer,
   contentType: string,
@@ -283,7 +300,18 @@ export async function receiveMediaUpload(
     );
   }
 
+  // Chosen immediately before the D1 transition, not when the helper entered:
+  // the R2 PUT and verification reads may take a while, and the receipt time
+  // the capture-trust window is evaluated against must be the time that is
+  // written.
   const committedAt = new Date().toISOString();
+  const timeline = resolveMediaTimeline({
+    mimeType: media.mimeType,
+    bytes: new Uint8Array(bytes),
+    eventStartAt: timelineContext.eventStartAt,
+    eventTimezone: timelineContext.eventTimezone,
+    storedAt: committedAt,
+  });
   try {
     if (await repository.commitReservationIngress({
       mediaId: media.id,
@@ -294,6 +322,8 @@ export async function receiveMediaUpload(
       height: metadata.height,
       finalEtag: verifiedFinal.etag,
       committedAt,
+      capturedAt: timeline.capturedAt,
+      timelineAt: timeline.timelineAt,
     })) return (await repository.getById(media.id))!;
   } catch (error) {
     const current = await repository.getById(media.id);

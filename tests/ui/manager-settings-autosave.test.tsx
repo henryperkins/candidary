@@ -50,6 +50,7 @@ function managerFetch(pages: Record<string, MediaPage>, event: Record<string, un
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
       return json(pages[cursor] ?? { media: [], nextCursor: null });
     }
+    if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
     if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -294,12 +295,13 @@ describe('manager settings autosave guards', () => {
     expect(prompt).toHaveFocus();
     await user.click(within(prompt).getByRole('button', { name: 'Stay' }));
     expect(screen.getByRole('heading', { name: 'Add guests' })).toBeVisible();
-    expect(screen.queryByRole('heading', { name: 'Gallery publishing' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Private gallery' })).not.toBeInTheDocument();
 
     await user.click(nav.getByRole('button', { name: 'Gallery' }));
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
-    expect(await screen.findByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Private gallery' })).toBeVisible();
+    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
     expect(within(screen.getByRole('group', { name: 'Publication status' }))
       .getByRole('button', { name: 'unpublished' })).toHaveClass('active');
   });

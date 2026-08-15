@@ -18,6 +18,10 @@ export const MAX_EXPORT_PART_SOURCE_BYTES = 2 * 1024 * 1024 * 1024;
 export const MANAGER_MEDIA_PAGE_SIZE = 24;
 export const MANAGER_MEDIA_MAX_PAGE_SIZE = 50;
 export const MANAGER_BULK_SELECTION_MAX = 50;
+// Host private Gallery: the one non-sentinel timeline instant per stored photo
+// and the bounded chronological page size shared by server and production client.
+export const MEDIA_TIMELINE_SENTINEL = '1970-01-01T00:00:00.000Z';
+export const PRIVATE_GALLERY_PAGE_SIZE = 48;
 export const GUEST_MESSAGE_PAGE_SIZE = 50;
 export const DEFAULT_GUESTBOOK_PROMPT = 'Share a wish, memory, or moment from the day.';
 export const MAX_EVENT_GUEST_NOTES = 1_000;

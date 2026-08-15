@@ -481,6 +481,10 @@ export interface MediaRecord {
   idempotencyKey: string;
   reservationExpiresAt: string;
   createdAt: string;
+  storedAt: string | null;
+  capturedAt: string | null;
+  timelineAt: string;
+  favoritedAt: string | null;
   publishedAt: string | null;
   previewObjectKey: string | null;
   deletedAt: string | null;

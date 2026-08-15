@@ -13,7 +13,7 @@ import {
 import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
-import { managerMediaView, MediaRepository } from '../db/media';
+import { managerGalleryMediaView, managerMediaView, MediaRepository } from '../db/media';
 import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { requestOrigin } from '../origins';
@@ -27,7 +27,9 @@ import {
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_GUESTBOOK_PROMPT_LENGTH,
   MIN_EVENT_CALENDAR_YEAR,
+  PRIVATE_GALLERY_PAGE_SIZE,
 } from '../../shared/constants';
+import { decodeGalleryCursor, encodeGalleryCursor } from '../http/gallery-cursor';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
 import { resolveEventSchedule } from '../http/event-schedule';
 import { eventStartTime, selectManagerEventView } from '../http/event-view';
@@ -82,6 +84,10 @@ const bulkActionSchema = z.object({
 const deleteSchema = z.object({ confirmation: z.string() });
 const mediaLimitSchema = z.coerce.number().int().min(1).max(MANAGER_MEDIA_MAX_PAGE_SIZE)
   .default(MANAGER_MEDIA_PAGE_SIZE);
+const galleryLimitSchema = z.coerce.number().int().min(1).max(PRIVATE_GALLERY_PAGE_SIZE)
+  .default(PRIVATE_GALLERY_PAGE_SIZE);
+const favoriteSchema = z.object({ favorite: z.boolean() }).strict();
+const GALLERY_SEARCH_MAX_CODE_POINTS = 120;
 
 function managerForEvent(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
@@ -333,6 +339,105 @@ manageRoutes.get('/manage/events/:eventId/media', async (context) => {
     },
     requestId: context.get('requestId'),
   });
+});
+
+manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
+  await managerForEvent(context);
+  const eventId = context.req.param('eventId');
+
+  const rawQuery = context.req.query('query');
+  let query: string | undefined;
+  if (rawQuery !== undefined) {
+    const trimmed = rawQuery.trim();
+    const codePoints = [...trimmed].length;
+    if (codePoints < 1 || codePoints > GALLERY_SEARCH_MAX_CODE_POINTS) {
+      throw new ApiError(
+        'VALIDATION_FAILED',
+        `Search must contain between 1 and ${GALLERY_SEARCH_MAX_CODE_POINTS} characters.`,
+        422,
+      );
+    }
+    query = trimmed;
+  }
+  const rawFavorites = context.req.query('favorites');
+  if (rawFavorites !== undefined && rawFavorites !== '1') {
+    throw new ApiError('VALIDATION_FAILED', 'The favorites filter is invalid.', 422);
+  }
+  const limit = galleryLimitSchema.safeParse(context.req.query('limit'));
+  if (!limit.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      `Ask for between 1 and ${PRIVATE_GALLERY_PAGE_SIZE} photos per page.`,
+      422,
+    );
+  }
+  const rawCursor = context.req.query('cursor');
+  const cursor = rawCursor === undefined ? undefined : decodeGalleryCursor(rawCursor);
+  const mediaRepository = new MediaRepository(context.env.DB);
+  if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'The private gallery is still preparing. Try again shortly.',
+      409,
+    );
+  }
+  const page = await mediaRepository.listGalleryTimeline(
+    eventId,
+    {
+      query,
+      favorites: rawFavorites === '1',
+      cursor,
+      limit: limit.data,
+    },
+  );
+  return context.json({
+    data: {
+      media: page.media,
+      nextCursor: page.nextCursor ? encodeGalleryCursor(page.nextCursor) : null,
+    },
+    requestId: context.get('requestId'),
+  });
+});
+
+manageRoutes.put('/manage/events/:eventId/media/:mediaId/favorite', async (context) => {
+  await managerForEvent(context, true);
+  const parsed = favoriteSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new ApiError('VALIDATION_FAILED', 'Choose whether to favorite this photo.', 422);
+  }
+  const eventId = context.req.param('eventId');
+  const mediaId = context.req.param('mediaId');
+  const requestId = context.get('requestId');
+  try {
+    const media = await new MediaRepository(context.env.DB).setFavorite(
+      eventId,
+      mediaId,
+      parsed.data.favorite ? new Date().toISOString() : null,
+    );
+    console.info(JSON.stringify({
+      event: 'manager_gallery_favorite_write',
+      eventId,
+      mediaId,
+      favorite: parsed.data.favorite,
+      result: 'succeeded',
+      requestId,
+    }));
+    return context.json({
+      data: { media: managerGalleryMediaView(media) },
+      requestId,
+    });
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'manager_gallery_favorite_write',
+      eventId,
+      mediaId,
+      favorite: parsed.data.favorite,
+      result: error instanceof ApiError ? 'refused' : 'failed',
+      errorCode: error instanceof ApiError ? error.code : 'INTERNAL_ERROR',
+      requestId,
+    }));
+    throw error;
+  }
 });
 
 manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => {

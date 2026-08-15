@@ -15,6 +15,7 @@ export type NotificationKind = 'getting_started' | 'event_reminder' | 'retention
 export type UploadState = 'reserved' | 'stored' | 'failed' | 'deleted';
 export type ModerationStatus = 'pending' | 'approved' | 'rejected';
 export type PublicationStatus = 'unpublished' | 'published' | 'hidden';
+export type TimelineSource = 'capture' | 'received';
 export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired';
 
 export interface ApiSuccess<T> {
@@ -276,6 +277,21 @@ export interface ManagerMediaView {
   width: number | null;
   height: number | null;
   createdAt: string;
+}
+
+export interface ManagerGalleryMediaView {
+  id: string;
+  originalFilename: string;
+  guestName: string;
+  caption: string | null;
+  publicationStatus: PublicationStatus;
+  previewAvailable: boolean;
+  width: number | null;
+  height: number | null;
+  receivedAt: string;
+  timelineAt: string;
+  timelineSource: TimelineSource;
+  isFavorite: boolean;
 }
 
 // RSVP. Every shape below is written out rather than derived from a database

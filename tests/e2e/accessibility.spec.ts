@@ -46,7 +46,7 @@ const NOTE = {
 const MANAGER_SECTIONS = [
   { name: 'Intake', heading: 'Live intake' },
   { name: 'RSVP', heading: 'Guest list and RSVPs' },
-  { name: 'Gallery', heading: 'Gallery publishing' },
+  { name: 'Gallery', heading: 'Private gallery' },
   { name: 'Guestbook', heading: 'Guestbook from the day' },
   { name: 'Share', heading: 'Share your event' },
   { name: 'Settings', heading: 'Settings' },

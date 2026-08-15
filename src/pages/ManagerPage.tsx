@@ -18,7 +18,6 @@ import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
 import { EventSettingsEditor } from '../components/EventSettingsEditor';
 import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
-import { ManagerExportPanel } from '../components/ManagerExportPanel';
 import { ManagerPhotoIntakePanel } from '../components/ManagerPhotoIntakePanel';
 import type { PhotoIntakeAction } from '../components/ManagerPhotoIntakePanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
@@ -29,6 +28,7 @@ import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
 import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRecheck';
 import { ManagerGuestbookPanel } from '../features/guestbook/ManagerGuestbookPanel';
 import type { GuestbookSummary } from '../features/guestbook/manager-guestbook-state';
+import { ManagerGalleryWorkspace } from '../features/gallery/ManagerGalleryWorkspace';
 import {
   mergeCoverResponse,
   mergePhotoIntakeResponse,
@@ -794,14 +794,6 @@ export function ManagerPage() {
     </div>
   </fieldset>;
 
-  const exportPanel = (variant: 'share' | 'utility') => <ManagerExportPanel
-    className={`manager-export-panel--${variant}`}
-    job={activeExport}
-    download={activeExport ? exportDownloads[activeExport.id] : undefined}
-    onPrepare={() => runManagerAction(prepareExport)}
-    onDownload={(job) => runManagerAction(() => downloadExport(job))}
-    onRetry={(job) => runManagerAction(() => retryExport(job))}
-  />;
   const visibleNotice: ManagerNotice | null = autosaveRecovery
     ? { type: 'load', failure: autosaveRecovery.failure }
     : coverAccessFailure
@@ -885,16 +877,33 @@ export function ManagerPage() {
         discardDraftEpoch={rsvpDiscardEpoch}
       />}
 
-      {section === 'gallery' && <section aria-labelledby="gallery-publishing-title">
-        <div className="workspace-heading"><div><p className="section-label">Optional shared view</p><h2 id="gallery-publishing-title">Gallery publishing</h2></div><div className="filter-tabs" role="group" aria-label="Publication status">{(['unpublished', 'published', 'hidden'] as const).map((value) => <button className={status === value ? 'active' : ''} onClick={() => { setStatus(value); setSelected([]); }} key={value}>{value}</button>)}</div></div>
-        {!event.galleryVisible && <p className="manager-notice">The guest gallery is off. Publishing choices are saved for whenever you enable it.</p>}
-        <div className="bulk-bar"><span id="bulk-selection-status" role="status" aria-live="polite">{selectionAtLimit
-          ? `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`
-          : selected.length
-            ? `${selected.length} selected`
-            : 'Select photos to update the optional gallery'}</span><button className="button button--approve" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('publish'))}><Eye aria-hidden="true" /> Publish selected</button><button className="button button--danger-outline" disabled={!selected.length} onClick={() => void runManagerAction(() => bulk('hide'))}><EyeOff aria-hidden="true" /> Hide selected</button></div>
-        {renderMediaGrid(true)}
-      </section>}
+      {section === 'gallery' && <ManagerGalleryWorkspace
+        event={event}
+        eventId={eventId}
+        shared={{
+          media,
+          status,
+          selected,
+          selectionAtLimit,
+          onStatusChange: (next) => {
+            setStatus(next);
+            setSelected([]);
+          },
+          onSelectedChange: setSelected,
+          onBulk: (action) => runManagerAction(() => bulk(action)),
+          onChangePublication: (item, action) => runManagerAction(() => changePublication(item, action)),
+          loadingMore,
+          hasMore: Boolean(nextMediaCursor),
+          onLoadMore: loadMoreMedia,
+        }}
+        exports={{
+          job: activeExport,
+          download: activeExport ? exportDownloads[activeExport.id] : undefined,
+          onPrepare: () => runManagerAction(prepareExport),
+          onDownload: (job) => runManagerAction(() => downloadExport(job)),
+          onRetry: (job) => runManagerAction(() => retryExport(job)),
+        }}
+      />}
 
       {section === 'share' && <section className="manager-panel">
         <p className="section-label">Invite your guests</p>
@@ -932,7 +941,10 @@ export function ManagerPage() {
             'This immediately signs out guests, pauses RSVP and photo intake, and makes every invitation and sign using this QR stop working. It cannot be undone, and there is no replacement.',
           )}
         </section>}
-        {exportPanel('share')}
+        <section className="manager-export-route">
+          <p>Prepare or retrieve the complete collection from the Gallery.</p>
+          <button type="button" className="button button--secondary" onClick={() => openSection('gallery')}>Open Gallery</button>
+        </section>
       </section>}
 
       {section === 'guestbook' && <ManagerGuestbookPanel
@@ -1062,7 +1074,6 @@ export function ManagerPage() {
     <aside className="manager-utility">
       <section className="manager-utility__guest-entry"><p className="section-label">Event entry</p><h2>Scan to join</h2>{qr && <img className="intake-qr" src={qr} alt="Event QR code" />}<button type="button" className="button button--secondary button--wide" disabled={!eventLink} onClick={() => void copyEventLink()}><Copy aria-hidden="true" /> Copy event link</button></section>
       <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>photos stored</span></div><div className="meter"><span style={{ width: `${Math.min(100, (photoCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{photoCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(event.storedBytes)} of {STORAGE_CAP}</small></section>
-      {exportPanel('utility')}
     </aside>
   </div>;
 }

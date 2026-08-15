@@ -205,12 +205,13 @@ const INVARIANT_STATEMENT_COUNT = 18;
  * file that is not checked in is never seen, and a correctly numbered extra file
  * that *is* checked in would simply be accepted as the next entry.
  *
- * Fifteen after the post-Phase-3 Guestbook cutover: `0014` closes the Cover
- * Studio invariants and `0015_curated_private_guestbook.sql` is the new active
- * terminal migration. Count, terminal event metadata, and exact trigger hashes
- * move together in this candidate.
+ * Sixteen after the Host Private Gallery landing: `0014` closes the Cover
+ * Studio invariants, `0015_curated_private_guestbook.sql` shipped the Guestbook
+ * cutover, and `0016_host_private_gallery.sql` is the new active terminal
+ * migration. Count, terminal event metadata, and exact trigger hashes move
+ * together in this candidate.
  */
-const EXPECTED_MIGRATION_COUNT = 15;
+const EXPECTED_MIGRATION_COUNT = 16;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
@@ -419,6 +420,8 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption', 'upload_state',
     'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
+    // 0016, appended so every earlier ordinal is unmoved.
+    'captured_at', 'timeline_at', 'favorited_at',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',

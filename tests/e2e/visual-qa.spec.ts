@@ -258,32 +258,25 @@ test('the manager rail holds its counts at the documented photo cap', async ({ p
   await expect(page.locator('.manager-nav')).toHaveScreenshot('manager-nav-count-390.png');
 });
 
-test('the manager card controls and the mobile export panel hold their layout', async ({ page }) => {
+test('the private mosaic and the gallery export control hold their layout', async ({ page }) => {
   await openManager(page, 6);
   await page.setViewportSize({ width: 320, height: 844 });
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Gallery publishing' })).toBeVisible();
-  const card = page.locator('.moderation-grid article').first();
-  const cardContent = card.locator('.intake-card-actions').locator('..');
-  await expect(cardContent.locator('.intake-card-actions button')).toHaveCount(3);
+  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  const mosaic = page.locator('.gallery-mosaic');
+  await expect(mosaic.locator('.gallery-mosaic__item')).toHaveCount(3);
   await settle(page);
-  // The evidence is the wrapped identity and its controls. Chromium GPU processes can quantize the
-  // photograph's antialiased outer corners one colour channel apart under parallel load.
-  await expect(cardContent).toHaveScreenshot('manager-actions-320.png');
+  await expect(mosaic).toHaveScreenshot('manager-private-mosaic-320.png');
 
-  // The Share section is taller than a phone screen, and the rail is sticky: scrolling any part of it
-  // into view for a capture would put the rail on top of it. Phone width is what the layout is made
-  // of, so the width stays at 390 and only the capture window is opened far enough that the whole
-  // section is laid out at once, below the rail rather than under it.
+  // The phone is what the layout is made of: keep 390 and capture the export control beside the
+  // private header without any scrolling.
   await page.setViewportSize({ width: 390, height: 1500 });
-  await destination(page, 'Share').click();
-  const share = page.locator('.manager-panel');
-  await expect(page.getByRole('heading', { name: 'Share your event' })).toBeVisible();
-  await expect(page.locator('.manager-export-panel--share')).toBeVisible();
-  await expect(page.locator('.manager-panel img[alt="Event QR code"]')).toBeVisible();
+  const exportControl = page.locator('.gallery-export');
+  await expect(exportControl).toBeVisible();
+  await expect(page.locator('.gallery-total')).toHaveText('6 photos');
   expect(await page.evaluate(() => window.scrollY), 'the section is laid out without scrolling').toBe(0);
   await settle(page);
-  await expect(share).toHaveScreenshot('manager-export-first-390.png');
+  await expect(exportControl).toHaveScreenshot('gallery-export-390.png');
 });
 
 // Kept from the pre-baseline visual pass: a picture proves what a state looks like, not that nothing

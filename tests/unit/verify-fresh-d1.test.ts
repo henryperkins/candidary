@@ -72,7 +72,7 @@ const migrationFileNames = [
   '0007_event_theme.sql', '0008_event_rsvp.sql', '0009_rsvp_roster_batches.sql',
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
-  '0015_curated_private_guestbook.sql',
+  '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -175,6 +175,7 @@ const guestbookColumns: Record<string, string[]> = {
     'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption', 'upload_state',
     'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
+    'captured_at', 'timeline_at', 'favorited_at',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',

@@ -397,6 +397,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions button', `intake card control at ${width}`);
 
     await destination(page, 'Gallery').click();
+    await page.getByRole('button', { name: 'Shared gallery' }).click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
     await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
@@ -409,14 +410,16 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
       .toBeLessThanOrEqual(actionRow.clientWidth + 1);
 
     await destination(page, 'Guestbook').click();
+    await expect(page.locator('.manager-guestbook__entry .button').first()).toBeVisible();
     await expectTouchTargets(page, '.manager-guestbook__entry .button', `Guestbook control at ${width}`);
 
-    await destination(page, 'Share').click();
-    const panel = page.locator(width < 761 ? '.manager-export-panel--share' : '.manager-export-panel--utility');
+    await destination(page, 'Gallery').click();
+    await page.getByRole('button', { name: 'Private gallery' }).click();
+    const panel = page.locator('.gallery-export');
     const links = panel.locator('.export-links a');
     if (await links.count() === 0) await panel.getByRole('button', { name: 'Get download links' }).click();
     await expect(links.first()).toBeVisible();
-    await expectTouchTargets(page, `${width < 761 ? '.manager-export-panel--share' : '.manager-export-panel--utility'} .export-links a`, `export link at ${width}`);
+    await expectTouchTargets(page, '.gallery-export .export-links a', `export link at ${width}`);
 
     await expectContained(page, width);
   }

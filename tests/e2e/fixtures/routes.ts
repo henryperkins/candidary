@@ -1214,6 +1214,29 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     const mediaPage = options.mediaPages[cursor] ?? { media: [], nextCursor: null };
     return route.fulfill({ json: { data: mediaPage, requestId: 'request-a' } });
   });
+  await page.route(`${base}/gallery`, (route) => {
+    const first = options.mediaPages.first?.media ?? [];
+    const media = (first as Array<Record<string, unknown>>).map((item, index) => ({
+      id: item.id ?? `gallery-${index}`,
+      originalFilename: item.originalFilename ?? `photo-${index}.jpg`,
+      guestName: item.guestName ?? 'Avery',
+      caption: item.caption ?? null,
+      publicationStatus: item.publicationStatus ?? 'unpublished',
+      previewAvailable: true,
+      width: 1200,
+      height: 800,
+      receivedAt: '2026-09-19T00:00:00.000Z',
+      timelineAt: '2026-09-19T00:00:00.000Z',
+      timelineSource: 'received',
+      isFavorite: false,
+    }));
+    return route.fulfill({ json: { data: { media, nextCursor: null }, requestId: 'request-a' } });
+  });
+  await page.route(new RegExp(`/api/manage/events/${event.id}/media/[^/?]+/favorite$`, 'u'), (route) => {
+    const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    const favorite = (route.request().postDataJSON() as { favorite: boolean }).favorite;
+    return route.fulfill({ json: { data: { media: { id: mediaId, isFavorite: favorite } }, requestId: 'request-a' } });
+  });
   let eventReadIndex = 0;
   await page.route(new RegExp(`/api/manage/events/${event.id}$`, 'u'), (route) => {
     const replies = scenario?.eventReplies;
