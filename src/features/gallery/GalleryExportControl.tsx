@@ -46,7 +46,9 @@ export function GalleryExportControl({
   const [preparing, setPreparing] = useState(false);
   // One live region that outlives every branch below. A `role="status"` inserted alongside its own
   // first text is not announced, and the prepare button cannot carry the news either: it is disabled
-  // the moment it is pressed, which blurs it. So the region is mounted empty and filled afterwards.
+  // the moment it is pressed, which blurs it. So the region is mounted outside the branch and filled
+  // afterwards. It only speaks for changes that happen while the host is here: a job already running
+  // when Gallery opens mounts the region full, which is why the state is also rendered visibly.
   const liveMessage = job
     ? `${EXPORT_STATE_LABELS[job.state]}. ${exportStateDetail(job)}`
     : preparing ? 'Preparing your download…' : '';

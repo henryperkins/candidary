@@ -139,9 +139,9 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `guest-review-320.png` | `/event/:slug` review state: one accepted photo, one rejected file | 320 x 844 |
 | `guest-secondary-long-content-320.png` | `/event/:slug` `.guest-secondary` with deliveries and gallery open on 80-character filenames | 320 x 844 |
 | `fullscreen-long-caption-320.png` | `/event/:slug/fullscreen` first figure with an 80-character caption | 320 x 844 |
+| `manager-guestbook-390.png` | `/manage/event/:id` Guestbook `.manager-main`: chrome, filters, a pending row, and its actions | 390 wide |
 | `manager-nav-768.png` | `/manage/event/:id` compact 104 px rail | 768 x 900 |
 | `manager-nav-count-390.png` | `/manage/event/:id` stacked rail with the count at the 10,000-photo cap | 390 x 844 |
-| `manager-actions-320.png` | `/manage/event/:id` Gallery card with all four controls | 320 x 844 |
 | `manager-private-mosaic-320.png` | `/manage/event/:id` private Gallery mosaic | 320 x 844 |
 | `manager-gallery-viewer-320.png` | `/manage/event/:id` immersive private Gallery viewer | 320 x 844 |
 | `manager-shared-gallery-320.png` | `/manage/event/:id` Shared gallery filters and labeled publish/hide cards | 320 x 844 |
@@ -152,11 +152,13 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `rsvp-receipt-390.png` | `/event/:slug` saved household receipt with `Change RSVP` | 390 wide |
 | `rsvp-before-start-390.png` | `/event/:slug` before-start surface showing the saved response and no write action | 390 x 844 |
 
-One file in that directory is no longer a baseline. `manager-export-first-390-mobile-win32.png`
-pictured the Share-section export panel that existed before export moved into Gallery. No test
-captures that name any more, so `--update-snapshots` will never rewrite it and no run can fail on it.
-It is kept as the last picture of the surface it replaced; delete it whenever that stops being worth
-a file. Its live successor is `gallery-export-390.png`.
+Two files in that directory are no longer baselines. `manager-export-first-390-mobile-win32.png`
+pictured the Share-section export panel that existed before export moved into Gallery, and
+`manager-actions-320-mobile-win32.png` pictured the Gallery card while it still carried Live Intake's
+download and delete controls. No test captures either name any more, so `--update-snapshots` will
+never rewrite them and no run can fail on them. They are kept as the last pictures of the surfaces
+they replaced; delete either whenever that stops being worth a file. Their live successors are
+`gallery-export-390.png` and `manager-shared-gallery-320.png`.
 
 The event-theme suite adds exactly eight tracked images:
 
