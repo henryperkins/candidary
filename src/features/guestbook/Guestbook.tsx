@@ -355,8 +355,7 @@ export function Guestbook({
     <summary><span>Guestbook <small>{contributionEnabled ? 'Read or leave a note' : 'Read entries'}</small></span><ChevronDown aria-hidden="true" /></summary>
     {opened && <div className="event-extra__content guestbook__content">
       <div className="guestbook__intro">
-        <MessageCircle aria-hidden="true" />
-        <h3 ref={headingRef} tabIndex={-1}>Leave a note for <bdi>{event.name}</bdi></h3>
+        <h3 ref={headingRef} tabIndex={-1}><MessageCircle aria-hidden="true" />Leave a note for <bdi>{event.name}</bdi></h3>
         <p dir="auto">{event.guestbookPrompt}</p>
         <p className="guestbook__privacy">This event-private book is visible to current guests only after the hosts share an entry. Your display name is not a verified identity.</p>
       </div>

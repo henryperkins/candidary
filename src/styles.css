@@ -547,8 +547,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    text-led state. It deliberately inherits every color and radius from the resolved event theme. */
 .guestbook__content { min-width: 0; display: grid; gap: 28px; }
 .guestbook__intro { min-width: 0; max-width: 620px; }
-.guestbook__intro > svg { color: var(--event-accent); font-size: 1.6rem; }
-.guestbook__intro h3 { margin: 12px 0 8px; font-size: 1.6rem; overflow-wrap: anywhere; }
+/* The bubble leads the heading's first line instead of stacking above it, so the intro keeps a single
+   left edge with the copy beneath it. It stays inline rather than becoming a grid gutter: a wrapped
+   event name then continues flush left under the icon instead of indenting the whole heading. */
+.guestbook__intro h3 { margin: 0 0 8px; font-size: 1.6rem; overflow-wrap: anywhere; }
+.guestbook__intro h3 > svg { width: .85em; height: .85em; margin-inline-end: .3em; vertical-align: -.05em; color: var(--event-accent); }
 .guestbook__intro h3:focus { outline: none; }
 .guestbook__intro h3:focus-visible { outline: 2px solid var(--event-focus); outline-offset: 5px; }
 .guestbook__intro > p { max-width: 62ch; margin-bottom: 8px; color: var(--event-page-text); overflow-wrap: anywhere; }
