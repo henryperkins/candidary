@@ -343,6 +343,15 @@ manageRoutes.get('/manage/events/:eventId/media', async (context) => {
 
 manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   await managerForEvent(context);
+  const eventId = context.req.param('eventId');
+  const mediaRepository = new MediaRepository(context.env.DB);
+  if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'The private gallery is still preparing. Try again shortly.',
+      409,
+    );
+  }
 
   const rawQuery = context.req.query('query');
   let query: string | undefined;
@@ -372,8 +381,8 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   }
   const rawCursor = context.req.query('cursor');
   const cursor = rawCursor === undefined ? undefined : decodeGalleryCursor(rawCursor);
-  const page = await new MediaRepository(context.env.DB).listGalleryTimeline(
-    context.req.param('eventId'),
+  const page = await mediaRepository.listGalleryTimeline(
+    eventId,
     {
       query,
       favorites: rawFavorites === '1',
@@ -396,15 +405,39 @@ manageRoutes.put('/manage/events/:eventId/media/:mediaId/favorite', async (conte
   if (!parsed.success) {
     throw new ApiError('VALIDATION_FAILED', 'Choose whether to favorite this photo.', 422);
   }
-  const media = await new MediaRepository(context.env.DB).setFavorite(
-    context.req.param('eventId'),
-    context.req.param('mediaId'),
-    parsed.data.favorite ? new Date().toISOString() : null,
-  );
-  return context.json({
-    data: { media: managerGalleryMediaView(media) },
-    requestId: context.get('requestId'),
-  });
+  const eventId = context.req.param('eventId');
+  const mediaId = context.req.param('mediaId');
+  const requestId = context.get('requestId');
+  try {
+    const media = await new MediaRepository(context.env.DB).setFavorite(
+      eventId,
+      mediaId,
+      parsed.data.favorite ? new Date().toISOString() : null,
+    );
+    console.info(JSON.stringify({
+      event: 'manager_gallery_favorite_write',
+      eventId,
+      mediaId,
+      favorite: parsed.data.favorite,
+      result: 'succeeded',
+      requestId,
+    }));
+    return context.json({
+      data: { media: managerGalleryMediaView(media) },
+      requestId,
+    });
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'manager_gallery_favorite_write',
+      eventId,
+      mediaId,
+      favorite: parsed.data.favorite,
+      result: error instanceof ApiError ? 'refused' : 'failed',
+      errorCode: error instanceof ApiError ? error.code : 'INTERNAL_ERROR',
+      requestId,
+    }));
+    throw error;
+  }
 });
 
 manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => {

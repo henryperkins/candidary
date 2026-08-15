@@ -67,6 +67,19 @@ function gallery(access: Access, query = '') {
   }, testEnv);
 }
 
+function decodeCursorPayload(cursor: string): unknown {
+  const normalized = cursor.replaceAll('-', '+').replaceAll('_', '/');
+  const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), '=');
+  return JSON.parse(atob(padded));
+}
+
+function unversionedCursor(timelineAt: string, id: string): string {
+  return btoa(JSON.stringify({ timelineAt, id }))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/u, '');
+}
+
 describe('host private gallery API', () => {
   it('refuses a private gallery read without a manager session', async () => {
     const access = await eventAccess();
@@ -99,6 +112,11 @@ describe('host private gallery API', () => {
     expect(firstBody.data.media.map((media: { id: string }) => media.id))
       .toEqual([mediaId(2), mediaId(3)]);
     expect(firstBody.data.nextCursor).toEqual(expect.any(String));
+    expect(decodeCursorPayload(firstBody.data.nextCursor)).toEqual({
+      v: 1,
+      timelineAt: '2026-09-19T11:00:00.000Z',
+      id: mediaId(3),
+    });
     expect(firstBody.data.media[0]).toEqual({
       id: mediaId(2),
       originalFilename: 'seed-2.jpg',
@@ -135,6 +153,31 @@ describe('host private gallery API', () => {
     expect((await gallery(access, '?favorites=0')).status).toBe(422);
     expect((await gallery(access, `?query=${'x'.repeat(121)}`)).status).toBe(422);
     expect((await gallery(access, '?cursor=not-a-cursor')).status).toBe(422);
+    expect((await gallery(access, `?cursor=${encodeURIComponent(unversionedCursor(
+      '2026-09-19T10:00:00.000Z',
+      mediaId(1),
+    ))}`)).status).toBe(422);
+  });
+
+  it('fails closed until every stored timeline sentinel for the event is repaired', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { timelineAt: '1970-01-01T00:00:00.000Z' });
+
+    const blocked = await gallery(access);
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json<any>()).toMatchObject({
+      code: 'MEDIA_STATE_CONFLICT',
+      message: 'The private gallery is still preparing. Try again shortly.',
+    });
+
+    await env.DB.prepare(`
+      UPDATE media SET timeline_at = COALESCE(stored_at, created_at)
+      WHERE event_id = ? AND timeline_at = '1970-01-01T00:00:00.000Z'
+    `).bind(access.event.id).run();
+
+    const ready = await gallery(access);
+    expect(ready.status).toBe(200);
+    expect((await ready.json<any>()).data.media).toHaveLength(1);
   });
 
   it('writes and clears a favorite idempotently with CSRF and origin guards', async () => {

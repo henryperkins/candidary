@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -87,6 +87,16 @@ const rows: ManagerGalleryMediaView[] = [
   photo('p4', '2026-08-16T05:24:00.000Z', { isFavorite: true }),
 ];
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function managerFetch(overrides: {
   galleryRows?: ManagerGalleryMediaView[];
   favoriteFails?: boolean;
@@ -121,14 +131,18 @@ function managerFetch(overrides: {
 
 const noop = () => Promise.resolve();
 
-function renderGallery(overrides: {
+interface GalleryRenderOverrides {
   galleryRows?: ManagerGalleryMediaView[];
   favoriteFails?: boolean;
   exportJob?: ExportView;
   exportDownload?: ExportDownloadView;
   status?: 'all' | 'unpublished' | 'published' | 'hidden';
-} = {}) {
-  const fetchMock = managerFetch(overrides);
+}
+
+function renderGalleryWithFetch(
+  fetchMock: ReturnType<typeof vi.fn>,
+  overrides: GalleryRenderOverrides = {},
+) {
   vi.stubGlobal('fetch', fetchMock);
   const onPrepare = vi.fn(noop);
   const onStatusChange = vi.fn();
@@ -157,6 +171,10 @@ function renderGallery(overrides: {
     }}
   />);
   return { fetchMock, onPrepare, onStatusChange };
+}
+
+function renderGallery(overrides: GalleryRenderOverrides = {}) {
+  return renderGalleryWithFetch(managerFetch(overrides), overrides);
 }
 
 afterEach(() => {
@@ -189,11 +207,106 @@ describe('host private gallery', () => {
     await user.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByText('From Maya')).toBeVisible();
     expect(screen.queryByText('From Jose')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Saturday, August 15 · 11:48 PM/ })).toHaveFocus());
+
+    await user.clear(screen.getByLabelText('Find photos'));
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect((await screen.findAllByText('From Jose'))[0]).toBeVisible();
 
     await user.type(screen.getByLabelText('Find photos'), 'missing-person');
     await user.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByRole('heading', { name: 'No photos match this search.' })).toBeVisible();
     expect(await screen.findByRole('button', { name: 'Clear search' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'No photos match this search.' })).toHaveFocus();
+  });
+
+  it('keeps an abandoned continuation page out of a replacement search', async () => {
+    const continuation = deferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
+        if (url.searchParams.get('cursor') === 'older-page') return continuation.promise;
+        if (url.searchParams.get('query') === 'Maya') {
+          return success({ media: [rows[2]], nextCursor: null });
+        }
+        return success({ media: [rows[0]], nextCursor: 'older-page' });
+      }
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await screen.findByText('First dance');
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await user.type(screen.getByLabelText('Find photos'), 'Maya');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('From Maya')).toBeVisible();
+
+    await act(async () => {
+      continuation.resolve(await success({ media: [rows[1]], nextCursor: null }));
+      await continuation.promise;
+    });
+    expect(screen.queryByText('p2.jpg')).not.toBeInTheDocument();
+    expect(screen.getByText('From Maya')).toBeVisible();
+  });
+
+  it('keeps the confirmed timeline and retries the exact replacement after a later search failure', async () => {
+    let searchAttempts = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
+        if (url.searchParams.get('query') === 'Maya') {
+          searchAttempts += 1;
+          return searchAttempts === 1
+            ? failure('INTERNAL_ERROR', 'Search is temporarily unavailable.')
+            : success({ media: [rows[2]], nextCursor: null });
+        }
+        return success({ media: [rows[0]], nextCursor: null });
+      }
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await screen.findByText('First dance');
+    await user.type(screen.getByLabelText('Find photos'), 'Maya');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Search is temporarily unavailable.');
+    expect(screen.getByText('First dance')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('From Maya')).toBeVisible();
+    expect(searchAttempts).toBe(2);
+  });
+
+  it('keeps the confirmed timeline and retries the exact continuation after a later page failure', async () => {
+    let continuationAttempts = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
+        if (url.searchParams.get('cursor') === 'next-page') {
+          continuationAttempts += 1;
+          return continuationAttempts === 1
+            ? failure('INTERNAL_ERROR', 'The next page is temporarily unavailable.')
+            : success({ media: [rows[1]], nextCursor: null });
+        }
+        return success({ media: [rows[0]], nextCursor: 'next-page' });
+      }
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await screen.findByText('First dance');
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The next page is temporarily unavailable.');
+    expect(screen.getByText('First dance')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('p2.jpg')).toBeVisible();
+    expect(continuationAttempts).toBe(2);
   });
 
   it('filters to favorites and patches a favorited tile in place without a refetch', async () => {
@@ -211,6 +324,7 @@ describe('host private gallery', () => {
     const favoriteTile = await screen.findByRole('button', { name: /favorite p1/i });
     await user.click(favoriteTile);
     await waitFor(() => expect(screen.getByRole('button', { name: /favorite p1/i })).toHaveAttribute('aria-pressed', 'true'));
+    expect(await screen.findByText('p1.jpg added to favorites.')).toBeInTheDocument();
     expect(galleryGets().length).toBe(before);
 
     await user.click(screen.getByRole('button', { name: 'Favorites' }));
@@ -248,10 +362,18 @@ describe('host private gallery', () => {
     expect(screen.getByRole('button', { name: /open p2/i })).toHaveFocus();
   });
 
-  it('switches to the shared workspace on unpublished and back to a preserved private view', async () => {
-    const { onStatusChange } = renderGallery();
+  it('switches to the shared workspace on unpublished and back to the preserved private state', async () => {
+    const { fetchMock, onStatusChange } = renderGallery();
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Private gallery' });
+
+    await user.type(screen.getByLabelText('Find photos'), 'Maya');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('From Maya')).toBeVisible();
+    const galleryGetsBeforeSwitch = fetchMock.mock.calls.filter(([input, init]) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
+    }).length;
 
     await user.click(screen.getByRole('button', { name: 'Shared gallery' }));
     expect(await screen.findByRole('heading', { name: 'Shared gallery' })).toBeVisible();
@@ -261,7 +383,56 @@ describe('host private gallery', () => {
 
     await user.click(screen.getByRole('button', { name: 'Private gallery' }));
     expect(await screen.findByRole('heading', { name: 'Private gallery' })).toBeVisible();
-    expect(screen.getByText('Saturday, August 15 · 5:42–6:18 PM')).toBeVisible();
+    expect(screen.getByLabelText('Find photos')).toHaveValue('Maya');
+    expect(screen.getByText('From Maya')).toBeVisible();
+    expect(screen.queryByText('From Jose')).not.toBeInTheDocument();
+    const galleryGetsAfterSwitch = fetchMock.mock.calls.filter(([input, init]) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
+    }).length;
+    expect(galleryGetsAfterSwitch).toBe(galleryGetsBeforeSwitch);
+  });
+
+  it('focuses the nearest current tile when an open favorite is removed after pagination', async () => {
+    const continuation = deferred<Response>();
+    const favoriteWrite = deferred<Response>();
+    const favoriteRows = [
+      photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true }),
+      photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+    ];
+    const laterFavorite = photo('p3', '2026-08-16T04:48:00.000Z', { guestName: 'Maya', isFavorite: true });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
+        if (url.searchParams.get('cursor') === 'later-favorites') return continuation.promise;
+        return success({
+          media: favoriteRows,
+          nextCursor: url.searchParams.get('favorites') === '1' ? 'later-favorites' : null,
+        });
+      }
+      if (url.pathname.endsWith('/media/p2/favorite') && method === 'PUT') return favoriteWrite.promise;
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await screen.findByText('First dance');
+    await user.click(screen.getByRole('button', { name: 'Favorites' }));
+    await screen.findByRole('button', { name: 'Load more photos' });
+    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
+    await user.click(screen.getByRole('button', { name: /open p2/i }));
+    const dialog = await screen.findByRole('dialog', { name: 'p2.jpg' });
+    const viewerFavorite = within(dialog).getByRole('button', { name: /favorite p2/i });
+    await user.click(viewerFavorite);
+    expect(viewerFavorite).toBeDisabled();
+
+    continuation.resolve(await success({ media: [laterFavorite], nextCursor: null }));
+    await screen.findByRole('button', { name: /open p3/i });
+    favoriteWrite.resolve(await success({ media: { ...favoriteRows[1], isFavorite: false } }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: /open p3/i })).toHaveFocus());
   });
 
   it('starts the complete export from the one Download all action', async () => {

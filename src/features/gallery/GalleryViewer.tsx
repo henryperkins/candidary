@@ -9,6 +9,7 @@ interface GalleryViewerProps {
   photos: ManagerGalleryMediaView[];
   index: number;
   timeZone: string;
+  favoritePendingIds: ReadonlySet<string>;
   onIndexChange(index: number): void;
   onClose(): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
@@ -18,6 +19,7 @@ export function GalleryViewer({
   photos,
   index,
   timeZone,
+  favoritePendingIds,
   onIndexChange,
   onClose,
   onFavorite,
@@ -120,6 +122,7 @@ export function GalleryViewer({
         className="gallery-viewer__favorite"
         aria-pressed={photo.isFavorite}
         aria-label={`Favorite ${photo.originalFilename}`}
+        disabled={favoritePendingIds.has(photo.id)}
         onClick={() => onFavorite(photo)}
       >
         <Heart aria-hidden="true" /> Favorite

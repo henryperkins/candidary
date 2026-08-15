@@ -10,11 +10,20 @@ export const COMPACT_MOSAIC_LIMIT = 8;
 interface GalleryMomentProps {
   moment: MomentModel;
   timeZone: string;
+  eager: boolean;
+  favoritePendingIds: ReadonlySet<string>;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
 }
 
-export function GalleryMoment({ moment, timeZone, onOpen, onFavorite }: GalleryMomentProps) {
+export function GalleryMoment({
+  moment,
+  timeZone,
+  eager,
+  favoritePendingIds,
+  onOpen,
+  onFavorite,
+}: GalleryMomentProps) {
   const [expanded, setExpanded] = useState(false);
   const photos = expanded ? moment.photos : moment.photos.slice(0, COMPACT_MOSAIC_LIMIT);
   return <section className="gallery-moment" aria-labelledby={`moment-heading-${moment.key}`}>
@@ -33,7 +42,12 @@ export function GalleryMoment({ moment, timeZone, onOpen, onFavorite }: GalleryM
           style={mosaicStyleVars(index + 1) as CSSProperties}
         >
           {photo.previewAvailable
-            ? <img src={mediaPreview(photo.id)} alt={photo.caption ?? photo.originalFilename} loading="lazy" decoding="async" />
+            ? <img
+                src={mediaPreview(photo.id)}
+                alt={photo.caption ?? photo.originalFilename}
+                loading={eager && index < 4 ? 'eager' : 'lazy'}
+                decoding="async"
+              />
             : <div className="gallery-mosaic__placeholder" aria-hidden="true"><ImageOff aria-hidden="true" /></div>}
           <button
             type="button"
@@ -46,6 +60,7 @@ export function GalleryMoment({ moment, timeZone, onOpen, onFavorite }: GalleryM
             className="gallery-mosaic__favorite"
             aria-pressed={photo.isFavorite}
             aria-label={`Favorite ${photo.originalFilename}`}
+            disabled={favoritePendingIds.has(photo.id)}
             onClick={() => onFavorite(photo)}
           >
             <Heart aria-hidden="true" />

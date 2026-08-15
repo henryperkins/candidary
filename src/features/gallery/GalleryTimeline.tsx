@@ -9,6 +9,7 @@ interface GalleryTimelineProps {
   timeZone: string;
   hasMore: boolean;
   loadingMore: boolean;
+  favoritePendingIds: ReadonlySet<string>;
   onLoadMore(): void;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
@@ -19,17 +20,20 @@ export function GalleryTimeline({
   timeZone,
   hasMore,
   loadingMore,
+  favoritePendingIds,
   onLoadMore,
   onOpen,
   onFavorite,
 }: GalleryTimelineProps) {
   const moments = useMemo(() => buildMoments(photos), [photos]);
   return <div className="gallery-timeline">
-    {moments.map((moment) => (
+    {moments.map((moment, index) => (
       <GalleryMoment
         key={moment.key}
         moment={moment}
         timeZone={timeZone}
+        eager={index === 0}
+        favoritePendingIds={favoritePendingIds}
         onOpen={onOpen}
         onFavorite={onFavorite}
       />

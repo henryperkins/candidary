@@ -60,20 +60,21 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
         >Shared gallery</button>
       </div>
     </div>
-    {mode === 'private'
-      ? <div className="gallery-private-mode">
-          <div className="gallery-header">
-            <p className="gallery-total">{event.storedMediaCount.toLocaleString()} photos</p>
-            <GalleryExportControl
-              job={exports.job}
-              download={exports.download}
-              onPrepare={exports.onPrepare}
-              onDownload={exports.onDownload}
-              onRetry={exports.onRetry}
-            />
-          </div>
-          <ManagerPrivateGallery event={event} eventId={eventId} />
-        </div>
-      : <ManagerSharedGallery event={event} {...shared} />}
+    <div className="gallery-private-mode" hidden={mode !== 'private'}>
+      <div className="gallery-header">
+        <p className="gallery-total">{event.storedMediaCount.toLocaleString()} photos</p>
+        <GalleryExportControl
+          job={exports.job}
+          download={exports.download}
+          onPrepare={exports.onPrepare}
+          onDownload={exports.onDownload}
+          onRetry={exports.onRetry}
+        />
+      </div>
+      <ManagerPrivateGallery event={event} eventId={eventId} active={mode === 'private'} />
+    </div>
+    <div className="gallery-shared-mode" hidden={mode !== 'shared'}>
+      <ManagerSharedGallery event={event} {...shared} />
+    </div>
   </section>;
 }
