@@ -551,7 +551,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    left edge with the copy beneath it. It stays inline rather than becoming a grid gutter: a wrapped
    event name then continues flush left under the icon instead of indenting the whole heading. */
 .guestbook__intro h3 { margin: 0 0 8px; font-size: 1.6rem; overflow-wrap: anywhere; }
-.guestbook__intro h3 > svg { width: .85em; height: .85em; margin-inline-end: .3em; vertical-align: -.05em; color: var(--event-accent); }
+/* 1.5rem is the icon's native 24-unit box, so the inventory's 1.75 stroke renders at exactly 1.75px
+   beside 700-weight type; any other size rescales it lighter or heavier. That box draws 20px of ink
+   inside lucide's 2-unit padding, a 1px overshoot on the heading's 19px caps, and -.1em drops the
+   ink's centre onto the centre of the cap band. */
+.guestbook__intro h3 > svg { width: 1.5rem; height: 1.5rem; margin-inline-end: .3em; vertical-align: -.1em; color: var(--event-accent); }
 .guestbook__intro h3:focus { outline: none; }
 .guestbook__intro h3:focus-visible { outline: 2px solid var(--event-focus); outline-offset: 5px; }
 .guestbook__intro > p { max-width: 62ch; margin-bottom: 8px; color: var(--event-page-text); overflow-wrap: anywhere; }
