@@ -893,7 +893,11 @@ export function ManagerPage() {
           loadingMore,
           hasMore: Boolean(nextMediaCursor),
           onLoadMore: loadMoreMedia,
-          onOpenSettings: () => openSection('settings'),
+          // Same route the stuck-autosave notice takes: it honours the guest-list guards and puts
+          // focus on the Settings heading, so the host does not land on `body` when the notice they
+          // pressed unmounts with the Gallery.
+          onOpenSettings: openSettingsForRepair,
+          settingsBlocked: rsvpCommitPending,
         }}
         exports={{
           job: activeExport,
@@ -953,7 +957,8 @@ export function ManagerPage() {
         summaryFailure={guestbookSummaryFailure}
         onSummaryRefresh={refreshGuestbookSummary}
         onSummaryObserved={setGuestbookSummary}
-        onOpenSettings={() => openSection('settings')}
+        onOpenSettings={openSettingsForRepair}
+        settingsBlocked={rsvpCommitPending}
       />}
 
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>

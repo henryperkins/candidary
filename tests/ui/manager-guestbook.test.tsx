@@ -136,6 +136,7 @@ describe('Manager Guestbook', () => {
         summary={emptySummary}
         onSummaryRefresh={vi.fn(async () => undefined)}
         onOpenSettings={vi.fn()}
+        settingsBlocked={false}
       />
     </StrictMode>);
     await waitFor(() => expect(listResolvers).toHaveLength(2));
@@ -172,6 +173,7 @@ describe('Manager Guestbook', () => {
       summary={{ ...emptySummary, needsReviewCount: 1 }}
       onSummaryRefresh={vi.fn(async () => undefined)}
       onOpenSettings={vi.fn()}
+      settingsBlocked={false}
     />);
 
     const row = (await screen.findByText('Generated on demand.')).closest('li');
@@ -212,6 +214,7 @@ describe('Manager Guestbook', () => {
       summary={{ ...emptySummary, needsReviewCount: 2 }}
       onSummaryRefresh={vi.fn(async () => undefined)}
       onOpenSettings={vi.fn()}
+      settingsBlocked={false}
     />);
 
     expect(screen.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
@@ -270,6 +273,7 @@ describe('Manager Guestbook', () => {
       summary={{ ...emptySummary, needsReviewCount: 2 }}
       onSummaryRefresh={onSummaryRefresh}
       onOpenSettings={vi.fn()}
+      settingsBlocked={false}
     />);
 
     const noteRow = await screen.findByRole('listitem', { name: /Avery guest note/i });
@@ -370,7 +374,7 @@ describe('Manager Guestbook', () => {
       });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
     expect(await screen.findByText('Original row.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Show earlier' }));
     expect(await screen.findByText('Older row.')).toBeVisible();
@@ -469,7 +473,7 @@ describe('Manager Guestbook', () => {
       return success({ items: pages[url.searchParams.get('view') ?? 'shared'], nextCursor: null, summary: emptySummary });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
 
     const actions = (name: string) => within(screen.getByRole('listitem', { name: new RegExp(name, 'i') }))
       .getAllByRole('button').map((button) => button.textContent);
@@ -504,7 +508,7 @@ describe('Manager Guestbook', () => {
       return success({ items: [{ id: 'note-a', source: 'guest_note', guestName: 'Avery', body: 'Delete me.', createdAt: '2026-09-19T22:00:00Z', state: 'approved', visibility: 'shared' }], nextCursor: null, summary: { ...emptySummary, sharedCount: 1 } });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, sharedCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, sharedCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
     const row = await screen.findByRole('listitem', { name: /Avery guest note/i });
     await user.click(within(row).getByRole('button', { name: 'Delete' }));
     expect(await screen.findByRole('button', { name: 'Undo' })).toBeVisible();
@@ -528,7 +532,7 @@ describe('Manager Guestbook', () => {
       return success({ items: [{ id: 'deleted', source: 'guest_note', guestName: null, body: 'Keep until confirmed.', createdAt: '2026-09-19T22:00:00Z', state: 'deleted', visibility: 'host_only' }], nextCursor: null, summary: { ...emptySummary, deletedCount: 1 } });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, deletedCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, deletedCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
     await user.click(screen.getByRole('button', { name: /Deleted/i }));
     const row = await screen.findByRole('listitem', { name: /Unsigned guest note/i });
     const purge = within(row).getByRole('button', { name: 'Permanently delete' });
@@ -553,7 +557,7 @@ describe('Manager Guestbook', () => {
       return success({ items: [{ id: 'note-a', source: 'guest_note', guestName: 'Avery', body: listReads > 1 ? 'Server row.' : 'Stale row.', createdAt: '2026-09-19T22:00:00Z', state: listReads > 1 ? 'rejected' : 'approved', visibility: listReads > 1 ? 'author_only' : 'shared' }], nextCursor: null, summary: emptySummary });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
     const row = await screen.findByRole('listitem', { name: /Avery guest note/i });
     await user.click(within(row).getByRole('button', { name: 'Keep private' }));
     expect(await within(row).findByRole('alert')).toHaveTextContent('This entry changed.');
@@ -576,7 +580,7 @@ describe('Manager Guestbook', () => {
       ], nextCursor: null, summary: { ...emptySummary, needsReviewCount: 2 } });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, needsReviewCount: 2 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, needsReviewCount: 2 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
     const first = await screen.findByRole('listitem', { name: /First guest note/i });
     await user.click(within(first).getByRole('button', { name: 'Share' }));
     await waitFor(() => expect(screen.queryByText('First row.')).not.toBeInTheDocument());
@@ -591,9 +595,9 @@ describe('Manager Guestbook', () => {
       return success({ items: url.searchParams.get('view') === 'hidden' ? [{ id: 'caption', source: 'photo_caption', mediaId: 'caption', guestName: null, body: 'Suppressed caption.', createdAt: '2026-09-19T22:00:00Z', state: 'published', visibility: 'author_only', previewAvailable: true }] : [], nextCursor: null, summary: { ...emptySummary, galleryVisible: false, hiddenCount: 1 } });
     }));
     const user = userEvent.setup();
-    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, galleryVisible: false, hiddenCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={onOpenSettings} />);
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, galleryVisible: false, hiddenCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={onOpenSettings} settingsBlocked={false} />);
     expect(await screen.findByText('Photo captions are not visible to guests while the gallery is off.')).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Open Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole('button', { name: /Hidden/i }));
     expect(await screen.findByText('Published · gallery off')).toBeVisible();

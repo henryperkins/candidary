@@ -100,6 +100,7 @@ function deferred<T>() {
 function managerFetch(overrides: {
   galleryRows?: ManagerGalleryMediaView[];
   favoriteFails?: boolean;
+  nextCursor?: string | null;
 } = {}) {
   const galleryRows = overrides.galleryRows ?? rows.map((item) => ({ ...item }));
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -115,7 +116,7 @@ function managerFetch(overrides: {
         || item.originalFilename.toLowerCase().includes(query.toLowerCase())
       ));
       if (favorites) result = result.filter((item) => item.isFavorite);
-      return success({ media: result, nextCursor: null });
+      return success({ media: result, nextCursor: overrides.nextCursor ?? null });
     }
     if (url.pathname.endsWith('/favorite') && method === 'PUT') {
       if (overrides.favoriteFails) return failure();
@@ -133,6 +134,7 @@ const noop = () => Promise.resolve();
 
 interface GalleryRenderOverrides {
   galleryRows?: ManagerGalleryMediaView[];
+  nextCursor?: string | null;
   favoriteFails?: boolean;
   exportJob?: ExportView;
   exportDownload?: ExportDownloadView;
@@ -159,6 +161,7 @@ function renderGalleryWithFetch(
       onBulk: noop,
       onChangePublication: noop,
       onOpenSettings: vi.fn(),
+      settingsBlocked: false,
       loadingMore: false,
       hasMore: false,
       onLoadMore: noop,
@@ -354,6 +357,9 @@ describe('host private gallery', () => {
     const dialog = await screen.findByRole('dialog', { name: 'First dance' });
     expect(within(dialog).getByText('First dance')).toBeVisible();
     expect(within(dialog).getByText('From Jose')).toBeVisible();
+    // The viewer walks the loaded result set, and the header above it counts the whole event, so the
+    // position says which of the two it is talking about rather than contradicting the total.
+    expect(within(dialog).getByText('Photo 1 of 4')).toBeVisible();
 
     await user.keyboard('{ArrowRight}');
     expect(within(dialog).queryByText('First dance')).not.toBeInTheDocument();
@@ -361,6 +367,19 @@ describe('host private gallery', () => {
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /open p2/i })).toHaveFocus();
+  });
+
+  it('names the viewer position as loaded while chronological pages remain', async () => {
+    renderGallery({ nextCursor: 'cursor-b' });
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    await user.click(await screen.findByRole('button', { name: /open first dance/i }));
+    const dialog = await screen.findByRole('dialog', { name: 'First dance' });
+    // 4 of 842 stored photos are loaded. A bare "of 4" beside the header's event total would read as
+    // a second, smaller collection instead of one page of the first.
+    expect(within(dialog).getByText('Photo 1 of 4 loaded')).toBeVisible();
+    expect(screen.getByText('842 photos')).toBeVisible();
   });
 
   it('switches to the shared workspace on unpublished and back to the preserved private state', async () => {
@@ -473,7 +492,14 @@ describe('host private gallery', () => {
     expect(screen.getByText('Ready')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Get download links' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Download all' })).not.toBeInTheDocument();
-    expect(screen.getByText(/842 photos · 3 guestbook entries\. Download links last 24 hours\./)).toBeVisible();
+    expect(screen.getByText(
+      /842 photos · 3 guestbook entries\. Download links last 24 hours\./,
+      { selector: 'span' },
+    )).toBeVisible();
+    // The visible label alone would announce the bare word "Ready", so one live region carries the
+    // whole sentence. It is mounted before any job exists, which is the only way it is ever spoken.
+    expect(screen.getByText(/^Ready\. 842 photos · 3 guestbook entries\./, { selector: 'p' }))
+      .toHaveAttribute('role', 'status');
     expect(screen.queryByText(/attempt/i)).not.toBeInTheDocument();
   });
 
@@ -500,7 +526,9 @@ describe('host private gallery', () => {
     await screen.findByRole('heading', { name: 'Gallery' });
 
     expect(screen.getByText('Failed')).toBeVisible();
-    expect(screen.getByText(/Attempt 2 failed/)).toBeVisible();
+    expect(screen.getByText(/Attempt 2 failed/, { selector: 'span' })).toBeVisible();
+    expect(screen.getByText(/^Failed\. 842 photos · 3 guestbook entries\. Attempt 2 failed\./, { selector: 'p' }))
+      .toHaveAttribute('role', 'status');
     expect(screen.getByRole('button', { name: 'Retry export' })).toBeVisible();
   });
 
@@ -527,6 +555,7 @@ describe('host private gallery', () => {
         onBulk: noop,
         onChangePublication: noop,
         onOpenSettings,
+        settingsBlocked: false,
         loadingMore: false,
         hasMore: false,
         onLoadMore: noop,
@@ -544,7 +573,7 @@ describe('host private gallery', () => {
     expect(screen.getByRole('button', { name: 'Hide toast.jpg' })).toHaveTextContent('Hide');
     expect(screen.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
     expect(screen.getByText('The optional shared gallery is off. Publishing choices are saved until you turn it on.')).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Open Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
 
@@ -587,7 +616,10 @@ describe('host private gallery', () => {
     expect(screen.queryByRole('heading', { name: 'No unpublished photos.' })).not.toBeInTheDocument();
   });
 
-  it('restores focus to the moment heading after collapsing extra photos', async () => {
+  // Spec 6.4 allows the moment heading or the expansion control. The control is what the host
+  // pressed and it outlives the collapse, so focus stays there rather than jumping back above the
+  // mosaic and making them tab through every remaining tile to reach it again.
+  it('keeps focus on the expansion control after collapsing extra photos', async () => {
     const crowded = Array.from({ length: 9 }, (_, index) => (
       photo(`p${index + 1}`, `2026-08-15T22:${String(42 + index).padStart(2, '0')}:00.000Z`)
     ));
@@ -595,11 +627,46 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Gallery' });
 
-    const heading = screen.getByRole('heading', { name: /Saturday, August 15 · 5:42/ });
     await user.click(screen.getByRole('button', { name: 'Show more photos' }));
     expect(screen.getByRole('button', { name: /open p9/i })).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Show fewer photos' }));
-    await waitFor(() => expect(heading).toHaveFocus());
+
+    const collapse = screen.getByRole('button', { name: 'Show fewer photos' });
+    await user.click(collapse);
+    const toggle = screen.getByRole('button', { name: 'Show more photos' });
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('button', { name: /open p9/i })).not.toBeInTheDocument();
+  });
+
+  it('withdraws the shared settings escape while a guest-list commit holds the destinations', async () => {
+    const onOpenSettings = vi.fn();
+    vi.stubGlobal('fetch', managerFetch());
+    render(<ManagerGalleryWorkspace
+      event={{ ...event, galleryVisible: false }}
+      eventId="event-a"
+      shared={{
+        media: [],
+        status: 'unpublished',
+        selected: [],
+        selectionAtLimit: false,
+        onStatusChange: vi.fn(),
+        onSelectedChange: vi.fn(),
+        onBulk: noop,
+        onChangePublication: noop,
+        onOpenSettings,
+        settingsBlocked: true,
+        loadingMore: false,
+        hasMore: false,
+        onLoadMore: noop,
+      }}
+      exports={{ onPrepare: noop, onDownload: noop, onRetry: noop }}
+    />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+
+    const escape = screen.getByRole('button', { name: 'Open settings' });
+    expect(escape).toBeDisabled();
+    await user.click(escape);
+    expect(onOpenSettings).not.toHaveBeenCalled();
   });
 });

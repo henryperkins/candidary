@@ -9,10 +9,17 @@ export interface GalleryMoment {
   endAt: string;
 }
 
+/**
+ * What a photo is called wherever the host sees it named. The caption is guest prose and the
+ * filename is the fallback, so this must never return an empty string: it becomes an `alt`, an
+ * accessible name, and the immersive viewer's dialog name, and a blank caption that reached the
+ * database before intake trimmed them would otherwise leave all three unnamed.
+ */
 export function galleryPhotoTitle(
   photo: Pick<ManagerGalleryMediaView, 'caption' | 'originalFilename'>,
 ): string {
-  return photo.caption ?? photo.originalFilename;
+  const caption = photo.caption?.trim();
+  return caption ? caption : photo.originalFilename;
 }
 
 /**

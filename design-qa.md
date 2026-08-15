@@ -146,12 +146,17 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `manager-gallery-viewer-320.png` | `/manage/event/:id` immersive private Gallery viewer | 320 x 844 |
 | `manager-shared-gallery-320.png` | `/manage/event/:id` Shared gallery filters and labeled publish/hide cards | 320 x 844 |
 | `gallery-export-390.png` | `/manage/event/:id` private Gallery Download all control | 390 wide |
-| `manager-export-first-390.png` | Historical Share-section export panel; export now lives once in Gallery | 390 wide |
 | `manager-rsvp-390.png` | `/manage/event/:id?section=rsvp` guest list: totals, filters, list, editor entry, import | 390 wide |
 | `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
 | `rsvp-household-320.png` | `/event/:slug` household card: a named attend, a decline, an attending plus-one | 320 wide |
 | `rsvp-receipt-390.png` | `/event/:slug` saved household receipt with `Change RSVP` | 390 wide |
 | `rsvp-before-start-390.png` | `/event/:slug` before-start surface showing the saved response and no write action | 390 x 844 |
+
+One file in that directory is no longer a baseline. `manager-export-first-390-mobile-win32.png`
+pictured the Share-section export panel that existed before export moved into Gallery. No test
+captures that name any more, so `--update-snapshots` will never rewrite it and no run can fail on it.
+It is kept as the last picture of the surface it replaced; delete it whenever that stops being worth
+a file. Its live successor is `gallery-export-390.png`.
 
 The event-theme suite adds exactly eight tracked images:
 
@@ -196,9 +201,9 @@ carries `-desktop-win32.png`. That is deliberate and must not be normalised away
   `playwright.config.ts`). Every state above is 844 px wide or narrower and belongs to a touch
   device; a second desktop-emulated copy would picture a viewport with a 15 px scrollbar that no
   phone has.
-- `manager-export-first-390.png` is captured at 390 px wide with a tall capture window so the whole
-  Share section lays out at once. The sticky rail would otherwise be drawn over any part of it that
-  had to be scrolled into view. Width is what the layout is made of; the height is only the window.
+- `gallery-export-390.png` is captured at 390 px wide with a tall capture window so the whole control
+  lays out at once. The sticky rail would otherwise be drawn over any part of it that had to be
+  scrolled into view. Width is what the layout is made of; the height is only the window.
 - Dates rendered through `Intl` (`/create` date placeholder, the guest hero date) follow the
   capturing machine's locale and time zone. That is a further reason the platform suffix stays.
 
@@ -335,8 +340,8 @@ in the final handoff and are not preclaimed here.
 | Lifecycle facts at capacity | 761 through 1440 | Each of the three facts stays on one line at 10,000 photos and 100 GiB |
 | Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide; count text is at least 12 px at the three layout starts |
 | All six sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
-| All six sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
-| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
+| All six sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block. The mechanism is a CSS reveal, not DOM uniqueness: the utility rail's guest-entry and capacity copies stay in the document and are hidden below 761 |
+| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit; the two Gallery bulk controls stack below 761 and share one row from 761 |
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |

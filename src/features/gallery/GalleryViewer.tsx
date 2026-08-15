@@ -9,16 +9,30 @@ interface GalleryViewerProps {
   photos: ManagerGalleryMediaView[];
   index: number;
   timeZone: string;
+  /** Whether the timeline still has unloaded pages behind the loaded result set. */
+  hasMore: boolean;
   favoritePendingIds: ReadonlySet<string>;
   onIndexChange(index: number): void;
   onClose(): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
 }
 
+/**
+ * The viewer navigates the loaded result set and nothing else, so its position line says so while
+ * pages remain. The header's event total counts every stored photo; a bare "of 48" beside "842
+ * photos" would read as a second, smaller collection rather than as one page of the first.
+ */
+function positionLabel(index: number, count: number, hasMore: boolean): string {
+  return hasMore
+    ? `Photo ${index + 1} of ${count} loaded`
+    : `Photo ${index + 1} of ${count}`;
+}
+
 export function GalleryViewer({
   photos,
   index,
   timeZone,
+  hasMore,
   favoritePendingIds,
   onIndexChange,
   onClose,
@@ -118,7 +132,7 @@ export function GalleryViewer({
         <span className="gallery-viewer__timing">
           {photo.timelineSource === 'capture' ? 'Taken' : 'Received'} {formatMomentHeading(moment, timeZone)}
         </span>
-        <span className="gallery-viewer__position">Photo {index + 1} of {photos.length}</span>
+        <span className="gallery-viewer__position">{positionLabel(index, photos.length, hasMore)}</span>
       </div>
       <button
         type="button"

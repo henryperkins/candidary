@@ -23,6 +23,7 @@ interface ManagerGalleryWorkspaceProps {
     hasMore: boolean;
     onLoadMore(): Promise<void>;
     onOpenSettings(): void;
+    settingsBlocked: boolean;
   };
   exports: {
     job?: ExportView;

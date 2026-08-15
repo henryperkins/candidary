@@ -1,5 +1,5 @@
 import { Heart, ImageOff } from 'lucide-react';
-import { useRef, useState, type CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
@@ -25,21 +25,11 @@ export function GalleryMoment({
   onFavorite,
 }: GalleryMomentProps) {
   const [expanded, setExpanded] = useState(false);
-  const headingRef = useRef<HTMLHeadingElement>(null);
   const photos = expanded ? moment.photos : moment.photos.slice(0, COMPACT_MOSAIC_LIMIT);
-
-  function toggleExpanded() {
-    if (expanded) {
-      setExpanded(false);
-      queueMicrotask(() => headingRef.current?.focus());
-      return;
-    }
-    setExpanded(true);
-  }
 
   return <section className="gallery-moment" aria-labelledby={`moment-heading-${moment.key}`}>
     <header className="gallery-moment__heading">
-      <h3 id={`moment-heading-${moment.key}`} ref={headingRef} tabIndex={-1}>{formatMomentHeading(moment, timeZone)}</h3>
+      <h3 id={`moment-heading-${moment.key}`} tabIndex={-1}>{formatMomentHeading(moment, timeZone)}</h3>
       <span className="gallery-moment__count">
         {moment.photos.length} photo{moment.photos.length === 1 ? '' : 's'}
       </span>
@@ -85,13 +75,16 @@ export function GalleryMoment({
         </div>;
       })}
     </div>
+    {/* Spec 6.4 accepts the moment heading or the expansion control. The control is the one that
+        survives the collapse, so focus stays on it: sending focus back up to the heading would make
+        the host tab through every remaining tile again to reach the button they just pressed. */}
     {moment.photos.length > COMPACT_MOSAIC_LIMIT && (
       <button
         type="button"
         className="gallery-moment__toggle"
         aria-expanded={expanded}
         aria-controls={`moment-photos-${moment.key}`}
-        onClick={toggleExpanded}
+        onClick={() => setExpanded((current) => !current)}
       >
         {expanded ? 'Show fewer photos' : 'Show more photos'}
       </button>

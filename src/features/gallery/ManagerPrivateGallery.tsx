@@ -480,6 +480,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
       photos={rows}
       index={viewerIndex}
       timeZone={event.eventTimezone}
+      hasMore={cursor !== null}
       favoritePendingIds={favoritePendingIds}
       onIndexChange={changeViewerIndex}
       onClose={closeViewer}

@@ -5,6 +5,7 @@ import { mediaPreview } from '../../app/api';
 import type { MediaView } from '../../app/types';
 import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
 import type { EventView, PublicationStatus } from '../../../shared/contracts';
+import { galleryPhotoTitle } from './gallery-timeline';
 
 export type GallerySharedStatus = 'all' | PublicationStatus;
 
@@ -12,6 +13,29 @@ const SHARED_STATUS_LABELS: Record<PublicationStatus, string> = {
   unpublished: 'Unpublished',
   published: 'Published',
   hidden: 'Hidden',
+};
+
+/**
+ * Keyed by the status union so a new publication status cannot silently inherit the unpublished
+ * copy — the empty state is the only thing on screen when it is wrong.
+ */
+const SHARED_EMPTY_COPY: Record<GallerySharedStatus, { title: string; body: string }> = {
+  all: {
+    title: 'No photos.',
+    body: 'New private deliveries appear here.',
+  },
+  unpublished: {
+    title: 'No unpublished photos.',
+    body: 'New private deliveries appear here.',
+  },
+  published: {
+    title: 'No published photos.',
+    body: 'Publish a photo to share a preview with guests.',
+  },
+  hidden: {
+    title: 'No hidden photos.',
+    body: 'Photos you hide from guests will appear here.',
+  },
 };
 
 interface ManagerSharedGalleryProps {
@@ -25,34 +49,11 @@ interface ManagerSharedGalleryProps {
   onBulk(action: 'publish' | 'hide'): Promise<void>;
   onChangePublication(item: MediaView, action: 'publish' | 'hide'): Promise<void>;
   onOpenSettings(): void;
+  /** True while a guest-list commit holds every destination, matching the Manager's own guard. */
+  settingsBlocked: boolean;
   loadingMore: boolean;
   hasMore: boolean;
   onLoadMore(): Promise<void>;
-}
-
-function sharedEmptyCopy(status: GallerySharedStatus): { title: string; body: string } {
-  if (status === 'published') {
-    return {
-      title: 'No published photos.',
-      body: 'Publish a photo to share a preview with guests.',
-    };
-  }
-  if (status === 'hidden') {
-    return {
-      title: 'No hidden photos.',
-      body: 'Photos you hide from guests will appear here.',
-    };
-  }
-  if (status === 'all') {
-    return {
-      title: 'No photos.',
-      body: 'New private deliveries appear here.',
-    };
-  }
-  return {
-    title: 'No unpublished photos.',
-    body: 'New private deliveries appear here.',
-  };
 }
 
 /**
@@ -72,11 +73,12 @@ export function ManagerSharedGallery({
   onBulk,
   onChangePublication,
   onOpenSettings,
+  settingsBlocked,
   loadingMore,
   hasMore,
   onLoadMore,
 }: ManagerSharedGalleryProps) {
-  const empty = sharedEmptyCopy(status);
+  const empty = SHARED_EMPTY_COPY[status];
   return <div className="gallery-shared">
     <div className="filter-tabs" role="group" aria-label="Publication status">
       {(['unpublished', 'published', 'hidden'] as const).map((value) => (
@@ -91,7 +93,12 @@ export function ManagerSharedGallery({
     </div>
     {!event.galleryVisible && <div className="manager-notice">
       <span>The optional shared gallery is off. Publishing choices are saved until you turn it on.</span>
-      <button type="button" className="text-button" onClick={onOpenSettings}>Open Settings</button>
+      <button
+        type="button"
+        className="text-button"
+        disabled={settingsBlocked}
+        onClick={onOpenSettings}
+      >Open settings</button>
     </div>}
     <div className="bulk-bar">
       <span id="bulk-selection-status" role="status" aria-live="polite">
@@ -121,6 +128,10 @@ export function ManagerSharedGallery({
             {media.map((item) => {
               const isSelected = selected.includes(item.id);
               const selectionUnavailable = !isSelected && selectionAtLimit;
+              // The card names the photo the way the private timeline does. Its controls keep naming
+              // the file, because Live Intake's identical cards act on files — download, delete — and
+              // the two grids must not disagree about what a control is pointed at.
+              const title = galleryPhotoTitle(item);
               return <article className={isSelected ? 'selected' : ''} key={item.id}>
                 <div className="intake-photo">
                   <label className="intake-select"><input
@@ -135,11 +146,11 @@ export function ManagerSharedGallery({
                       return [...current, item.id];
                     })}
                   /></label>
-                  <img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} loading="lazy" decoding="async" />
+                  <img src={mediaPreview(item.id)} alt={title} loading="lazy" decoding="async" />
                 </div>
                 <div>
                   <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
-                  <strong title={item.caption || item.originalFilename}>{item.caption || item.originalFilename}</strong>
+                  <strong title={title}>{title}</strong>
                   <small>From {item.guestName}</small>
                   <div className="intake-card-actions">
                     {item.publicationStatus !== 'published' && (

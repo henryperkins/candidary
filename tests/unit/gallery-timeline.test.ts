@@ -76,12 +76,19 @@ describe('buildMoments', () => {
 });
 
 describe('galleryPhotoTitle', () => {
+  const base = photo('a', '2026-08-15T22:42:00.000Z');
+
   it('prefers the caption and falls back to the filename', () => {
-    expect(galleryPhotoTitle(photo('a', '2026-08-15T22:42:00.000Z'))).toBe('a.jpg');
-    expect(galleryPhotoTitle({
-      ...photo('a', '2026-08-15T22:42:00.000Z'),
-      caption: 'First dance',
-    })).toBe('First dance');
+    expect(galleryPhotoTitle(base)).toBe('a.jpg');
+    expect(galleryPhotoTitle({ ...base, caption: 'First dance' })).toBe('First dance');
+  });
+
+  // The result becomes an `alt`, three accessible names, and the viewer dialog's own name, so a
+  // caption that carries no text has to fall through rather than leave any of them empty.
+  it('falls back for a caption that is empty or only whitespace', () => {
+    expect(galleryPhotoTitle({ ...base, caption: '' })).toBe('a.jpg');
+    expect(galleryPhotoTitle({ ...base, caption: '   ' })).toBe('a.jpg');
+    expect(galleryPhotoTitle({ ...base, caption: '  First dance  ' })).toBe('First dance');
   });
 });
 
