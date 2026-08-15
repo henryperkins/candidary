@@ -766,8 +766,6 @@ export function ManagerPage() {
   const photoCount = event.storedMediaCount ?? 0;
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
   const activeExport = exports[0];
-  // One panel, two placements: the wide utility rail and the narrow Share section. The stylesheet
-  // reveals exactly one of them, so the host never sees the same export control twice.
   // Both entry actions are confirmed the same way, and both name the event so the
   // host cannot mistake which one they are typing into.
   const entryConfirmationForm = (action: EntryAction, verb: string, warning: string) => <fieldset
@@ -895,6 +893,11 @@ export function ManagerPage() {
           loadingMore,
           hasMore: Boolean(nextMediaCursor),
           onLoadMore: loadMoreMedia,
+          // Same route the stuck-autosave notice takes: it honours the guest-list guards and puts
+          // focus on the Settings heading, so the host does not land on `body` when the notice they
+          // pressed unmounts with the Gallery.
+          onOpenSettings: openSettingsForRepair,
+          settingsBlocked: rsvpCommitPending,
         }}
         exports={{
           job: activeExport,
@@ -954,7 +957,8 @@ export function ManagerPage() {
         summaryFailure={guestbookSummaryFailure}
         onSummaryRefresh={refreshGuestbookSummary}
         onSummaryObserved={setGuestbookSummary}
-        onOpenSettings={() => openSection('settings')}
+        onOpenSettings={openSettingsForRepair}
+        settingsBlocked={rsvpCommitPending}
       />}
 
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>

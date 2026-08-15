@@ -1419,21 +1419,21 @@ describe('manager experience', () => {
     await expectRecoverableFailure(
       'bulk publish',
       () => user.click(screen.getByRole('button', { name: 'Publish selected' })),
-      'Shared gallery',
+      'Gallery',
     );
     await expectRecoverableFailure(
       'hide',
       () => user.click(screen.getByRole('button', { name: 'Hide selected' })),
-      'Shared gallery',
+      'Gallery',
     );
     await user.click(screen.getByRole('button', { name: 'Private gallery' }));
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
-    expect(screen.getByRole('heading', { name: 'Private gallery' }), 'export').toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Gallery' }), 'export').toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
   });
 
   it('caps cross-page bulk selection at 50 and submits only the selected ids', async () => {
@@ -1466,7 +1466,7 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
-    expect(await screen.findByRole('heading', { name: 'Shared gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
     const choices = await screen.findAllByRole('checkbox', { name: /^Select /u });
     expect(choices).toHaveLength(MANAGER_BULK_SELECTION_MAX + 1);
@@ -2009,7 +2009,7 @@ describe('manager experience', () => {
     await user.click(galleryNavigation);
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
     await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));

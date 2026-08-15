@@ -139,15 +139,26 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `guest-review-320.png` | `/event/:slug` review state: one accepted photo, one rejected file | 320 x 844 |
 | `guest-secondary-long-content-320.png` | `/event/:slug` `.guest-secondary` with deliveries and gallery open on 80-character filenames | 320 x 844 |
 | `fullscreen-long-caption-320.png` | `/event/:slug/fullscreen` first figure with an 80-character caption | 320 x 844 |
+| `manager-guestbook-390.png` | `/manage/event/:id` Guestbook `.manager-main`: chrome, filters, a pending row, and its actions | 390 wide |
 | `manager-nav-768.png` | `/manage/event/:id` compact 104 px rail | 768 x 900 |
 | `manager-nav-count-390.png` | `/manage/event/:id` stacked rail with the count at the 10,000-photo cap | 390 x 844 |
-| `manager-actions-320.png` | `/manage/event/:id` Gallery card with all four controls | 320 x 844 |
-| `manager-export-first-390.png` | `/manage/event/:id` Share section: event link, QR, both entry controls, and the mobile export panel | 390 wide |
+| `manager-private-mosaic-320.png` | `/manage/event/:id` private Gallery mosaic | 320 x 844 |
+| `manager-gallery-viewer-320.png` | `/manage/event/:id` immersive private Gallery viewer | 320 x 844 |
+| `manager-shared-gallery-320.png` | `/manage/event/:id` Shared gallery filters and labeled publish/hide cards | 320 x 844 |
+| `gallery-export-390.png` | `/manage/event/:id` private Gallery Download all control | 390 wide |
 | `manager-rsvp-390.png` | `/manage/event/:id?section=rsvp` guest list: totals, filters, list, editor entry, import | 390 wide |
 | `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
 | `rsvp-household-320.png` | `/event/:slug` household card: a named attend, a decline, an attending plus-one | 320 wide |
 | `rsvp-receipt-390.png` | `/event/:slug` saved household receipt with `Change RSVP` | 390 wide |
 | `rsvp-before-start-390.png` | `/event/:slug` before-start surface showing the saved response and no write action | 390 x 844 |
+
+Two files in that directory are no longer baselines. `manager-export-first-390-mobile-win32.png`
+pictured the Share-section export panel that existed before export moved into Gallery, and
+`manager-actions-320-mobile-win32.png` pictured the Gallery card while it still carried Live Intake's
+download and delete controls. No test captures either name any more, so `--update-snapshots` will
+never rewrite them and no run can fail on them. They are kept as the last pictures of the surfaces
+they replaced; delete either whenever that stops being worth a file. Their live successors are
+`gallery-export-390.png` and `manager-shared-gallery-320.png`.
 
 The event-theme suite adds exactly eight tracked images:
 
@@ -192,9 +203,9 @@ carries `-desktop-win32.png`. That is deliberate and must not be normalised away
   `playwright.config.ts`). Every state above is 844 px wide or narrower and belongs to a touch
   device; a second desktop-emulated copy would picture a viewport with a 15 px scrollbar that no
   phone has.
-- `manager-export-first-390.png` is captured at 390 px wide with a tall capture window so the whole
-  Share section lays out at once. The sticky rail would otherwise be drawn over any part of it that
-  had to be scrolled into view. Width is what the layout is made of; the height is only the window.
+- `gallery-export-390.png` is captured at 390 px wide with a tall capture window so the whole control
+  lays out at once. The sticky rail would otherwise be drawn over any part of it that had to be
+  scrolled into view. Width is what the layout is made of; the height is only the window.
 - Dates rendered through `Intl` (`/create` date placeholder, the guest hero date) follow the
   capturing machine's locale and time zone. That is a further reason the platform suffix stays.
 
@@ -331,13 +342,13 @@ in the final handoff and are not preclaimed here.
 | Lifecycle facts at capacity | 761 through 1440 | Each of the three facts stays on one line at 10,000 photos and 100 GiB |
 | Intake count badge at the cap | 320, 360, 390, 430, 431, 470, 760, 761, 768, 780, 860, 1024, 1100, 1101, 1120, 1133, 1134, 1440 | `10000` contained by the badge's own box at every width, badge at most 48 px wide; count text is at least 12 px at the three layout starts |
 | All six sections at 200% zoom | 640 x 450 | Every destination reachable at 44 x 44; no rails; two media columns; no escapes |
-| All six sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block — the rail's copies are in the document and hidden, as above |
-| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit |
+| All six sections | 390 x 844 | No element of the shell leaves the viewport in any section; on Share, one visible guest entry and no second capacity block. The mechanism is a CSS reveal, not DOM uniqueness: the utility rail's guest-entry and capacity copies stay in the document and are hidden below 761 |
+| Card controls | 390, 431, 470, 1200 | Intake Filter and Clear, download, card controls, publication filters, bulk controls, note controls and export links all 44 x 44; card action rows fit; the two Gallery bulk controls stack below 761 and share one row from 761 |
 | Long photo name | 320, 390, 768, 1440 | Wraps to 2–3 lines inside the card, full name retained in `title` |
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |
 | 120-photo intake | 320, 390, 768 | One 24-item page rendered initially, lazy and async previews, fewer than 24 initial preview requests, 44 x 44 `Load more photos`, five genuine 24-row pages append without duplicates, and an answered live first-page poll leaves the exhausted continuation control absent |
-| Mobile export reachability | 390, 768 | Never two export panels on screen at once. The mechanism is a CSS reveal, not DOM uniqueness: on the phone's Intake the rail's copy is the document's only panel and it is hidden; on Share the Share copy is visible below 761 and the utility copy hidden, and the two swap at and above it |
+| Mobile export reachability | 390, 768 | One Gallery `Download all` control. Never two export panels on screen at once |
 
 ### Recoverable failures — `tests/e2e/error-recovery.spec.ts`
 
@@ -345,9 +356,9 @@ in the final handoff and are not preclaimed here.
 | --- | --- | --- |
 | Failed guest and manager load | 320, 768 and the project viewport | Announced with the transport hint, 44 x 44 `Try again`, and the next attempt reaches the real surface |
 | Session and lifecycle failures (7 codes, guest and manager) | project viewport | The link or the event's own end is named, no retry offered, and the transport line never appears |
-| Refused bulk publish | 390 x 844 | Gallery section, `unpublished` filter, cards and selection all survive; 44 x 44 dismiss |
+| Refused bulk publish | 390 x 844 | Gallery section, `Unpublished` filter, cards and selection all survive; 44 x 44 dismiss |
 | Refused delete | 390 x 844 | The photo and its card survive; notice dismissible |
-| Refused export request | 390 x 844 | Share section and an enabled `Prepare download` survive |
+| Refused export request | 390 x 844 | Gallery section and an enabled `Download all` survive |
 
 ### Automated accessibility engine — `tests/e2e/accessibility.spec.ts`
 

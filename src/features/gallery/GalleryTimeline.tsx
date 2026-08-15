@@ -44,7 +44,7 @@ export function GalleryTimeline({
         className="button button--secondary"
         disabled={loadingMore}
         onClick={onLoadMore}
-      >Load more photos</button>
+      >{loadingMore ? 'Loading more photos…' : 'Load more photos'}</button>
     </div>}
   </div>;
 }

@@ -4,6 +4,7 @@ import type { ManagerGalleryMediaView } from '../../shared/contracts';
 import {
   buildMoments,
   formatMomentHeading,
+  galleryPhotoTitle,
   mosaicPlacement,
   mosaicStyleVars,
 } from '../../src/features/gallery/gallery-timeline';
@@ -71,6 +72,23 @@ describe('buildMoments', () => {
     expect(moments[0]?.photos.map((item) => item.id)).toEqual(['a', 'b', 'c']);
     expect(moments[0]?.endAt).toBe('2026-08-16T05:00:00.000Z');
     expect(moments[1]?.photos.map((item) => item.id)).toEqual(['d']);
+  });
+});
+
+describe('galleryPhotoTitle', () => {
+  const base = photo('a', '2026-08-15T22:42:00.000Z');
+
+  it('prefers the caption and falls back to the filename', () => {
+    expect(galleryPhotoTitle(base)).toBe('a.jpg');
+    expect(galleryPhotoTitle({ ...base, caption: 'First dance' })).toBe('First dance');
+  });
+
+  // The result becomes an `alt`, three accessible names, and the viewer dialog's own name, so a
+  // caption that carries no text has to fall through rather than leave any of them empty.
+  it('falls back for a caption that is empty or only whitespace', () => {
+    expect(galleryPhotoTitle({ ...base, caption: '' })).toBe('a.jpg');
+    expect(galleryPhotoTitle({ ...base, caption: '   ' })).toBe('a.jpg');
+    expect(galleryPhotoTitle({ ...base, caption: '  First dance  ' })).toBe('First dance');
   });
 });
 

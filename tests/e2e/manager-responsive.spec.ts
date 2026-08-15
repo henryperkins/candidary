@@ -402,6 +402,16 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
 
+    // Gallery's copy of the bulk bar is scoped a class deeper than the shared rule, so it outranks
+    // the 761 layout unless it opts back in by name. Touch targets and containment both survive a
+    // full-bleed stack, so only the row itself reports that the wide layout was lost.
+    const bulkTops = await page.locator('.gallery-shared .bulk-bar .button').evaluateAll(
+      (nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)),
+    );
+    expect(bulkTops.length, `two bulk controls at ${width}`).toBe(2);
+    expect(new Set(bulkTops).size, `bulk controls share one row from 761 and stack below it at ${width}`)
+      .toBe(width >= 761 ? 1 : 2);
+
     // The card clips its own corners, so a control pushed past its edge still measures 44x44 and still
     // stays inside the viewport. Only the row that holds them reports that it ran out of width.
     const actions = page.locator('.moderation-grid article:first-of-type .intake-card-actions');

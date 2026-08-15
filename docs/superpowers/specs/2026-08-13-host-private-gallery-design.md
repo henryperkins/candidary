@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13
 
-**Status:** Approved direction; revised after technical review; final-review findings incorporated 2026-08-14
+**Status:** Approved direction; revised after technical review; final-review findings incorporated 2026-08-14; section 6.1 heading amended 2026-08-15 (see Revisions)
 
 **Repository baseline:** `b293ee42c35cc30c19b86cd1ff4737ad54857755`
 
@@ -123,12 +123,16 @@ Private Gallery is deliberately calmer. It reads on entry, search or clear, Favo
 The Gallery header contains:
 
 - the Private gallery / Shared gallery mode switch;
-- the title **Private gallery**;
+- the title **Gallery**;
 - a quiet total such as **842 photos**;
 - one **Download all** action; and
 - the existing export progress or ready state after that action is used.
 
-In Shared mode the same header shows the title **Shared gallery**, replacing the current **Gallery publishing** heading, while the publication filter tabs and batch controls remain unchanged.
+The title does not change with the mode. The mode switch is already a pressed-state control naming
+Private gallery and Shared gallery, so a heading that renamed itself alongside it stated the same
+fact twice and made the destination the host navigated to appear to move. Shared mode keeps the
+publication filter tabs and batch controls unchanged, and both replace the former **Gallery
+publishing** heading.
 
 The quiet total uses the existing event-level stored-media count and always describes the complete private collection; it does not change into a filtered search count.
 
@@ -753,3 +757,13 @@ Implementation review should reject additions that turn this work into an album 
 The product improvement is deliberately simple:
 
 > Give the host a calm chronological place to relive every private delivery, mark favorites, find a known photo, open it fully, and download the complete collection.
+
+## 20. Revisions
+
+**2026-08-15 — one Gallery heading.** Section 6.1 originally specified the titles **Private gallery**
+and **Shared gallery**, swapped by mode. Implementation review found the mode switch directly beneath
+it already carried both names as a pressed-state control, so the heading repeated the switch and made
+the Manager destination look as though it changed identity between two modes of one section. The
+heading is now the constant **Gallery**, the mode switch is the only Private/Shared label, and the
+`gallery-workspace-title` region name is stable. Nothing else in section 6.1 changed: the total, the
+single **Download all** action, and the export progress and ready states are unaffected.

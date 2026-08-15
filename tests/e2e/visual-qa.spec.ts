@@ -262,11 +262,26 @@ test('the private mosaic and the gallery export control hold their layout', asyn
   await openManager(page, 6);
   await page.setViewportSize({ width: 320, height: 844 });
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
   const mosaic = page.locator('.gallery-mosaic');
   await expect(mosaic.locator('.gallery-mosaic__item')).toHaveCount(3);
   await settle(page);
   await expect(mosaic).toHaveScreenshot('manager-private-mosaic-320.png');
+
+  await mosaic.getByRole('button', { name: /open /i }).first().click();
+  const viewer = page.locator('.gallery-viewer');
+  await expect(viewer).toBeVisible();
+  await settle(page);
+  await expect(viewer).toHaveScreenshot('manager-gallery-viewer-320.png');
+  await page.getByRole('button', { name: 'Close viewer' }).click();
+  await expect(viewer).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Shared gallery' }).click();
+  const shared = page.locator('.gallery-shared');
+  await expect(shared.getByRole('button', { name: 'Unpublished' })).toHaveAttribute('aria-pressed', 'true');
+  await settle(page);
+  await expect(shared).toHaveScreenshot('manager-shared-gallery-320.png');
+  await page.getByRole('button', { name: 'Private gallery' }).click();
 
   // The phone is what the layout is made of: keep 390 and capture the export control beside the
   // private header without any scrolling.

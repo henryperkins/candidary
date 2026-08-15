@@ -10,6 +10,19 @@ export interface GalleryMoment {
 }
 
 /**
+ * What a photo is called wherever the host sees it named. The caption is guest prose and the
+ * filename is the fallback, so this must never return an empty string: it becomes an `alt`, an
+ * accessible name, and the immersive viewer's dialog name, and a blank caption that reached the
+ * database before intake trimmed them would otherwise leave all three unnamed.
+ */
+export function galleryPhotoTitle(
+  photo: Pick<ManagerGalleryMediaView, 'caption' | 'originalFilename'>,
+): string {
+  const caption = photo.caption?.trim();
+  return caption ? caption : photo.originalFilename;
+}
+
+/**
  * Groups the ordered chronological stream into unnamed derived moments. A new
  * moment begins only when the gap from the previous result exceeds 45 minutes;
  * a local midnight never splits a continuous run, so the grouping is recomputed

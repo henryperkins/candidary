@@ -304,13 +304,14 @@ async function openGallery(page: Page) {
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
 }
 
 async function openSharedGallery(page: Page) {
   await openGallery(page);
   await page.getByRole('button', { name: 'Shared gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Shared gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Shared gallery' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.moderation-grid article')).toHaveCount(2);
 }
 
@@ -352,9 +353,9 @@ test('a refused bulk publish keeps the gallery, its filter, and the selection', 
   await expect(page.getByText('1 selected')).toBeVisible();
   await page.getByRole('button', { name: 'Publish selected' }).click();
 
-  await expectRecoverableNotice(page, 'Shared gallery');
+  await expectRecoverableNotice(page, 'Gallery');
   // The filter the host had chosen and the selection they had made are both still true.
-  await expect(page.locator('.filter-tabs button.active')).toHaveText('unpublished');
+  await expect(page.locator('.filter-tabs button.active')).toHaveText('Unpublished');
   await expect(page.getByText('1 selected')).toBeVisible();
   await expect(first.getByRole('checkbox')).toBeChecked();
 });
@@ -391,7 +392,7 @@ test('a refused export request keeps the gallery and the control that asked for 
 
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
-  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
   // The control that asked is still there, still able to ask again, rather than a dead section.
   await expect(control.getByRole('button', { name: 'Download all' })).toBeEnabled();
   await expectContained(page);

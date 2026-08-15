@@ -61,6 +61,8 @@ interface ManagerGuestbookPanelProps {
   onSummaryRefresh: (options?: { silent?: boolean }) => Promise<unknown>;
   onSummaryObserved?: (summary: GuestbookSummary) => void;
   onOpenSettings: () => void;
+  /** True while a guest-list commit holds every destination, matching the Manager's own guard. */
+  settingsBlocked: boolean;
 }
 
 interface RowFailure {
@@ -82,6 +84,7 @@ export function ManagerGuestbookPanel({
   onSummaryRefresh,
   onSummaryObserved,
   onOpenSettings,
+  settingsBlocked,
 }: ManagerGuestbookPanelProps) {
   const [view, setView] = useState<GuestbookManagerView>(() => initialGuestbookView(summary));
   const [source, setSource] = useState<GuestbookManagerSource>('all');
@@ -303,7 +306,12 @@ export function ManagerGuestbookPanel({
 
     {view === 'shared' && !galleryVisible && <div className="manager-guestbook__notice">
       <span>Photo captions are not visible to guests while the gallery is off.</span>
-      <button type="button" className="text-button" onClick={onOpenSettings}>Open Settings</button>
+      <button
+        type="button"
+        className="text-button"
+        disabled={settingsBlocked}
+        onClick={onOpenSettings}
+      >Open settings</button>
     </div>}
 
     {loadFailure && <div className="manager-guestbook__error" role="alert">
