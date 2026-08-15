@@ -436,3 +436,93 @@ test('gallery-off keeps a published caption out of Shared while retaining the cu
   await expect(page.getByText('A private read-back while the shared gallery is off.')).toBeVisible();
   await expect(page.getByText('Your entry')).toBeVisible();
 });
+
+/* iOS Safari zooms the viewport whenever a focused control computes under 16px and never zooms back
+   out, so an undersized guest field leaves the respondent pinching the page straight before they can
+   carry on. The global `input { font: inherit }` takes its size from whichever label wraps the
+   field, which is how two of these three drifted under the floor while the third stayed correct.
+   This walks every visible guest text field rather than the three known ones, so a new field that
+   inherits a small label is caught here rather than on someone's phone. */
+test('every guest text field clears the 16px iOS focus-zoom floor', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  for (const surface of ['photos', 'rsvp'] as const) {
+    await stubGuestRoutes(page, surface === 'rsvp'
+      ? {
+        event: {
+          uploadsEnabled: false,
+          phase: 'rsvp-primary',
+          rsvpState: 'open',
+          rsvpAccess: 'editable',
+          rsvpDeadlineAt: '2026-09-05T23:59:59.999Z',
+          rsvpDeadlineDate: '2026-09-05',
+        },
+      }
+      : {});
+    await page.goto('/event/maya-theo');
+
+    if (surface === 'photos') {
+      await page.locator('details.guestbook summary').click();
+      await page.getByRole('button', { name: 'Add your name' }).click();
+    }
+
+    const fields = page.locator('.guest-shell--drop input[type="text"], .guest-shell--drop input:not([type])');
+    const count = await fields.count();
+    expect(count, `${surface} renders at least one guest field`).toBeGreaterThan(0);
+    for (let index = 0; index < count; index += 1) {
+      const field = fields.nth(index);
+      if (!(await field.isVisible())) continue;
+      const size = await field.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+      const name = await field.evaluate((element) => element.getAttribute('aria-label')
+        ?? element.closest('label')?.textContent?.trim().slice(0, 40)
+        ?? element.className);
+      expect(size, `${surface} field "${name}" font size`).toBeGreaterThanOrEqual(16);
+    }
+  }
+});
+
+/* `.notes-feed li` carries no colour of its own, so its rule falls back to `currentColor` — full
+   page ink — the moment the list is mounted outside whatever ancestor supplies one. That is exactly
+   what happened when the Guestbook replaced the Notes surface and left the colouring rule behind on
+   a class nothing renders. The token is resolved through the browser rather than restated as a hex
+   literal here, so this stays true for all four presets. */
+test('the Guestbook draws its row rules in the event section border, not page ink', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubGuestRoutes(page, {
+    event: { theme: eventTheme('garden-party') },
+    guestbook: {
+      shared: [{
+        id: 'note-rule',
+        source: 'guest_note',
+        kind: 'message',
+        mediaId: null,
+        guestName: 'Ada',
+        body: 'A shared note that gives the feed a row rule to measure.',
+        createdAt: '2026-09-19T20:00:00Z',
+        state: 'approved',
+        moderationStatus: 'approved',
+        visibility: 'shared',
+        isOwn: false,
+      } as GuestGuestbookItem],
+    },
+  });
+  await page.goto('/event/maya-theo');
+  await page.locator('details.guestbook summary').click();
+
+  const measured = await page.locator('.guestbook-section .notes-feed li').first()
+    .evaluate((element) => {
+      const probe = document.createElement('span');
+      element.append(probe);
+      const read = (value: string) => {
+        probe.style.color = value;
+        return getComputedStyle(probe).color;
+      };
+      const sectionBorder = read('var(--event-section-border)');
+      const pageText = read('var(--event-page-text)');
+      probe.remove();
+      return { border: getComputedStyle(element).borderTopColor, sectionBorder, pageText };
+    });
+
+  expect(measured.border).toBe(measured.sectionBorder);
+  expect(measured.border).not.toBe(measured.pageText);
+});
