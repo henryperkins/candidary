@@ -344,14 +344,6 @@ manageRoutes.get('/manage/events/:eventId/media', async (context) => {
 manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   await managerForEvent(context);
   const eventId = context.req.param('eventId');
-  const mediaRepository = new MediaRepository(context.env.DB);
-  if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
-    throw new ApiError(
-      'MEDIA_STATE_CONFLICT',
-      'The private gallery is still preparing. Try again shortly.',
-      409,
-    );
-  }
 
   const rawQuery = context.req.query('query');
   let query: string | undefined;
@@ -381,6 +373,14 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   }
   const rawCursor = context.req.query('cursor');
   const cursor = rawCursor === undefined ? undefined : decodeGalleryCursor(rawCursor);
+  const mediaRepository = new MediaRepository(context.env.DB);
+  if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'The private gallery is still preparing. Try again shortly.',
+      409,
+    );
+  }
   const page = await mediaRepository.listGalleryTimeline(
     eventId,
     {

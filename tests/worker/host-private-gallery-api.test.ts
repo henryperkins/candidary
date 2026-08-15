@@ -163,6 +163,10 @@ describe('host private gallery API', () => {
     const access = await eventAccess();
     await seedStored(access, 1, { timelineAt: '1970-01-01T00:00:00.000Z' });
 
+    const invalid = await gallery(access, '?cursor=not-a-cursor');
+    expect(invalid.status).toBe(422);
+    expect((await invalid.json<any>()).code).toBe('VALIDATION_FAILED');
+
     const blocked = await gallery(access);
     expect(blocked.status).toBe(409);
     expect(await blocked.json<any>()).toMatchObject({
