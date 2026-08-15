@@ -222,7 +222,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .empty-state { min-height: 220px; display: grid; place-items: center; align-content: center; padding: 30px; text-align: center; border: 1px dashed var(--border); border-radius: 9px; }.empty-state svg { color: var(--denim); font-size: 2rem; }.empty-state h3 { margin: 14px 0 3px; font-size: 1.4rem; }.empty-state p { color: var(--muted); }
 .contributions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 25px; }.contributions > p { color: var(--muted); }.contributions ul { margin: 0; padding: 0; display: grid; gap: 8px; list-style: none; }.contributions li { min-height: 64px; display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 6px; border-bottom: 1px solid var(--border); }.contributions img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; }
 .status { display: inline-flex; align-items: center; gap: 6px; width: fit-content; padding: 6px 10px; border-radius: 999px; font-size: .75rem; font-style: normal; font-weight: 600; text-transform: capitalize; }.status--approved { background: var(--moss-soft); color: #4e5b28; }.status--pending { background: var(--denim-soft); color: var(--chestnut); }.status--rejected { background: #fbe0dc; color: var(--danger); }
-.note-form label { min-width: 0; display: grid; gap: 8px; }.notes-feed { margin: 18px 0 0; padding: 0; list-style: none; }.notes-feed li { min-width: 0; padding: 18px 0; border-top: 1px solid; }.notes-feed p { margin-bottom: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.note-form label { min-width: 0; display: grid; gap: 8px; }.notes-feed { margin: 18px 0 0; padding: 0; list-style: none; }.notes-feed li { min-width: 0; padding: 18px 0; border-top: 1px solid var(--event-section-border); }.notes-feed p { margin-bottom: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .guest-shell footer { padding: 32px 6vw; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; color: var(--muted); }.guest-shell footer p { margin: 0; }
 
 /* These choice cards sit in Candidary's creation and manager chrome, so they intentionally use the
@@ -515,18 +515,15 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .contributions--compact ul { width: 100%; }
 .guest-shell--drop .contributions li { border-bottom-color: var(--event-section-border); }
 .guest-shell--drop .status--pending { background: var(--event-accent-soft); color: var(--event-accent-soft-foreground); }
-.notes-secondary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
-.notes-secondary > div { min-width: 0; }
-.notes-secondary > div:first-child > svg { color: var(--event-accent); font-size: 1.7rem; }
-.notes-secondary h3 { margin: 12px 0 5px; font-size: 1.45rem; overflow-wrap: anywhere; }
-.notes-secondary p { color: var(--event-secondary-muted-text); }
-.notes-secondary__privacy { margin-top: 14px; max-width: 42ch; font-size: .85rem; line-height: 1.55; }
-.notes-secondary__workspace { display: grid; gap: 0; }
+/* `.notes-secondary` and `.notes-feed-region` were the Notes surface the Guestbook replaced. Nothing
+   renders them any more, and leaving them here was not free: the only rule that ever gave
+   `.notes-feed li` a border colour was scoped to `.notes-secondary`, so once the Guestbook mounted
+   `.notes-feed` outside that ancestor the separators fell back to `currentColor` and drew every row
+   rule in full page ink. The colour now lives on the base rule; the two orphaned declarations that
+   still had live intent are re-scoped to `.guestbook` below. */
 .note-form { display: grid; gap: 12px; }
 .note-form__label { color: var(--event-page-text); font-size: .85rem; font-weight: 700; overflow-wrap: anywhere; }
-.notes-secondary .note-form textarea { background: var(--event-raised-surface); border-color: var(--event-input-border); color: var(--event-page-text); }
-.notes-secondary .note-form textarea::placeholder { color: var(--event-muted-text); }
-.notes-secondary .note-form textarea[readonly] { opacity: .72; }
+.guestbook .note-form textarea[readonly] { opacity: .72; }
 .note-form__footer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .note-form__footer small { color: var(--event-secondary-muted-text); font-size: .75rem; }
 .note-form__footer .button { width: 100%; }
@@ -538,22 +535,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .note-submit-feedback { min-height: 1.5em; margin-top: 10px; }
 .note-submit-feedback p { margin: 0; color: var(--moss); font-size: .85rem; font-weight: 650; }
 .note-submit-feedback .note-submit-feedback__error { color: var(--danger); }
-.notes-feed-region { min-width: 0; padding-top: 22px; }
-.notes-feed-region h4 { margin: 0; color: var(--event-page-text); font-family: 'Manrope', sans-serif; font-size: 1rem; }
-.notes-feed__state { margin: 12px 0 0; font-size: .85rem; }
 .notes-feed__recovery { margin-top: 14px; display: grid; gap: 12px; justify-items: start; }
 .notes-feed__recovery p, .notes-feed__more p { margin: 0; color: var(--danger); font-size: .85rem; }
-.notes-secondary .notes-feed { color: var(--event-page-text); }
-.notes-secondary .notes-feed li { border-top-color: var(--event-section-border); }
-.notes-secondary .notes-feed small { color: var(--event-secondary-muted-text); }
-.notes-feed-region .button--secondary { max-width: 100%; border-color: var(--event-primary-on-surface); color: var(--event-primary-on-surface); white-space: normal; }
-.notes-feed__entry { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; }
-.notes-feed__thumbnail { width: 58px; height: 58px; object-fit: cover; border-radius: max(0px, calc(var(--event-card-radius) - 4px)); }
-.notes-feed__body { min-width: 0; }
-.notes-feed__meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
-.notes-feed__meta small { min-width: 0; overflow-wrap: anywhere; }
-.notes-feed__meta .status { max-width: 100%; flex: 0 0 auto; overflow-wrap: anywhere; text-align: start; text-transform: none; }
-.notes-feed__visibility { display: block; margin-top: 5px; overflow-wrap: anywhere; }
+/* Was `.notes-feed-region .button--secondary`. Every secondary action inside the disclosure — the
+   two `Show earlier` buttons, `Try again`, `Retry`, `Keep editing` — sits on a themed guest surface,
+   so it answers to the resolved event primary rather than to the global chestnut default. */
+.guestbook .button--secondary { max-width: 100%; border-color: var(--event-primary-on-surface); color: var(--event-primary-on-surface); white-space: normal; }
 .notes-feed__more { margin-top: 18px; display: grid; gap: 10px; justify-items: start; }
 
 /* The guestbook is a local extension of the event ledger: one disclosure, paper fields, and
@@ -572,7 +559,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .guestbook-signature p > span { min-width: 0; overflow-wrap: anywhere; }
 .guestbook-signature .text-button { min-height: 44px; color: var(--event-primary-on-surface); }
 .guestbook-signature label { min-width: 0; display: grid; gap: 7px; font-size: .875rem; font-weight: 700; }
-.guestbook-signature input { width: 100%; min-width: 0; min-height: 48px; padding: 11px 13px; border: 1px solid var(--event-input-border); border-radius: var(--event-input-radius); background: var(--event-raised-surface); color: var(--event-page-text); box-shadow: 0 1px 3px var(--event-input-shadow); }
+/* iOS Safari zooms the viewport whenever a focused control computes under 16px and never zooms back
+   out, so a guest who taps this field is left on a page they have to pinch straight again. The
+   global `input { font: inherit }` inherits this label's .875rem, which is why the size is restated
+   here rather than left to the cascade. `.photo-drop__name input` and `.rsvp-field input` restate it
+   for the same reason; any new guest field inside a labelled block has to do the same. */
+.guestbook-signature input { width: 100%; min-width: 0; min-height: 48px; padding: 11px 13px; border: 1px solid var(--event-input-border); border-radius: var(--event-input-radius); background: var(--event-raised-surface); color: var(--event-page-text); font-size: 1rem; box-shadow: 0 1px 3px var(--event-input-shadow); }
 .guestbook-confirmation { padding-top: 14px; display: grid; gap: 12px; border-top: 1px solid var(--event-section-border); }
 .guestbook-confirmation p { margin: 0; color: var(--event-page-text); overflow-wrap: anywhere; }
 .guestbook-confirmation > div { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -590,7 +582,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .guestbook-entry__body > p { margin-bottom: 8px; color: var(--event-page-text); overflow-wrap: anywhere; white-space: pre-wrap; }
 .guestbook-entry__meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 .guestbook-entry__meta small { min-width: 0; color: var(--event-secondary-muted-text); overflow-wrap: anywhere; }
-.guestbook-entry__meta .status { max-width: 100%; flex: 0 0 auto; overflow-wrap: anywhere; text-align: start; text-transform: none; }
+/* The guest state is a textual label, not a filled pill: `.status` alone carries pill padding and a
+   999px radius but no ground, so the shape was invisible and its side padding was the only thing
+   holding the label off the row's right edge. The Manager's own `__states` chips keep their fill. */
+.guestbook-entry__meta .status { max-width: 100%; flex: 0 0 auto; padding: 0; border-radius: 0; overflow-wrap: anywhere; text-align: start; text-transform: none; }
 .guestbook-entry__own { display: block; margin-top: 7px; color: var(--event-primary-on-surface); font-size: .875rem; }
 .guestbook-entry__privacy { display: block; margin-top: 5px; color: var(--event-secondary-muted-text); overflow-wrap: anywhere; }
 .guestbook .button, .guestbook .text-button { min-height: 44px; }
@@ -619,7 +614,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .rsvp-household__heading { gap: 7px; }
 .rsvp-household__heading > p { margin: 0; color: var(--event-muted-text); line-height: 1.5; }
 .rsvp-field { min-width: 0; display: grid; gap: 7px; color: var(--event-text); font-size: .86rem; font-weight: 700; }
-.rsvp-field input { width: 100%; min-width: 0; min-height: 48px; padding: 11px 13px; font: inherit; font-weight: 500; }
+/* The 16px floor above applies here too: `font: inherit` takes `.rsvp-field`'s .86rem, and this is
+   the first field an invited household types into on a phone. */
+.rsvp-field input { width: 100%; min-width: 0; min-height: 48px; padding: 11px 13px; font: inherit; font-weight: 500; font-size: 1rem; }
 .rsvp-field small, .rsvp-privacy { color: var(--event-muted-text); font-size: .76rem; font-weight: 400; line-height: 1.45; }
 .rsvp-privacy { margin: 0; }
 .rsvp-button { width: 100%; min-height: 48px; padding: 12px 16px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--event-action-radius); font: inherit; font-weight: 800; cursor: pointer; }
@@ -667,7 +664,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 @media (min-width: 700px) {
-  .notes-secondary { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: clamp(32px, 5vw, 50px); }
   .guestbook__content { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); column-gap: clamp(32px, 5vw, 50px); }
   .guestbook__intro { grid-column: 1; }
   .guestbook-composer, .guestbook-composer-closed { grid-column: 2; grid-row: 1; }
