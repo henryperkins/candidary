@@ -295,15 +295,15 @@ describe('manager settings autosave guards', () => {
     expect(prompt).toHaveFocus();
     await user.click(within(prompt).getByRole('button', { name: 'Stay' }));
     expect(screen.getByRole('heading', { name: 'Add guests' })).toBeVisible();
-    expect(screen.queryByRole('heading', { name: 'Private gallery' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Gallery' })).not.toBeInTheDocument();
 
     await user.click(nav.getByRole('button', { name: 'Gallery' }));
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
-    expect(await screen.findByRole('heading', { name: 'Private gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
     expect(within(screen.getByRole('group', { name: 'Publication status' }))
-      .getByRole('button', { name: 'unpublished' })).toHaveClass('active');
+      .getByRole('button', { name: 'Unpublished' })).toHaveClass('active');
   });
 
   it('keeps manager destinations unavailable while a guest-list commit is in flight', async () => {

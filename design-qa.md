@@ -142,7 +142,11 @@ git diff --exit-code -- tests/e2e/visual-qa.spec.ts-snapshots/guest-review-320-m
 | `manager-nav-768.png` | `/manage/event/:id` compact 104 px rail | 768 x 900 |
 | `manager-nav-count-390.png` | `/manage/event/:id` stacked rail with the count at the 10,000-photo cap | 390 x 844 |
 | `manager-actions-320.png` | `/manage/event/:id` Gallery card with all four controls | 320 x 844 |
-| `manager-export-first-390.png` | `/manage/event/:id` Share section: event link, QR, both entry controls, and the mobile export panel | 390 wide |
+| `manager-private-mosaic-320.png` | `/manage/event/:id` private Gallery mosaic | 320 x 844 |
+| `manager-gallery-viewer-320.png` | `/manage/event/:id` immersive private Gallery viewer | 320 x 844 |
+| `manager-shared-gallery-320.png` | `/manage/event/:id` Shared gallery filters and labeled publish/hide cards | 320 x 844 |
+| `gallery-export-390.png` | `/manage/event/:id` private Gallery Download all control | 390 wide |
+| `manager-export-first-390.png` | Historical Share-section export panel; export now lives once in Gallery | 390 wide |
 | `manager-rsvp-390.png` | `/manage/event/:id?section=rsvp` guest list: totals, filters, list, editor entry, import | 390 wide |
 | `rsvp-lookup-390.png` | `/event/:slug` RSVP lookup first viewport | 390 x 844 |
 | `rsvp-household-320.png` | `/event/:slug` household card: a named attend, a decline, an attending plus-one | 320 wide |
@@ -337,7 +341,7 @@ in the final handoff and are not preclaimed here.
 | Long unbroken note | 320, 900 | Wraps rather than widening the page |
 | Section change | 390 x 844 | Returns to the top of the new section, clear of the sticky rail |
 | 120-photo intake | 320, 390, 768 | One 24-item page rendered initially, lazy and async previews, fewer than 24 initial preview requests, 44 x 44 `Load more photos`, five genuine 24-row pages append without duplicates, and an answered live first-page poll leaves the exhausted continuation control absent |
-| Mobile export reachability | 390, 768 | Never two export panels on screen at once. The mechanism is a CSS reveal, not DOM uniqueness: on the phone's Intake the rail's copy is the document's only panel and it is hidden; on Share the Share copy is visible below 761 and the utility copy hidden, and the two swap at and above it |
+| Mobile export reachability | 390, 768 | One Gallery `Download all` control. Never two export panels on screen at once |
 
 ### Recoverable failures — `tests/e2e/error-recovery.spec.ts`
 
@@ -345,9 +349,9 @@ in the final handoff and are not preclaimed here.
 | --- | --- | --- |
 | Failed guest and manager load | 320, 768 and the project viewport | Announced with the transport hint, 44 x 44 `Try again`, and the next attempt reaches the real surface |
 | Session and lifecycle failures (7 codes, guest and manager) | project viewport | The link or the event's own end is named, no retry offered, and the transport line never appears |
-| Refused bulk publish | 390 x 844 | Gallery section, `unpublished` filter, cards and selection all survive; 44 x 44 dismiss |
+| Refused bulk publish | 390 x 844 | Gallery section, `Unpublished` filter, cards and selection all survive; 44 x 44 dismiss |
 | Refused delete | 390 x 844 | The photo and its card survive; notice dismissible |
-| Refused export request | 390 x 844 | Share section and an enabled `Prepare download` survive |
+| Refused export request | 390 x 844 | Gallery section and an enabled `Download all` survive |
 
 ### Automated accessibility engine — `tests/e2e/accessibility.spec.ts`
 

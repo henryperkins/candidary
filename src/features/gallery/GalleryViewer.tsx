@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
-import { formatMomentHeading } from './gallery-timeline';
+import { formatMomentHeading, galleryPhotoTitle } from './gallery-timeline';
 
 interface GalleryViewerProps {
   photos: ManagerGalleryMediaView[];
@@ -70,6 +70,8 @@ export function GalleryViewer({
   }, [index, photos.length, onClose, onIndexChange]);
 
   if (!photo) return null;
+  const title = galleryPhotoTitle(photo);
+  const titleId = `gallery-viewer-title-${photo.id}`;
   const moment = {
     key: photo.id,
     photos: [photo],
@@ -80,7 +82,7 @@ export function GalleryViewer({
     className="gallery-viewer"
     role="dialog"
     aria-modal="true"
-    aria-label={photo.originalFilename}
+    aria-labelledby={titleId}
     ref={dialogRef}
   >
     <button type="button" className="gallery-viewer__close" ref={closeRef} aria-label="Close viewer" onClick={onClose}>
@@ -97,7 +99,7 @@ export function GalleryViewer({
     </button>
     <div className="gallery-viewer__media">
       {photo.previewAvailable
-        ? <img src={mediaPreview(photo.id)} alt={photo.caption ?? photo.originalFilename} />
+        ? <img src={mediaPreview(photo.id)} alt={title} decoding="async" />
         : <div className="gallery-viewer__placeholder"><strong>{photo.originalFilename}</strong><span>Preview unavailable</span></div>}
     </div>
     <button
@@ -111,21 +113,22 @@ export function GalleryViewer({
     </button>
     <div className="gallery-viewer__info">
       <div className="gallery-viewer__meta">
-        <strong>{photo.caption ?? photo.originalFilename}</strong>
+        <strong id={titleId}>{title}</strong>
         <span>From {photo.guestName}</span>
         <span className="gallery-viewer__timing">
           {photo.timelineSource === 'capture' ? 'Taken' : 'Received'} {formatMomentHeading(moment, timeZone)}
         </span>
+        <span className="gallery-viewer__position">Photo {index + 1} of {photos.length}</span>
       </div>
       <button
         type="button"
         className="gallery-viewer__favorite"
         aria-pressed={photo.isFavorite}
-        aria-label={`Favorite ${photo.originalFilename}`}
+        aria-label={`Favorite ${title}`}
         disabled={favoritePendingIds.has(photo.id)}
         onClick={() => onFavorite(photo)}
       >
-        <Heart aria-hidden="true" /> Favorite
+        <Heart aria-hidden="true" fill={photo.isFavorite ? 'currentColor' : 'none'} /> Favorite
       </button>
     </div>
   </div>;

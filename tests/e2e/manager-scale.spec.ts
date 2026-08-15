@@ -100,7 +100,7 @@ test('exposes the one export control inside the private gallery', async ({ page 
   await expect(page.locator('.gallery-export')).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Gallery', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Private gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
   const control = page.locator('.gallery-export');
   await expect(control).toBeVisible();
   await expect(page.locator('.gallery-export')).toHaveCount(1);

@@ -9,6 +9,12 @@ export interface GalleryMoment {
   endAt: string;
 }
 
+export function galleryPhotoTitle(
+  photo: Pick<ManagerGalleryMediaView, 'caption' | 'originalFilename'>,
+): string {
+  return photo.caption ?? photo.originalFilename;
+}
+
 /**
  * Groups the ordered chronological stream into unnamed derived moments. A new
  * moment begins only when the gap from the previous result exceeds 45 minutes;

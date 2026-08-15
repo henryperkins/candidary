@@ -766,8 +766,6 @@ export function ManagerPage() {
   const photoCount = event.storedMediaCount ?? 0;
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
   const activeExport = exports[0];
-  // One panel, two placements: the wide utility rail and the narrow Share section. The stylesheet
-  // reveals exactly one of them, so the host never sees the same export control twice.
   // Both entry actions are confirmed the same way, and both name the event so the
   // host cannot mistake which one they are typing into.
   const entryConfirmationForm = (action: EntryAction, verb: string, warning: string) => <fieldset
@@ -895,6 +893,7 @@ export function ManagerPage() {
           loadingMore,
           hasMore: Boolean(nextMediaCursor),
           onLoadMore: loadMoreMedia,
+          onOpenSettings: () => openSection('settings'),
         }}
         exports={{
           job: activeExport,

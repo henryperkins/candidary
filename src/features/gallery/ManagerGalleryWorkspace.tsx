@@ -22,6 +22,7 @@ interface ManagerGalleryWorkspaceProps {
     loadingMore: boolean;
     hasMore: boolean;
     onLoadMore(): Promise<void>;
+    onOpenSettings(): void;
   };
   exports: {
     job?: ExportView;
@@ -41,10 +42,7 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
   const [mode, setMode] = useState<'private' | 'shared'>('private');
   return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
-      <div>
-        <p className="section-label">{mode === 'private' ? 'Private memory library' : 'Optional shared view'}</p>
-        <h2 id="gallery-workspace-title">{mode === 'private' ? 'Private gallery' : 'Shared gallery'}</h2>
-      </div>
+      <h2 id="gallery-workspace-title">Gallery</h2>
       <div className="gallery-mode-switch" role="group" aria-label="Gallery mode">
         <button
           type="button"

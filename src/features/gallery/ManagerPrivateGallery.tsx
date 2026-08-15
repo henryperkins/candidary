@@ -4,6 +4,7 @@ import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } 
 import { api, ClientApiError } from '../../app/api';
 import { ErrorState, LoadingState } from '../../components/States';
 import type { EventView, ManagerGalleryMediaView } from '../../../shared/contracts';
+import { galleryPhotoTitle } from './gallery-timeline';
 import { GalleryTimeline } from './GalleryTimeline';
 import { GalleryViewer } from './GalleryViewer';
 
@@ -309,7 +310,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
       } else {
         dispatchRows({ type: 'confirm', photo: result.media });
       }
-      setAnnouncement(`${photo.originalFilename} ${next ? 'added to' : 'removed from'} favorites.`);
+      setAnnouncement(`${galleryPhotoTitle(photo)} ${next ? 'added to' : 'removed from'} favorites.`);
     } catch (caught) {
       if (requestGeneration !== loadGeneration.current) return;
       dispatchRows({ type: 'favorite', id: photo.id, favorite: confirmed });
@@ -405,7 +406,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
     } else if (favoritesOnly) {
       content = <div className="empty-state">
         <h3 ref={emptyRef} tabIndex={-1}>No favorites yet.</h3>
-        <p>The heart on any photo adds it to this shared event list.</p>
+        <p>The heart on a photo adds it to Favorites for every host on this event. It does not publish it.</p>
         <button type="button" className="button button--secondary" onClick={toggleFavorites}>Show every photo</button>
       </div>;
     } else {
@@ -443,14 +444,16 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
         placeholder="Contributor, caption, or filename"
         onChange={(change) => setQueryInput(change.target.value)}
       />
-      <button type="submit" className="button button--secondary">Search</button>
-      {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
-      <button
-        type="button"
-        className={`button ${favoritesOnly ? 'button--approve' : 'button--secondary'}`}
-        aria-pressed={favoritesOnly}
-        onClick={toggleFavorites}
-      >Favorites</button>
+      <div className="gallery-search__actions">
+        <button type="submit" className="button button--secondary">Search</button>
+        {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
+        <button
+          type="button"
+          className="button button--secondary gallery-search__favorites"
+          aria-pressed={favoritesOnly}
+          onClick={toggleFavorites}
+        >Favorites</button>
+      </div>
     </form>
     {loading && hasConfirmedPage.current && <p className="sr-only" role="status">Updating photos…</p>}
     <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
