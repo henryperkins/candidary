@@ -226,16 +226,23 @@ describe('host private gallery storage timeline', () => {
     const bytes = jpegCapture('2026:09:19 17:42:30');
     const reserved = await reserveMedia(repository, sessionId, 'media-ingress', bytes);
 
-    const stored = await receiveMediaUpload(
-      env.CANONICAL_MEDIA_BUCKET,
-      repository,
-      reserved,
-      TIMELINE_CONTEXT,
-      sessionId,
-      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-      'image/jpeg',
-      new Date(STORED_AT),
-    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(STORED_AT));
+    let stored;
+    try {
+      stored = await receiveMediaUpload(
+        env.CANONICAL_MEDIA_BUCKET,
+        repository,
+        reserved,
+        TIMELINE_CONTEXT,
+        sessionId,
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+        'image/jpeg',
+        new Date(STORED_AT),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(stored).toMatchObject({
       uploadState: 'stored',
@@ -352,10 +359,12 @@ describe('host private gallery repository', () => {
     const favoritedAt = '2026-09-19T23:00:00.000Z';
     const favorited = await repository.setFavorite('event-a', 'g1', favoritedAt);
     expect(favorited.favoritedAt).toBe(favoritedAt);
-    const again = await repository.setFavorite('event-a', 'g1', favoritedAt);
+    const again = await repository.setFavorite('event-a', 'g1', '2026-09-19T23:05:00.000Z');
     expect(again.favoritedAt).toBe(favoritedAt);
     const cleared = await repository.setFavorite('event-a', 'g1', null);
     expect(cleared.favoritedAt).toBeNull();
+    const refavorited = await repository.setFavorite('event-a', 'g1', '2026-09-19T23:10:00.000Z');
+    expect(refavorited.favoritedAt).toBe('2026-09-19T23:10:00.000Z');
   });
 
   it('refuses a favorite write for foreign or removed media', async () => {

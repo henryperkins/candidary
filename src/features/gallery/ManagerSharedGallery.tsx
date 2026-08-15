@@ -104,8 +104,8 @@ export function ManagerSharedGallery({
                   <strong title={item.caption || item.originalFilename}>{item.caption || item.originalFilename}</strong>
                   <small>From {item.guestName}</small>
                   <div className="intake-card-actions">
-                    {item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void onChangePublication(item, 'publish')}><Eye aria-hidden="true" /></button>}
-                    {item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void onChangePublication(item, 'hide')}><EyeOff aria-hidden="true" /></button>}
+                    {item.publicationStatus !== 'published' && <button type="button" aria-label={`Publish ${item.originalFilename}`} onClick={() => void onChangePublication(item, 'publish')}><Eye aria-hidden="true" /></button>}
+                    {item.publicationStatus !== 'hidden' && <button type="button" aria-label={`Hide ${item.originalFilename}`} onClick={() => void onChangePublication(item, 'hide')}><EyeOff aria-hidden="true" /></button>}
                   </div>
                 </div>
               </article>;

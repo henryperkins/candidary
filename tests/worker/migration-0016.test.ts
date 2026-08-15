@@ -151,7 +151,9 @@ describe('migration 0016 host private gallery', () => {
     expect(indexes.results[0]?.sql).toContain("upload_state = 'stored'");
     expect(indexes.results[0]?.sql).toContain('deleted_at IS NULL');
     expect(indexes.results[0]?.sql).toContain('favorited_at IS NOT NULL');
+    expect(indexes.results[0]?.sql).toContain('event_id, timeline_at, id');
     expect(indexes.results[1]?.sql).toContain("upload_state = 'stored'");
     expect(indexes.results[1]?.sql).toContain('deleted_at IS NULL');
+    expect(indexes.results[1]?.sql).toContain('event_id, timeline_at, id');
   });
 });

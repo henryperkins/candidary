@@ -86,7 +86,7 @@ const mediaLimitSchema = z.coerce.number().int().min(1).max(MANAGER_MEDIA_MAX_PA
   .default(MANAGER_MEDIA_PAGE_SIZE);
 const galleryLimitSchema = z.coerce.number().int().min(1).max(PRIVATE_GALLERY_PAGE_SIZE)
   .default(PRIVATE_GALLERY_PAGE_SIZE);
-const favoriteSchema = z.object({ favorite: z.boolean() });
+const favoriteSchema = z.object({ favorite: z.boolean() }).strict();
 const GALLERY_SEARCH_MAX_CODE_POINTS = 120;
 
 function managerForEvent(context: Context<AppBindings>, write = false) {

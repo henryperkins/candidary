@@ -1,4 +1,4 @@
-import { Heart } from 'lucide-react';
+import { Heart, ImageOff } from 'lucide-react';
 import { useState, type CSSProperties } from 'react';
 
 import { mediaPreview } from '../../app/api';
@@ -34,7 +34,7 @@ export function GalleryMoment({ moment, timeZone, onOpen, onFavorite }: GalleryM
         >
           {photo.previewAvailable
             ? <img src={mediaPreview(photo.id)} alt={photo.caption ?? photo.originalFilename} loading="lazy" decoding="async" />
-            : <div className="gallery-mosaic__placeholder" aria-hidden="true"><Heart aria-hidden="true" /></div>}
+            : <div className="gallery-mosaic__placeholder" aria-hidden="true"><ImageOff aria-hidden="true" /></div>}
           <button
             type="button"
             className="gallery-mosaic__open"

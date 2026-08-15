@@ -300,7 +300,11 @@ export async function receiveMediaUpload(
     );
   }
 
-  const committedAt = now.toISOString();
+  // Chosen immediately before the D1 transition, not when the helper entered:
+  // the R2 PUT and verification reads may take a while, and the receipt time
+  // the capture-trust window is evaluated against must be the time that is
+  // written.
+  const committedAt = new Date().toISOString();
   const timeline = resolveMediaTimeline({
     mimeType: media.mimeType,
     bytes: new Uint8Array(bytes),

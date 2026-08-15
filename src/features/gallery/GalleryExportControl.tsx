@@ -1,4 +1,5 @@
 import { Download } from 'lucide-react';
+import { useState } from 'react';
 
 import type { ExportDownloadView, ExportView } from '../../app/types';
 
@@ -22,13 +23,22 @@ export function GalleryExportControl({
   onDownload,
   onRetry,
 }: GalleryExportControlProps) {
+  const [preparing, setPreparing] = useState(false);
   if (!job) {
     return <div className="gallery-export">
       <p className="gallery-export__copy">
         Every stored, non-deleted original, the photo manifest, and the printable and private
         Guestbook artifacts — one logical job. Search and favorites never narrow it.
       </p>
-      <button type="button" className="button button--primary" onClick={() => void onPrepare()}>
+      <button
+        type="button"
+        className="button button--primary"
+        disabled={preparing}
+        onClick={() => {
+          setPreparing(true);
+          void onPrepare().finally(() => setPreparing(false));
+        }}
+      >
         <Download aria-hidden="true" /> Download all
       </button>
     </div>;

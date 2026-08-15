@@ -3,6 +3,8 @@ export interface ExifEntrySpec {
   value: string;
 }
 
+const EXIF_IFD_POINTER = 0x8769;
+
 function asciiBytes(value: string): Uint8Array {
   const chars = [...value].map((char) => char.charCodeAt(0));
   return new Uint8Array([...chars, 0]);
@@ -43,6 +45,59 @@ export function buildExifTiff(entries: ExifEntrySpec[], littleEndian = true): Ui
   view.setUint16(headerSize, entries.length, littleEndian);
   entryBytes.forEach((entry, index) => tiff.set(entry, headerSize + 2 + index * 12));
   view.setUint32(headerSize + 2 + entries.length * 12, 0, littleEndian);
+  for (const part of valueParts) tiff.set(part.bytes, part.offset);
+  return tiff;
+}
+
+/**
+ * A TIFF whose capture tags live in the Exif SubIFD referenced by IFD0
+ * (`ExifIFDPointer` 0x8769) — the layout real cameras emit — rather than
+ * directly in IFD0.
+ */
+export function buildExifTiffSubIfd(entries: ExifEntrySpec[], littleEndian = true): Uint8Array {
+  const headerSize = 8;
+  const ifd0Size = 2 + 1 * 12 + 4;
+  const subIfdOffset = headerSize + ifd0Size;
+  const subIfdSize = 2 + entries.length * 12 + 4;
+  let valueCursor = subIfdOffset + subIfdSize;
+  const valueParts: { offset: number; bytes: Uint8Array }[] = [];
+
+  const subEntries = entries.map(({ tag, value }) => {
+    const data = asciiBytes(value);
+    const entry = new Uint8Array(12);
+    const view = new DataView(entry.buffer);
+    view.setUint16(0, tag, littleEndian);
+    view.setUint16(2, 2, littleEndian);
+    view.setUint32(4, data.length, littleEndian);
+    if (data.length <= 4) {
+      entry.set(data, 8);
+    } else {
+      view.setUint32(8, valueCursor, littleEndian);
+      valueParts.push({ offset: valueCursor, bytes: data });
+      valueCursor += data.length;
+    }
+    return entry;
+  });
+
+  const tiff = new Uint8Array(valueCursor);
+  const view = new DataView(tiff.buffer);
+  tiff.set(littleEndian ? [0x49, 0x49] : [0x4d, 0x4d], 0);
+  view.setUint16(2, 0x002a, littleEndian);
+  view.setUint32(4, headerSize, littleEndian);
+
+  view.setUint16(headerSize, 1, littleEndian);
+  const pointerEntry = new Uint8Array(12);
+  const pointerView = new DataView(pointerEntry.buffer);
+  pointerView.setUint16(0, EXIF_IFD_POINTER, littleEndian);
+  pointerView.setUint16(2, 4, littleEndian);
+  pointerView.setUint32(4, 1, littleEndian);
+  pointerView.setUint32(8, subIfdOffset, littleEndian);
+  tiff.set(pointerEntry, headerSize + 2);
+  view.setUint32(headerSize + 2 + 12, 0, littleEndian);
+
+  view.setUint16(subIfdOffset, entries.length, littleEndian);
+  subEntries.forEach((entry, index) => tiff.set(entry, subIfdOffset + 2 + index * 12));
+  view.setUint32(subIfdOffset + 2 + entries.length * 12, 0, littleEndian);
   for (const part of valueParts) tiff.set(part.bytes, part.offset);
   return tiff;
 }

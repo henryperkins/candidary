@@ -148,10 +148,10 @@ export function ManagerPrivateGallery({ event, eventId }: ManagerPrivateGalleryP
       setNotice(null);
       if (favoritesOnly && !next) {
         const removedIndex = rows.findIndex((item) => item.id === photo.id);
-        const nextRows = rows.filter((item) => item.id !== photo.id);
-        setRows(nextRows);
+        setRows((current) => current.filter((item) => item.id !== photo.id));
         if (viewerIndex !== null && rows[viewerIndex]?.id === photo.id) {
           setViewerIndex(null);
+          const nextRows = rows.filter((item) => item.id !== photo.id);
           const target = nextRows[Math.min(removedIndex, nextRows.length - 1)];
           if (target) (tileFor(target) ?? resultsRef.current?.querySelector<HTMLElement>('h3'))?.focus();
           else emptyRef.current?.focus();

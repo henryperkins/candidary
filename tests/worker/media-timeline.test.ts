@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { SupportedImageType } from '../../shared/constants';
 import { resolveMediaTimeline } from '../../worker/media-timeline';
-import { buildExifTiff, jpegWithExif, jpegWithoutExif } from './jpeg-exif';
+import { buildExifTiffSubIfd, jpegWithExif, jpegWithoutExif } from './jpeg-exif';
 
 const DATE_TIME_ORIGINAL = 0x9003;
 const OFFSET_TIME_ORIGINAL = 0x9011;
@@ -30,7 +30,7 @@ function jpeg(capture: string, offset: string | null = null): Uint8Array {
         { tag: DATE_TIME_ORIGINAL, value: capture },
         { tag: OFFSET_TIME_ORIGINAL, value: offset },
       ];
-  return jpegWithExif(buildExifTiff(entries));
+  return jpegWithExif(buildExifTiffSubIfd(entries));
 }
 
 describe('resolveMediaTimeline', () => {
@@ -62,6 +62,27 @@ describe('resolveMediaTimeline', () => {
       capturedAt: '2026-09-19T22:55:00.000Z',
       timelineAt: '2026-09-19T22:55:00.000Z',
       timelineSource: 'capture',
+    });
+  });
+
+  it('falls back for an unparsable offset', () => {
+    expect(timeline({ bytes: jpeg('2026:09:19 17:42:30', 'not-an-offset') })).toEqual({
+      capturedAt: null,
+      timelineAt: '2026-09-19T22:50:00.000Z',
+      timelineSource: 'received',
+    });
+  });
+
+  it('falls back for an out-of-range offset hour or minute', () => {
+    expect(timeline({ bytes: jpeg('2026:09:19 17:42:30', '+25:00') })).toEqual({
+      capturedAt: null,
+      timelineAt: '2026-09-19T22:50:00.000Z',
+      timelineSource: 'received',
+    });
+    expect(timeline({ bytes: jpeg('2026:09:19 17:42:30', '+05:60') })).toEqual({
+      capturedAt: null,
+      timelineAt: '2026-09-19T22:50:00.000Z',
+      timelineSource: 'received',
     });
   });
 

@@ -452,11 +452,14 @@ export class MediaRepository {
   async setFavorite(eventId: string, mediaId: string, favoritedAt: string | null): Promise<MediaRecord> {
     const result = await this.db.prepare(`
       UPDATE media
-      SET favorited_at = ?
+      SET favorited_at = CASE
+            WHEN ? IS NULL THEN NULL
+            ELSE COALESCE(favorited_at, ?)
+          END
       WHERE id = ? AND event_id = ?
         AND upload_state = 'stored' AND deleted_at IS NULL
       RETURNING *
-    `).bind(favoritedAt, mediaId, eventId).all<MediaRow>();
+    `).bind(favoritedAt, favoritedAt, mediaId, eventId).all<MediaRow>();
     const row = result.results[0];
     if (row) return mapMedia(row);
 
@@ -1431,7 +1434,8 @@ export class MediaRepository {
               SELECT final_object_key FROM media_object_promotions WHERE media_id = ?
             ), object_bucket_generation = 'canonical',
             byte_size = ?, width = ?, height = ?,
-            upload_state = 'stored', stored_at = ?, preview_object_key = NULL
+            upload_state = 'stored', stored_at = ?,
+            captured_at = NULL, timeline_at = ?, preview_object_key = NULL
         WHERE id = ? AND upload_state = 'reserved' AND deleted_at IS NULL
           AND object_bucket_generation = 'legacy'
           AND object_key = (
@@ -1458,6 +1462,7 @@ export class MediaRepository {
         byteSize,
         width,
         height,
+        committedAt,
         committedAt,
         mediaId,
         mediaId,
