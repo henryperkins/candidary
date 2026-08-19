@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight, Heart, X } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { mediaPreview } from '../../app/api';
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
@@ -41,6 +42,35 @@ export function GalleryViewer({
   const photo = photos[index];
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  // Keyed by photo rather than a boolean, so stepping to the next photo clears
+  // the failure without a reset effect and stepping back re-shows it.
+  const [failedPreviewId, setFailedPreviewId] = useState<string | null>(null);
+  const [host] = useState(() => document.createElement('div'));
+
+  /**
+   * The same containment Cover Studio uses. `aria-modal` alone left the manager
+   * shell tabbable and readable behind the dialog; inerting the other body
+   * children is what actually removes it. This runs as a layout effect so the
+   * host is in the document before the focus effect below reaches for the close
+   * button. Focus restoration stays with the gallery, which knows the origin tile.
+   */
+  useLayoutEffect(() => {
+    document.body.append(host);
+    const inerted: HTMLElement[] = [];
+    for (const sibling of Array.from(document.body.children)) {
+      if (sibling === host || !(sibling instanceof HTMLElement)) continue;
+      if (sibling.hasAttribute('inert')) continue;
+      sibling.setAttribute('inert', '');
+      inerted.push(sibling);
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      for (const sibling of inerted) sibling.removeAttribute('inert');
+      document.body.style.overflow = previousOverflow;
+      host.remove();
+    };
+  }, [host]);
 
   useEffect(() => {
     closeRef.current?.focus();
@@ -64,8 +94,12 @@ export function GalleryViewer({
         return;
       }
       if (event.key === 'Tab') {
+        // Disabled controls must be excluded: Previous is disabled on the first
+        // photo and Favorite while its write is in flight, and wrapping onto one
+        // of those called focus() on an element that cannot take it, stranding
+        // the host where they were.
         const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button, a[href], [tabindex]:not([tabindex="-1"])',
+          'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
         );
         const first = focusable?.[0];
         const last = focusable?.[focusable.length - 1];
@@ -92,7 +126,7 @@ export function GalleryViewer({
     startAt: photo.timelineAt,
     endAt: photo.timelineAt,
   };
-  return <div
+  return createPortal(<div
     className="gallery-viewer"
     role="dialog"
     aria-modal="true"
@@ -112,9 +146,21 @@ export function GalleryViewer({
       <ChevronLeft aria-hidden="true" />
     </button>
     <div className="gallery-viewer__media">
-      {photo.previewAvailable
-        ? <img src={mediaPreview(photo.id)} alt={title} decoding="async" />
-        : <div className="gallery-viewer__placeholder"><strong>{photo.originalFilename}</strong><span>Preview unavailable</span></div>}
+      {photo.previewAvailable && failedPreviewId !== photo.id
+        ? <img
+            src={mediaPreview(photo.id)}
+            alt={title}
+            decoding="async"
+            onError={() => setFailedPreviewId(photo.id)}
+          />
+        : <div className="gallery-viewer__placeholder">
+            <strong>{photo.originalFilename}</strong>
+            <span>Preview unavailable</span>
+            {/* The photograph itself is safe: `stored` already means privately
+                delivered, and export eligibility never depends on a preview. Say
+                so here, where there is room, rather than leaving a host to guess. */}
+            <span>This photo was delivered and is included in your download.</span>
+          </div>}
     </div>
     <button
       type="button"
@@ -145,5 +191,5 @@ export function GalleryViewer({
         <Heart aria-hidden="true" fill={photo.isFavorite ? 'currentColor' : 'none'} /> Favorite
       </button>
     </div>
-  </div>;
+  </div>, host);
 }

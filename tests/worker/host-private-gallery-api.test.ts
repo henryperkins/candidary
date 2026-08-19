@@ -100,20 +100,43 @@ describe('host private gallery API', () => {
     expect((await guest.json<any>()).code).toBe('ROLE_FORBIDDEN');
   });
 
+  it('reports a stored photo as previewable even with no recorded preview object', async () => {
+    const access = await eventAccess();
+    const id = await seedStored(access, 1);
+
+    // Nothing in the current pipeline writes this column: `getOrCreatePreview`
+    // transforms the original on demand and keeps the result ephemeral on purpose.
+    // Deriving availability from it reported false for every delivered photo and
+    // left the host's Gallery rendering placeholders instead of their photographs.
+    const row = await env.DB
+      .prepare('SELECT preview_object_key FROM media WHERE id = ?')
+      .bind(id)
+      .first<{ preview_object_key: string | null }>();
+    expect(row?.preview_object_key).toBeNull();
+
+    const response = await gallery(access);
+    expect(response.status).toBe(200);
+    const body = await response.json<any>();
+    expect(body.data.media).toEqual([
+      expect.objectContaining({ id, previewAvailable: true }),
+    ]);
+  });
+
   it('returns the earliest-first gallery view and a chronological cursor', async () => {
     const access = await eventAccess();
     await seedStored(access, 1, { timelineAt: '2026-09-19T12:00:00.000Z' });
     await seedStored(access, 2, { timelineAt: '2026-09-19T11:00:00.000Z', favoritedAt: '2026-09-19T11:30:00.000Z' });
     await seedStored(access, 3, { timelineAt: '2026-09-19T11:00:00.000Z' });
 
-    const first = await gallery(access, '?limit=2');
+    const first = await gallery(access, '?limit=2&order=earliest');
     expect(first.status).toBe(200);
     const firstBody = await first.json<any>();
     expect(firstBody.data.media.map((media: { id: string }) => media.id))
       .toEqual([mediaId(2), mediaId(3)]);
     expect(firstBody.data.nextCursor).toEqual(expect.any(String));
     expect(decodeCursorPayload(firstBody.data.nextCursor)).toEqual({
-      v: 1,
+      v: 2,
+      order: 'earliest',
       timelineAt: '2026-09-19T11:00:00.000Z',
       id: mediaId(3),
     });
@@ -123,7 +146,7 @@ describe('host private gallery API', () => {
       guestName: 'Avery Stone',
       caption: null,
       publicationStatus: 'unpublished',
-      previewAvailable: false,
+      previewAvailable: true,
       width: 800,
       height: 600,
       receivedAt: '2026-09-19T00:00:00.000Z',
@@ -132,10 +155,66 @@ describe('host private gallery API', () => {
       isFavorite: true,
     });
 
-    const second = await gallery(access, `?limit=2&cursor=${encodeURIComponent(firstBody.data.nextCursor)}`);
+    const second = await gallery(
+      access,
+      `?limit=2&order=earliest&cursor=${encodeURIComponent(firstBody.data.nextCursor)}`,
+    );
     const secondBody = await second.json<any>();
     expect(secondBody.data.media.map((media: { id: string }) => media.id)).toEqual([mediaId(1)]);
     expect(secondBody.data.nextCursor).toBeNull();
+  });
+
+  it('opens newest-first by default and walks the stream backwards from there', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { timelineAt: '2026-09-19T12:00:00.000Z' });
+    await seedStored(access, 2, { timelineAt: '2026-09-19T11:00:00.000Z' });
+    await seedStored(access, 3, { timelineAt: '2026-09-19T10:00:00.000Z' });
+
+    // No `order` parameter: a host arriving the morning after lands on the last photo
+    // of the night, not on the empty room.
+    const first = await gallery(access, '?limit=2');
+    const firstBody = await first.json<any>();
+    expect(firstBody.data.media.map((media: { id: string }) => media.id))
+      .toEqual([mediaId(1), mediaId(2)]);
+    expect(decodeCursorPayload(firstBody.data.nextCursor)).toEqual({
+      v: 2,
+      order: 'newest',
+      timelineAt: '2026-09-19T11:00:00.000Z',
+      id: mediaId(2),
+    });
+
+    const second = await gallery(
+      access,
+      `?limit=2&cursor=${encodeURIComponent(firstBody.data.nextCursor)}`,
+    );
+    const secondBody = await second.json<any>();
+    expect(secondBody.data.media.map((media: { id: string }) => media.id)).toEqual([mediaId(3)]);
+    expect(secondBody.data.nextCursor).toBeNull();
+  });
+
+  it('refuses an unknown order and a cursor cut for the other direction', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { timelineAt: '2026-09-19T12:00:00.000Z' });
+    await seedStored(access, 2, { timelineAt: '2026-09-19T11:00:00.000Z' });
+
+    expect((await gallery(access, '?order=oldest')).status).toBe(422);
+    expect((await gallery(access, '?order=')).status).toBe(422);
+
+    const newest = await gallery(access, '?limit=1');
+    const cursor = (await newest.json<any>()).data.nextCursor;
+    // The keyset predicate flips with the direction, so replaying this position against
+    // earliest-first would return the side of the stream the host already read.
+    const crossed = await gallery(
+      access,
+      `?limit=1&order=earliest&cursor=${encodeURIComponent(cursor)}`,
+    );
+    expect(crossed.status).toBe(422);
+    expect((await crossed.json<any>()).code).toBe('VALIDATION_FAILED');
+
+    const replayed = await gallery(access, `?limit=1&cursor=${encodeURIComponent(cursor)}`);
+    expect(replayed.status).toBe(200);
+    expect((await replayed.json<any>()).data.media.map((media: { id: string }) => media.id))
+      .toEqual([mediaId(2)]);
   });
 
   it('applies search and favorites and validates the parameter contract', async () => {

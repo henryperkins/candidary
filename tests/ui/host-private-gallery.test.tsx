@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -69,7 +69,7 @@ function photo(id: string, timelineAt: string, overrides: Partial<ManagerGallery
     guestName: 'Jose',
     caption: null,
     publicationStatus: 'unpublished',
-    previewAvailable: false,
+    previewAvailable: true,
     width: null,
     height: null,
     receivedAt: timelineAt,
@@ -181,6 +181,11 @@ function renderGallery(overrides: GalleryRenderOverrides = {}) {
   return renderGalleryWithFetch(managerFetch(overrides), overrides);
 }
 
+/** Mosaic photographs are decorative (`alt=""`), so they carry no role to query by. */
+function mosaicImages(): HTMLImageElement[] {
+  return Array.from(document.querySelectorAll<HTMLImageElement>('.gallery-mosaic__item img'));
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -200,6 +205,77 @@ describe('host private gallery', () => {
 
     const galleryCalls = fetchMock.mock.calls.map(([input]) => new URL(String(input), 'https://candidary.test'));
     expect(galleryCalls.filter(({ pathname }) => pathname.endsWith('/gallery'))).toHaveLength(1);
+  });
+
+  it('renders the delivered photographs themselves rather than a placeholder grid', async () => {
+    renderGallery();
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    await waitFor(() => expect(mosaicImages()).toHaveLength(4));
+    expect(mosaicImages().map((image) => image.getAttribute('src')))
+      .toEqual(rows.map((item) => `/api/media/${item.id}/preview`));
+    expect(screen.queryByText('Preview unavailable')).not.toBeInTheDocument();
+  });
+
+  it('names each tile once, on the control that opens it', async () => {
+    renderGallery();
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    // The photograph is decorative and the visible caption is its echo; announcing
+    // the same title three times per tile is 48 tiles' worth of noise per page.
+    expect(screen.getByRole('button', { name: 'Open First dance, from Jose' })).toBeVisible();
+    for (const image of mosaicImages()) expect(image).toHaveAttribute('alt', '');
+    expect(screen.queryAllByRole('img')).toHaveLength(0);
+  });
+
+  it('names an unavailable preview in text and keeps the neighbouring photographs', async () => {
+    renderGallery({
+      galleryRows: rows.map((item, index) => (
+        index === 1 ? { ...item, previewAvailable: false } : { ...item }
+      )),
+    });
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    expect(await screen.findByText('Preview unavailable')).toBeVisible();
+    expect(mosaicImages()).toHaveLength(3);
+    // The tile stays openable: its name, contributor, and time are still the host's record.
+    expect(screen.getByRole('button', { name: 'Open p2.jpg, from Jose' })).toBeVisible();
+  });
+
+  it('falls back to the named unavailable state when a preview fails to load', async () => {
+    renderGallery();
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    await waitFor(() => expect(mosaicImages()).toHaveLength(4));
+    fireEvent.error(mosaicImages()[0]!);
+
+    expect(await screen.findByText('Preview unavailable')).toBeVisible();
+    expect(mosaicImages()).toHaveLength(3);
+  });
+
+  it('opens newest-first and refetches the stream when the host changes the order', async () => {
+    const { fetchMock } = renderGallery();
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    const galleryOrders = () => fetchMock.mock.calls
+      .map(([input]) => new URL(String(input), 'https://candidary.test'))
+      .filter(({ pathname }) => pathname.endsWith('/gallery'))
+      .map((url) => url.searchParams.get('order'));
+
+    // The order is always explicit on the wire: a cursor is cut for one direction and
+    // the server refuses to replay it against the other.
+    expect(galleryOrders()).toEqual(['newest']);
+    expect(screen.getByRole('button', { name: 'Newest first' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Earliest first' })).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(screen.getByRole('button', { name: 'Earliest first' }));
+    await waitFor(() => expect(galleryOrders()).toEqual(['newest', 'earliest']));
+    expect(screen.getByRole('button', { name: 'Earliest first' })).toHaveAttribute('aria-pressed', 'true');
+
+    // Choosing the order already in force must not spend a request.
+    await user.click(screen.getByRole('button', { name: 'Earliest first' }));
+    expect(galleryOrders()).toEqual(['newest', 'earliest']);
   });
 
   it('searches, clears, and shows the no-match state without losing the active query', async () => {
@@ -309,7 +385,8 @@ describe('host private gallery', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('The next page is temporarily unavailable.');
     expect(screen.getByText('First dance')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('p2.jpg')).toBeVisible();
+    // Named through the control rather than a visible caption: only the hero tile carries one.
+    expect(await screen.findByRole('button', { name: 'Open p2.jpg, from Jose' })).toBeVisible();
     expect(continuationAttempts).toBe(2);
   });
 
@@ -493,12 +570,12 @@ describe('host private gallery', () => {
     expect(screen.getByRole('button', { name: 'Get download links' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Download all' })).not.toBeInTheDocument();
     expect(screen.getByText(
-      /842 photos · 3 guestbook entries\. Download links last 24 hours\./,
+      /842 photos · 1 KB · 3 guestbook entries\. Download links last 24 hours\./,
       { selector: 'span' },
     )).toBeVisible();
     // The visible label alone would announce the bare word "Ready", so one live region carries the
     // whole sentence. It is mounted before any job exists, which is the only way it is ever spoken.
-    expect(screen.getByText(/^Ready\. 842 photos · 3 guestbook entries\./, { selector: 'p' }))
+    expect(screen.getByText(/^Ready\. 842 photos · 1 KB · 3 guestbook entries\./, { selector: 'p' }))
       .toHaveAttribute('role', 'status');
     expect(screen.queryByText(/attempt/i)).not.toBeInTheDocument();
   });
@@ -527,9 +604,54 @@ describe('host private gallery', () => {
 
     expect(screen.getByText('Failed')).toBeVisible();
     expect(screen.getByText(/Attempt 2 failed/, { selector: 'span' })).toBeVisible();
-    expect(screen.getByText(/^Failed\. 842 photos · 3 guestbook entries\. Attempt 2 failed\./, { selector: 'p' }))
+    expect(screen.getByText(/^Failed\. 842 photos · 1 KB · 3 guestbook entries\. Attempt 2 failed\./, { selector: 'p' }))
       .toHaveAttribute('role', 'status');
     expect(screen.getByRole('button', { name: 'Retry export' })).toBeVisible();
+  });
+
+  it('names every download part with its size and says when it is a desktop task', async () => {
+    const part = (partNumber: number, mediaCount: number, sourceBytes: number) => ({
+      partNumber,
+      mediaCount,
+      sourceBytes,
+      url: `https://example.test/part-${partNumber}`,
+      expiresAt: '2026-09-20T00:00:00Z',
+      filename: `part-${partNumber}.zip`,
+    });
+    renderGallery({
+      exportJob: {
+        id: 'export-a',
+        state: 'ready',
+        snapshotAt: '2026-09-19T00:00:00Z',
+        mediaCount: 4812,
+        totalBytes: 3 * 1024 ** 3,
+        attempt: 1,
+        partCount: 2,
+        expiresAt: '2026-09-20T00:00:00Z',
+        guestbookEntryCount: 12,
+        guestbookSharedCount: 4,
+        guestbookEventName: null,
+        guestbookEventDate: null,
+        guestbookEventTimezone: null,
+        guestbookPrompt: null,
+        guestbookGalleryVisible: null,
+      },
+      exportDownload: {
+        manifest: { url: 'https://example.test/manifest', expiresAt: '2026-09-20T00:00:00Z', filename: 'manifest.csv' },
+        parts: [part(1, 2400, 2 * 1024 ** 3), part(2, 2412, 1024 ** 3)],
+        printableGuestbook: null,
+        privateGuestbook: null,
+      },
+    });
+    await screen.findByRole('heading', { name: 'Gallery' });
+
+    // A host planning a multi-gigabyte download needs the size before they start.
+    expect(screen.getByText(/4,812 photos · 3\.0 GB · 12 guestbook entries/, { selector: 'span' })).toBeVisible();
+    expect(screen.getByRole('link', { name: /Photo part 1 of 2/ })).toBeVisible();
+    expect(screen.getByText('2,400 photos · 2.0 GB')).toBeVisible();
+    expect(screen.getByText('2,412 photos · 1.0 GB')).toBeVisible();
+    expect(screen.getByText(/Collect every one/)).toBeVisible();
+    expect(screen.getByText(/easier to finish on a computer than on a phone/)).toBeVisible();
   });
 
   it('uses titled publication filters and labeled hide actions in the shared workspace', async () => {

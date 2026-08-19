@@ -1,6 +1,14 @@
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
 
 export const MOMENT_GAP_MINUTES = 45;
+/**
+ * A reception never pauses 45 minutes, so gap alone let a whole evening collapse into
+ * one group: "Show more photos" became an 800-tile action, and the authored mosaic
+ * rhythm — which only shapes the first eight positions — applied once to the entire
+ * night. A ceiling turns that into a readable run of moments, each with its own real
+ * time range and its own composition.
+ */
+export const MOMENT_PHOTO_LIMIT = 60;
 
 export interface GalleryMoment {
   key: string;
@@ -23,22 +31,31 @@ export function galleryPhotoTitle(
 }
 
 /**
- * Groups the ordered chronological stream into unnamed derived moments. A new
- * moment begins only when the gap from the previous result exceeds 45 minutes;
- * a local midnight never splits a continuous run, so the grouping is recomputed
- * over the active result set and never stored.
+ * Groups the ordered stream into unnamed derived moments. A new moment begins when the
+ * step from the previous result exceeds 45 minutes, or when the current one is full;
+ * a local midnight never splits a continuous run, so the grouping is recomputed over
+ * the active result set and never stored.
+ *
+ * The stream may run newest-first or earliest-first, so the step is a *distance*, not a
+ * difference — a moment is a run of photos close together in time, whichever way the
+ * host is reading. `startAt` and `endAt` are therefore the moment's earliest and latest
+ * instants rather than its first and last arrivals, which is what the heading needs.
  */
 export function buildMoments(photos: readonly ManagerGalleryMediaView[]): GalleryMoment[] {
   const moments: GalleryMoment[] = [];
   const gapMs = MOMENT_GAP_MINUTES * 60_000;
+  let previousAt: number | null = null;
   for (const photo of photos) {
+    const at = Date.parse(photo.timelineAt);
     const current = moments[moments.length - 1];
-    const gap = current
-      ? Date.parse(photo.timelineAt) - Date.parse(current.endAt)
-      : Number.POSITIVE_INFINITY;
-    if (current && gap <= gapMs) {
+    const continues = current !== undefined
+      && previousAt !== null
+      && Math.abs(at - previousAt) <= gapMs
+      && current.photos.length < MOMENT_PHOTO_LIMIT;
+    if (continues && current) {
       current.photos.push(photo);
-      current.endAt = photo.timelineAt;
+      if (at < Date.parse(current.startAt)) current.startAt = photo.timelineAt;
+      if (at > Date.parse(current.endAt)) current.endAt = photo.timelineAt;
     } else {
       moments.push({
         key: photo.id,
@@ -47,6 +64,7 @@ export function buildMoments(photos: readonly ManagerGalleryMediaView[]): Galler
         endAt: photo.timelineAt,
       });
     }
+    previousAt = at;
   }
   return moments;
 }
@@ -102,8 +120,13 @@ export interface MosaicPlacement {
 
 const SPAN_PATTERNS: Record<MosaicColumnCount, Readonly<Record<number, MosaicPlacement>>> = {
   2: {
-    1: { columnSpan: 2, rowSpan: 1 },
-    6: { columnSpan: 2, rowSpan: 1 },
+    // Two rows, not one. A single row across both columns made the phone hero the
+    // *flattest* crop in the grid — near 2.2:1, rising to 4:1 just below the three-column
+    // breakpoint — on the surface where most photographs are portrait phone shots, so the
+    // featured tile was the one that threw away most of its subject. Two rows make it
+    // roughly square, and position eight closes the block that leaves.
+    1: { columnSpan: 2, rowSpan: 2 },
+    8: { columnSpan: 2, rowSpan: 1 },
   },
   3: {
     1: { columnSpan: 2, rowSpan: 2 },

@@ -5,6 +5,7 @@ import {
   buildMoments,
   formatMomentHeading,
   galleryPhotoTitle,
+  MOMENT_PHOTO_LIMIT,
   mosaicPlacement,
   mosaicStyleVars,
 } from '../../src/features/gallery/gallery-timeline';
@@ -73,6 +74,47 @@ describe('buildMoments', () => {
     expect(moments[0]?.endAt).toBe('2026-08-16T05:00:00.000Z');
     expect(moments[1]?.photos.map((item) => item.id)).toEqual(['d']);
   });
+
+  it('groups a newest-first stream the same way, keeping the heading bounds chronological', () => {
+    const descending = [
+      photo('c', '2026-08-16T05:10:00.000Z'),
+      photo('b', '2026-08-16T04:59:00.000Z'),
+      photo('a', '2026-08-16T04:30:00.000Z'),
+    ];
+
+    const moments = buildMoments(descending);
+    expect(moments).toHaveLength(1);
+    expect(moments[0]!.photos.map(({ id }) => id)).toEqual(['c', 'b', 'a']);
+    // The stream runs backwards but the range still reads earliest to latest.
+    expect(moments[0]!.startAt).toBe('2026-08-16T04:30:00.000Z');
+    expect(moments[0]!.endAt).toBe('2026-08-16T05:10:00.000Z');
+  });
+
+  it('splits a newest-first stream on the same 45-minute distance', () => {
+    const moments = buildMoments([
+      photo('late', '2026-08-16T06:30:00.000Z'),
+      photo('mid', '2026-08-16T05:00:00.000Z'),
+      photo('early', '2026-08-16T04:40:00.000Z'),
+    ]);
+
+    expect(moments.map((moment) => moment.photos.map(({ id }) => id)))
+      .toEqual([['late'], ['mid', 'early']]);
+  });
+
+  it('caps a moment so a continuous reception cannot become one unbounded group', () => {
+    // Every photo one minute apart: gap alone would put all 130 in a single moment.
+    const photos = Array.from({ length: MOMENT_PHOTO_LIMIT * 2 + 10 }, (_, index) => photo(
+      `p${index}`,
+      new Date(Date.UTC(2026, 7, 16, 4, index)).toISOString(),
+    ));
+
+    const moments = buildMoments(photos);
+    expect(moments.map((moment) => moment.photos.length))
+      .toEqual([MOMENT_PHOTO_LIMIT, MOMENT_PHOTO_LIMIT, 10]);
+    // Consecutive chunks stay contiguous and keep their own real time ranges.
+    expect(moments[0]!.endAt).toBe(photos[MOMENT_PHOTO_LIMIT - 1]!.timelineAt);
+    expect(moments[1]!.startAt).toBe(photos[MOMENT_PHOTO_LIMIT]!.timelineAt);
+  });
 });
 
 describe('galleryPhotoTitle', () => {
@@ -134,9 +176,12 @@ describe('formatMomentHeading', () => {
 
 describe('mosaicPlacement', () => {
   it('applies the exact span pattern for two columns', () => {
-    expect(mosaicPlacement(1, 2)).toEqual({ columnSpan: 2, rowSpan: 1 });
-    expect(mosaicPlacement(6, 2)).toEqual({ columnSpan: 2, rowSpan: 1 });
+    // The phone hero spans two rows so it stays roughly square rather than becoming the
+    // flattest crop in the grid; position eight closes the block that leaves.
+    expect(mosaicPlacement(1, 2)).toEqual({ columnSpan: 2, rowSpan: 2 });
+    expect(mosaicPlacement(8, 2)).toEqual({ columnSpan: 2, rowSpan: 1 });
     expect(mosaicPlacement(2, 2)).toEqual({ columnSpan: 1, rowSpan: 1 });
+    expect(mosaicPlacement(6, 2)).toEqual({ columnSpan: 1, rowSpan: 1 });
   });
 
   it('applies the exact span pattern for three columns', () => {
@@ -162,7 +207,7 @@ describe('mosaicPlacement', () => {
   it('emits the span variables for every breakpoint', () => {
     expect(mosaicStyleVars(1)).toEqual({
       '--gallery-col-span-2': 2,
-      '--gallery-row-span-2': 1,
+      '--gallery-row-span-2': 2,
       '--gallery-col-span-3': 2,
       '--gallery-row-span-3': 2,
       '--gallery-col-span-4': 2,

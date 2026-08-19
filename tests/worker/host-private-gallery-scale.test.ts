@@ -143,6 +143,29 @@ describe('host private gallery at the 10,000-photo event limit', () => {
     expect(favoritesPlan.results.map((row) => row.detail).join('\n'))
       .toContain('media_private_gallery_favorites');
 
+    // Newest-first is the default the host actually lands on, so it has to ride the same two
+    // partial indexes rather than falling back to a sort over the whole event.
+    const newestPlan = await env.DB.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM media
+      WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+      ORDER BY timeline_at DESC, id DESC LIMIT 49
+    `).bind('event-a').all<{ detail: string }>();
+    const newestDetail = newestPlan.results.map((row) => row.detail).join('\n');
+    expect(newestDetail).toContain('media_private_gallery_timeline');
+    expect(newestDetail).not.toContain('TEMP B-TREE');
+
+    const newestFavoritesPlan = await env.DB.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM media
+      WHERE event_id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+        AND favorited_at IS NOT NULL
+      ORDER BY timeline_at DESC, id DESC LIMIT 49
+    `).bind('event-a').all<{ detail: string }>();
+    const newestFavoritesDetail = newestFavoritesPlan.results.map((row) => row.detail).join('\n');
+    expect(newestFavoritesDetail).toContain('media_private_gallery_favorites');
+    expect(newestFavoritesDetail).not.toContain('TEMP B-TREE');
+
     const repository = new MediaRepository(env.DB);
     const ceilingMs = 5000;
 
@@ -173,5 +196,9 @@ describe('host private gallery at the 10,000-photo event limit', () => {
     expect(combined.media.every((media) => media.guestName === 'Jose' && media.isFavorite))
       .toBe(true);
     expect(Date.now() - combinedStarted).toBeLessThan(ceilingMs);
-  });
+    // Seeding 10,500 rows and planning six statements over them sits close to the default
+    // 20s ceiling on its own and crosses it whenever the rest of the suite is competing for
+    // the machine. The per-query ceilings above are what actually guard the performance
+    // claim; this only stops a busy machine from reading as a regression.
+  }, 90_000);
 });

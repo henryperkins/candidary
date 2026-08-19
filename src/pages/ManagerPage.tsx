@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
+import { formatBytes } from '../app/format';
 import { hostSignInHref } from '../app/recovery';
 import {
   MANAGER_BULK_SELECTION_MAX,
@@ -117,12 +118,6 @@ function ManagerAccessRecovery({
     )}
     <ManagementLinkRecovery />
   </section>;
-}
-
-function formatBytes(bytes = 0) {
-  if (bytes < 1024 ** 2) return `${Math.max(0, Math.round(bytes / 1024))} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
 const PHOTO_CAP = MAX_EVENT_MEDIA.toLocaleString();
@@ -383,6 +378,18 @@ export function ManagerPage() {
     }
   }, [eventId, mediaPath, refreshGuestbookSummary]);
 
+  // Exports only. The full `refresh` would also put back the event and the media page,
+  // which a poll running behind a host's own edit has no business doing.
+  const refreshExports = useCallback(async () => {
+    try {
+      const exportData = await api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`);
+      setExports(exportData.exports);
+    } catch {
+      // A missed tick is not worth a notice: the next one is ten seconds away, and the
+      // card keeps showing the last state the server actually confirmed.
+    }
+  }, [eventId]);
+
   const refreshIntake = useCallback(async () => {
     try {
       const readToken = eventReads.current.openRead();
@@ -492,6 +499,27 @@ export function ManagerPage() {
     }, 5_000);
     return () => window.clearInterval(interval);
   }, [refreshIntake, section]);
+  /**
+   * An export is the terminal act of the whole product and it runs in a Workflow, so its
+   * card is the one place the host waits on work they cannot see. Nothing polled it: the
+   * state was written once by `refresh` and then sat on "Preparing" until a reload or some
+   * unrelated manager action happened to run a full refresh. Ten seconds while a job is
+   * actually in flight, on the same visibility guard intake uses, and never otherwise.
+   */
+  const activeExportState = exports[0]?.state;
+  useEffect(() => {
+    if (section !== 'gallery') return;
+    if (activeExportState !== 'queued' && activeExportState !== 'running') return;
+    const refreshVisibleExports = () => {
+      if (document.visibilityState === 'visible') void refreshExports();
+    };
+    const interval = window.setInterval(refreshVisibleExports, 10_000);
+    window.addEventListener('focus', refreshVisibleExports);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshVisibleExports);
+    };
+  }, [activeExportState, refreshExports, section]);
   useEffect(() => {
     if (section !== 'guestbook') return;
     const refreshVisibleSummary = () => {

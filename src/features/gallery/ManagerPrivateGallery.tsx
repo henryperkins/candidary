@@ -3,6 +3,10 @@ import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } 
 
 import { api, ClientApiError } from '../../app/api';
 import { ErrorState, LoadingState } from '../../components/States';
+import {
+  DEFAULT_GALLERY_TIMELINE_ORDER,
+  type GalleryTimelineOrder,
+} from '../../../shared/constants';
 import type { EventView, ManagerGalleryMediaView } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
 import { GalleryTimeline } from './GalleryTimeline';
@@ -95,6 +99,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [order, setOrder] = useState<GalleryTimelineOrder>(DEFAULT_GALLERY_TIMELINE_ORDER);
   const [rowState, dispatchRows] = useReducer(galleryRowsReducer, {
     rows: [],
     focusRequest: null,
@@ -126,11 +131,15 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
   const galleryPath = useCallback((
     nextQuery: string,
     nextFavorites: boolean,
+    nextOrder: GalleryTimelineOrder,
     nextCursor?: string,
   ) => {
     const params = new URLSearchParams();
     if (nextQuery) params.set('query', nextQuery);
     if (nextFavorites) params.set('favorites', '1');
+    // Always explicit: a cursor is cut for one direction and the server refuses to
+    // replay it against the other, so the order can never be left to a default drift.
+    params.set('order', nextOrder);
     if (nextCursor) params.set('cursor', nextCursor);
     const search = params.toString();
     return `/api/manage/events/${eventId}/gallery${search ? `?${search}` : ''}`;
@@ -171,7 +180,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
     setViewerPhotoId(null);
     viewerOrigin.current = null;
 
-    api<GalleryPage>(galleryPath(query, favoritesOnly), { signal: controller.signal })
+    api<GalleryPage>(galleryPath(query, favoritesOnly, order), { signal: controller.signal })
       .then((page) => {
         if (generation !== loadGeneration.current) return;
         confirmedEventId.current = eventId;
@@ -201,7 +210,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
       });
 
     return () => controller.abort();
-  }, [cancelContinuation, eventId, favoritesOnly, galleryPath, query, retryEpoch]);
+  }, [cancelContinuation, eventId, favoritesOnly, galleryPath, order, query, retryEpoch]);
 
   useEffect(() => {
     if (resultsFocusEpoch === 0) return;
@@ -240,7 +249,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
     setLoadingMore(true);
     setNotice((current) => current?.retry === 'append' ? null : current);
     try {
-      const page = await api<GalleryPage>(galleryPath(query, favoritesOnly, requested), {
+      const page = await api<GalleryPage>(galleryPath(query, favoritesOnly, order, requested), {
         signal: controller.signal,
       });
       if (generation !== loadMoreGeneration.current) return;
@@ -372,6 +381,12 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
     setFavoritesOnly((current) => !current);
   }
 
+  function chooseOrder(next: GalleryTimelineOrder) {
+    if (next === order) return;
+    requestReplacement();
+    setOrder(next);
+  }
+
   function retryNotice() {
     if (!notice?.retry) return;
     if (notice.retry === 'append') {
@@ -418,7 +433,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
   } else {
     content = <div ref={resultsRef}>
       <GalleryTimeline
-        key={`${query}\u0000${favoritesOnly ? 'favorites' : 'all'}`}
+        key={`${query}\u0000${favoritesOnly ? 'favorites' : 'all'}\u0000${order}`}
         photos={rows}
         timeZone={event.eventTimezone}
         hasMore={cursor !== null}
@@ -435,7 +450,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
     ? null
     : rows.findIndex((photo) => photo.id === viewerPhotoId);
 
-  return <div className="gallery-private" aria-busy={loading || loadingMore}>
+  return <div className="gallery-private">
     <form className="gallery-search" role="search" onSubmit={submitSearch}>
       <label htmlFor="gallery-search-input">Find photos</label>
       <input
@@ -455,6 +470,22 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
         >Favorites</button>
       </div>
     </form>
+    {/* Named for the photograph the host lands on, not for the sort key. "Newest first"
+        opens on the last dance; "Earliest first" opens on the empty room. */}
+    <div className="gallery-order" role="group" aria-label="Photo order">
+      <button
+        type="button"
+        aria-pressed={order === 'newest'}
+        className={order === 'newest' ? 'active' : ''}
+        onClick={() => chooseOrder('newest')}
+      >Newest first</button>
+      <button
+        type="button"
+        aria-pressed={order === 'earliest'}
+        className={order === 'earliest' ? 'active' : ''}
+        onClick={() => chooseOrder('earliest')}
+      >Earliest first</button>
+    </div>
     {loading && hasConfirmedPage.current && <p className="sr-only" role="status">Updating photos…</p>}
     <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
     {notice && <div className="manager-action-error" role="alert">
@@ -475,7 +506,9 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
         ><X aria-hidden="true" /></button>
       </div>
     </div>}
-    {content}
+    {/* Busy scopes the results, not the surface: on the container it swept in the search
+        field, so a host's own input sat inside a busy region during every load. */}
+    <div aria-busy={loading || loadingMore}>{content}</div>
     {viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
       photos={rows}
       index={viewerIndex}
