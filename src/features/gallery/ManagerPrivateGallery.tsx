@@ -124,6 +124,7 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
   const focusResults = useRef(false);
   const favoriteRequests = useRef(new Set<string>());
   const viewerOrigin = useRef<HTMLElement | null>(null);
+  const restoreFocus = useRef<HTMLElement | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   const emptyRef = useRef<HTMLHeadingElement>(null);
   const rows = rowState.rows;
@@ -239,6 +240,21 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
     viewerOrigin.current = null;
   }, [active, viewerPhotoId]);
 
+  /**
+   * The viewer inerts the rest of the document while it is open, and an inert element
+   * cannot take focus. Restoring inside the close handler ran before React had torn the
+   * dialog down, so `focus()` was a silent no-op and the host was left on `<body>` with
+   * their place in the mosaic gone. A passive effect runs after the viewer's own layout
+   * cleanup has removed `inert`, which is the first moment the tile can accept focus.
+   * jsdom does not implement inert focus semantics, so only a real browser sees this.
+   */
+  useEffect(() => {
+    if (viewerPhotoId !== null) return;
+    const target = restoreFocus.current;
+    restoreFocus.current = null;
+    target?.focus();
+  }, [viewerPhotoId]);
+
   async function loadMore() {
     if (!cursor || loadingMore) return;
     const requested = cursor;
@@ -289,8 +305,8 @@ export function ManagerPrivateGallery({ event, eventId, active = true }: Manager
   }
 
   function closeViewer() {
+    if (active) restoreFocus.current = viewerOrigin.current;
     setViewerPhotoId(null);
-    if (active) viewerOrigin.current?.focus();
     viewerOrigin.current = null;
   }
 

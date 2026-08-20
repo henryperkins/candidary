@@ -194,6 +194,8 @@ export function ManagerPage() {
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
   const guestbookSummaryRequest = useRef(0);
+  // Both the whole-page load and the export poll write `exports`; the later request wins.
+  const exportsRead = useRef(0);
   const loadMoreOwner = useRef<AbortController | null>(null);
   // Reads and writes of the event row overlap once autosave can be running
   // behind another destination. Every write brackets itself here, and every
@@ -345,6 +347,7 @@ export function ManagerPage() {
           throw caught;
         });
       const readToken = eventReads.current.openRead();
+      const exportsGeneration = ++exportsRead.current;
       const [eventData, mediaData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
@@ -361,7 +364,7 @@ export function ManagerPage() {
       if (latestMediaPath.current === mediaPath) {
         setMediaPage({ rows: mediaData.media, cursor: mediaData.nextCursor ?? null });
       }
-      setExports(exportData.exports);
+      if (exportsGeneration === exportsRead.current) setExports(exportData.exports);
       setEventLink(linkData.eventLink ?? '');
       entryDisabled.current = linkData.disabledAt !== null;
       setEntryDisabledAt(linkData.disabledAt);
@@ -381,12 +384,19 @@ export function ManagerPage() {
   // Exports only. The full `refresh` would also put back the event and the media page,
   // which a poll running behind a host's own edit has no business doing.
   const refreshExports = useCallback(async () => {
+    const generation = ++exportsRead.current;
     try {
       const exportData = await api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`);
-      setExports(exportData.exports);
-    } catch {
-      // A missed tick is not worth a notice: the next one is ten seconds away, and the
-      // card keeps showing the last state the server actually confirmed.
+      // The poll only lives while the job is queued or running, so an answer that arrives
+      // behind a newer one can put a terminal state back and stop the poll on a job that
+      // has since moved. Last read issued is the only one allowed to write.
+      if (generation === exportsRead.current) setExports(exportData.exports);
+    } catch (caught) {
+      // Same rule the intake poll follows: a missed tick over a venue network is not worth a
+      // notice, but a rotated link or an ended lifecycle will fail every following tick too,
+      // and the host would otherwise watch "Preparing" forever with nothing telling them why.
+      const notice = managerNoticeFor(caught, 'The export status could not be refreshed.');
+      if (notice.type === 'load') setActionError(notice);
     }
   }, [eventId]);
 

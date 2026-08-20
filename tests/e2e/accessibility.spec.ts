@@ -685,6 +685,16 @@ test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and
       .every((child) => child.hasAttribute('inert'));
   });
   expect(backgroundContained, 'the manager shell is inert behind the viewer').toBe(true);
+
+  // Closing is half of containment. The shell is inert while the dialog is open, so a
+  // restoration that runs before the dialog is torn down calls `focus()` on an element
+  // that is not focusable yet and drops the host at the top of the document.
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  expect(
+    await page.evaluate(() => document.activeElement?.classList.contains('gallery-mosaic__open') ?? false),
+    'focus returns to the tile the viewer was opened from',
+  ).toBe(true);
 });
 
 test('reduced motion opens the terminal Guestbook without smooth scrolling or moving focus into the textarea', async ({ page }) => {
