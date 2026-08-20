@@ -467,8 +467,8 @@ test('every guest text field clears the 16px iOS focus-zoom floor', async ({ pag
     }
 
     const fields = page.locator('.guest-shell--drop input[type="text"], .guest-shell--drop input:not([type])');
+    await expect(fields.first(), `${surface} renders at least one guest field`).toBeVisible();
     const count = await fields.count();
-    expect(count, `${surface} renders at least one guest field`).toBeGreaterThan(0);
     for (let index = 0; index < count; index += 1) {
       const field = fields.nth(index);
       if (!(await field.isVisible())) continue;
