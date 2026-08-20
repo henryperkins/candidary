@@ -191,24 +191,30 @@ in `docs/deployment.md`.
 
 ### Physical-device evidence
 
-One gate has passed. It is recorded at exactly the strength it was observed, and no more.
+Two gates have passed. Each is recorded at exactly the strength it was observed, and no more.
 
 | Gate | Result |
 | --- | --- |
 | A printed pre-0008 QR opens its event against the deployed Worker | **Passed** — confirmed by the operator on 2026-07-31 by scanning a real printed code on a physical phone. Device model, OS version, and browser were **not recorded**; `docs/deployment.md` requires them, so this entry is incomplete until they are supplied. |
+| A printed QR opens its event during **RSVP-primary** on a physical device | **Passed** — confirmed by the operator. Date, device model, OS version, browser, and network condition were **not recorded**; `docs/deployment.md` and §14 of `docs/superpowers/specs/2026-08-02-support-free-event-reliability-design.md` both require them, so this entry is incomplete until they are supplied. |
 
-Corroborating server-side evidence for that gate, which does not depend on the report: the live
-`tracy-and-bill-s-wedding-celebration-tn9o3c` event holds an entry credential whose id equals its
+Corroborating server-side evidence for the pre-0008 gate, which does not depend on the report: the
+live `tracy-and-bill-s-wedding-celebration-tn9o3c` event holds an entry credential whose id equals its
 guest access token id — an adoption of the printed token rather than a freshly minted credential, so
 the code already in circulation is the one that now works.
+
+The RSVP-primary gate has no equivalent server-side corroboration recorded here yet. It carries one
+consequence beyond itself: a production event has had RSVP enabled, so the phase exists outside the
+test suite. This section asserted the opposite from 2026-07-31 (`77e02b3`) until 2026-08-20, because
+the original bullet's reasoning was never revisited as production state moved. A gate listed as
+unproven for a reason that has expired is the failure mode this document exists to prevent, so the
+reason is recorded here rather than quietly deleted.
 
 ### Not yet evidenced
 
 Everything else in the physical and assistive-technology gate list remains unproven and may not be
-recorded as passed on the strength of the automated suite or of the gate above:
+recorded as passed on the strength of the automated suite or of the gates above:
 
-- the printed QR scanned during **RSVP-primary** — no production event has RSVP enabled yet, so this
-  state has never existed outside the test suite;
 - the printed QR scanned **after a *Sign out guest devices* rotation**, which is the specific claim
   that separates this design from a fragile one;
 - **VoiceOver** and **TalkBack** over the RSVP lookup, household form, and manager guest list;
