@@ -324,7 +324,7 @@ describe('manager settings and private photo intake', () => {
       caption: 'A safe caption',
       publicationStatus: 'unpublished',
       uploadState: 'stored',
-      previewAvailable: false,
+      previewAvailable: true,
       width: 800,
       height: 600,
       createdAt: media.createdAt,
@@ -339,7 +339,7 @@ describe('manager settings and private photo intake', () => {
     expect(publishedBody.data.media).toMatchObject({
       id: media.id,
       publicationStatus: 'published',
-      previewAvailable: false,
+      previewAvailable: true,
     });
     expect(publishedBody.data.item).toMatchObject({
       id: media.id,
@@ -347,7 +347,7 @@ describe('manager settings and private photo intake', () => {
       mediaId: media.id,
       state: 'published',
       visibility: 'author_only',
-      previewAvailable: false,
+      previewAvailable: true,
     });
     expect(JSON.stringify([listedBody, publishedBody]))
       .not.toMatch(/objectKey|object_key|previewObjectKey|preview_object_key|uploaderSessionId|idempotencyKey/u);
@@ -613,8 +613,8 @@ describe('manager settings and private photo intake', () => {
     }
     expect(changed.map((item: any) => item.id)).toEqual([first.id, second.id]);
     expect(changed).toEqual([
-      expect.objectContaining({ publicationStatus: 'published', previewAvailable: false }),
-      expect.objectContaining({ publicationStatus: 'published', previewAvailable: false }),
+      expect.objectContaining({ publicationStatus: 'published', previewAvailable: true }),
+      expect.objectContaining({ publicationStatus: 'published', previewAvailable: true }),
     ]);
     expect(JSON.stringify(changed)).not.toMatch(
       /objectKey|previewObjectKey|uploaderSessionId|idempotencyKey|byteSize|mimeType|reservationExpiresAt/u,

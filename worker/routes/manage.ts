@@ -22,6 +22,9 @@ import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
 import { RsvpService } from '../services/rsvp';
 import {
+  DEFAULT_GALLERY_TIMELINE_ORDER,
+  GALLERY_TIMELINE_ORDERS,
+  type GalleryTimelineOrder,
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
@@ -371,8 +374,13 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
       422,
     );
   }
+  const rawOrder = context.req.query('order');
+  if (rawOrder !== undefined && !(GALLERY_TIMELINE_ORDERS as readonly string[]).includes(rawOrder)) {
+    throw new ApiError('VALIDATION_FAILED', 'The gallery order is invalid.', 422);
+  }
+  const order = (rawOrder ?? DEFAULT_GALLERY_TIMELINE_ORDER) as GalleryTimelineOrder;
   const rawCursor = context.req.query('cursor');
-  const cursor = rawCursor === undefined ? undefined : decodeGalleryCursor(rawCursor);
+  const cursor = rawCursor === undefined ? undefined : decodeGalleryCursor(rawCursor, order);
   const mediaRepository = new MediaRepository(context.env.DB);
   if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
     throw new ApiError(
@@ -388,12 +396,13 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
       favorites: rawFavorites === '1',
       cursor,
       limit: limit.data,
+      order,
     },
   );
   return context.json({
     data: {
       media: page.media,
-      nextCursor: page.nextCursor ? encodeGalleryCursor(page.nextCursor) : null,
+      nextCursor: page.nextCursor ? encodeGalleryCursor(page.nextCursor, order) : null,
     },
     requestId: context.get('requestId'),
   });

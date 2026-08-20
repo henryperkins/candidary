@@ -282,16 +282,31 @@ test('the private mosaic and the gallery export control hold their layout', asyn
   await settle(page);
   await expect(shared).toHaveScreenshot('manager-shared-gallery-320.png');
   await page.getByRole('button', { name: 'Private gallery' }).click();
+  await expect(page.locator('.gallery-private .gallery-mosaic__item')).toHaveCount(3);
 
   // The phone is what the layout is made of: keep 390 and capture the export control beside the
-  // private header without any scrolling.
+  // private header without any scrolling. The taller mosaic and viewer focus restoration can leave
+  // this multi-state test below the top, so establish the position the assertion is proving first.
   await page.setViewportSize({ width: 390, height: 1500 });
+  await settle(page);
+  const authoredScrollBehavior = await page.evaluate(() => {
+    const root = document.documentElement;
+    const authoredBehavior = root.style.scrollBehavior;
+    root.style.scrollBehavior = 'auto';
+    if (getComputedStyle(root).scrollBehavior !== 'auto') {
+      throw new Error('The visual test could not disable smooth scrolling.');
+    }
+    window.scrollTo(0, 0);
+    return authoredBehavior;
+  });
   const exportControl = page.locator('.gallery-export');
   await expect(exportControl).toBeVisible();
   await expect(page.locator('.gallery-total')).toHaveText('6 photos');
   expect(await page.evaluate(() => window.scrollY), 'the section is laid out without scrolling').toBe(0);
-  await settle(page);
   await expect(exportControl).toHaveScreenshot('gallery-export-390.png');
+  await page.evaluate((authoredBehavior) => {
+    document.documentElement.style.scrollBehavior = authoredBehavior;
+  }, authoredScrollBehavior);
 });
 
 // Kept from the pre-baseline visual pass: a picture proves what a state looks like, not that nothing

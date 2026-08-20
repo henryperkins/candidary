@@ -22,6 +22,14 @@ export const MANAGER_BULK_SELECTION_MAX = 50;
 // and the bounded chronological page size shared by server and production client.
 export const MEDIA_TIMELINE_SENTINEL = '1970-01-01T00:00:00.000Z';
 export const PRIVATE_GALLERY_PAGE_SIZE = 48;
+/**
+ * Which end of the day the host starts from. `newest` is the default because a host
+ * opens this the morning after: earliest-first hands them the empty venue and the test
+ * shot, and puts the vows and the last dance a hundred pages away.
+ */
+export const GALLERY_TIMELINE_ORDERS = ['newest', 'earliest'] as const;
+export type GalleryTimelineOrder = (typeof GALLERY_TIMELINE_ORDERS)[number];
+export const DEFAULT_GALLERY_TIMELINE_ORDER: GalleryTimelineOrder = 'newest';
 export const GUEST_MESSAGE_PAGE_SIZE = 50;
 export const DEFAULT_GUESTBOOK_PROMPT = 'Share a wish, memory, or moment from the day.';
 export const MAX_EVENT_GUEST_NOTES = 1_000;

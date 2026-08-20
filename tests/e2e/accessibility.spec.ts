@@ -626,6 +626,77 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
   await expectNoAxeViolations(page, 'fullscreen gallery');
 });
 
+/**
+ * The manager private mosaic had no axe pass at all: the guest `.photo-grid` and the fullscreen
+ * gallery were covered, and the surface the host actually reviews their photographs on was not.
+ * That gap is why a clipped focus ring on the mosaic's primary control survived.
+ */
+test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and contains its viewer', async ({ page }) => {
+  await stubManagerRoutes(page, { mediaPages: { first: { media: makeMedia(6), nextCursor: null } } });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
+
+  await expect(page.locator('.gallery-mosaic__item')).toHaveCount(6);
+  await expect(page.locator('.gallery-mosaic__item img').first()).toBeVisible();
+  await expect(page.getByText('Preview unavailable')).toHaveCount(0);
+  await expectNoAxeViolations(page, 'manager private gallery mosaic');
+
+  // Reached by real Tab presses: `:focus-visible` does not match a programmatic focus, so a
+  // measurement taken after `.focus()` would report the ring missing whether or not it is.
+  await page.locator('#gallery-search-input').focus();
+  const onOpenControl = () => page.evaluate(
+    () => document.activeElement?.classList.contains('gallery-mosaic__open') ?? false,
+  );
+  for (let step = 0; step < 12 && !(await onOpenControl()); step += 1) {
+    await page.keyboard.press('Tab');
+  }
+  expect(await onOpenControl(), 'a tile is reachable by keyboard').toBe(true);
+
+  const ring = await page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return null;
+    const style = getComputedStyle(active);
+    const tile = active.closest<HTMLElement>('.gallery-mosaic__item');
+    return {
+      focusVisible: active.matches(':focus-visible'),
+      outlineStyle: style.outlineStyle,
+      outlineOffset: Number.parseFloat(style.outlineOffset),
+      clipped: tile ? getComputedStyle(tile).overflow !== 'visible' : false,
+    };
+  });
+  expect(ring?.focusVisible, 'the tile control takes a visible focus state').toBe(true);
+  expect(ring?.outlineStyle).not.toBe('none');
+  // The control fills its tile exactly and the tile clips, so any ring drawn outward is painted
+  // and then discarded. A non-negative offset here is the defect, not a style preference.
+  if (ring?.clipped) expect(ring.outlineOffset).toBeLessThan(0);
+
+  await page.keyboard.press('Enter');
+  const viewer = page.getByRole('dialog');
+  await expect(viewer).toBeVisible();
+  await expectNoAxeViolations(page, 'manager gallery viewer');
+
+  // An opaque ground, not a 96% one: the remainder used to carry the manager shell's own text
+  // through the dialog and into the photograph.
+  await expect(viewer).toHaveCSS('background-color', 'rgb(43, 29, 23)');
+  const backgroundContained = await page.evaluate(() => {
+    const host = document.querySelector('.gallery-viewer')?.parentElement;
+    return Array.from(document.body.children)
+      .filter((child) => child !== host)
+      .every((child) => child.hasAttribute('inert'));
+  });
+  expect(backgroundContained, 'the manager shell is inert behind the viewer').toBe(true);
+
+  // Closing is half of containment. The shell is inert while the dialog is open, so a
+  // restoration that runs before the dialog is torn down calls `focus()` on an element
+  // that is not focusable yet and drops the host at the top of the document.
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  expect(
+    await page.evaluate(() => document.activeElement?.classList.contains('gallery-mosaic__open') ?? false),
+    'focus returns to the tile the viewer was opened from',
+  ).toBe(true);
+});
+
 test('reduced motion opens the terminal Guestbook without smooth scrolling or moving focus into the textarea', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.addInitScript(() => {

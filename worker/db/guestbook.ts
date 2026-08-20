@@ -135,7 +135,7 @@ const GUEST_PROJECTION = `
     END AS guest_visibility,
     CASE WHEN media.uploader_session_id = ?2 THEN 1 ELSE 0 END AS is_own,
     media.id AS media_id,
-    CASE WHEN media.preview_object_key IS NOT NULL THEN 1 ELSE 0 END AS preview_available
+    CASE WHEN media.upload_state = 'stored' THEN 1 ELSE 0 END AS preview_available
   FROM media
   JOIN events ON events.id = media.event_id
   WHERE media.event_id = ?1
@@ -185,7 +185,7 @@ const MANAGER_PROJECTION = `
     END AS guest_visibility,
     0 AS is_own,
     media.id AS media_id,
-    CASE WHEN media.preview_object_key IS NOT NULL THEN 1 ELSE 0 END AS preview_available,
+    CASE WHEN media.upload_state = 'stored' THEN 1 ELSE 0 END AS preview_available,
     CASE
       WHEN media.publication_status = 'unpublished' THEN 'needs-review'
       WHEN media.publication_status = 'published' AND events.gallery_visible = 1 THEN 'shared'
@@ -546,7 +546,7 @@ export class GuestbookRepository {
           ELSE 'author_only'
         END AS guest_visibility,
         0 AS is_own, media.id AS media_id,
-        CASE WHEN media.preview_object_key IS NOT NULL THEN 1 ELSE 0 END AS preview_available
+        CASE WHEN media.upload_state = 'stored' THEN 1 ELSE 0 END AS preview_available
       FROM media
       JOIN events ON events.id = media.event_id
       WHERE media.id = ?

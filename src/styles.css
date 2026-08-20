@@ -859,6 +859,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-export__copy { margin: 0; color: var(--muted); font-size: .85rem; }
 .gallery-export .export-state { justify-items: start; }
 .gallery-export .export-links { display: grid; gap: 8px; }
+.gallery-export .export-links__lead { margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.5; }
 .gallery-export .export-links a { min-height: 44px; display: inline-flex; align-items: center; color: var(--chestnut); font-weight: 600; }
 .gallery-export .export-links small { display: block; color: var(--muted); font-size: .75rem; font-weight: 400; }
 .gallery-export .button { min-height: 44px; }
@@ -872,23 +873,65 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   color: var(--chestnut);
   border-color: var(--denim);
 }
+/* Two options, so it reads as one choice rather than a filter bar: the same switch geometry the
+   Private/Shared control above it already uses, at the smaller weight of a view setting. */
+.gallery-order { margin: 0 0 20px; display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; }
+.gallery-order button { min-height: 44px; padding: 8px 14px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
+.gallery-order button.active { background: var(--denim-soft); color: var(--chestnut); }
 .gallery-timeline { display: grid; gap: 34px; }
 .gallery-moment__heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
 .gallery-moment__heading h3 { margin: 0; font-size: 1.25rem; letter-spacing: -.02em; overflow-wrap: anywhere; }
 .gallery-moment__count { color: var(--muted); font-size: .8rem; }
-.gallery-mosaic { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; grid-auto-rows: clamp(124px, 40vw, 180px); gap: 8px; }
-.gallery-mosaic__item { min-width: 0; position: relative; grid-column: span var(--gallery-col-span-2); grid-row: span var(--gallery-row-span-2); overflow: hidden; border-radius: 8px; background: var(--denim-soft); }
+/* The row height tracks the column width — at two columns a tile is (100vw - 40px gutters -
+   8px gap) / 2 — so a unit tile stays square instead of flattening as the phone gets wider. */
+.gallery-mosaic { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; grid-auto-rows: clamp(124px, calc(50vw - 24px), 190px); gap: 8px; }
+/* The ground a photograph loads onto is warm paper, not Denim Soft: that token means
+   "selected / pending" in this system, so every unloaded photo used to read as selected,
+   in the coldest value the palette owns. */
+/* An event runs to 10,000 photos and every loaded tile stays in the document, so off-screen tiles
+   stop costing layout and paint. The grid rows are fixed, so skipping a tile cannot move anything;
+   the intrinsic size only matches the tallest row so a skipped tile reserves the right box. */
+.gallery-mosaic__item { min-width: 0; position: relative; grid-column: span var(--gallery-col-span-2); grid-row: span var(--gallery-row-span-2); overflow: hidden; border-radius: 8px; background: var(--manager-rail); content-visibility: auto; contain-intrinsic-size: auto 180px; }
 .gallery-mosaic__item img, .gallery-mosaic__placeholder { width: 100%; height: 100%; object-fit: cover; object-position: center; }
-.gallery-mosaic__placeholder { display: grid; place-items: center; color: var(--muted); }
-.gallery-mosaic__open { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; cursor: pointer; }
+.gallery-mosaic__placeholder { padding: 8px; display: grid; place-content: center; justify-items: center; gap: 4px; color: var(--muted); text-align: center; }
+.gallery-mosaic__placeholder span { font-size: .76rem; line-height: 1.3; }
+.gallery-mosaic__open { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+/* This button's box is exactly the tile's, and the tile clips its overflow, so the global ring at
+   `outline-offset: 3px` was painted entirely outside the clip — the mosaic's primary control was the
+   one element in the product with no visible focus. Bring the ring inside, and lay a paper band under
+   it: a lone Denim ring against an unknown photograph has no guaranteed contrast. */
+.gallery-mosaic__open:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+  box-shadow: inset 0 0 0 7px var(--paper);
+}
+/* The manager bar is sticky below 761px (52px brand over 58px destinations), so anything reached by
+   keyboard must stop clear of it instead of scrolling underneath. */
+.gallery-moment__heading h3, .gallery-mosaic__open, .gallery-mosaic__favorite, .gallery-moment__toggle {
+  scroll-margin-top: 124px;
+}
 .gallery-mosaic__favorite { position: absolute; top: 8px; right: 8px; z-index: 2; width: 44px; height: 44px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--paper); color: var(--chestnut); cursor: pointer; }
 .gallery-mosaic__favorite[aria-pressed="true"] { background: var(--chestnut); color: white; }
 .gallery-mosaic__favorite:disabled, .gallery-viewer__favorite:disabled { opacity: .6; cursor: wait; }
-.gallery-mosaic__meta { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; padding: 26px 10px 8px; display: grid; gap: 2px; background: linear-gradient(transparent, rgb(43 29 23 / 72%)); color: white; pointer-events: none; }
-.gallery-mosaic__meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .82rem; }
-.gallery-mosaic__meta small { font-size: .72rem; }
+/* A solid band, not a ramp. Under a gradient the caption sat on roughly 37% ink, so white text
+   over a bright photograph — a dress, a sky, a lit tent — measured near 2.3:1 against a 4.5:1
+   floor, and the failure depended on the photograph rather than on anything the code could see.
+   At a fixed 88% the ratio is a constant, and both lines clear the system's type floor. */
+.gallery-mosaic__meta { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; padding: 10px 12px; display: grid; gap: 2px; background: rgb(43 29 23 / 88%); color: var(--paper); pointer-events: none; }
+.gallery-mosaic__meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875rem; }
+.gallery-mosaic__meta small { font-size: .76rem; opacity: .88; }
+/* Two columns held all the way to 761px, where the manager is still one full-width workspace, so
+   tiles reached 356px wide against a 180px row — the flattest crop anywhere in the product. Three
+   columns from 601px, with the row still tracking the column, keeps them near square instead. */
+@media (min-width: 601px) and (max-width: 760px) {
+  .gallery-mosaic { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: clamp(124px, calc((100vw - 60px) / 3), 180px); gap: 10px; }
+  .gallery-mosaic__item { grid-column: span var(--gallery-col-span-3); grid-row: span var(--gallery-row-span-3); }
+}
 .gallery-moment__toggle { min-height: 44px; margin-top: 12px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font: inherit; font-weight: 600; cursor: pointer; }
-.gallery-viewer { position: fixed; inset: 0; z-index: 40; display: grid; grid-template-rows: minmax(0, 1fr) auto; background: rgb(43 29 23 / 96%); color: var(--paper); }
+/* Opaque, not 96%: the four percent that showed through put the nav labels, the search controls, and
+   the tile captions underneath the dialog's own text. This system rejects translucency that weakens
+   legibility, and a photograph deserves an unbroken ground. */
+.gallery-viewer { position: fixed; inset: 0; z-index: 40; display: grid; grid-template-rows: minmax(0, 1fr) auto; background: var(--ink); color: var(--paper); }
 .gallery-viewer__close,
 .gallery-viewer__prev,
 .gallery-viewer__next {
@@ -911,7 +954,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-viewer__close { position: absolute; top: calc(env(safe-area-inset-top, 0px) + 10px); right: 12px; width: 44px; height: 44px; }
 .gallery-viewer__media { min-width: 0; min-height: 0; display: grid; place-items: center; }
 .gallery-viewer__media img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.gallery-viewer__placeholder { display: grid; gap: 8px; justify-items: center; color: var(--paper); }
+.gallery-viewer__placeholder { max-width: 34ch; padding: 24px; display: grid; gap: 8px; justify-items: center; color: var(--paper); text-align: center; }
+.gallery-viewer__placeholder strong { overflow-wrap: anywhere; }
+.gallery-viewer__placeholder span:last-child { opacity: .82; font-size: .9rem; line-height: 1.5; }
 .gallery-viewer__prev, .gallery-viewer__next { width: 52px; height: 52px; position: absolute; top: 50%; transform: translateY(-50%); }
 .gallery-viewer__prev { left: 10px; }
 .gallery-viewer__next { right: 10px; }
@@ -919,7 +964,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-viewer__info { min-width: 0; padding: 18px max(20px, env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px)); display: grid; gap: 14px; border-top: 1px solid rgb(255 250 243 / 18%); }
 .gallery-viewer__meta { min-width: 0; display: grid; gap: 3px; }
 .gallery-viewer__meta strong { font-family: Manrope, sans-serif; font-size: 1.25rem; overflow-wrap: anywhere; }
-.gallery-viewer__meta span { color: #e8dfd5; font-size: .9rem; overflow-wrap: anywhere; }
+.gallery-viewer__meta span { opacity: .82; font-size: .9rem; overflow-wrap: anywhere; }
 .gallery-viewer__favorite { min-height: 44px; padding: 9px 16px; display: inline-flex; align-items: center; justify-self: start; gap: 8px; border: 0; border-radius: 8px; background: var(--paper); color: var(--ink); cursor: pointer; }
 .gallery-viewer__favorite[aria-pressed="true"] { background: var(--chestnut); color: white; }
 .manager-export-route { margin-top: 28px; padding-top: 24px; display: grid; gap: 10px; justify-items: start; border-top: 1px solid var(--border); }
@@ -1151,6 +1196,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 /* Three-column mosaic band. */
 @media (min-width: 761px) and (max-width: 1100px) {
+  /* The bar becomes a static side rail here, so nothing overlaps the top edge any more. */
+  .gallery-moment__heading h3, .gallery-mosaic__open, .gallery-mosaic__favorite, .gallery-moment__toggle {
+    scroll-margin-top: 20px;
+  }
   .gallery-mosaic { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 132px; gap: 10px; }
   .gallery-mosaic__item { grid-column: span var(--gallery-col-span-3); grid-row: span var(--gallery-row-span-3); }
 }

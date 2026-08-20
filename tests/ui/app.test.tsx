@@ -1436,6 +1436,124 @@ describe('manager experience', () => {
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
   });
 
+  /**
+   * The export card is the one place a host waits on work they cannot see, and its poll
+   * only lives while the job is queued or running. Both ways of losing that poll are
+   * silent by construction, so both are pinned here.
+   */
+  it('surfaces a credential failure from the export poll instead of waiting on Preparing forever', async () => {
+    const queued = {
+      id: 'export-a', state: 'queued', attempt: 1, mediaCount: 6, totalBytes: 1024,
+      guestbookEntryCount: 0, errorCode: null, snapshotAt: '2026-09-20T00:00:00.000Z',
+    };
+    // Armed immediately before the poll tick, so the refusal belongs to the poll and not to a
+    // whole-page load whose own catch would have reported it anyway.
+    let failNextExportRead = false;
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/exports')) {
+        if (failNextExportRead) {
+          failNextExportRead = false;
+          // The way a rotated management link fails: not a dropped venue packet, and identical
+          // on every following tick.
+          return errorJson({ code: 'TOKEN_REVOKED', message: 'This link is no longer valid.', requestId: 'request-a' }, 401);
+        }
+        return json({ exports: [queued] });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      if (url.includes('/rsvp/summary')) return json(RSVP_SUMMARY);
+      if (url.includes('/rsvp/households')) return json({ households: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
+
+    const poll = await waitFor(() => {
+      const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
+      if (!scheduled) throw new Error('the export poll was never scheduled');
+      return scheduled as () => void;
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    failNextExportRead = true;
+    await act(async () => { poll(); });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('This link is no longer valid.');
+    expect(screen.getByLabelText('Management link'), 'the notice carries a route back in').toBeVisible();
+  });
+
+  it('does not let a stale export answer put back a state the poll has already passed', async () => {
+    const job = (state: string) => ({
+      id: 'export-a', state, attempt: 1, mediaCount: 6, totalBytes: 1024,
+      guestbookEntryCount: 0, errorCode: null, snapshotAt: '2026-09-20T00:00:00.000Z',
+    });
+    // Armed immediately before the first poll tick, so the held answer is that tick's and not
+    // one of the reads the initial load and the section navigation happen to make.
+    let holdNextExportRead = false;
+    let ready = false;
+    let releaseStale!: () => void;
+    const interval = vi.spyOn(window, 'setInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/exports')) {
+        if (holdNextExportRead) {
+          holdNextExportRead = false;
+          ready = true;
+          return new Promise<Response>((resolve) => {
+            releaseStale = () => void json({ exports: [job('queued')] }).then(resolve);
+          });
+        }
+        return json({ exports: [job(ready ? 'ready' : 'queued')] });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      if (url.includes('/rsvp/summary')) return json(RSVP_SUMMARY);
+      if (url.includes('/rsvp/households')) return json({ households: [], nextCursor: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Private gallery' }));
+
+    const poll = await waitFor(() => {
+      const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
+      if (!scheduled) throw new Error('the export poll was never scheduled');
+      return scheduled as () => void;
+    });
+    const shownState = () => document.querySelector('.export-state strong')?.textContent;
+    expect(shownState()).toBe('Preparing');
+    holdNextExportRead = true;
+    // The first tick is held open; the second answers first, with the state the job has reached.
+    await act(async () => { poll(); });
+    await act(async () => { poll(); });
+    await waitFor(() => expect(shownState()).toBe('Ready'));
+
+    // Ready is terminal, so the poll has stopped. An older answer landing now would put the
+    // job back to Preparing with nothing left running to correct it.
+    await act(async () => { releaseStale(); });
+    expect(shownState()).toBe('Ready');
+  });
+
   it('caps cross-page bulk selection at 50 and submits only the selected ids', async () => {
     const rows = makeMedia(MANAGER_BULK_SELECTION_MAX + 1, 'unpublished');
     const bulkBodies: Array<{ ids: string[] }> = [];

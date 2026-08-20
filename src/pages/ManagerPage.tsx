@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
+import { formatBytes } from '../app/format';
 import { hostSignInHref } from '../app/recovery';
 import {
   MANAGER_BULK_SELECTION_MAX,
@@ -119,12 +120,6 @@ function ManagerAccessRecovery({
   </section>;
 }
 
-function formatBytes(bytes = 0) {
-  if (bytes < 1024 ** 2) return `${Math.max(0, Math.round(bytes / 1024))} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-}
-
 const PHOTO_CAP = MAX_EVENT_MEDIA.toLocaleString();
 const STORAGE_CAP = `${Math.round(MAX_EVENT_BYTES / 1024 ** 3)} GB`;
 
@@ -199,6 +194,8 @@ export function ManagerPage() {
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
   const loadedOnce = useRef(false);
   const guestbookSummaryRequest = useRef(0);
+  // Both the whole-page load and the export poll write `exports`; the later request wins.
+  const exportsRead = useRef(0);
   const loadMoreOwner = useRef<AbortController | null>(null);
   // Reads and writes of the event row overlap once autosave can be running
   // behind another destination. Every write brackets itself here, and every
@@ -350,6 +347,7 @@ export function ManagerPage() {
           throw caught;
         });
       const readToken = eventReads.current.openRead();
+      const exportsGeneration = ++exportsRead.current;
       const [eventData, mediaData, exportData, linkData] = await Promise.all([
         api<{ event: EventView }>(`/api/manage/events/${eventId}`),
         api<ManagerMediaPage>(mediaPath()),
@@ -366,7 +364,7 @@ export function ManagerPage() {
       if (latestMediaPath.current === mediaPath) {
         setMediaPage({ rows: mediaData.media, cursor: mediaData.nextCursor ?? null });
       }
-      setExports(exportData.exports);
+      if (exportsGeneration === exportsRead.current) setExports(exportData.exports);
       setEventLink(linkData.eventLink ?? '');
       entryDisabled.current = linkData.disabledAt !== null;
       setEntryDisabledAt(linkData.disabledAt);
@@ -382,6 +380,25 @@ export function ManagerPage() {
       }
     }
   }, [eventId, mediaPath, refreshGuestbookSummary]);
+
+  // Exports only. The full `refresh` would also put back the event and the media page,
+  // which a poll running behind a host's own edit has no business doing.
+  const refreshExports = useCallback(async () => {
+    const generation = ++exportsRead.current;
+    try {
+      const exportData = await api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`);
+      // The poll only lives while the job is queued or running, so an answer that arrives
+      // behind a newer one can put a terminal state back and stop the poll on a job that
+      // has since moved. Last read issued is the only one allowed to write.
+      if (generation === exportsRead.current) setExports(exportData.exports);
+    } catch (caught) {
+      // Same rule the intake poll follows: a missed tick over a venue network is not worth a
+      // notice, but a rotated link or an ended lifecycle will fail every following tick too,
+      // and the host would otherwise watch "Preparing" forever with nothing telling them why.
+      const notice = managerNoticeFor(caught, 'The export status could not be refreshed.');
+      if (notice.type === 'load') setActionError(notice);
+    }
+  }, [eventId]);
 
   const refreshIntake = useCallback(async () => {
     try {
@@ -492,6 +509,27 @@ export function ManagerPage() {
     }, 5_000);
     return () => window.clearInterval(interval);
   }, [refreshIntake, section]);
+  /**
+   * An export is the terminal act of the whole product and it runs in a Workflow, so its
+   * card is the one place the host waits on work they cannot see. Nothing polled it: the
+   * state was written once by `refresh` and then sat on "Preparing" until a reload or some
+   * unrelated manager action happened to run a full refresh. Ten seconds while a job is
+   * actually in flight, on the same visibility guard intake uses, and never otherwise.
+   */
+  const activeExportState = exports[0]?.state;
+  useEffect(() => {
+    if (section !== 'gallery') return;
+    if (activeExportState !== 'queued' && activeExportState !== 'running') return;
+    const refreshVisibleExports = () => {
+      if (document.visibilityState === 'visible') void refreshExports();
+    };
+    const interval = window.setInterval(refreshVisibleExports, 10_000);
+    window.addEventListener('focus', refreshVisibleExports);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshVisibleExports);
+    };
+  }, [activeExportState, refreshExports, section]);
   useEffect(() => {
     if (section !== 'guestbook') return;
     const refreshVisibleSummary = () => {

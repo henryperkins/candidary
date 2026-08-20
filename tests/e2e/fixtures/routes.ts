@@ -1214,7 +1214,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     const mediaPage = options.mediaPages[cursor] ?? { media: [], nextCursor: null };
     return route.fulfill({ json: { data: mediaPage, requestId: 'request-a' } });
   });
-  await page.route(`${base}/gallery`, (route) => {
+  await page.route(`${base}/gallery**`, (route) => {
     const first = options.mediaPages.first?.media ?? [];
     const media = (first as Array<Record<string, unknown>>).map((item, index) => ({
       id: item.id ?? `gallery-${index}`,

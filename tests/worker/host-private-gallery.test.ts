@@ -270,15 +270,39 @@ describe('host private gallery repository', () => {
     await insertStoredRow({ id: 'g3', eventId: 'event-a', timelineAt: '2026-09-19T22:15:00.000Z' });
 
     const repository = new MediaRepository(env.DB);
-    const first = await repository.listGalleryTimeline('event-a', { limit: 2 });
+    const first = await repository.listGalleryTimeline('event-a', { limit: 2, order: 'earliest' });
     expect(first.media.map((media) => media.id)).toEqual(['g1', 'g2']);
+    expect(first.nextCursor).toEqual({ timelineAt: '2026-09-19T22:15:00.000Z', id: 'g2' });
+
+    const second = await repository.listGalleryTimeline('event-a', {
+      limit: 2,
+      order: 'earliest',
+      cursor: first.nextCursor ?? undefined,
+    });
+    expect(second.media.map((media) => media.id)).toEqual(['g3']);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('pages newest-first by default, tie-breaking on id in the same direction', async () => {
+    await seedEvent();
+    await seedGuestSession();
+    await insertStoredRow({ id: 'g1', eventId: 'event-a', timelineAt: '2026-09-19T22:10:00.000Z' });
+    await insertStoredRow({ id: 'g2', eventId: 'event-a', timelineAt: '2026-09-19T22:15:00.000Z' });
+    await insertStoredRow({ id: 'g3', eventId: 'event-a', timelineAt: '2026-09-19T22:15:00.000Z' });
+
+    // The keyset comparison flips with the ordering, so the tie-break walks down the ids
+    // here where earliest-first walks up them. If only one of the two flipped, the second
+    // page would return a row the first page already gave back.
+    const repository = new MediaRepository(env.DB);
+    const first = await repository.listGalleryTimeline('event-a', { limit: 2 });
+    expect(first.media.map((media) => media.id)).toEqual(['g3', 'g2']);
     expect(first.nextCursor).toEqual({ timelineAt: '2026-09-19T22:15:00.000Z', id: 'g2' });
 
     const second = await repository.listGalleryTimeline('event-a', {
       limit: 2,
       cursor: first.nextCursor ?? undefined,
     });
-    expect(second.media.map((media) => media.id)).toEqual(['g3']);
+    expect(second.media.map((media) => media.id)).toEqual(['g1']);
     expect(second.nextCursor).toBeNull();
   });
 
@@ -342,12 +366,16 @@ describe('host private gallery repository', () => {
     });
 
     const repository = new MediaRepository(env.DB);
-    expect((await repository.listGalleryTimeline('event-a', { favorites: true })).media
-      .map((media) => media.id)).toEqual(['g1', 'g3']);
+    expect((await repository.listGalleryTimeline('event-a', { favorites: true, order: 'earliest' }))
+      .media.map((media) => media.id)).toEqual(['g1', 'g3']);
     expect((await repository.listGalleryTimeline('event-a', {
       favorites: true,
+      order: 'earliest',
       query: 'maya',
     })).media.map((media) => media.id)).toEqual(['g3']);
+    // The filters compose with either direction rather than pinning one.
+    expect((await repository.listGalleryTimeline('event-a', { favorites: true }))
+      .media.map((media) => media.id)).toEqual(['g3', 'g1']);
   });
 
   it('sets and clears a favorite idempotently and returns the gallery view', async () => {

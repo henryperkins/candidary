@@ -8,6 +8,8 @@ import {
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
   MEDIA_TIMELINE_SENTINEL,
+  DEFAULT_GALLERY_TIMELINE_ORDER,
+  type GalleryTimelineOrder,
   PRIVATE_GALLERY_PAGE_SIZE,
   type SupportedImageType,
 } from '../../shared/constants';
@@ -202,6 +204,22 @@ function mapPromotion(row: MediaObjectPromotionRow): MediaObjectPromotion {
   };
 }
 
+/**
+ * Whether the preview route can produce an image for this row, which is the only
+ * question a client asks before rendering one.
+ *
+ * This deliberately does not consult `preview_object_key`. That column records a
+ * *legacy* cached derivative and nothing in the current pipeline writes it —
+ * `getOrCreatePreview` transforms the original on demand and keeps the result
+ * ephemeral on purpose, so a stored row previews perfectly well with the column
+ * NULL. Deriving the flag from the column reported `false` for every photo
+ * delivered by the current code and left the private Gallery rendering
+ * placeholders instead of the host's photographs.
+ */
+function previewAvailable(uploadState: MediaRecord['uploadState']): boolean {
+  return uploadState === 'stored';
+}
+
 export function managerMediaView(media: Pick<
   MediaRecord,
   | 'id'
@@ -210,7 +228,6 @@ export function managerMediaView(media: Pick<
   | 'caption'
   | 'publicationStatus'
   | 'uploadState'
-  | 'previewObjectKey'
   | 'width'
   | 'height'
   | 'createdAt'
@@ -222,7 +239,7 @@ export function managerMediaView(media: Pick<
     caption: media.caption,
     publicationStatus: media.publicationStatus,
     uploadState: media.uploadState,
-    previewAvailable: media.previewObjectKey !== null,
+    previewAvailable: previewAvailable(media.uploadState),
     width: media.width,
     height: media.height,
     createdAt: media.createdAt,
@@ -237,7 +254,7 @@ function mapManagerMedia(row: MediaRow): ManagerMediaView {
     caption: row.caption,
     publicationStatus: row.publication_status,
     uploadState: row.upload_state,
-    previewAvailable: row.preview_object_key !== null,
+    previewAvailable: previewAvailable(row.upload_state),
     width: row.width,
     height: row.height,
     createdAt: row.created_at,
@@ -251,7 +268,7 @@ export function managerGalleryMediaView(media: Pick<
   | 'guestName'
   | 'caption'
   | 'publicationStatus'
-  | 'previewObjectKey'
+  | 'uploadState'
   | 'width'
   | 'height'
   | 'createdAt'
@@ -266,7 +283,7 @@ export function managerGalleryMediaView(media: Pick<
     guestName: media.guestName,
     caption: media.caption,
     publicationStatus: media.publicationStatus,
-    previewAvailable: media.previewObjectKey !== null,
+    previewAvailable: previewAvailable(media.uploadState),
     width: media.width,
     height: media.height,
     receivedAt: media.storedAt ?? media.createdAt,
@@ -283,7 +300,7 @@ function mapGalleryMediaRow(row: MediaRow): ManagerGalleryMediaView {
     guestName: row.guest_name,
     caption: row.caption,
     publicationStatus: row.publication_status,
-    previewObjectKey: row.preview_object_key,
+    uploadState: row.upload_state,
     width: row.width,
     height: row.height,
     createdAt: row.created_at,
@@ -311,6 +328,7 @@ export interface GalleryTimelineOptions {
   favorites?: boolean;
   cursor?: GalleryCursor;
   limit?: number;
+  order?: GalleryTimelineOrder;
 }
 
 export interface GalleryTimelinePage {
@@ -392,18 +410,24 @@ export class MediaRepository {
   }
 
   /**
-   * The host private Gallery stream: event-scoped, stored-only, non-deleted,
-   * ordered earliest-first by `timeline_at` and ID. `event_id` is always the
-   * first bound value, so a caller-supplied cursor can only move the position
+   * The host private Gallery stream: event-scoped, stored-only, non-deleted, ordered
+   * by `timeline_at` and ID in the direction the host asked for. `event_id` is always
+   * the first bound value, so a caller-supplied cursor can only move the position
    * inside the event the session is already authorized for. Search is a bound
    * `instr(lower(...), lower(?))` substring match — ASCII-only folding with
    * literal `%` and `_` — over contributor, caption, and filename.
+   *
+   * The keyset comparison and the ORDER BY must flip together, or the cursor walks
+   * away from the page it just returned. `ascending` is derived from a validated
+   * enum and only ever selects between two SQL literals here; no caller value
+   * reaches the statement text.
    */
   async listGalleryTimeline(
     eventId: string,
     options: GalleryTimelineOptions = {},
   ): Promise<GalleryTimelinePage> {
     const limit = options.limit ?? PRIVATE_GALLERY_PAGE_SIZE;
+    const ascending = (options.order ?? DEFAULT_GALLERY_TIMELINE_ORDER) === 'earliest';
     const predicates = [
       'event_id = ?',
       "upload_state = 'stored'",
@@ -423,11 +447,14 @@ export class MediaRepository {
       predicates.push('favorited_at IS NOT NULL');
     }
     if (options.cursor) {
-      predicates.push('(timeline_at > ? OR (timeline_at = ? AND id > ?))');
+      predicates.push(ascending
+        ? '(timeline_at > ? OR (timeline_at = ? AND id > ?))'
+        : '(timeline_at < ? OR (timeline_at = ? AND id < ?))');
       bindings.push(options.cursor.timelineAt, options.cursor.timelineAt, options.cursor.id);
     }
     bindings.push(limit + 1);
 
+    const direction = ascending ? 'ASC' : 'DESC';
     const result = await this.db.prepare(`
       SELECT
         id, original_filename, guest_name, caption, publication_status,
@@ -435,7 +462,7 @@ export class MediaRepository {
         captured_at, timeline_at, favorited_at
       FROM media
       WHERE ${predicates.join(' AND ')}
-      ORDER BY timeline_at ASC, id ASC
+      ORDER BY timeline_at ${direction}, id ${direction}
       LIMIT ?
     `).bind(...bindings).all<MediaRow>();
     const pageRows = result.results.slice(0, limit);
