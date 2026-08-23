@@ -1,7 +1,10 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { ALBUM_SHARE_SESSION_SECONDS } from '../../shared/constants';
+import {
+  ALBUM_SHARE_MAX_ACTIVE_SESSIONS,
+  ALBUM_SHARE_SESSION_SECONDS,
+} from '../../shared/constants';
 import type { AlbumShareView, PublicAlbumView } from '../../shared/contracts';
 import { createApp } from '../../worker/app';
 import { AlbumShareService } from '../../worker/services/album-share';
@@ -510,7 +513,7 @@ describe('public album exchange and projection', () => {
       shareId,
       eventId: access.event.id,
       start: 25,
-      count: 1_999,
+      count: ALBUM_SHARE_MAX_ACTIVE_SESSIONS - 1,
       expiresAt: earliestLiveExpiry,
     });
 
@@ -535,7 +538,8 @@ describe('public album exchange and projection', () => {
     expect(await env.DB.prepare(`
       SELECT count(*) AS count FROM event_album_share_sessions
       WHERE share_id = ? AND expires_at > ?
-    `).bind(shareId, new Date().toISOString()).first<number>('count')).toBe(2_000);
+    `).bind(shareId, new Date().toISOString()).first<number>('count'))
+      .toBe(ALBUM_SHARE_MAX_ACTIVE_SESSIONS);
   });
 
   it('rejects a valid album session cookie with a trailing dot suffix', async () => {

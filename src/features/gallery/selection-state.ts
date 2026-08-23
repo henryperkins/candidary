@@ -15,6 +15,10 @@ export function selectionCapacityMessage(): string {
   return `${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once. Add these first, then select more.`;
 }
 
+export function sharedSelectionCapacityMessage(): string {
+  return `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`;
+}
+
 function uniqueIds(ids: readonly string[]): string[] {
   return [...new Set(ids)];
 }
@@ -76,7 +80,7 @@ export function transitionSelection(
     return {
       next,
       message: capped
-        ? `${added} of ${ids.length} ${action.label} selected. ${selectionCapacityMessage()}`
+        ? `${added} of ${ids.length} selected from ${action.label}. ${selectionCapacityMessage()}`
         : `${pluralPhotos(added)} selected from ${action.label}. ${next.size} selected in total.`,
     };
   }

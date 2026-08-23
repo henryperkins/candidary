@@ -18,7 +18,7 @@ import { GalleryExportControl } from './GalleryExportControl';
 import { ManagerAlbum, type ManagerAlbumHandle } from './ManagerAlbum';
 import { ManagerPrivateGallery } from './ManagerPrivateGallery';
 import { ManagerSharedGallery, type GallerySharedStatus } from './ManagerSharedGallery';
-import { selectionCapacityMessage } from './selection-state';
+import { sharedSelectionCapacityMessage } from './selection-state';
 import type { Dispatch, SetStateAction } from 'react';
 
 type GalleryMode = 'library' | 'album' | 'shared';
@@ -168,7 +168,7 @@ ManagerGalleryWorkspaceProps
   useEffect(() => {
     if (mode !== 'shared') return;
     setAnnouncement(shared.selectionAtLimit
-      ? selectionCapacityMessage()
+      ? sharedSelectionCapacityMessage()
       : shared.selected.length
         ? `${shared.selected.length} selected`
         : 'Select photos to update the optional gallery');

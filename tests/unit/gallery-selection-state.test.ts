@@ -75,7 +75,7 @@ describe('gallery selection transitions', () => {
     expect(transition.next.has('new-a')).toBe(true);
     expect(transition.next.has('new-b')).toBe(false);
     expect(transition.message).toBe(
-      `1 of 2 these results selected. ${selectionCapacityMessage()}`,
+      `1 of 2 selected from these results. ${selectionCapacityMessage()}`,
     );
     expect(selectionCapacityMessage()).toBe(
       `${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once. Add these first, then select more.`,

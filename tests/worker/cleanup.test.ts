@@ -5114,19 +5114,17 @@ describe('album-share session cleanup', () => {
     `).bind(shareId, access.event.id, expiredAt, expiredAt).run();
 
     await testEnv.DB.prepare(`
-      WITH digits(d) AS (
-        VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
-      ), numbers(n) AS (
-        SELECT ones.d + tens.d * 10 + hundreds.d * 100
-          + thousands.d * 1000 + ten_thousands.d * 10000
-        FROM digits ones, digits tens, digits hundreds, digits thousands, digits ten_thousands
+      WITH RECURSIVE numbers(n) AS (
+        SELECT 0
+        UNION ALL
+        SELECT n + 1 FROM numbers WHERE n + 1 < ?5
       )
       INSERT INTO event_album_share_sessions (
         id, share_id, event_id, secret_digest, expires_at, created_at
       )
-      SELECT printf('expired-album-session-%05d', n), ?, ?,
-        printf('digest-%05d', n), ?, ?
-      FROM numbers WHERE n < ?
+      SELECT printf('expired-album-session-%05d', n), ?1, ?2,
+        printf('digest-%05d', n), ?3, ?4
+      FROM numbers
     `).bind(shareId, access.event.id, expiredAt, expiredAt, expiredCount).run();
     if (includeFuture) {
       await testEnv.DB.prepare(`

@@ -6,6 +6,7 @@ import type { MediaView } from '../../app/types';
 import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
 import type { EventView, PublicationStatus } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
+import { sharedSelectionCapacityMessage } from './selection-state';
 
 export type GallerySharedStatus = 'all' | PublicationStatus;
 
@@ -150,7 +151,7 @@ export function ManagerSharedGallery({
         id="bulk-selection-status"
       >
         {selectionAtLimit
-          ? `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`
+          ? sharedSelectionCapacityMessage()
           : selected.length
             ? `${selected.length} selected`
             : 'Select photos to update the optional gallery'}

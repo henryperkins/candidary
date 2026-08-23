@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
+import { DEFAULT_GUESTBOOK_PROMPT, MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
 import type {
   AlbumEntryView,
   AlbumMetadataInput,
@@ -340,6 +340,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
   eventId?: string;
   onAlbumAccessFailure?: (failure: LoadFailure | null) => void;
   sharedSelected?: string[];
+  sharedSelectionAtLimit?: boolean;
   onSharedSelectedChange?: (value: string[] | ((current: string[]) => string[])) => void;
   strictMode?: boolean;
 } = {}) {
@@ -353,7 +354,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
       media: [],
       status: 'unpublished',
       selected: workspaceOverrides.sharedSelected ?? [],
-      selectionAtLimit: false,
+      selectionAtLimit: workspaceOverrides.sharedSelectionAtLimit ?? false,
       onStatusChange: vi.fn(),
       onSelectedChange: workspaceOverrides.onSharedSelectedChange ?? vi.fn(),
       onBulk: noop,
@@ -427,12 +428,23 @@ describe('gallery modes', () => {
 
   it('keeps Shared announcements in the workspace live region', async () => {
     const { fetchMock } = harness();
-    renderWorkspace(fetchMock);
+    const expected = `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`;
+    renderWorkspace(fetchMock, {}, {
+      sharedSelected: Array.from(
+        { length: MANAGER_BULK_SELECTION_MAX },
+        (_, index) => `photo-${index}`,
+      ),
+      sharedSelectionAtLimit: true,
+    });
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
 
     await userEvent.setup().click(within(modes).getByRole('button', { name: 'Shared' }));
 
     expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
+    expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
+      .toHaveTextContent(expected);
+    expect(document.getElementById('bulk-selection-status')).toHaveTextContent(expected);
+    expect(document.getElementById('bulk-selection-status')).toBeVisible();
     expect(document.querySelector('.gallery-shared [role="status"]')).toBeNull();
   });
 });
