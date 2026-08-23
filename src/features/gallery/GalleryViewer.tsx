@@ -217,7 +217,6 @@ export function GalleryViewer({
         {photo.isFavorite
           ? <><Check aria-hidden="true" /> <span aria-hidden="true">In album</span></>
           : <><Plus aria-hidden="true" /> Add to album</>}
-        <span className="sr-only">{photo.isFavorite ? 'In the album' : 'Not in the album'}</span>
       </button>
     </div>
   </div>, host);

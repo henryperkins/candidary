@@ -537,6 +537,8 @@ describe('host private gallery', () => {
     await user.click(screen.getByRole('button', { name: /open p2/i }));
     const dialog = await screen.findByRole('dialog', { name: 'p2.jpg' });
     const viewerFavorite = within(dialog).getByRole('button', { name: 'Remove p2.jpg from the album' });
+    expect(within(dialog).queryByText('In the album')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('Not in the album')).not.toBeInTheDocument();
     await user.click(viewerFavorite);
     expect(viewerFavorite).toBeDisabled();
 
