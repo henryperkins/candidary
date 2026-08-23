@@ -85,14 +85,20 @@ function isRecoverableQueuedRetry(
 async function ensureRetryWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
-): Promise<void> {
+): Promise<'dispatched' | 'failed'> {
   const id = `${job.id}-${job.attempt}`;
   try {
     await workflow.createBatch([{ id, params: { jobId: job.id } }]);
+    return 'dispatched';
   } catch (error) {
     try {
       const observed = await (await workflow.get(id)).status();
-      if (observed.status !== 'unknown') return;
+      if (observed.status === 'errored'
+        || observed.status === 'terminated'
+        || observed.status === 'complete') {
+        return 'failed';
+      }
+      if (observed.status !== 'unknown') return 'dispatched';
     } catch {
       // The original creation failure remains authoritative when existence
       // cannot be observed. A later request can safely retry the same ID.
@@ -364,8 +370,18 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
       current.guestbookHtmlObjectKey,
       current.guestbookCsvObjectKey,
     ].filter((key): key is string => Boolean(key));
-  const job = recovering ? current : await commitOrRecoverRetry(repository, current);
-  await ensureRetryWorkflow(context.env.EXPORT_WORKFLOW, job);
+  let job = recovering ? current : await commitOrRecoverRetry(repository, current);
+  const dispatch = await ensureRetryWorkflow(context.env.EXPORT_WORKFLOW, job);
+  if (dispatch === 'failed') {
+    const recovered = await repository.markRetryDispatchFailed(
+      job.id,
+      job.attempt,
+      'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    );
+    if (recovered.job) job = recovered.job;
+  } else {
+    job = await repository.getById(job.id) ?? job;
+  }
   await deleteExportKeys(context.env.MEDIA_BUCKET, keys);
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });

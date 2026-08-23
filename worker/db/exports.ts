@@ -747,6 +747,32 @@ export class ExportsRepository {
     };
   }
 
+  /**
+   * Fails only the exact pristine retry attempt that could not retain a
+   * Workflow. A concurrent Workflow claim or artifact write wins this fence.
+   */
+  async markRetryDispatchFailed(
+    id: string,
+    attempt: number,
+    errorCode: string,
+  ): Promise<{ changed: boolean; job: ExportRecord | null }> {
+    const result = await this.db.prepare(`
+      UPDATE export_jobs SET state = 'failed', error_code = ?3
+      WHERE id = ?1 AND state = 'queued' AND attempt = ?2 AND attempt > 1
+        AND error_code IS NULL AND object_key IS NULL AND manifest_object_key IS NULL
+        AND part_count = 0
+        AND guestbook_html_object_key IS NULL AND guestbook_html_bytes IS NULL
+        AND guestbook_html_sha256 IS NULL AND guestbook_csv_object_key IS NULL
+        AND guestbook_csv_bytes IS NULL AND guestbook_csv_sha256 IS NULL
+        AND started_at IS NULL AND completed_at IS NULL AND expires_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM export_parts WHERE export_job_id = ?1)
+    `).bind(id, attempt, errorCode).run();
+    return {
+      changed: (result.meta.changes ?? 0) === 1,
+      job: await this.getById(id),
+    };
+  }
+
   async retry(id: string): Promise<ExportRecord> {
     const results = await this.db.batch([
         this.db.prepare(`

@@ -1045,6 +1045,108 @@ describe('manager exports', () => {
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
   });
 
+  it.each(['errored', 'terminated', 'complete'] as const)(
+    'fails a terminal retry Workflow in %s state and advances the next retry',
+    async (terminal) => {
+      const access = await eventAccess();
+      const { job } = await failedExportWithArtifacts(access, `retry-workflow-${terminal}`);
+      const createdIds: string[] = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'createBatch') {
+            return async (batch: Array<{ id: string }>) => {
+              createdIds.push(batch[0]!.id);
+              throw new Error(`simulated retained ${terminal} retry Workflow`);
+            };
+          }
+          if (property === 'get') {
+            return async (id: string) => ({ id, status: async () => ({ status: terminal }) });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(
+        `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+        { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+        { ...testEnv, EXPORT_WORKFLOW: workflow },
+      );
+
+      expect(response.status).toBe(202);
+      const failed = (await response.json<any>()).data.export;
+      expect(createdIds).toEqual([`${job.id}-2`]);
+      expect(failed).toMatchObject({
+        id: job.id,
+        state: 'failed',
+        attempt: 2,
+      });
+      expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+        state: 'failed',
+        attempt: 2,
+        errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+      });
+      expect(await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
+      `).bind(job.id).first<number>('count')).toBe(0);
+
+      const next = await createApp().request(
+        `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+        { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+        testEnv,
+      );
+      expect(next.status).toBe(202);
+      expect((await next.json<any>()).data.export).toMatchObject({
+        state: 'queued',
+        attempt: 3,
+      });
+    },
+  );
+
+  it('keeps the running attempt when the retry claim wins the terminal dispatch failure fence', async () => {
+    const access = await eventAccess();
+    const { job } = await failedExportWithArtifacts(access, 'retry-workflow-claim-race');
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') {
+          return async () => { throw new Error('simulated lost retry Workflow response'); };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({
+            id,
+            status: async () => {
+              await testEnv.DB.prepare(`
+                UPDATE export_jobs SET state = 'running', started_at = ?2
+                WHERE id = ?1 AND state = 'queued' AND attempt = 2
+              `).bind(job.id, '2026-08-23T12:00:01.000Z').run();
+              return { status: 'errored' };
+            },
+          });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, EXPORT_WORKFLOW: workflow },
+    );
+
+    expect(response.status).toBe(202);
+    expect((await response.json<any>()).data.export).toMatchObject({
+      id: job.id,
+      state: 'running',
+      attempt: 2,
+    });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+      state: 'running',
+      attempt: 2,
+      errorCode: null,
+    });
+  });
+
   it('converges concurrent failed-job retries on one deterministic next attempt', async () => {
     const access = await eventAccess();
     const { job, keys } = await failedExportWithArtifacts(access, 'retry-concurrent');
