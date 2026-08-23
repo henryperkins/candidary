@@ -12,3 +12,7 @@ coverage/
 Thumbs.db
 .superpowers/
 .worktrees/
+.claude/settings.local.json
+.codex/
+.cursor/
+.github/hooks/
