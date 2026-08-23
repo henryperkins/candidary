@@ -292,8 +292,12 @@ const albumForeignKeyRows = [
 
 const albumIndexRows = [
   {
-    tbl: 'event_album_share_sessions', idx: 'event_album_share_sessions_lookup', uniq: 0, partial: 0,
-    sql: 'CREATE INDEX event_album_share_sessions_lookup\n  ON event_album_share_sessions(id, share_id, event_id)',
+    tbl: 'event_album_share_sessions', idx: 'event_album_share_sessions_expiry', uniq: 0, partial: 0,
+    sql: 'CREATE INDEX event_album_share_sessions_expiry\n  ON event_album_share_sessions(expires_at, id)',
+  },
+  {
+    tbl: 'event_album_share_sessions', idx: 'event_album_share_sessions_share_expiry', uniq: 0, partial: 0,
+    sql: 'CREATE INDEX event_album_share_sessions_share_expiry\n  ON event_album_share_sessions(share_id, expires_at, id)',
   },
   { tbl: 'event_album_share_sessions', idx: 'sqlite_autoindex_event_album_share_sessions_1', uniq: 1, partial: 0, sql: null },
   { tbl: 'event_album_shares', idx: 'sqlite_autoindex_event_album_shares_1', uniq: 1, partial: 0, sql: null },

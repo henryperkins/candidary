@@ -5101,7 +5101,7 @@ describe('bounded cover storage sweep', () => {
 describe('album-share session cleanup', () => {
   beforeEach(resetDatabase);
 
-  it('deletes at most one bounded page of expired sessions per scheduled pass', async () => {
+  async function seedSessions(expiredCount: number, includeFuture: boolean) {
     const cleanupNow = new Date('2026-08-23T12:00:00.000Z');
     const expiredAt = '2026-08-20T00:00:00.000Z';
     const futureAt = '2026-08-25T00:00:00.000Z';
@@ -5113,27 +5113,51 @@ describe('album-share session cleanup', () => {
       ) VALUES (?, ?, 'share-digest', 'v1.iv.ciphertext', ?, ?)
     `).bind(shareId, access.event.id, expiredAt, expiredAt).run();
 
-    const sessions = Array.from({ length: 102 }, (_, index) => testEnv.DB.prepare(`
+    await testEnv.DB.prepare(`
+      WITH digits(d) AS (
+        VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+      ), numbers(n) AS (
+        SELECT ones.d + tens.d * 10 + hundreds.d * 100
+          + thousands.d * 1000 + ten_thousands.d * 10000
+        FROM digits ones, digits tens, digits hundreds, digits thousands, digits ten_thousands
+      )
       INSERT INTO event_album_share_sessions (
         id, share_id, event_id, secret_digest, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `).bind(
-      `expired-album-session-${index.toString().padStart(3, '0')}`,
-      shareId,
-      access.event.id,
-      `digest-${index}`,
-      index === 101 ? futureAt : expiredAt,
-      expiredAt,
-    ));
-    await batchD1Statements(testEnv.DB, sessions);
+      )
+      SELECT printf('expired-album-session-%05d', n), ?, ?,
+        printf('digest-%05d', n), ?, ?
+      FROM numbers WHERE n < ?
+    `).bind(shareId, access.event.id, expiredAt, expiredAt, expiredCount).run();
+    if (includeFuture) {
+      await testEnv.DB.prepare(`
+        INSERT INTO event_album_share_sessions (
+          id, share_id, event_id, secret_digest, expires_at, created_at
+        ) VALUES ('future-album-session', ?, ?, 'future-digest', ?, ?)
+      `).bind(shareId, access.event.id, futureAt, expiredAt).run();
+    }
+    return cleanupNow;
+  }
+
+  it('drains multiple expired session pages in one scheduled pass', async () => {
+    const cleanupNow = await seedSessions(250, true);
 
     await scheduledCleanup(testEnv, cleanupNow);
 
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at <= ?
-    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(0);
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at > ?
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
+  });
+
+  it('stops an expired session sweep after five thousand deletes', async () => {
+    const cleanupNow = await seedSessions(5_001, false);
+
+    await scheduledCleanup(testEnv, cleanupNow);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at <= ?
     `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
   });
 });

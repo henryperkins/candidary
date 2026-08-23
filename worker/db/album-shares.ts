@@ -16,6 +16,12 @@ export interface AlbumShareSessionRecord {
   createdAt: string;
 }
 
+export interface AlbumShareSessionAdmission {
+  created: boolean;
+  shareExists: boolean;
+  retryAt: string | null;
+}
+
 interface AlbumShareRow {
   id: string;
   event_id: string;
@@ -95,19 +101,64 @@ export class AlbumSharesRepository {
       .bind(eventId).run();
   }
 
-  async createSession(record: AlbumShareSessionRecord): Promise<void> {
-    await this.db.prepare(`
+  /**
+   * Atomically admits one live session only while the share exists and its
+   * per-share live-session count remains below `maxActive`.
+   *
+   * D1 executes a batch as one ordered transaction, so concurrent exchanges
+   * cannot both observe the final slot. The diagnostic statement runs in the
+   * same transaction and distinguishes revocation from capacity without a
+   * racy follow-up read.
+   */
+  async admitSession(
+    record: AlbumShareSessionRecord,
+    activeAt: string,
+    maxActive: number,
+  ): Promise<AlbumShareSessionAdmission> {
+    const results = await this.db.batch([
+      this.db.prepare(`
       INSERT INTO event_album_share_sessions (
         id, share_id, event_id, secret_digest, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+      )
+      SELECT ?, share.id, share.event_id, ?, ?, ?
+      FROM event_album_shares AS share
+      WHERE share.id = ? AND share.event_id = ?
+        AND (
+          SELECT COUNT(*) FROM event_album_share_sessions AS session
+          WHERE session.share_id = share.id AND session.expires_at > ?
+        ) < ?
     `).bind(
-      record.id,
-      record.shareId,
-      record.eventId,
-      record.secretDigest,
-      record.expiresAt,
-      record.createdAt,
-    ).run();
+        record.id,
+        record.secretDigest,
+        record.expiresAt,
+        record.createdAt,
+        record.shareId,
+        record.eventId,
+        activeAt,
+        maxActive,
+      ),
+      this.db.prepare(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM event_album_shares
+            WHERE id = ? AND event_id = ?
+          ) AS share_exists,
+          (
+            SELECT MIN(expires_at) FROM event_album_share_sessions
+            WHERE share_id = ? AND expires_at > ?
+          ) AS retry_at
+      `).bind(record.shareId, record.eventId, record.shareId, activeAt),
+    ]);
+    const diagnostic = results[1]?.results[0] as {
+      share_exists: number;
+      retry_at: string | null;
+    } | undefined;
+    if (!diagnostic) throw new Error('Album share session admission returned no diagnostic.');
+    return {
+      created: (results[0]?.meta.changes ?? 0) === 1,
+      shareExists: diagnostic.share_exists === 1,
+      retryAt: diagnostic.retry_at,
+    };
   }
 
   async getSession(id: string): Promise<AlbumShareSessionRecord | null> {

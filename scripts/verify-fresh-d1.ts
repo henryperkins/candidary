@@ -608,9 +608,12 @@ const EXPECTED_ALBUM_FOREIGN_KEYS = [
 ];
 
 const EXPECTED_ALBUM_INDEXES = [
-  'event_album_share_sessions.event_album_share_sessions_lookup unique=0 partial=0'
-    + ' sql=CREATE INDEX event_album_share_sessions_lookup'
-    + ' ON event_album_share_sessions(id, share_id, event_id)',
+  'event_album_share_sessions.event_album_share_sessions_expiry unique=0 partial=0'
+    + ' sql=CREATE INDEX event_album_share_sessions_expiry'
+    + ' ON event_album_share_sessions(expires_at, id)',
+  'event_album_share_sessions.event_album_share_sessions_share_expiry unique=0 partial=0'
+    + ' sql=CREATE INDEX event_album_share_sessions_share_expiry'
+    + ' ON event_album_share_sessions(share_id, expires_at, id)',
   'event_album_share_sessions.sqlite_autoindex_event_album_share_sessions_1'
     + ' unique=1 partial=0 sql=NULL',
   'event_album_shares.sqlite_autoindex_event_album_shares_1 unique=1 partial=0 sql=NULL',

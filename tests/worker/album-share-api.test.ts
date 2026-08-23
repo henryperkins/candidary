@@ -1,8 +1,10 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { ALBUM_SHARE_SESSION_SECONDS } from '../../shared/constants';
 import type { AlbumShareView, PublicAlbumView } from '../../shared/contracts';
 import { createApp } from '../../worker/app';
+import { AlbumShareService } from '../../worker/services/album-share';
 import {
   eventAccess,
   origin,
@@ -136,6 +138,37 @@ async function unavailableShape(response: Response) {
   };
 }
 
+async function seedAlbumShareSessions(input: {
+  shareId: string;
+  eventId: string;
+  start: number;
+  count: number;
+  expiresAt: string;
+}) {
+  await env.DB.prepare(`
+    WITH digits(d) AS (
+      VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+    ), numbers(n) AS (
+      SELECT ones.d + tens.d * 10 + hundreds.d * 100 + thousands.d * 1000
+      FROM digits ones, digits tens, digits hundreds, digits thousands
+    )
+    INSERT INTO event_album_share_sessions (
+      id, share_id, event_id, secret_digest, expires_at, created_at
+    )
+    SELECT
+      printf('seeded-album-session-%05d', n + ?1),
+      ?2, ?3, printf('digest-%05d', n + ?1), ?5, ?5
+    FROM numbers
+    WHERE n < ?4
+  `).bind(
+    input.start,
+    input.shareId,
+    input.eventId,
+    input.count,
+    input.expiresAt,
+  ).run();
+}
+
 describe('manager album sharing', () => {
   it('requires manager authority, event ownership, Origin, and the accepted manager CSRF pair', async () => {
     const access = await eventAccess();
@@ -260,6 +293,68 @@ describe('manager album sharing', () => {
       .bind(photoId).first<string>('favorited_at')).toBe(NOW);
     expect(await env.DB.prepare('SELECT publication_status FROM media WHERE id = ?')
       .bind(photoId).first<string>('publication_status')).toBe('unpublished');
+  });
+
+  it('linearizes an enable read before a concurrent stop without resurrecting the share', async () => {
+    const access = await eventAccess();
+    await shareableAlbum(access);
+    const original = await enabledShare(access);
+    let observed!: () => void;
+    let resume!: () => void;
+    const shareObserved = new Promise<void>((resolve) => { observed = resolve; });
+    const mayReturnShare = new Promise<void>((resolve) => { resume = resolve; });
+    const pausedDb = new Proxy(testEnv.DB, {
+      get(target, property, receiver) {
+        if (property !== 'prepare') {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return (query: string) => {
+          const statement = target.prepare(query);
+          if (!query.includes('FROM event_album_shares WHERE event_id = ?')) return statement;
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty, statementReceiver) {
+              if (statementProperty !== 'bind') {
+                const value = Reflect.get(
+                  statementTarget,
+                  statementProperty,
+                  statementReceiver,
+                ) as unknown;
+                return typeof value === 'function' ? value.bind(statementTarget) : value;
+              }
+              return (...values: unknown[]) => {
+                const bound = statementTarget.bind(...values);
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty, boundReceiver) {
+                    if (boundProperty === 'first') {
+                      return async <T>() => {
+                        const row = await boundTarget.first<T>();
+                        observed();
+                        await mayReturnShare;
+                        return row;
+                      };
+                    }
+                    const value = Reflect.get(boundTarget, boundProperty, boundReceiver) as unknown;
+                    return typeof value === 'function' ? value.bind(boundTarget) : value;
+                  },
+                });
+              };
+            },
+          });
+        };
+      },
+    });
+    const enabling = new AlbumShareService({ ...testEnv, DB: pausedDb }).enable(access.event.id);
+
+    await shareObserved;
+    expect((await managerShare(access, 'DELETE')).status).toBe(200);
+    resume();
+    const observedBeforeStop = await enabling;
+
+    expect(observedBeforeStop.url).toBe(original.url);
+    expect((await exchange(fragment(observedBeforeStop.url))).status).toBe(410);
+    expect(await env.DB.prepare('SELECT count(*) AS count FROM event_album_shares')
+      .first<number>('count')).toBe(0);
   });
 });
 
@@ -391,8 +486,56 @@ describe('public album exchange and projection', () => {
 
     expect(row?.secret_digest).not.toBe(rawSecret);
     expect(JSON.stringify(row)).not.toContain(session.token);
-    expect(Date.parse(row!.expires_at)).toBeGreaterThanOrEqual(before + (7 * 24 * 60 * 60 * 1000));
-    expect(Date.parse(row!.expires_at)).toBeLessThanOrEqual(after + (7 * 24 * 60 * 60 * 1000));
+    const lifetimeMs = ALBUM_SHARE_SESSION_SECONDS * 1_000;
+    expect(Date.parse(row!.expires_at)).toBeGreaterThanOrEqual(before + lifetimeMs);
+    expect(Date.parse(row!.expires_at)).toBeLessThanOrEqual(after + lifetimeMs);
+  });
+
+  it('admits exactly one exchange at the live-session cap and ignores expired rows', async () => {
+    const access = await eventAccess();
+    await shareableAlbum(access);
+    const share = await enabledShare(access);
+    const [shareId] = fragment(share.url).split('.');
+    if (!shareId) throw new Error('Expected the enabled share identifier.');
+    const requestStartedAt = Date.now();
+    const earliestLiveExpiry = new Date(requestStartedAt + 120_000).toISOString();
+    await seedAlbumShareSessions({
+      shareId,
+      eventId: access.event.id,
+      start: 0,
+      count: 25,
+      expiresAt: new Date(requestStartedAt - 60_000).toISOString(),
+    });
+    await seedAlbumShareSessions({
+      shareId,
+      eventId: access.event.id,
+      start: 25,
+      count: 1_999,
+      expiresAt: earliestLiveExpiry,
+    });
+
+    const responses = await Promise.all([
+      exchange(fragment(share.url)),
+      exchange(fragment(share.url)),
+    ]);
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 429]);
+    const limited = responses.find(({ status }) => status === 429);
+    if (!limited) throw new Error('Expected one capacity response.');
+    const retryAfter = Number(limited.headers.get('retry-after'));
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeGreaterThanOrEqual(
+      Math.max(1, Math.ceil((Date.parse(earliestLiveExpiry) - Date.now()) / 1_000)),
+    );
+    expect(retryAfter).toBeLessThanOrEqual(
+      Math.ceil((Date.parse(earliestLiveExpiry) - requestStartedAt) / 1_000),
+    );
+    expect((await limited.json<{ code: string }>()).code).toBe('RATE_LIMITED');
+    expect(await env.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions
+      WHERE share_id = ? AND expires_at > ?
+    `).bind(shareId, new Date().toISOString()).first<number>('count')).toBe(2_000);
   });
 
   it('rejects a valid album session cookie with a trailing dot suffix', async () => {

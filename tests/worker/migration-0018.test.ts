@@ -141,6 +141,30 @@ describe('migration 0018 album end to end', () => {
       .toEqual({ count: 0 });
   });
 
+  it('indexes global expiry sweeps and per-share live-session admission', async () => {
+    await applyD1Migrations(env.DB, [...migrationsUpTo('0018'), migrationOnly('0018')]);
+
+    const indexes = await env.DB.prepare(`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = 'event_album_share_sessions'
+        AND sql IS NOT NULL
+      ORDER BY name
+    `).all<{ name: string; sql: string }>();
+
+    expect(indexes.results).toEqual([
+      {
+        name: 'event_album_share_sessions_expiry',
+        sql: 'CREATE INDEX event_album_share_sessions_expiry\n'
+          + '  ON event_album_share_sessions(expires_at, id)',
+      },
+      {
+        name: 'event_album_share_sessions_share_expiry',
+        sql: 'CREATE INDEX event_album_share_sessions_share_expiry\n'
+          + '  ON event_album_share_sessions(share_id, expires_at, id)',
+      },
+    ]);
+  });
+
   it('accepts only the matching complete or album export snapshot shape', async () => {
     await applyD1Migrations(env.DB, [...migrationsUpTo('0018'), migrationOnly('0018')]);
     await seedEvent();

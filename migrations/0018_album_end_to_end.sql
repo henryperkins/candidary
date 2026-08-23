@@ -20,8 +20,10 @@ CREATE TABLE event_album_share_sessions (
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE INDEX event_album_share_sessions_lookup
-  ON event_album_share_sessions(id, share_id, event_id);
+CREATE INDEX event_album_share_sessions_expiry
+  ON event_album_share_sessions(expires_at, id);
+CREATE INDEX event_album_share_sessions_share_expiry
+  ON event_album_share_sessions(share_id, expires_at, id);
 
 ALTER TABLE export_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'complete'
   CHECK (kind IN ('complete', 'album'));

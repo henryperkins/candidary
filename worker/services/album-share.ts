@@ -1,4 +1,8 @@
 import type { AlbumShareStatus, AlbumShareView, PublicAlbumView } from '../../shared/contracts';
+import {
+  ALBUM_SHARE_MAX_ACTIVE_SESSIONS,
+  ALBUM_SHARE_SESSION_SECONDS,
+} from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { AlbumRepository } from '../db/album';
 import {
@@ -18,11 +22,17 @@ import {
   type SecretToken,
 } from '../security/crypto';
 
-const ALBUM_SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const TOKEN = /^([A-Za-z0-9_-]{1,128})\.([A-Za-z0-9_-]{1,128})$/u;
 
 export function albumShareUnavailable(): ApiError {
   return new ApiError('ALBUM_SHARE_UNAVAILABLE', 'This album is not available.', 410);
+}
+
+export class AlbumShareSessionCapacityError extends ApiError {
+  constructor(public readonly retryAfterSeconds: number) {
+    super('RATE_LIMITED', 'Too many active album sessions. Try again later.', 429);
+    this.name = 'AlbumShareSessionCapacityError';
+  }
 }
 
 function tokenParts(token: string): { id: string; secret: string } | null {
@@ -90,6 +100,9 @@ export class AlbumShareService {
 
   async enable(eventId: string, now = new Date()): Promise<AlbumShareView> {
     const existing = await this.shares.getForEvent(eventId);
+    // This read linearizes before a later concurrent stop. Returning its observed
+    // credential is safe: stop deletes the share and cascades every session, so it
+    // cannot resurrect access even when the response arrives after revocation.
     if (existing) return this.shareView(existing);
 
     const album = await this.albums.get(eventId);
@@ -132,24 +145,23 @@ export class AlbumShareService {
     return event;
   }
 
-  private async credential(token: string, now: Date): Promise<AlbumShareRecord> {
+  private async credential(token: string, now: Date) {
     const parsed = tokenParts(token);
     if (!parsed) throw albumShareUnavailable();
     const share = await this.shares.getById(parsed.id);
     if (!share) throw albumShareUnavailable();
     const digest = await digestSecret(parsed.secret, this.env.ALBUM_SHARE_HMAC_KEY);
     if (!constantTimeEqual(digest, share.secretDigest)) throw albumShareUnavailable();
-    await this.activeEvent(share.eventId, now);
-    return share;
+    const event = await this.activeEvent(share.eventId, now);
+    return { share, event };
   }
 
   async exchange(token: string, now = new Date()): Promise<AlbumShareExchange> {
-    const share = await this.credential(token, now);
-    const event = await this.activeEvent(share.eventId, now);
+    const { share, event } = await this.credential(token, now);
     const album = publicProjection(await this.albums.get(share.eventId));
     const session = createSecretToken();
     const expiresAtMs = Math.min(
-      now.getTime() + ALBUM_SESSION_LIFETIME_MS,
+      now.getTime() + (ALBUM_SHARE_SESSION_SECONDS * 1_000),
       Date.parse(event.purgeAfter),
     );
     const record: AlbumShareSessionRecord = {
@@ -160,7 +172,22 @@ export class AlbumShareService {
       expiresAt: new Date(expiresAtMs).toISOString(),
       createdAt: now.toISOString(),
     };
-    await this.shares.createSession(record);
+    const admission = await this.shares.admitSession(
+      record,
+      now.toISOString(),
+      ALBUM_SHARE_MAX_ACTIVE_SESSIONS,
+    );
+    if (!admission.created) {
+      if (!admission.shareExists) throw albumShareUnavailable();
+      const retryAtMs = Date.parse(admission.retryAt ?? '');
+      if (!Number.isFinite(retryAtMs)) {
+        throw new Error('A full album share has no active session expiry.');
+      }
+      throw new AlbumShareSessionCapacityError(Math.max(
+        1,
+        Math.ceil((retryAtMs - now.getTime()) / 1_000),
+      ));
+    }
     return {
       album,
       session,

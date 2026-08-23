@@ -1,4 +1,6 @@
 import {
+  ALBUM_SHARE_SESSION_CLEANUP_BATCH,
+  ALBUM_SHARE_SESSION_CLEANUP_MAX_BATCHES,
   COVER_CLEANUP_ROWS_PER_CLASS,
   COVER_PURGE_FENCE_TERMINAL_PROOF_SUFFIX,
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
@@ -110,16 +112,22 @@ export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Prom
   return cleaned;
 }
 
-export const ALBUM_SHARE_SESSION_CLEANUP_LIMIT = 100;
-
-export function cleanupExpiredAlbumShareSessions(
+export async function cleanupExpiredAlbumShareSessions(
   env: AppEnv,
   now = new Date(),
 ): Promise<number> {
-  return new AlbumSharesRepository(env.DB).deleteExpiredSessions(
-    now.toISOString(),
-    ALBUM_SHARE_SESSION_CLEANUP_LIMIT,
-  );
+  const repository = new AlbumSharesRepository(env.DB);
+  const timestamp = now.toISOString();
+  let cleaned = 0;
+  for (let batch = 0; batch < ALBUM_SHARE_SESSION_CLEANUP_MAX_BATCHES; batch += 1) {
+    const changes = await repository.deleteExpiredSessions(
+      timestamp,
+      ALBUM_SHARE_SESSION_CLEANUP_BATCH,
+    );
+    cleaned += changes;
+    if (changes < ALBUM_SHARE_SESSION_CLEANUP_BATCH) break;
+  }
+  return cleaned;
 }
 
 export const LEGACY_STORED_MEDIA_PROMOTION_LIMIT = 25;

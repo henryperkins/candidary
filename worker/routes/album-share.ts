@@ -5,7 +5,11 @@ import { MediaRepository } from '../db/media';
 import type { AppBindings } from '../env';
 import { getAlbumShareCookie, setAlbumShareCookie } from '../http/cookies';
 import { assertRequestOrigin } from '../http/csrf';
-import { AlbumShareService, albumShareUnavailable } from '../services/album-share';
+import {
+  AlbumShareService,
+  AlbumShareSessionCapacityError,
+  albumShareUnavailable,
+} from '../services/album-share';
 import { getOrCreatePreview } from '../storage/previews';
 
 export const albumShareRoutes = new Hono<AppBindings>();
@@ -40,9 +44,17 @@ albumShareRoutes.delete('/manage/events/:eventId/album/share', async (context) =
 albumShareRoutes.post('/album-share/exchange', async (context) => {
   assertRequestOrigin(context);
   const body = await context.req.json().catch(() => null) as { token?: unknown } | null;
-  const exchanged = await new AlbumShareService(context.env).exchange(
-    typeof body?.token === 'string' ? body.token : '',
-  );
+  let exchanged;
+  try {
+    exchanged = await new AlbumShareService(context.env).exchange(
+      typeof body?.token === 'string' ? body.token : '',
+    );
+  } catch (error) {
+    if (error instanceof AlbumShareSessionCapacityError) {
+      context.header('Retry-After', String(error.retryAfterSeconds));
+    }
+    throw error;
+  }
   setAlbumShareCookie(context, exchanged.session, exchanged.maxAgeSeconds);
   return context.json({
     data: { album: exchanged.album },

@@ -44,6 +44,12 @@ export const ALBUM_MAX_SECTIONS = 40;
 export const ALBUM_TITLE_MAX_LENGTH = 120;
 export const ALBUM_DESCRIPTION_MAX_LENGTH = 1_000;
 export const ALBUM_SHARE_SESSION_SECONDS = 7 * 24 * 60 * 60;
+/** One live album share can serve the full 500-guest event across four devices each. */
+export const ALBUM_SHARE_MAX_ACTIVE_SESSIONS = 2_000;
+/** Scheduled cleanup deletes expired album-share sessions in small D1 statements. */
+export const ALBUM_SHARE_SESSION_CLEANUP_BATCH = 100;
+/** One scheduled pass may drain at most 5,000 expired album-share sessions. */
+export const ALBUM_SHARE_SESSION_CLEANUP_MAX_BATCHES = 50;
 export const GUEST_MESSAGE_PAGE_SIZE = 50;
 export const DEFAULT_GUESTBOOK_PROMPT = 'Share a wish, memory, or moment from the day.';
 export const MAX_EVENT_GUEST_NOTES = 1_000;
