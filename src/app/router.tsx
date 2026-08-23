@@ -5,6 +5,7 @@ import {
   type RouteObject,
 } from 'react-router-dom';
 import { CreatePage } from '../pages/CreatePage';
+import { AlbumSharePage } from '../pages/AlbumSharePage';
 import { EventEntryPage } from '../pages/EventEntryPage';
 import { EventEntryUnavailablePage } from '../pages/EventEntryUnavailablePage';
 import { EventPage } from '../pages/EventPage';
@@ -24,6 +25,7 @@ const routes: RouteObject[] = [
   { path: '/privacy', element: <PrivacyPage /> },
   { path: '/terms', element: <TermsPage /> },
   { path: '/join', element: <EventEntryPage /> },
+  { path: '/album', element: <AlbumSharePage /> },
   { path: '/event/:slug', element: <EventPage /> },
   { path: '/event/:slug/fullscreen', element: <EventPage fullscreen /> },
   { path: '/manage/event/:eventId', element: <ManagerPage /> },

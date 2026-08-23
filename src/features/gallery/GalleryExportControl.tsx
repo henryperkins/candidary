@@ -3,26 +3,27 @@ import { useState } from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
+import { EXPORT_STATE_LABELS, ExportStatusAnnouncement } from './export-control-status';
+
+// Complete-export rendering predates the wire-level `kind` discriminator. Direct callers that
+// still supply that legacy shape remain source-compatible; current API jobs retain the field.
+export type LegacyCompleteExportView = Omit<ExportView, 'kind'> & { kind?: 'complete' };
+type CompleteExportInput = ExportView | LegacyCompleteExportView;
+
+export function normalizeCompleteExport(job: CompleteExportInput): ExportView {
+  return { ...job, kind: job.kind ?? 'complete' };
+}
 
 interface GalleryExportControlProps {
-  job?: ExportView;
+  job?: CompleteExportInput;
+  activeJob?: ExportView;
   download?: ExportDownloadView;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
+  live?: boolean;
+  onAnnouncement?(message: string): void;
 }
-
-/**
- * Keyed by the state union rather than matched with a fallback, so a new export state is a
- * compile error here instead of a job that silently claims to have expired.
- */
-const EXPORT_STATE_LABELS: Record<ExportView['state'], string> = {
-  queued: 'Preparing',
-  running: 'Preparing',
-  ready: 'Ready',
-  failed: 'Failed',
-  expired: 'Expired',
-};
 
 // A host planning a multi-gigabyte download needs the size before they start, not after.
 // `totalBytes` and each part's `sourceBytes` were already on the wire and unused.
@@ -52,31 +53,40 @@ const DESKTOP_ADVISORY_BYTES = 2 * 1024 ** 3;
  */
 export function GalleryExportControl({
   job,
+  activeJob,
   download,
   onPrepare,
   onDownload,
   onRetry,
+  live = true,
+  onAnnouncement,
 }: GalleryExportControlProps) {
   const [preparing, setPreparing] = useState(false);
+  const normalizedJob = job ? normalizeCompleteExport(job) : undefined;
+  const otherExportActive = activeJob !== undefined && activeJob.id !== normalizedJob?.id;
   // One live region that outlives every branch below. A `role="status"` inserted alongside its own
   // first text is not announced, and the prepare button cannot carry the news either: it is disabled
   // the moment it is pressed, which blurs it. So the region is mounted outside the branch and filled
   // afterwards. It only speaks for changes that happen while the host is here: a job already running
   // when Gallery opens mounts the region full, which is why the state is also rendered visibly.
-  const liveMessage = job
-    ? `${EXPORT_STATE_LABELS[job.state]}. ${exportStateDetail(job)}`
+  const liveMessage = normalizedJob
+    ? `${EXPORT_STATE_LABELS[normalizedJob.state]}. ${exportStateDetail(normalizedJob)}`
     : preparing ? 'Preparing your download…' : '';
   return <div className="gallery-export">
-    <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{liveMessage}</p>
-    {!job
+    <ExportStatusAnnouncement
+      live={live}
+      message={liveMessage}
+      onAnnouncement={onAnnouncement}
+    />
+    {!normalizedJob
       ? <>
           <p className="gallery-export__copy">
-            Every private photo, the photo manifest, and the printable and private guestbook files. Search and favorites do not change this.
+            Every private photo, the photo manifest, and the printable and private guestbook files. Search and album picks do not change this.
           </p>
           <button
             type="button"
             className="button button--primary"
-            disabled={preparing}
+            disabled={preparing || otherExportActive}
             onClick={() => {
               setPreparing(true);
               void onPrepare().finally(() => setPreparing(false));
@@ -86,10 +96,10 @@ export function GalleryExportControl({
           </button>
         </>
       : <div className="export-state">
-          <strong>{EXPORT_STATE_LABELS[job.state]}</strong>
-          <span>{exportStateDetail(job)}</span>
-          {job.state === 'ready' && !download && (
-            <button type="button" className="button button--secondary" onClick={() => void onDownload(job)}>
+          <strong>{EXPORT_STATE_LABELS[normalizedJob.state]}</strong>
+          <span>{exportStateDetail(normalizedJob)}</span>
+          {normalizedJob.state === 'ready' && !download && (
+            <button type="button" className="button button--secondary" onClick={() => void onDownload(normalizedJob)}>
               <Download aria-hidden="true" /> Get download links
             </button>
           )}
@@ -98,8 +108,8 @@ export function GalleryExportControl({
               {download.parts.length} photo parts. Collect every one — each holds a different
               set of photos.
             </p>}
-            {job.totalBytes >= DESKTOP_ADVISORY_BYTES && <p className="export-links__lead">
-              This download is {formatBytes(job.totalBytes)}. It is easier to finish on a
+            {normalizedJob.totalBytes >= DESKTOP_ADVISORY_BYTES && <p className="export-links__lead">
+              This download is {formatBytes(normalizedJob.totalBytes)}. It is easier to finish on a
               computer than on a phone.
             </p>}
             {download.manifest && <a href={download.manifest.url}>Photo manifest</a>}
@@ -112,8 +122,13 @@ export function GalleryExportControl({
             {download.printableGuestbook && <a href={download.printableGuestbook.url}>Printable guestbook</a>}
             {download.privateGuestbook && <a href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
           </div>}
-          {(job.state === 'failed' || job.state === 'expired') && (
-            <button type="button" className="button button--secondary" onClick={() => void onRetry(job)}>
+          {(normalizedJob.state === 'failed' || normalizedJob.state === 'expired') && (
+            <button
+              type="button"
+              className="button button--secondary"
+              disabled={otherExportActive}
+              onClick={() => void onRetry(normalizedJob)}
+            >
               Retry export
             </button>
           )}

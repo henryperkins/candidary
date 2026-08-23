@@ -18,6 +18,7 @@ const managerExportKeys = [
   'guestbookPrompt',
   'guestbookSharedCount',
   'id',
+  'kind',
   'mediaCount',
   'partCount',
   'snapshotAt',
@@ -62,6 +63,33 @@ function signerFreeEnv() {
       return Reflect.get(target, property, receiver) as unknown;
     },
   });
+}
+
+const ALBUM_SNAPSHOT_SOURCE_AT = '2026-08-23T00:00:00.000Z';
+
+async function setAlbumSnapshotSource(
+  access: Awaited<ReturnType<typeof eventAccess>>,
+  pickedIds: string[],
+  entriesJson: string,
+) {
+  await testEnv.DB.batch([
+    testEnv.DB.prepare(`
+      UPDATE media SET
+        created_at = ?2,
+        stored_at = ?2,
+        favorited_at = CASE
+        WHEN id IN (SELECT value FROM json_each(?1)) THEN ?2 ELSE NULL END
+      WHERE event_id = ?3
+    `).bind(JSON.stringify(pickedIds), ALBUM_SNAPSHOT_SOURCE_AT, access.event.id),
+    testEnv.DB.prepare(`
+      INSERT INTO event_albums (
+        event_id, entries, saved_at, revision, created_at, updated_at
+      ) VALUES (?1, ?2, ?3, 1, ?3, ?3)
+      ON CONFLICT(event_id) DO UPDATE SET
+        entries = excluded.entries, saved_at = excluded.saved_at,
+        revision = event_albums.revision + 1, updated_at = excluded.updated_at
+    `).bind(access.event.id, entriesJson, ALBUM_SNAPSHOT_SOURCE_AT),
+  ]);
 }
 
 describe('manager exports', () => {
@@ -150,6 +178,217 @@ describe('manager exports', () => {
     }, testEnv);
     expect(response.status).toBe(409);
     expect((await response.json<any>()).code).toBe('EXPORT_EMPTY');
+  });
+
+  it('atomically freezes only live album picks, canonical raw order, and deterministic tail positions', async () => {
+    const access = await eventAccess();
+    const first = await uploadPending(access, 'album-snapshot-first', 'First pick');
+    const second = await uploadPending(access, 'album-snapshot-second', 'Second pick');
+    const unpickedLegacy = await uploadPending(access, 'album-snapshot-unpicked', 'Unpicked legacy');
+    await testEnv.DB.batch([
+      testEnv.DB.prepare('UPDATE media SET timeline_at = ? WHERE id = ?')
+        .bind('2026-08-23T10:00:00.000Z', first.id),
+      testEnv.DB.prepare('UPDATE media SET timeline_at = ? WHERE id = ?')
+        .bind('2026-08-23T11:00:00.000Z', second.id),
+      testEnv.DB.prepare('UPDATE media SET object_key = ? WHERE id = ?')
+        .bind(`events/${access.event.id}/media/${unpickedLegacy.id}`, unpickedLegacy.id),
+    ]);
+    const rawEntries = `[
+      { "kind": "section", "id": "section-a", "heading": "Dinner" },
+      { "kind": "photo", "mediaId": "${second.id}" },
+      { "kind": "photo", "mediaId": "stale-id" },
+      { "kind": "photo", "mediaId": "${first.id}" }
+    ]`;
+    await setAlbumSnapshotSource(access, [first.id, second.id], rawEntries);
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+    }, testEnv);
+
+    expect(response.status).toBe(202);
+    const job = (await response.json<any>()).data.export;
+    expect(job).toMatchObject({ kind: 'album', mediaCount: 2, totalBytes: 128 });
+    const frozen = await testEnv.DB.prepare(`
+      SELECT kind, album_entries_json, guestbook_entry_count, guestbook_event_name
+      FROM export_jobs WHERE id = ?
+    `).bind(job.id).first<any>();
+    expect(frozen).toEqual({
+      kind: 'album',
+      album_entries_json: JSON.stringify(JSON.parse(rawEntries)),
+      guestbook_entry_count: null,
+      guestbook_event_name: null,
+    });
+    expect((await testEnv.DB.prepare(`
+      SELECT media_id, album_tail_position FROM export_media_entries
+      WHERE export_job_id = ? ORDER BY album_tail_position
+    `).bind(job.id).all()).results).toEqual([
+      { media_id: first.id, album_tail_position: 1 },
+      { media_id: second.id, album_tail_position: 2 },
+    ]);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
+  });
+
+  it('bounds album membership, bytes, and canonical validation by storage and pick transition times', async () => {
+    const access = await eventAccess();
+    const included = await uploadPending(access, 'album-boundary-included', null);
+    const storedAfter = await uploadPending(access, 'album-boundary-stored-after', null);
+    const pickedAfter = await uploadPending(access, 'album-boundary-picked-after', null);
+    const boundary = '2026-08-23T12:00:00.000Z';
+    await setAlbumSnapshotSource(
+      access,
+      [included.id, storedAfter.id, pickedAfter.id],
+      JSON.stringify([
+        { kind: 'photo', mediaId: storedAfter.id },
+        { kind: 'photo', mediaId: included.id },
+        { kind: 'photo', mediaId: pickedAfter.id },
+      ]),
+    );
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE media SET created_at = '2026-08-23T09:00:00.000Z',
+          stored_at = '2026-08-23T10:00:00.000Z', favorited_at = '2026-08-23T11:00:00.000Z'
+        WHERE id = ?
+      `).bind(included.id),
+      testEnv.DB.prepare(`
+        UPDATE media SET created_at = '2026-08-23T09:00:00.000Z',
+          stored_at = '2026-08-23T13:00:00.000Z', favorited_at = '2026-08-23T11:00:00.000Z',
+          object_key = ?, byte_size = ?
+        WHERE id = ?
+      `).bind(`events/${access.event.id}/media/${storedAfter.id}`, MAX_EVENT_BYTES + 1, storedAfter.id),
+      testEnv.DB.prepare(`
+        UPDATE media SET created_at = '2026-08-23T09:00:00.000Z',
+          stored_at = '2026-08-23T10:00:00.000Z', favorited_at = '2026-08-23T13:00:00.000Z',
+          object_key = ?, byte_size = ?
+        WHERE id = ?
+      `).bind(`events/${access.event.id}/media/${pickedAfter.id}`, MAX_EVENT_BYTES + 1, pickedAfter.id),
+    ]);
+
+    const job = await new ExportsRepository(testEnv.DB).createAlbumActive({
+      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+    });
+
+    expect(job).toMatchObject({ kind: 'album', mediaCount: 1, totalBytes: 64 });
+    expect((await testEnv.DB.prepare(`
+      SELECT media_id FROM export_media_entries WHERE export_job_id = ?
+    `).bind(job.id).all()).results).toEqual([{ media_id: included.id }]);
+  });
+
+  it('classifies an album with only post-boundary transitions as empty', async () => {
+    const access = await eventAccess();
+    const after = await uploadPending(access, 'album-boundary-empty', null);
+    const boundary = '2026-08-23T12:00:00.000Z';
+    await setAlbumSnapshotSource(access, [after.id], '[]');
+    await testEnv.DB.prepare(`
+      UPDATE media SET created_at = '2026-08-23T09:00:00.000Z',
+        stored_at = '2026-08-23T13:00:00.000Z', favorited_at = '2026-08-23T13:00:00.000Z',
+        object_key = ?, byte_size = ?
+      WHERE id = ?
+    `).bind(`events/${access.event.id}/media/${after.id}`, MAX_EVENT_BYTES + 1, after.id).run();
+
+    await expect(new ExportsRepository(testEnv.DB).createAlbumActive({
+      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+    })).rejects.toMatchObject({ code: 'EXPORT_EMPTY' });
+  });
+
+  it('freezes malformed and non-array historical album order as canonical empty order', async () => {
+    for (const [index, raw] of ['{', '{"kind":"photo"}'].entries()) {
+      const access = await eventAccess();
+      const picked = await uploadPending(access, `album-malformed-order-${index}`, null);
+      await setAlbumSnapshotSource(access, [picked.id], '[]');
+      await testEnv.DB.prepare('PRAGMA ignore_check_constraints = ON').run();
+      await testEnv.DB.prepare('UPDATE event_albums SET entries = ? WHERE event_id = ?')
+        .bind(raw, access.event.id).run();
+      await testEnv.DB.prepare('PRAGMA ignore_check_constraints = OFF').run();
+
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+      }, testEnv);
+
+      expect(response.status).toBe(202);
+      const job = (await response.json<any>()).data.export;
+      expect(await testEnv.DB.prepare('SELECT album_entries_json FROM export_jobs WHERE id = ?')
+        .bind(job.id).first<string>('album_entries_json')).toBe('[]');
+      expect((await testEnv.DB.prepare(`
+        SELECT media_id, album_tail_position FROM export_media_entries WHERE export_job_id = ?
+      `).bind(job.id).all()).results).toEqual([
+        { media_id: picked.id, album_tail_position: 1 },
+      ]);
+    }
+  });
+
+  it('refuses an empty album even when the event has complete-export content', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'album-empty-unpicked', 'Still delivered');
+    await setAlbumSnapshotSource(access, [], '[]');
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+    }, testEnv);
+
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).code).toBe('EXPORT_EMPTY');
+    expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM export_jobs WHERE event_id = ?')
+      .bind(access.event.id).first<number>('count')).toBe(0);
+  });
+
+  it('rolls back the album job and its frozen order when picked-row insertion fails', async () => {
+    const access = await eventAccess();
+    const picked = await uploadPending(access, 'album-snapshot-rollback', null);
+    await setAlbumSnapshotSource(
+      access,
+      [picked.id],
+      JSON.stringify([{ kind: 'photo', mediaId: picked.id }]),
+    );
+    await testEnv.DB.prepare(`
+      CREATE TRIGGER fail_album_media_snapshot BEFORE INSERT ON export_media_entries
+      BEGIN SELECT RAISE(ABORT, 'album snapshot insert failed'); END
+    `).run();
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+    }, testEnv);
+
+    expect(response.status).toBe(500);
+    expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM export_jobs WHERE event_id = ?')
+      .bind(access.event.id).first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare('SELECT count(*) AS count FROM export_media_entries')
+      .first<number>('count')).toBe(0);
+  });
+
+  it('rejects unknown export selectors and preserves the empty-object complete contract', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'complete-empty-object', null);
+    const invalid = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager),
+      body: JSON.stringify({ kind: 'complete', extra: true }),
+    }, testEnv);
+    expect(invalid.status).toBe(422);
+
+    const complete = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(complete.status).toBe(202);
+    expect((await complete.json<any>()).data.export).toMatchObject({ kind: 'complete' });
+    expect(await testEnv.DB.prepare('SELECT album_entries_json FROM export_jobs WHERE event_id = ?')
+      .bind(access.event.id).first<string | null>('album_entries_json')).toBeNull();
+  });
+
+  it('lists equal-time exports newest-first with a stable ID tie-breaker', async () => {
+    const access = await eventAccess();
+    const repository = new ExportsRepository(testEnv.DB);
+    const createdAt = '2026-08-23T12:00:00.000Z';
+    for (const id of ['export-a', 'export-b']) {
+      await repository.createActive({
+        id, eventId: access.event.id, snapshotAt: createdAt,
+        mediaCount: 0, totalBytes: 0, createdAt,
+      });
+      await repository.markFailed(id, 'EXPORT_TEST_FAILURE');
+    }
+
+    expect((await repository.listForEvent(access.event.id)).map(({ id }) => id))
+      .toEqual(['export-b', 'export-a']);
   });
 
   it('refuses a legacy writable photo before creating or dispatching an export', async () => {
@@ -422,6 +661,260 @@ describe('manager exports', () => {
     expect((await retry.json<any>()).data.export.attempt).toBe(2);
   });
 
+  it('keeps a found initial Workflow with unknown status on its one deterministic instance ID', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-failure', null);
+    const createdIds: string[] = [];
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async (batch: Array<{ id: string }>) => {
+            createdIds.push(batch[0]!.id);
+            throw new Error('simulated lost initial Workflow creation response');
+          };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({ id, status: async () => ({ status: 'unknown' }) });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+    expect(response.status).toBe(202);
+    const [job] = await new ExportsRepository(testEnv.DB).listForEvent(access.event.id);
+    expect(job).toMatchObject({ state: 'queued', attempt: 1, errorCode: null });
+    expect(createdIds).toEqual([job!.id]);
+  });
+
+  it.each(['errored', 'terminated'] as const)(
+    'durably fails a pristine initial job whose only Workflow instance is %s before claim',
+    async (terminal) => {
+      const access = await eventAccess();
+      await uploadPending(access, `initial-workflow-${terminal}`, null);
+      const createdIds: string[] = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+          if (property === 'createBatch') {
+            return async (batch: Array<{ id: string }>) => {
+              createdIds.push(batch[0]!.id);
+              throw new Error('simulated lost terminal Workflow response');
+            };
+          }
+          if (property === 'get') {
+            return async (id: string) => ({ id, status: async () => ({ status: terminal }) });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+      expect(response.status).toBe(202);
+      const body = await response.json<any>();
+      expect(body.data.export).toMatchObject({ state: 'failed', attempt: 1 });
+      const job = await new ExportsRepository(testEnv.DB).getById(body.data.export.id);
+      expect(job).toMatchObject({
+        state: 'failed', attempt: 1, errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+      });
+      expect(createdIds).toEqual([job!.id]);
+      expect((await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
+      `).bind(job!.id).first<number>('count'))).toBe(0);
+    },
+  );
+
+  it.each(['get', 'status'] as const)(
+    'replays idempotent creation on the same initial ID after an unobservable %s outcome',
+    async (unobservable) => {
+      const access = await eventAccess();
+      await uploadPending(access, `initial-workflow-unobservable-${unobservable}`, null);
+      const createdIds: string[] = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+          if (property === 'createBatch') {
+            return async (batch: Array<{ id: string }>) => {
+              createdIds.push(batch[0]!.id);
+              if (createdIds.length === 1) throw new Error('simulated unobservable createBatch result');
+            };
+          }
+          if (property === 'get') {
+            if (unobservable === 'get') {
+              return async () => { throw new Error('simulated unobservable Workflow lookup'); };
+            }
+            return async (id: string) => ({
+              id,
+              status: async () => { throw new Error('simulated unobservable Workflow status'); },
+            });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+      expect(response.status).toBe(202);
+      const job = (await response.json<any>()).data.export;
+      expect(job).toMatchObject({ state: 'queued', attempt: 1 });
+      expect(createdIds).toEqual([job.id, job.id]);
+      expect((await new ExportsRepository(testEnv.DB).listForEvent(access.event.id))).toHaveLength(1);
+      expect((await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
+      `).bind(job.id).first<number>('count'))).toBe(0);
+    },
+  );
+
+  it('fails a still-unobservable initial dispatch after replay so its snapshot can be retried', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-unobservable-replay', null);
+    const createdIds: string[] = [];
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async (batch: Array<{ id: string }>) => {
+            createdIds.push(batch[0]!.id);
+            throw new Error('simulated unobservable Workflow creation');
+          };
+        }
+        if (property === 'get') {
+          return async () => { throw new Error('simulated unavailable Workflow lookup'); };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+    expect(response.status).toBe(202);
+    const failed = (await response.json<any>()).data.export;
+    expect(failed).toMatchObject({ state: 'failed', attempt: 1 });
+    expect(await new ExportsRepository(testEnv.DB).getById(failed.id)).toMatchObject({
+      state: 'failed', attempt: 1, errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    });
+    expect(createdIds).toEqual([failed.id, failed.id]);
+
+    const retried = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${failed.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(retried.status).toBe(202);
+    expect((await retried.json<any>()).data.export).toMatchObject({
+      state: 'queued', attempt: 2,
+    });
+    expect((await new ExportsRepository(testEnv.DB).listForEvent(access.event.id))).toHaveLength(1);
+  });
+
+  it('retries a terminal-before-claim initial job without duplicating its frozen snapshot', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-terminal-retry', null);
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async () => { throw new Error('simulated terminal initial Workflow'); };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({ id, status: async () => ({ status: 'errored' }) });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const initial = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+    const failed = (await initial.json<any>()).data.export;
+    const frozenBefore = await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(failed.id).first<number>('count');
+
+    const retry = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${failed.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(retry.status).toBe(202);
+    expect((await retry.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(failed.id).first<number>('count')).toBe(frozenBefore);
+  });
+
+  it('adopts an initial Workflow whose creation response was lost', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-response-loss', null);
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async () => { throw new Error('simulated lost initial Workflow response'); };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({ id, status: async () => ({ status: 'queued' }) });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+    expect(response.status).toBe(202);
+    expect((await response.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 1 });
+  });
+
+  it('does not overwrite an initial job that crossed from pristine queued to running', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-running-race', null);
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async (batch: Array<{ id: string }>) => {
+            const id = batch[0]!.id;
+            await testEnv.DB.prepare(`
+              UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
+            `).bind('2026-08-23T12:00:01.000Z', id).run();
+            throw new Error('simulated lost initial Workflow response after claim');
+          };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({ id, status: async () => ({ status: 'unknown' }) });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+    expect(response.status).toBe(202);
+    expect((await response.json<any>()).data.export).toMatchObject({ state: 'running', attempt: 1 });
+  });
+
   it('keeps prior-attempt objects when the retry transition fails before commit', async () => {
     const access = await eventAccess();
     const { job, keys } = await failedExportWithArtifacts(access, 'retry-before-commit');
@@ -552,6 +1045,108 @@ describe('manager exports', () => {
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
   });
 
+  it.each(['errored', 'terminated', 'complete'] as const)(
+    'fails a terminal retry Workflow in %s state and advances the next retry',
+    async (terminal) => {
+      const access = await eventAccess();
+      const { job } = await failedExportWithArtifacts(access, `retry-workflow-${terminal}`);
+      const createdIds: string[] = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'createBatch') {
+            return async (batch: Array<{ id: string }>) => {
+              createdIds.push(batch[0]!.id);
+              throw new Error(`simulated retained ${terminal} retry Workflow`);
+            };
+          }
+          if (property === 'get') {
+            return async (id: string) => ({ id, status: async () => ({ status: terminal }) });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(
+        `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+        { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+        { ...testEnv, EXPORT_WORKFLOW: workflow },
+      );
+
+      expect(response.status).toBe(202);
+      const failed = (await response.json<any>()).data.export;
+      expect(createdIds).toEqual([`${job.id}-2`]);
+      expect(failed).toMatchObject({
+        id: job.id,
+        state: 'failed',
+        attempt: 2,
+      });
+      expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+        state: 'failed',
+        attempt: 2,
+        errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+      });
+      expect(await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
+      `).bind(job.id).first<number>('count')).toBe(0);
+
+      const next = await createApp().request(
+        `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+        { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+        testEnv,
+      );
+      expect(next.status).toBe(202);
+      expect((await next.json<any>()).data.export).toMatchObject({
+        state: 'queued',
+        attempt: 3,
+      });
+    },
+  );
+
+  it('keeps the running attempt when the retry claim wins the terminal dispatch failure fence', async () => {
+    const access = await eventAccess();
+    const { job } = await failedExportWithArtifacts(access, 'retry-workflow-claim-race');
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') {
+          return async () => { throw new Error('simulated lost retry Workflow response'); };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({
+            id,
+            status: async () => {
+              await testEnv.DB.prepare(`
+                UPDATE export_jobs SET state = 'running', started_at = ?2
+                WHERE id = ?1 AND state = 'queued' AND attempt = 2
+              `).bind(job.id, '2026-08-23T12:00:01.000Z').run();
+              return { status: 'errored' };
+            },
+          });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, EXPORT_WORKFLOW: workflow },
+    );
+
+    expect(response.status).toBe(202);
+    expect((await response.json<any>()).data.export).toMatchObject({
+      id: job.id,
+      state: 'running',
+      attempt: 2,
+    });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+      state: 'running',
+      attempt: 2,
+      errorCode: null,
+    });
+  });
+
   it('converges concurrent failed-job retries on one deterministic next attempt', async () => {
     const access = await eventAccess();
     const { job, keys } = await failedExportWithArtifacts(access, 'retry-concurrent');
@@ -642,6 +1237,215 @@ describe('manager exports', () => {
     expect(photo?.byteLength).toBe(parts[0]!.sourceBytes);
   });
 
+  it('preserves frozen album order across parts and retries without live album or favorite reads', async () => {
+    const access = await eventAccess();
+    const first = await uploadPending(access, 'album-ordered-first', 'First by timeline');
+    const second = await uploadPending(access, 'album-ordered-second', 'Second by timeline');
+    const third = await uploadPending(access, 'album-ordered-third', 'Placed first');
+    await testEnv.DB.batch([
+      testEnv.DB.prepare('UPDATE media SET timeline_at = ? WHERE id = ?')
+        .bind('2026-08-23T10:00:00.000Z', first.id),
+      testEnv.DB.prepare('UPDATE media SET timeline_at = ? WHERE id = ?')
+        .bind('2026-08-23T11:00:00.000Z', second.id),
+      testEnv.DB.prepare('UPDATE media SET timeline_at = ? WHERE id = ?')
+        .bind('2026-08-23T12:00:00.000Z', third.id),
+    ]);
+    await setAlbumSnapshotSource(access, [first.id, second.id, third.id], JSON.stringify([
+      { kind: 'section', id: 'section-a', heading: 'Placed photos' },
+      { kind: 'photo', mediaId: third.id },
+      { kind: 'photo', mediaId: first.id },
+    ]));
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+    }, testEnv);
+    expect(created.status).toBe(202);
+    const job = (await created.json<any>()).data.export;
+    expect(job).toMatchObject({ kind: 'album', mediaCount: 3 });
+
+    // Every live source changes before the Workflow reads. An implementation that re-opens
+    // event_albums or favorited_at will now export only the wrong photo in the wrong order.
+    await setAlbumSnapshotSource(
+      access,
+      [second.id],
+      JSON.stringify([{ kind: 'photo', mediaId: second.id }]),
+    );
+    const runAt = new Date();
+    const ready = await processExport(testEnv, job.id, runAt, 100);
+    expect(ready).toMatchObject({
+      kind: 'album', state: 'ready', partCount: 3,
+      guestbookHtmlObjectKey: null, guestbookCsvObjectKey: null,
+      guestbookEntryCount: null,
+    });
+    expect(Date.parse(ready!.expiresAt!) - runAt.getTime()).toBe(86_400_000);
+    const repository = new ExportsRepository(testEnv.DB);
+    const firstParts = await repository.listParts(job.id);
+    const archivedNames: string[] = [];
+    for (const part of firstParts) {
+      const object = await testEnv.MEDIA_BUCKET.get(part.objectKey);
+      const archive = unzipSync(new Uint8Array(await object!.arrayBuffer()));
+      archivedNames.push(Object.keys(archive).find((name) => name.startsWith('photos/'))!);
+    }
+    expect(archivedNames).toEqual([
+      'photos/001-album-ordered-third.png',
+      'photos/001-album-ordered-first.png',
+      'photos/001-album-ordered-second.png',
+    ]);
+    const firstManifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
+    expect([...firstManifest.matchAll(/,(album-ordered-(?:third|first|second)\.png),/gu)]
+      .map((match) => match[1])).toEqual([
+      'album-ordered-third.png', 'album-ordered-first.png', 'album-ordered-second.png',
+    ]);
+
+    const download = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/download`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(download.status).toBe(200);
+    const descriptors = (await download.json<any>()).data;
+    expect(descriptors).toMatchObject({ printableGuestbook: null, privateGuestbook: null });
+    expect(descriptors.parts).toHaveLength(3);
+    const range = await createApp().request(descriptors.parts[1].url, {
+      headers: { cookie: access.manager.cookie, range: 'bytes=0-7' },
+    }, testEnv);
+    expect(range.status).toBe(206);
+    expect((await range.arrayBuffer()).byteLength).toBe(8);
+
+    await testEnv.DB.prepare("UPDATE export_jobs SET state = 'failed' WHERE id = ?")
+      .bind(job.id).run();
+    const retried = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(retried.status).toBe(202);
+    await setAlbumSnapshotSource(
+      access,
+      [first.id, third.id],
+      JSON.stringify([{ kind: 'photo', mediaId: first.id }]),
+    );
+    const retryReady = await processExport(testEnv, job.id, new Date(), 100);
+    const retryManifest = await (await testEnv.MEDIA_BUCKET.get(retryReady!.manifestObjectKey!))!.text();
+    expect(retryManifest).toBe(firstManifest);
+    expect(retryReady).toMatchObject({
+      kind: 'album', attempt: 2, guestbookHtmlObjectKey: null, guestbookCsvObjectKey: null,
+    });
+  });
+
+  it('enforces one queued or running export across kinds and refuses a conflicting retry cleanly', async () => {
+    const access = await eventAccess();
+    const picked = await uploadPending(access, 'album-active-conflict', null);
+    await setAlbumSnapshotSource(
+      access,
+      [picked.id],
+      JSON.stringify([{ kind: 'photo', mediaId: picked.id }]),
+    );
+    const album = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+    }, testEnv);
+    expect(album.status).toBe(202);
+    const albumJob = (await album.json<any>()).data.export;
+    const completeConflict = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(completeConflict.status).toBe(409);
+    expect((await completeConflict.json<any>()).code).toBe('EXPORT_ALREADY_ACTIVE');
+
+    await new ExportsRepository(testEnv.DB).markFailed(albumJob.id, 'EXPORT_TEST_FAILURE');
+    const complete = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(complete.status).toBe(202);
+    expect((await complete.json<any>()).data.export.kind).toBe('complete');
+
+    const retryConflict = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${albumJob.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(retryConflict.status).toBe(409);
+    expect((await retryConflict.json<any>()).code).toBe('EXPORT_ALREADY_ACTIVE');
+    expect(await new ExportsRepository(testEnv.DB).getById(albumJob.id)).toMatchObject({
+      kind: 'album', state: 'failed', attempt: 1,
+    });
+  });
+
+  it('keeps the cross-kind create conflict cause when the winner turns terminal after the batch', async () => {
+    const access = await eventAccess();
+    const picked = await uploadPending(access, 'album-create-conflict-race', null);
+    await setAlbumSnapshotSource(access, [picked.id], '[]');
+    const repository = new ExportsRepository(testEnv.DB);
+    const boundary = '2026-08-23T12:00:00.000Z';
+    const winner = await repository.createActive({
+      id: 'complete-create-winner', eventId: access.event.id, snapshotAt: boundary,
+      mediaCount: 0, totalBytes: 0, createdAt: boundary,
+    });
+    let transitioned = false;
+    const terminalAfterBatch = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            const results = await target.batch(statements);
+            if (!transitioned) {
+              transitioned = true;
+              await target.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`)
+                .bind(winner.id).run();
+            }
+            return results;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(new ExportsRepository(terminalAfterBatch).createAlbumActive({
+      id: 'album-create-loser', eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+    })).rejects.toMatchObject({
+      code: 'EXPORT_ALREADY_ACTIVE',
+      message: 'An export is already being prepared for this event.',
+    });
+  });
+
+  it('keeps the cross-kind retry conflict cause when the winner turns terminal after the batch', async () => {
+    const access = await eventAccess();
+    const picked = await uploadPending(access, 'album-retry-conflict-race', null);
+    await setAlbumSnapshotSource(access, [picked.id], '[]');
+    const repository = new ExportsRepository(testEnv.DB);
+    const boundary = '2026-08-23T12:00:00.000Z';
+    const candidate = await repository.createAlbumActive({
+      id: 'album-retry-candidate', eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+    });
+    await repository.markFailed(candidate.id, 'EXPORT_TEST_FAILURE');
+    const winner = await repository.createActive({
+      id: 'complete-retry-winner', eventId: access.event.id, snapshotAt: boundary,
+      mediaCount: 0, totalBytes: 0, createdAt: boundary,
+    });
+    let transitioned = false;
+    const terminalAfterBatch = new Proxy(testEnv.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            const results = await target.batch(statements);
+            if (!transitioned) {
+              transitioned = true;
+              await target.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`)
+                .bind(winner.id).run();
+            }
+            return results;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(new ExportsRepository(terminalAfterBatch).retry(candidate.id)).rejects.toMatchObject({
+      code: 'EXPORT_ALREADY_ACTIVE',
+      message: 'An export is already being prepared for this event.',
+    });
+  });
+
   it('returns only the Manager export allowlist from create, get, list, and retry', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'safe-manager-export', 'Visible caption');
@@ -651,6 +1455,7 @@ describe('manager exports', () => {
     }, testEnv);
     const createdJob = (await created.json<any>()).data.export;
     expectManagerExport(createdJob);
+    expect(createdJob.kind).toBe('complete');
 
     const fetched = await app.request(
       `/api/manage/events/${access.event.id}/exports/${createdJob.id}`,
@@ -1097,6 +1902,72 @@ describe('manager exports', () => {
       },
     }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))
       .rejects.toThrow('cannot contain photo inventory');
+  });
+
+  it('rejects every Guestbook field at album readiness and blocks direct Guestbook artifact routes', async () => {
+    const access = await eventAccess();
+    const picked = await uploadPending(access, 'album-guestbook-fields', null);
+    await setAlbumSnapshotSource(access, [picked.id], '[]');
+    const repository = new ExportsRepository(testEnv.DB);
+    const boundary = '2026-08-23T12:00:00.000Z';
+    const job = await repository.createAlbumActive({
+      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+    });
+    await repository.claimRunning(job.id, '2026-08-23T12:00:01.000Z');
+    const inventory = {
+      manifestObjectKey: `events/${access.event.id}/exports/${job.id}/attempt-1/candidary-export-manifest.csv`,
+      parts: [{
+        partNumber: 1,
+        objectKey: `events/${access.event.id}/exports/${job.id}/attempt-1/photos-001.zip`,
+        mediaCount: 1,
+        sourceBytes: 64,
+      }],
+      guestbook: null,
+    };
+    const guestbookFields: Array<[string, string | number]> = [
+      ['guestbook_entry_count', 1],
+      ['guestbook_shared_count', 1],
+      ['guestbook_event_name', 'Maya & Theo'],
+      ['guestbook_event_date', '2026-09-19'],
+      ['guestbook_event_timezone', 'America/Chicago'],
+      ['guestbook_prompt', 'Share a memory'],
+      ['guestbook_gallery_visible', 1],
+      ['guestbook_html_object_key', 'guestbook.html'],
+      ['guestbook_html_bytes', 1],
+      ['guestbook_html_sha256', 'a'.repeat(64)],
+      ['guestbook_csv_object_key', 'guestbook.csv'],
+      ['guestbook_csv_bytes', 1],
+      ['guestbook_csv_sha256', 'b'.repeat(64)],
+    ];
+    for (const [column, value] of guestbookFields) {
+      await testEnv.DB.prepare(`UPDATE export_jobs SET ${column} = ? WHERE id = ?`)
+        .bind(value, job.id).run();
+      await expect(repository.markReady(
+        job.id,
+        inventory,
+        '2026-08-23T12:00:02.000Z',
+        '2026-08-24T12:00:02.000Z',
+      )).rejects.toThrow('An album export cannot contain Guestbook data.');
+      await testEnv.DB.prepare(`UPDATE export_jobs SET ${column} = NULL WHERE id = ?`)
+        .bind(job.id).run();
+    }
+
+    await repository.markReady(
+      job.id,
+      inventory,
+      '2026-08-23T12:00:02.000Z',
+      '2026-08-24T12:00:02.000Z',
+    );
+    await testEnv.DB.prepare(`
+      UPDATE export_jobs SET guestbook_html_object_key = 'forged-guestbook.html' WHERE id = ?
+    `).bind(job.id).run();
+    const direct = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/artifact/printable-guestbook`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+    expect(direct.status).toBe(404);
+    expect(await direct.json<any>()).toMatchObject({ code: 'EXPORT_FAILED' });
   });
 
   it('keeps legacy photo-only rows downloadable with null Guestbook descriptors', async () => {

@@ -11,6 +11,7 @@ Disallow: /api/
 Disallow: /event/
 Disallow: /manage/
 Disallow: /join
+Disallow: /album
 Disallow: /recover/
 Disallow: /host/
 

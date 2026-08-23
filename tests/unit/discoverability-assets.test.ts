@@ -34,7 +34,7 @@ describe('crawler discoverability assets', () => {
     expect(robots.match(/^Allow:[ \t]*\/$/gimu)).toHaveLength(1);
     expect(robots.match(/^Disallow:[ \t]*(\S+)$/gimu)?.map((line) => (
       line.replace(/^Disallow:[ \t]*/iu, '')
-    ))).toEqual(['/api/', '/event/', '/manage/', '/join', '/recover/', '/host/']);
+    ))).toEqual(['/api/', '/event/', '/manage/', '/join', '/album', '/recover/', '/host/']);
     expect(robots.match(/^Sitemap:[ \t]*(\S+)$/gimu)).toEqual([
       `Sitemap: ${canonicalOrigin}/sitemap.xml`,
     ]);

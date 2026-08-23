@@ -681,10 +681,14 @@ test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and
   const backgroundContained = await page.evaluate(() => {
     const host = document.querySelector('.gallery-viewer')?.parentElement;
     return Array.from(document.body.children)
-      .filter((child) => child !== host)
+      .filter((child) => child !== host && !(child instanceof HTMLElement
+        && child.dataset.galleryLiveHost === 'true'))
       .every((child) => child.hasAttribute('inert'));
   });
   expect(backgroundContained, 'the manager shell is inert behind the viewer').toBe(true);
+  const liveHost = page.locator('[data-gallery-live-host="true"]');
+  await expect(liveHost).not.toHaveAttribute('inert', '');
+  await expect(liveHost.getByRole('status')).toHaveCount(1);
 
   // Closing is half of containment. The shell is inert while the dialog is open, so a
   // restoration that runs before the dialog is torn down calls `focus()` on an element

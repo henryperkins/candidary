@@ -276,12 +276,12 @@ test('the private mosaic and the gallery export control hold their layout', asyn
   await page.getByRole('button', { name: 'Close viewer' }).click();
   await expect(viewer).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Shared gallery' }).click();
+  await page.getByRole('button', { name: 'Shared' }).click();
   const shared = page.locator('.gallery-shared');
   await expect(shared.getByRole('button', { name: 'Unpublished' })).toHaveAttribute('aria-pressed', 'true');
   await settle(page);
   await expect(shared).toHaveScreenshot('manager-shared-gallery-320.png');
-  await page.getByRole('button', { name: 'Private gallery' }).click();
+  await page.getByRole('button', { name: 'Library' }).click();
   await expect(page.locator('.gallery-private .gallery-mosaic__item')).toHaveCount(3);
 
   // The phone is what the layout is made of: keep 390 and capture the export control beside the

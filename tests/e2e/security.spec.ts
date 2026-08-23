@@ -34,6 +34,7 @@ test('every deep-linkable SPA document carries the shipped security headers', as
     `/manage/event/${EVENT_FIXTURE.id}`,
     '/recover/event-entry?kind=unavailable',
     '/join',
+    '/album',
   ]) {
     const response = await page.goto(path);
     const headers = response?.headers() ?? {};
@@ -123,6 +124,94 @@ test('a scanned entry leaves no credential in the URL, the page, or the console'
     consoleMessages.every((message) => !message.includes(EVENT_ENTRY_FIXTURE_TOKEN)),
     'the console never repeats the credential',
   ).toBe(true);
+});
+
+test('an album fragment becomes only a narrow cookie and can never authorize an original', async ({ page, context }) => {
+  const token = 'album-share-id.album-share-secret';
+  const rows = makeMedia(2, 'unpublished').map((item, index) => ({
+    ...item,
+    originalFilename: `private-original-${index + 1}.jpg`,
+    caption: index === 0 ? 'First dance' : 'The toast',
+  }));
+  const consoleMessages: string[] = [];
+  const requests: Array<{ url: string; body: string | null }> = [];
+  page.on('console', (message) => consoleMessages.push(message.text()));
+  page.on('pageerror', (error) => consoleMessages.push(error.message));
+  page.on('request', (request) => requests.push({ url: request.url(), body: request.postData() }));
+  await page.addInitScript(() => {
+    const writes: string[] = [];
+    Object.defineProperty(window, '__albumHistoryWrites', { value: writes, configurable: true });
+    const replace = history.replaceState.bind(history);
+    history.replaceState = (data: unknown, unused: string, url?: string | URL | null) => {
+      writes.push(String(url ?? ''));
+      replace(data, unused, url);
+    };
+  });
+
+  const audit = await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    album: {
+      pickedMediaIds: rows.map(({ id }) => id),
+      entries: rows.map(({ id }) => ({ kind: 'photo', mediaId: id })),
+      shareActive: true,
+      shareToken: token,
+    },
+  });
+
+  await page.goto(`/album?source=email#${token}`);
+  await expect(page.getByRole('heading', { level: 1, name: 'Album', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/album\?source=email$/u);
+
+  const exchangeRequests = requests.filter(({ url }) => new URL(url).pathname === '/api/album-share/exchange');
+  expect(exchangeRequests).toHaveLength(1);
+  expect(JSON.parse(exchangeRequests[0]!.body!)).toEqual({ token });
+  expect(requests.every(({ url }) => !url.includes(token)), 'the token never enters a request URL').toBe(true);
+  expect(requests.every(({ url, body }) => (
+    new URL(url).pathname === '/api/album-share/exchange' || !body?.includes(token)
+  )), 'only the exchange POST body carries the token').toBe(true);
+
+  const browserState = await page.evaluate((secret) => ({
+    href: location.href,
+    hash: location.hash,
+    html: document.documentElement.outerHTML,
+    historyState: JSON.stringify(history.state),
+    historyWrites: [...((window as unknown as { __albumHistoryWrites: string[] }).__albumHistoryWrites)],
+    imageSources: Array.from(document.images, ({ src }) => src),
+    referrer: document.referrer,
+    containsSecret: document.documentElement.textContent?.includes(secret) ?? false,
+  }), token);
+  expect(browserState.href).not.toContain(token);
+  expect(browserState.hash).toBe('');
+  expect(browserState.html).not.toContain(token);
+  expect(browserState.historyState).not.toContain(token);
+  expect(browserState.historyWrites.at(-1)).toBe('/album?source=email');
+  expect(browserState.historyWrites.every((entry) => !entry.includes(token))).toBe(true);
+  expect(browserState.imageSources.length).toBeGreaterThan(0);
+  expect(browserState.imageSources.every((source) => (
+    new URL(source).pathname.startsWith('/api/album-share/media/') && !source.includes(token)
+  ))).toBe(true);
+  expect(browserState.referrer).not.toContain(token);
+  expect(browserState.containsSecret).toBe(false);
+  expect(consoleMessages.every((message) => !message.includes(token))).toBe(true);
+
+  const albumCookie = (await context.cookies()).find(({ name }) => name === 'candidary_album');
+  expect(albumCookie).toEqual(expect.objectContaining({
+    name: 'candidary_album',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Strict',
+    path: '/api/album-share',
+  }));
+
+  const original = await page.evaluate(async (mediaId) => {
+    const response = await fetch(`/api/media/${mediaId}/original`, { credentials: 'include' });
+    return { status: response.status, body: await response.text() };
+  }, rows[0]!.id);
+  expect(original.status).toBe(403);
+  const originalRequest = audit.album.requests.find(({ path }) => path.endsWith(`/media/${rows[0]!.id}/original`));
+  expect(originalRequest).toBeDefined();
+  expect(originalRequest?.headers.cookie ?? '').not.toContain('candidary_album=');
+  expect(original.body).not.toContain(rows[0]!.originalFilename);
 });
 
 test('a refused staged guest list forgets its private source after discard', async ({ page }) => {

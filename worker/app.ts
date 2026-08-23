@@ -4,6 +4,7 @@ import { toErrorResponse } from '../shared/errors';
 import type { AppBindings } from './env';
 import { agentMarkdown } from './http/agent-markdown';
 import { securityHeaders } from './http/security-headers';
+import { albumShareRoutes } from './routes/album-share';
 import { entryRoutes } from './routes/entry';
 import { eventRoutes } from './routes/event';
 import { exportRoutes } from './routes/exports';
@@ -44,6 +45,7 @@ export function createApp() {
   app.route('/api', uploadRoutes);
   app.route('/api', contentRoutes);
   app.route('/api', galleryRoutes);
+  app.route('/api', albumShareRoutes);
   // Ahead of `manageRoutes`, which no longer owns any `/cover` path, so the
   // cover surface has exactly one owner rather than two mount positions.
   app.route('/api', eventCoverRoutes);

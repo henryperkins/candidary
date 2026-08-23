@@ -552,4 +552,124 @@ and no axe pass renders it. It is the next thing to look at if that pairing is r
 - P2: none open. The one serious `color-contrast` finding is resolved above.
 - P3: none observed in the verified states.
 
+## Album workspace end-to-end QA — 2026-08-23
+
+### Source and implementation
+
+- **Canonical handoff:** `Candidary Design System-handoff.zip`, internal file
+  `candidary-design-system/project/templates/album-workspace/AlbumWorkspace.dc.html`.
+- **Import boundary:** the requested Claude Design MCP connection was attempted, but its protected-
+  resource metadata and advertised authorization-server issuer did not agree. The supplied ZIP was
+  therefore used as the readable canonical fallback; this record does not claim that MCP import
+  succeeded and the source file was not modified.
+- **Implementation states:** `/manage/event/:eventId` → **Gallery** → **Library**, **Album**, inline
+  album preview, and **Shared**; `/album#id.secret` → fragment exchange → `/album` for the public
+  album. The browser fixture used twelve realistic photo records, ten existing picks, an ordered
+  five-entry album, title, description, cover, and active sharing.
+- **Browser runner:** the Browser plugin was unavailable, so the user-approved Playwright/Chromium
+  fallback was used. This evidence is local Chromium automation, not Safari/WebKit, a physical
+  iPhone or Android device, VoiceOver/TalkBack, or a native camera/photo-picker rehearsal.
+
+### Native-viewport capture evidence
+
+| Surface | Viewport | Captures |
+| --- | --- | --- |
+| Manager handoff sequence | 924×540 | `/tmp/candidary-album-qa/implementation/desktop-01-library.png` through `desktop-07-shared.png` |
+| Manager responsive sequence | 390×844 | `/tmp/candidary-album-qa/implementation/mobile-01-library.png` through `mobile-05-shared.png` |
+| Public album | 390×844 | `/tmp/candidary-album-qa/implementation/mobile-06-public.png` |
+| Same-state desktop comparisons | 1848×540, two native 924×540 halves | `/tmp/candidary-album-qa/compare/desktop-01-library.png` through `desktop-07-shared.png` |
+| Same-state mobile comparisons | 780×844, two native 390×844 halves | `/tmp/candidary-album-qa/compare/mobile-01-library.png`, `mobile-02-selection.png`, `mobile-03-editor.png`, and `mobile-05-shared.png` |
+
+Each comparison input placed the source handoff on the left and the implementation on the right at
+the same state and native viewport, then captured the pair as one image. Inspection covered layout,
+spacing, type weight, borders, radii, crops, copy, interactive-target containment, and overflow.
+The source component references `exitsOpen` but does not return it from its component logic, so its
+inline preview exit cannot render; it also has no public route. Those production states were therefore
+verified independently instead of inventing or editing source behavior.
+
+### Findings and disposition
+
+| Severity | Finding | Disposition |
+| --- | --- | --- |
+| P0 | None. | No remediation required. |
+| P1 | None. | No remediation required. |
+| P2 | Production retains the Manager lifecycle facts above Gallery, so Gallery begins lower than the isolated handoff shell. | Retained intentionally: deletion timing, stored bytes, and private-delivery state are existing host commitments and remain legible without clipping or blocking the workspace. |
+| P2 | The source keeps the three-mode switch inline at phone width, while production stacks it below 761 CSS pixels. | Retained intentionally: stacking is the approved responsive contract, preserves full labels and 44 px targets, and introduces no horizontal overflow. |
+| Evidence boundary | The handoff cannot render its intended inline-preview exit because `exitsOpen` is absent from the returned component state, and it defines no public route. | The source was preserved. Production preview and public album were captured and audited directly; neither limitation was treated as implementation parity. |
+| P3 | At 390 px, production keeps the tray's Add and Remove actions beside one another before wrapping Clear selection; the source places Add on its own row. | Retained: all three controls remain readable, contained, and at least 44 px high, with the two reversible album actions grouped together. |
+| P3 | Production adds the current pick count to the Album mode label. | Retained as useful state reinforcement; the accessible name and selected state remain clear. |
+
+No open P0 or P1 visual defect remains. The P2 differences are deliberate product-contract choices,
+not unresolved broken layout. Photo crops, paper/denim/moss palette, typography, borders, radii,
+selection tray, album editor, sharing state, and public album remain visually coherent at the pinned
+viewports.
+
+### Accessibility and operability evidence
+
+- Axe, including the `target-size` rule, reported zero violations in the 390×844 Library, selection,
+  editor, inline preview, Shared, and public-album states.
+- Direct geometry checks measured every visible Manager brand, navigation button, workspace button,
+  text field, textarea, and select at no less than 44×44 CSS pixels at 390×844.
+- The Album mode, reconciliation action, and preview action completed by keyboard; reduced-motion
+  emulation removed the selection-tray animation and restored non-smooth document scrolling.
+- The saved editor remained operable and horizontally contained at 640×450 and 320×450, used as
+  200% and 400% reflow proxies. All audited 390×844 manager/public states also passed document-level
+  horizontal-overflow checks.
+- The public exchange removed the fragment credential before rendering the album. This visual pass
+  complements, but does not replace, the separate request/cookie/original-media security coverage.
+
+### Consolidated repository evidence
+
+- `npm run lint`, `npm run typecheck`, `npm run typecheck:e2e`, `npm run verify:bindings`,
+  `npm run ci:migrations`, `npm run verify:fresh-d1`, `npm run build`, and `git diff --check`
+  completed successfully. The fresh-D1 check pinned all eighteen migrations plus the album tables,
+  columns, cascades, checks, partial indexes, and cover index.
+- Unit tests passed at 1,375/1,375 across 68 files. Worker tests passed at 1,311/1,311 across
+  56 files.
+- The first complete `npm run test:e2e` invocation ran all 514 project cases: 337 passed, 132 were
+  intentionally skipped by project, and 45 reported failures. Forty were Playwright's deliberate
+  missing-snapshot result because this checkout tracks Win32 baselines but no corresponding Linux
+  baselines; the generated `*-linux.png` files were not accepted as new design evidence and were
+  removed. The other five project cases exposed three stale assertions: a repeated album title made
+  one keyboard locator ambiguous, Gallery's one external live region needed to be excluded from the
+  inert-shell assertion, and renamed Gallery modes plus that live region made two legacy locators
+  ambiguous. After narrow corrections, the album keyboard case passed, viewer containment passed in
+  both desktop and mobile projects, and bulk-publish recovery passed in both projects. No product
+  styling or approved visual contract changed in those corrections.
+- Browser evidence remains local Chromium automation. A green targeted run is evidence for the album
+  flow and its coupled Gallery regressions; it is not a claim that this Linux host possesses or
+  compared the repository's Win32-only visual baselines.
+
+### Independent final-review corrections
+
+The complete branch review found eleven edge cases after the consolidated gate, and its corrected-diff
+rereview found three more. All fourteen were confirmed and corrected in the existing final commit:
+one-time atomic album reconciliation and frozen starting order, retryable ambiguous export dispatch,
+same-document share exchange with stale-request protection, crawler exclusion, persistent public
+status announcements, section autosave without blur, focus restoration after conditional controls
+disappear, enabled-boundary reorder focus, section-input focus visibility, Shared-selection reset,
+one derived Album save state, StrictMode-safe autosave disposal, a non-destructive legacy-favorite
+capacity guard, and truthful reconciliation winner/loser handling.
+
+- The complete Album workspace UI file passed 76/76 tests, including StrictMode replay and stale
+  reconciliation coverage in addition to the first six Manager regressions.
+- The affected album/export Worker files passed 77/77 tests, including three new concurrency and
+  redrive regressions. After the rereview, the complete 28-test Album Worker file passed again with
+  legacy-cap and winner/loser cases; the Worker TypeScript project also passed.
+- The public album and crawler files passed 16/16 focused Vitest cases. Five focused
+  production-preview Playwright cases passed, followed by a 1/1 strengthened no-reload fragment
+  transition that kept a mounted-document marker intact.
+- The final compact static check passed lint, app/Worker TypeScript, E2E TypeScript, and
+  `git diff --check` in one run.
+- The same independent reviewer inspected the three final corrections and returned no Important or
+  Minor findings. Its only residual limitation is that real-unmount queue disposal is supported by
+  lifecycle code inspection and the queue disposal unit test rather than a dedicated component-level
+  unmount assertion.
+
+These corrections add no new visual direction. The only visible styling change is the missing
+keyboard focus outline on the existing section-name field, so the approved source comparisons and
+native-viewport captures remain the applicable visual evidence. Per the request to commit and gate
+less, the broad repository suites above were not repeated after this narrow correction pass; the
+affected suites and static boundaries were rerun instead.
+
 final result: passed

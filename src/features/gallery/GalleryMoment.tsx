@@ -1,4 +1,4 @@
-import { Heart, ImageOff } from 'lucide-react';
+import { Check, ImageOff, Plus } from 'lucide-react';
 import { useState, type CSSProperties } from 'react';
 
 import { mediaPreview } from '../../app/api';
@@ -12,8 +12,11 @@ interface GalleryTileProps {
   position: number;
   eager: boolean;
   favoritePending: boolean;
+  selecting: boolean;
+  selected: boolean;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
+  onToggleSelected(photo: ManagerGalleryMediaView): void;
 }
 
 /**
@@ -23,19 +26,26 @@ interface GalleryTileProps {
  * neighbours too. The unavailable state is deliberately *text*, not a bare icon:
  * a host looking at their wedding needs to be told that the photo is fine and
  * only its preview is missing, which is what the system already guarantees.
+ *
+ * While a selection is running the covering button selects instead of opening, and the
+ * per-tile pick control is gone: the tray owns both verbs then, and two ways to change
+ * membership on one tile is how a host ends up adding the photo they meant to select.
  */
 function GalleryTile({
   photo,
   position,
   eager,
   favoritePending,
+  selecting,
+  selected,
   onOpen,
   onFavorite,
+  onToggleSelected,
 }: GalleryTileProps) {
   const [failed, setFailed] = useState(false);
   const title = galleryPhotoTitle(photo);
   return <div
-    className="gallery-mosaic__item"
+    className={selected ? 'gallery-mosaic__item is-selected' : 'gallery-mosaic__item'}
     data-photo-id={photo.id}
     style={mosaicStyleVars(position) as CSSProperties}
   >
@@ -61,22 +71,44 @@ function GalleryTile({
           <ImageOff aria-hidden="true" />
           <span>Preview unavailable</span>
         </div>}
-    <button
-      type="button"
-      className="gallery-mosaic__open"
-      aria-label={`Open ${title}, from ${photo.guestName}`}
-      onClick={(event) => onOpen(photo, event.currentTarget)}
-    />
-    <button
-      type="button"
-      className="gallery-mosaic__favorite"
-      aria-pressed={photo.isFavorite}
-      aria-label={`Favorite ${title}`}
-      disabled={favoritePending}
-      onClick={() => onFavorite(photo)}
-    >
-      <Heart aria-hidden="true" fill={photo.isFavorite ? 'currentColor' : 'none'} />
-    </button>
+    {selecting
+      ? <button
+          type="button"
+          className="gallery-mosaic__open gallery-mosaic__select"
+          aria-pressed={selected}
+          aria-label={`${selected ? 'Deselect' : 'Select'} ${title}, from ${photo.guestName}`}
+          onClick={() => onToggleSelected(photo)}
+        >
+          <span className="gallery-mosaic__checkbox" aria-hidden="true">
+            {selected && <Check />}
+          </span>
+        </button>
+      : <>
+          <button
+            type="button"
+            className="gallery-mosaic__open"
+            aria-label={`Open ${title}, from ${photo.guestName}`}
+            onClick={(event) => onOpen(photo, event.currentTarget)}
+          />
+          {/* Plus-then-check, not a heart. A heart only ever reads "loved"; album membership
+              has to read in both directions. The action label and `aria-pressed` expose that
+              state programmatically while the visible badge keeps it scannable. */}
+          <button
+            type="button"
+            className="gallery-mosaic__favorite"
+            aria-pressed={photo.isFavorite}
+            aria-label={photo.isFavorite
+              ? `Remove ${title} from the album`
+              : `Add ${title} to the album`}
+            disabled={favoritePending}
+            onClick={() => onFavorite(photo)}
+          >
+            {photo.isFavorite ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" />}
+          </button>
+          {photo.isFavorite && <span className="gallery-mosaic__album-badge" aria-hidden="true">
+            In album
+          </span>}
+        </>}
     {/* Only the hero carries a visible caption. On a unit tile the band covered ~59% of the
         photograph to restate a camera filename the open control already announces, and its
         contrast was a function of whatever the photo happened to be underneath. */}
@@ -92,8 +124,12 @@ interface GalleryMomentProps {
   timeZone: string;
   eager: boolean;
   favoritePendingIds: ReadonlySet<string>;
+  selecting: boolean;
+  selectedIds: ReadonlySet<string>;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
+  onToggleSelected(photo: ManagerGalleryMediaView): void;
+  onSelectMoment(photos: readonly ManagerGalleryMediaView[]): void;
 }
 
 export function GalleryMoment({
@@ -101,11 +137,16 @@ export function GalleryMoment({
   timeZone,
   eager,
   favoritePendingIds,
+  selecting,
+  selectedIds,
   onOpen,
   onFavorite,
+  onToggleSelected,
+  onSelectMoment,
 }: GalleryMomentProps) {
   const [expanded, setExpanded] = useState(false);
   const photos = expanded ? moment.photos : moment.photos.slice(0, COMPACT_MOSAIC_LIMIT);
+  const wholeMomentSelected = moment.photos.every((photo) => selectedIds.has(photo.id));
 
   return <section className="gallery-moment" aria-labelledby={`moment-heading-${moment.key}`}>
     <header className="gallery-moment__heading">
@@ -113,6 +154,13 @@ export function GalleryMoment({
       <span className="gallery-moment__count">
         {moment.photos.length} photo{moment.photos.length === 1 ? '' : 's'}
       </span>
+      {/* Selects the whole moment, not the eight tiles currently drawn: a host who collapsed
+          a run of sixty still means the run. */}
+      {selecting && <button
+        type="button"
+        className="gallery-moment__select"
+        onClick={() => onSelectMoment(moment.photos)}
+      >{wholeMomentSelected ? 'Clear this moment' : 'Select this moment'}</button>}
     </header>
     <div className="gallery-mosaic" id={`moment-photos-${moment.key}`}>
       {photos.map((photo, index) => (
@@ -122,8 +170,11 @@ export function GalleryMoment({
           position={index + 1}
           eager={eager}
           favoritePending={favoritePendingIds.has(photo.id)}
+          selecting={selecting}
+          selected={selectedIds.has(photo.id)}
           onOpen={onOpen}
           onFavorite={onFavorite}
+          onToggleSelected={onToggleSelected}
         />
       ))}
     </div>

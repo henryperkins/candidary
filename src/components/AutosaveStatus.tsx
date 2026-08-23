@@ -43,6 +43,7 @@ interface AutosaveStatusProps {
   blockingField?: BlockingField | null;
   onRetry(): void;
   className?: string;
+  live?: boolean;
 }
 
 export function AutosaveStatus({
@@ -51,6 +52,7 @@ export function AutosaveStatus({
   blockingField = null,
   onRetry,
   className,
+  live = true,
 }: AutosaveStatusProps) {
   const { visible, announcement } = autosaveStatusText(label, state, blockingField);
   // Retry is a real button and lives outside the live region: inserting it must
@@ -58,7 +60,11 @@ export function AutosaveStatus({
   // to the manager's recovery notice instead of offering a repeat that cannot work.
   const retryable = state.status === 'failed' && state.failure?.retryable === true;
   return <div className={className ? 'autosave-status ' + className : 'autosave-status'}>
-    <div role="status" aria-live="polite" aria-atomic="true">
+    <div
+      role={live ? 'status' : undefined}
+      aria-live={live ? 'polite' : undefined}
+      aria-atomic={live ? 'true' : undefined}
+    >
       <span className={'autosave-status__chip autosave-status__chip--' + state.status} aria-hidden="true">
         {visible}
       </span>

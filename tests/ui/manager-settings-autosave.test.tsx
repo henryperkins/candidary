@@ -301,7 +301,7 @@ describe('manager settings autosave guards', () => {
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
     expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     expect(within(screen.getByRole('group', { name: 'Publication status' }))
       .getByRole('button', { name: 'Unpublished' })).toHaveClass('active');
   });
@@ -463,7 +463,8 @@ describe('manager settings autosave guards', () => {
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
 
     const prompt = await screen.findByRole('region', { name: /not saved yet/i });
-    expect(within(prompt).getByRole('button', { name: 'Leave now' })).toBeVisible();
+    const leaveNow = within(prompt).getByRole('button', { name: 'Leave now' });
+    await waitFor(() => expect(leaveNow).toBeEnabled());
     expect(within(prompt).queryByRole('button', { name: 'Stay and fix settings' })).not.toBeInTheDocument();
     expect(prompt).toHaveFocus();
 
@@ -489,8 +490,10 @@ describe('manager settings autosave guards', () => {
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
     const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     expect(within(prompt).getByText(/may still finish saving after you leave/u)).toBeVisible();
+    const leaveNow = within(prompt).getByRole('button', { name: 'Leave now' });
+    await waitFor(() => expect(leaveNow).toBeEnabled());
 
-    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
+    await user.click(leaveNow);
     await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Manager sections' })).not.toBeInTheDocument());
   });
 

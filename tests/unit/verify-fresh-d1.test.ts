@@ -65,7 +65,7 @@ const eventColumnNames = [
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// post-cutover verifier refuses a candidate whose ledger is not exactly fifteen.
+// post-cutover verifier refuses a candidate whose ledger is not exactly eighteen.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
@@ -73,6 +73,7 @@ const migrationFileNames = [
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
   '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
+  '0017_event_album.sql', '0018_album_end_to_end.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -147,12 +148,12 @@ const guestbookColumns: Record<string, string[]> = {
     'part_count', 'guestbook_html_object_key', 'guestbook_html_bytes', 'guestbook_html_sha256',
     'guestbook_csv_object_key', 'guestbook_csv_bytes', 'guestbook_csv_sha256', 'guestbook_entry_count',
     'guestbook_shared_count', 'guestbook_event_name', 'guestbook_event_date', 'guestbook_event_timezone',
-    'guestbook_prompt', 'guestbook_gallery_visible',
+    'guestbook_prompt', 'guestbook_gallery_visible', 'kind', 'album_entries_json',
   ],
   export_media_entries: [
     'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
     'mime_type', 'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption',
-    'publication_status', 'created_at', 'published_at',
+    'publication_status', 'created_at', 'published_at', 'album_tail_position',
   ],
   guest_message_purge_receipts: [
     'event_id', 'guest_session_id', 'idempotency_key', 'request_hmac', 'purged_at',
@@ -210,6 +211,7 @@ const guestbookIndexRows = [
   { tbl: 'export_jobs', idx: 'export_jobs_expiry', uniq: 0, partial: 0 },
   { tbl: 'export_jobs', idx: 'export_jobs_one_active_per_event', uniq: 1, partial: 1 },
   { tbl: 'export_jobs', idx: 'sqlite_autoindex_export_jobs_1', uniq: 1, partial: 0 },
+  { tbl: 'export_media_entries', idx: 'export_album_media_position', uniq: 1, partial: 1 },
   { tbl: 'export_media_entries', idx: 'export_media_entries_order', uniq: 0, partial: 0 },
   { tbl: 'export_media_entries', idx: 'sqlite_autoindex_export_media_entries_1', uniq: 1, partial: 0 },
   { tbl: 'guest_message_purge_receipts', idx: 'sqlite_autoindex_guest_message_purge_receipts_1', uniq: 1, partial: 0 },
@@ -234,8 +236,8 @@ const guestbookIndexRows = [
 const guestbookSchemaRows = [
   { name: 'events', checks: '1' },
   { name: 'export_guestbook_entries', checks: '1|1|1|1|1|1|1|1' },
-  { name: 'export_jobs', checks: '1|1|1|1|1|1' },
-  { name: 'export_media_entries', checks: '1|1|1|1|1|1' },
+  { name: 'export_jobs', checks: '1|1|1|1|1|1|1|1|1|1|1' },
+  { name: 'export_media_entries', checks: '1|1|1|1|1|1|1' },
   { name: 'guest_message_purge_receipts', checks: '1' },
   { name: 'guest_message_rate_events', checks: '' },
   { name: 'legacy_media_scan_quarantine', checks: '1|1' },
@@ -243,6 +245,74 @@ const guestbookSchemaRows = [
   { name: 'media', checks: '1' },
   { name: 'media_object_promotions', checks: '1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1' },
   { name: 'media_object_write_tombstones', checks: '1|1|1|1|1|1|1' },
+];
+
+const albumTableRows = [
+  { name: 'event_album_share_sessions' },
+  { name: 'event_album_shares' },
+  { name: 'event_albums' },
+];
+
+// Hand-checked `pragma_table_info` rows for all 0017 tables plus the columns
+// appended by 0018. Exact cid/default/nullability/pk values keep this fixture
+// independent from the verifier constants it pressure-tests.
+const albumColumnRows = [
+  { tbl: 'event_album_share_sessions', cid: 0, col: 'id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 1 },
+  { tbl: 'event_album_share_sessions', cid: 1, col: 'share_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_share_sessions', cid: 2, col: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_share_sessions', cid: 3, col: 'secret_digest', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_share_sessions', cid: 4, col: 'expires_at', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_share_sessions', cid: 5, col: 'created_at', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_shares', cid: 0, col: 'id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 1 },
+  { tbl: 'event_album_shares', cid: 1, col: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_shares', cid: 2, col: 'secret_digest', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_shares', cid: 3, col: 'secret_ciphertext', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_shares', cid: 4, col: 'shared_at', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_album_shares', cid: 5, col: 'created_at', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_albums', cid: 0, col: 'event_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 1 },
+  { tbl: 'event_albums', cid: 1, col: 'entries', type: 'TEXT', notnull: 1, dflt_value: "'[]'", pk: 0 },
+  { tbl: 'event_albums', cid: 2, col: 'saved_at', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+  { tbl: 'event_albums', cid: 3, col: 'revision', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+  { tbl: 'event_albums', cid: 4, col: 'created_at', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_albums', cid: 5, col: 'updated_at', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { tbl: 'event_albums', cid: 6, col: 'title', type: 'TEXT', notnull: 1, dflt_value: "'Album'", pk: 0 },
+  { tbl: 'event_albums', cid: 7, col: 'description', type: 'TEXT', notnull: 1, dflt_value: "''", pk: 0 },
+  { tbl: 'event_albums', cid: 8, col: 'cover_media_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+  { tbl: 'export_jobs', cid: 28, col: 'kind', type: 'TEXT', notnull: 1, dflt_value: "'complete'", pk: 0 },
+  { tbl: 'export_jobs', cid: 29, col: 'album_entries_json', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+  { tbl: 'export_media_entries', cid: 15, col: 'album_tail_position', type: 'INTEGER', notnull: 0, dflt_value: null, pk: 0 },
+];
+
+const albumForeignKeyRows = [
+  { tbl: 'event_album_share_sessions', parent: 'events', col: 'event_id', on_delete: 'CASCADE' },
+  { tbl: 'event_album_share_sessions', parent: 'event_album_shares', col: 'share_id', on_delete: 'CASCADE' },
+  { tbl: 'event_album_shares', parent: 'events', col: 'event_id', on_delete: 'CASCADE' },
+  { tbl: 'event_albums', parent: 'events', col: 'event_id', on_delete: 'CASCADE' },
+];
+
+const albumIndexRows = [
+  {
+    tbl: 'event_album_share_sessions', idx: 'event_album_share_sessions_expiry', uniq: 0, partial: 0,
+    sql: 'CREATE INDEX event_album_share_sessions_expiry\n  ON event_album_share_sessions(expires_at, id)',
+  },
+  {
+    tbl: 'event_album_share_sessions', idx: 'event_album_share_sessions_share_expiry', uniq: 0, partial: 0,
+    sql: 'CREATE INDEX event_album_share_sessions_share_expiry\n  ON event_album_share_sessions(share_id, expires_at, id)',
+  },
+  { tbl: 'event_album_share_sessions', idx: 'sqlite_autoindex_event_album_share_sessions_1', uniq: 1, partial: 0, sql: null },
+  { tbl: 'event_album_shares', idx: 'sqlite_autoindex_event_album_shares_1', uniq: 1, partial: 0, sql: null },
+  { tbl: 'event_album_shares', idx: 'sqlite_autoindex_event_album_shares_2', uniq: 1, partial: 0, sql: null },
+  { tbl: 'event_albums', idx: 'sqlite_autoindex_event_albums_1', uniq: 1, partial: 0, sql: null },
+  {
+    tbl: 'export_media_entries', idx: 'export_album_media_position', uniq: 1, partial: 1,
+    sql: 'CREATE UNIQUE INDEX export_album_media_position\n  ON export_media_entries(export_job_id, album_tail_position)\n  WHERE album_tail_position IS NOT NULL',
+  },
+];
+
+const albumCheckRows = [
+  { name: 'event_albums', checks: '1|1' },
+  { name: 'export_jobs', checks: '1|1|1|1|1' },
+  { name: 'export_media_entries', checks: '1' },
 ];
 
 type ColumnRow = {
@@ -319,6 +389,11 @@ function invariantOutput(ledgerNames: string[]): unknown[] {
     resultEnvelope(structuredClone(guestbookIndexRows)),
     resultEnvelope(structuredClone(guestbookSchemaRows)),
     resultEnvelope(structuredClone(promotionTableRows)),
+    resultEnvelope(structuredClone(albumTableRows)),
+    resultEnvelope(structuredClone(albumColumnRows)),
+    resultEnvelope(structuredClone(albumForeignKeyRows)),
+    resultEnvelope(structuredClone(albumIndexRows)),
+    resultEnvelope(structuredClone(albumCheckRows)),
   ];
 }
 
@@ -487,6 +562,55 @@ describe('fresh local D1 verification', () => {
     }
   });
 
+  it('emits album schema pragmas with literal table names accepted by Wrangler', () => {
+    const statements = READ_ONLY_INVARIANT_QUERY
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    const albumColumns = statements[19]!;
+    const albumIndexes = statements[21]!;
+
+    expect(albumColumns).not.toContain('pragma_table_info(m.name)');
+    for (const table of [
+      'event_album_share_sessions',
+      'event_album_shares',
+      'event_albums',
+      'export_jobs',
+      'export_media_entries',
+    ]) {
+      expect(albumColumns).toContain(`pragma_table_info('${table}')`);
+    }
+
+    expect(albumIndexes).not.toContain('pragma_index_list(m.name)');
+    for (const table of [
+      'event_album_share_sessions',
+      'event_album_shares',
+      'event_albums',
+      'export_media_entries',
+    ]) {
+      expect(albumIndexes).toContain(`pragma_index_list('${table}')`);
+    }
+  });
+
+  it('keeps the legacy cover-index envelope at exactly four fields', async () => {
+    const statements = READ_ONLY_INVARIANT_QUERY
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    const coverIndexes = statements[9]!;
+    expect(coverIndexes).not.toContain('x.sql AS sql');
+    expect(coverIndexes).not.toContain('LEFT JOIN sqlite_master');
+
+    const candidate = await fixture();
+    const output = structuredClone(invariantOutput(candidate.ledgerNames));
+    const rows = (output[9] as { results: Array<Record<string, unknown>> }).results;
+    rows[0]!.sql = 'unexpected';
+    expect(() => parseWranglerInvariantOutput(
+      JSON.stringify(output),
+      candidate.ledgerNames,
+    )).toThrow(/Cover index 1 has unexpected fields/u);
+  });
+
   it('parses one deterministic Wrangler envelope and hashes only the ordered ledger names', async () => {
     const candidate = await fixture();
     const parsed = parseWranglerInvariantOutput(candidate.output, candidate.ledgerNames);
@@ -568,12 +692,12 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly fifteen migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly eighteen migrations', async () => {
     const candidate = await fixture();
-    const fourteen = candidate.ledgerNames.slice(0, -1);
+    const seventeen = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
-    output[0]!.results = fourteen.map((name, index) => ({ id: index + 1, name }));
-    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), fourteen)).toThrow();
+    output[0]!.results = seventeen.map((name, index) => ({ id: index + 1, name }));
+    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), seventeen)).toThrow();
   });
 
   it('fails closed on any post-cutover Guestbook schema inventory drift', async () => {
@@ -626,6 +750,63 @@ describe('fresh local D1 verification', () => {
           'source_writable_until TEXT NOT NULL',
           'source_writable_until TEXT',
         );
+      },
+    ];
+    for (const mutate of mutations) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      mutate(output);
+      expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+  });
+
+  it('fails closed on any 0017/0018 album schema inventory drift', async () => {
+    const candidate = await fixture();
+    const mutations: Array<(output: unknown[]) => void> = [
+      // A required album table disappearing.
+      (output) => { (output[18] as { results: unknown[] }).results.pop(); },
+      // A new table column's definition drifting, not merely its name.
+      (output) => {
+        const rows = (output[19] as { results: Array<{ tbl: string; col: string; dflt_value: string | null }> }).results;
+        rows.find((row) => row.tbl === 'event_albums' && row.col === 'title')!.dflt_value = "'Gallery'";
+      },
+      // An appended export column disappearing.
+      (output) => {
+        const rows = (output[19] as { results: Array<{ tbl: string; col: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.tbl === 'export_jobs'
+          && row.col === 'album_entries_json'), 1);
+      },
+      // Share cleanup must continue cascading through its event parent.
+      (output) => {
+        const rows = (output[20] as { results: Array<{ tbl: string; col: string; on_delete: string }> }).results;
+        rows.find((row) => row.tbl === 'event_album_shares' && row.col === 'event_id')!
+          .on_delete = 'RESTRICT';
+      },
+      // One share per event is enforced by the implicit unique index.
+      (output) => {
+        const rows = (output[21] as { results: Array<{ tbl: string; idx: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.tbl === 'event_album_shares'
+          && row.idx === 'sqlite_autoindex_event_album_shares_2'), 1);
+      },
+      // Album export ordering remains unique only for populated tail positions.
+      (output) => {
+        const rows = (output[21] as { results: Array<{ idx: string; sql: string | null }> }).results;
+        const row = rows.find((entry) => entry.idx === 'export_album_media_position')!;
+        row.sql = row.sql!.replace('album_tail_position IS NOT NULL', 'album_tail_position > 0');
+      },
+      // A changed title limit must not pass behind the same column inventory.
+      (output) => {
+        const rows = (output[22] as { results: Array<{ name: string; checks: string }> }).results;
+        rows.find((row) => row.name === 'event_albums')!.checks = '0|1';
+      },
+      // Complete and album exports must retain their mutually exclusive snapshot rule.
+      (output) => {
+        const rows = (output[22] as { results: Array<{ name: string; checks: string }> }).results;
+        rows.find((row) => row.name === 'export_jobs')!.checks = '1|1|0|1|1';
+      },
+      // Tail positions remain positive whenever present.
+      (output) => {
+        const rows = (output[22] as { results: Array<{ name: string; checks: string }> }).results;
+        rows.find((row) => row.name === 'export_media_entries')!.checks = '0';
       },
     ];
     for (const mutate of mutations) {

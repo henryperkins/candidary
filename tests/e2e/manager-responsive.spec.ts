@@ -364,8 +364,11 @@ test('manager cards keep the whole photo name reachable', async ({ page }) => {
 
 test('every manager control the host can touch measures at least 44 by 44', async ({ page }) => {
   const job = {
-    id: 'export-a', state: 'ready', snapshotAt: '2026-09-20T09:00:00Z',
+    id: 'export-a', kind: 'complete', state: 'ready', snapshotAt: '2026-09-20T09:00:00Z',
     mediaCount: 2, totalBytes: 256, attempt: 1, partCount: 1, expiresAt: '2026-09-27T09:00:00Z',
+    guestbookEntryCount: 1, guestbookSharedCount: 1, guestbookEventName: 'Maya & Theo',
+    guestbookEventDate: '2026-09-19', guestbookEventTimezone: 'America/Chicago',
+    guestbookPrompt: 'Share a memory.', guestbookGalleryVisible: true,
   };
   // Unpublished is the Gallery's own default filter and the only state that renders all four card
   // controls at once, so it is the state the 44px minimums actually have to fit.
@@ -397,7 +400,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions button', `intake card control at ${width}`);
 
     await destination(page, 'Gallery').click();
-    await page.getByRole('button', { name: 'Shared gallery' }).click();
+    await page.getByRole('button', { name: 'Shared' }).click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
     await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
@@ -424,7 +427,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.manager-guestbook__entry .button', `Guestbook control at ${width}`);
 
     await destination(page, 'Gallery').click();
-    await page.getByRole('button', { name: 'Private gallery' }).click();
+    await page.getByRole('button', { name: 'Library' }).click();
     const panel = page.locator('.gallery-export');
     const links = panel.locator('.export-links a');
     if (await links.count() === 0) await panel.getByRole('button', { name: 'Get download links' }).click();
@@ -433,6 +436,93 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
 
     await expectContained(page, width);
   }
+});
+
+test('the mobile Library tray, reopened Undo, Album, and Shared stay reachable and contained', async ({ page }) => {
+  const rows = makeMedia(4, 'unpublished');
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length, storedBytes: 512 },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByRole('button', { name: 'Library' }).click();
+    const selecting = page.getByRole('button', { name: /^(Select photos|Done selecting)$/u });
+    if (await selecting.getAttribute('aria-pressed') === 'true') await selecting.click();
+    await page.getByRole('button', { name: 'Select photos' }).click();
+    const firstRow = rows[0]!;
+    const first = page.getByRole('button', {
+      name: `Select ${firstRow.caption}, from ${firstRow.guestName}`,
+      exact: true,
+    });
+    await first.click();
+    const tray = page.getByRole('region', { name: 'Album' });
+    await expect(tray).toBeVisible();
+    await expectTouchTargets(page, '.selection-tray button', `selection tray at ${width}`);
+
+    const lastTile = page.locator('.gallery-mosaic__item').last();
+    // The tray is fixed, so browser visibility alone cannot tell that it occludes a
+    // tile. Scroll to the real document end and prove the reserved content space can
+    // lift the final mosaic row fully above it.
+    await page.evaluate(() => {
+      const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+      document.documentElement.style.scrollBehavior = 'auto';
+      window.scrollTo(0, document.documentElement.scrollHeight);
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    });
+    const lastBounds = await lastTile.boundingBox();
+    const trayBounds = await tray.boundingBox();
+    if (!lastBounds || !trayBounds) throw new Error(`Library geometry missing at ${width}`);
+    expect(lastBounds.y + lastBounds.height, `last tile clears tray at ${width}`)
+      .toBeLessThanOrEqual(trayBounds.y + 1);
+    await page.getByRole('button', { name: 'Clear selection' }).click();
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth, `Gallery document at ${width}`)
+      .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
+
+  const selectionToggle = page.getByRole('button', { name: /^(Select photos|Done selecting)$/u });
+  if (await selectionToggle.getAttribute('aria-pressed') === 'true') await selectionToggle.click();
+  await page.getByRole('button', { name: 'Select photos' }).click();
+  const firstRow = rows[0]!;
+  await page.getByRole('button', {
+    name: `Select ${firstRow.caption}, from ${firstRow.guestName}`,
+    exact: true,
+  }).click();
+  const tray = page.getByRole('region', { name: 'Album' });
+  await tray.getByRole('button', { name: 'Add 1 to album' }).click();
+  const undo = page.locator('.album-undo__bar');
+  await expect(undo).toBeVisible();
+  await page.getByRole('button', { name: 'Select photos' }).click();
+  const secondRow = rows[1]!;
+  await page.getByRole('button', {
+    name: `Select ${secondRow.caption}, from ${secondRow.guestName}`,
+    exact: true,
+  }).click();
+  await expect(tray).toBeVisible();
+  const reopenedTray = await tray.boundingBox();
+  const undoBounds = await undo.boundingBox();
+  if (!reopenedTray || !undoBounds) throw new Error('Undo geometry missing at 390');
+  const separated = reopenedTray.y + reopenedTray.height <= undoBounds.y + 1
+    || undoBounds.y + undoBounds.height <= reopenedTray.y + 1;
+  expect(separated, 'Undo does not cover the reopened tray at 390').toBe(true);
+  await expectTouchTargets(page, '.album-undo__bar button', 'Undo controls at 390');
+
+  await page.getByRole('button', { name: 'Clear selection' }).click();
+  await page.getByRole('button', { name: /^Album \(1\)$/u }).click();
+  await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
+  await expectTouchTargets(page, '.gallery-album button', 'Album controls at 390');
+
+  await page.getByRole('button', { name: 'Shared' }).click();
+  await expect(page.getByText(/Publication is a separate axis from the album/u)).toBeVisible();
+  await expectTouchTargets(page, '.gallery-shared button', 'Shared controls at 390');
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth, 'Gallery document at 390')
+    .toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });
 
 const RTL_GUESTBOOK_BODY = `${'ذكرى جميلة من هذا اليوم — '.repeat(18)}🌿`.slice(0, 500);

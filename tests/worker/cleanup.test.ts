@@ -213,6 +213,51 @@ describe('Guestbook export cleanup', () => {
     `).bind(job.id).first<number>('count')).toBe(1);
   });
 
+  it('expires album manifest and parts while retaining its immutable picked snapshot', async () => {
+    const access = await eventAccess();
+    const picked = await uploadPending(access, 'cleanup-album-export', 'Frozen album caption');
+    const snapshotAt = '2026-08-12T12:00:00.000Z';
+    await testEnv.DB.batch([
+      testEnv.DB.prepare('UPDATE media SET favorited_at = ? WHERE id = ?')
+        .bind(snapshotAt, picked.id),
+      testEnv.DB.prepare(`
+        INSERT INTO event_albums (
+          event_id, entries, saved_at, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, 1, ?, ?)
+      `).bind(
+        access.event.id,
+        JSON.stringify([{ kind: 'photo', mediaId: picked.id }]),
+        snapshotAt,
+        snapshotAt,
+        snapshotAt,
+      ),
+    ]);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: JSON.stringify({ kind: 'album' }),
+    }, testEnv);
+    expect(created.status).toBe(202);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date(snapshotAt));
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const keys = [ready!.manifestObjectKey, ...parts.map(({ objectKey }) => objectKey)]
+      .filter((key): key is string => Boolean(key));
+
+    expect(ready).toMatchObject({
+      kind: 'album', guestbookHtmlObjectKey: null, guestbookCsvObjectKey: null,
+    });
+    expect(await cleanupExpiredExports(testEnv, new Date('2026-08-14T12:00:00.000Z'))).toBe(1);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect(await repository.getById(job.id)).toMatchObject({ kind: 'album', state: 'expired' });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries
+      WHERE export_job_id = ? AND album_tail_position = 1
+    `).bind(job.id).first<number>('count')).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_guestbook_entries WHERE export_job_id = ?
+    `).bind(job.id).first<number>('count')).toBe(0);
+  });
+
   it('keeps Ready state and durable inventory when object deletion fails', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'cleanup-failure', null);
@@ -5050,5 +5095,67 @@ describe('bounded cover storage sweep', () => {
       failure_code: 'EVENT_DELETED', retryable: 0,
     });
     expect(await foreignKeyCheck()).toEqual([]);
+  });
+});
+
+describe('album-share session cleanup', () => {
+  beforeEach(resetDatabase);
+
+  async function seedSessions(expiredCount: number, includeFuture: boolean) {
+    const cleanupNow = new Date('2026-08-23T12:00:00.000Z');
+    const expiredAt = '2026-08-20T00:00:00.000Z';
+    const futureAt = '2026-08-25T00:00:00.000Z';
+    const access = await eventAccess('Album session cleanup');
+    const shareId = crypto.randomUUID();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_album_shares (
+        id, event_id, secret_digest, secret_ciphertext, shared_at, created_at
+      ) VALUES (?, ?, 'share-digest', 'v1.iv.ciphertext', ?, ?)
+    `).bind(shareId, access.event.id, expiredAt, expiredAt).run();
+
+    await testEnv.DB.prepare(`
+      WITH RECURSIVE numbers(n) AS (
+        SELECT 0
+        UNION ALL
+        SELECT n + 1 FROM numbers WHERE n + 1 < ?5
+      )
+      INSERT INTO event_album_share_sessions (
+        id, share_id, event_id, secret_digest, expires_at, created_at
+      )
+      SELECT printf('expired-album-session-%05d', n), ?1, ?2,
+        printf('digest-%05d', n), ?3, ?4
+      FROM numbers
+    `).bind(shareId, access.event.id, expiredAt, expiredAt, expiredCount).run();
+    if (includeFuture) {
+      await testEnv.DB.prepare(`
+        INSERT INTO event_album_share_sessions (
+          id, share_id, event_id, secret_digest, expires_at, created_at
+        ) VALUES ('future-album-session', ?, ?, 'future-digest', ?, ?)
+      `).bind(shareId, access.event.id, futureAt, expiredAt).run();
+    }
+    return cleanupNow;
+  }
+
+  it('drains multiple expired session pages in one scheduled pass', async () => {
+    const cleanupNow = await seedSessions(250, true);
+
+    await scheduledCleanup(testEnv, cleanupNow);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at <= ?
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(0);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at > ?
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
+  });
+
+  it('stops an expired session sweep after five thousand deletes', async () => {
+    const cleanupNow = await seedSessions(5_001, false);
+
+    await scheduledCleanup(testEnv, cleanupNow);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at <= ?
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
   });
 });

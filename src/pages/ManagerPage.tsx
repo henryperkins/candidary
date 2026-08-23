@@ -11,7 +11,7 @@ import {
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
-import type { PhotoIntakeState } from '../../shared/contracts';
+import type { ExportKind, PhotoIntakeState } from '../../shared/contracts';
 import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -29,7 +29,10 @@ import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
 import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRecheck';
 import { ManagerGuestbookPanel } from '../features/guestbook/ManagerGuestbookPanel';
 import type { GuestbookSummary } from '../features/guestbook/manager-guestbook-state';
-import { ManagerGalleryWorkspace } from '../features/gallery/ManagerGalleryWorkspace';
+import {
+  ManagerGalleryWorkspace,
+  type ManagerGalleryWorkspaceHandle,
+} from '../features/gallery/ManagerGalleryWorkspace';
 import {
   mergeCoverResponse,
   mergePhotoIntakeResponse,
@@ -173,6 +176,7 @@ export function ManagerPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
   const [coverAccessFailure, setCoverAccessFailure] = useState<LoadFailure | null>(null);
+  const [albumAccessFailure, setAlbumAccessFailure] = useState<LoadFailure | null>(null);
   const [autosaveRecovery, setAutosaveRecovery] = useState<{
     domain: DomainAutosaveState['domain'];
     failure: LoadFailure;
@@ -189,6 +193,9 @@ export function ManagerPage() {
   const [pendingRsvpClose, setPendingRsvpClose] = useState(false);
   const [pendingSettingsRepair, setPendingSettingsRepair] = useState(false);
   const pendingWorkPrompt = useRef<HTMLElement>(null);
+  const managerNotice = useRef<HTMLElement>(null);
+  const galleryWorkspace = useRef<ManagerGalleryWorkspaceHandle>(null);
+  const sectionTransitionPending = useRef(false);
   // Once the manager has rendered, a later load failure must not throw the host back to a bare error
   // page: it becomes the same inline, recoverable notice a failed mutation uses — carrying the
   // recovery hint with it, because the inline notice offers no `Try again` of its own either.
@@ -253,17 +260,42 @@ export function ManagerPage() {
     || rsvpDraftDirty
     || rsvpCommitPending;
   const blocker = useBlocker(shouldBlockNavigation);
+  const blockedNavigationKey = blocker.state === 'blocked'
+    ? blocker.location.key
+    : null;
+  const [albumPrepareResult, setAlbumPrepareResult] = useState<{
+    navigationKey: string;
+    ready: boolean;
+  } | null>(null);
+  const albumPrepareGeneration = useRef(0);
 
   useEffect(() => {
-    if (blocker.state !== 'blocked') return;
+    const generation = ++albumPrepareGeneration.current;
+    if (blockedNavigationKey === null) {
+      setAlbumPrepareResult(null);
+      return;
+    }
+    const navigationKey = blockedNavigationKey;
     settingsAutosave.current?.flush();
     appearanceAutosave.current?.flush();
-  }, [blocker.state]);
+    void (async () => {
+      const ready = await galleryWorkspace.current?.prepareToLeave() ?? true;
+      if (generation !== albumPrepareGeneration.current) return;
+      setAlbumPrepareResult({ navigationKey, ready });
+    })();
+  }, [blockedNavigationKey]);
   useEffect(() => {
     // The requested navigation happens by itself the moment both domains
     // confirm; the host never has to answer the prompt twice.
-    if (blocker.state === 'blocked' && unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) blocker.proceed();
-  }, [blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
+    if (
+      blocker.state === 'blocked'
+      && albumPrepareResult?.navigationKey === blockedNavigationKey
+      && albumPrepareResult.ready
+      && unconfirmedDomains.length === 0
+      && !rsvpDraftDirty
+      && !rsvpCommitPending
+    ) blocker.proceed();
+  }, [albumPrepareResult, blockedNavigationKey, blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
   useEffect(() => {
     if (unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) return;
     // A browser may cancel background requests during unload, so this warns
@@ -272,6 +304,10 @@ export function ManagerPage() {
     window.addEventListener('beforeunload', warn);
     return () => { window.removeEventListener('beforeunload', warn); };
   }, [rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
+  useEffect(() => {
+    if (!albumAccessFailure && autosaveRecovery?.domain !== 'album') return;
+    managerNotice.current?.focus();
+  }, [albumAccessFailure, autosaveRecovery]);
   useEffect(() => {
     if (rsvpDraftDirty && (blocker.state === 'blocked' || pendingSection !== null || pendingRsvpClose)) {
       pendingWorkPrompt.current?.focus();
@@ -492,12 +528,13 @@ export function ManagerPage() {
 
   // Every host mutation reports through here, so a rejected write leaves the current cards, filters,
   // and section exactly where they were and only adds a dismissible notice.
-  async function runManagerAction(action: () => Promise<void>) {
+  async function runManagerAction(action: () => Promise<void>, rethrow = false) {
     setActionError(null);
     try {
       await action();
     } catch (caught) {
       setActionError(managerNoticeFor(caught, 'The manager action could not be completed.'));
+      if (rethrow) throw caught;
     }
   }
 
@@ -516,7 +553,10 @@ export function ManagerPage() {
    * unrelated manager action happened to run a full refresh. Ten seconds while a job is
    * actually in flight, on the same visibility guard intake uses, and never otherwise.
    */
-  const activeExportState = exports[0]?.state;
+  const completeExport = exports.find((job) => job.kind === 'complete');
+  const albumExport = exports.find((job) => job.kind === 'album');
+  const activeExport = exports.find((job) => job.state === 'queued' || job.state === 'running');
+  const activeExportState = activeExport?.state;
   useEffect(() => {
     if (section !== 'gallery') return;
     if (activeExportState !== 'queued' && activeExportState !== 'running') return;
@@ -586,11 +626,20 @@ export function ManagerPage() {
     });
   }
 
-  function openSection(next: Section) {
+  async function openSection(next: Section) {
+    if (next === section || sectionTransitionPending.current) return;
     if (rsvpCommitPending && next !== 'rsvp') return;
     if (rsvpDraftDirty && next !== 'rsvp') {
       setPendingSection(next);
       return;
+    }
+    if (section === 'gallery') {
+      sectionTransitionPending.current = true;
+      try {
+        if (await galleryWorkspace.current?.prepareToLeave() === false) return;
+      } finally {
+        sectionTransitionPending.current = false;
+      }
     }
     transitionToSection(next);
   }
@@ -604,7 +653,7 @@ export function ManagerPage() {
     }
     settingsFocusRequested.current = true;
     setSettingsFocusEpoch((current) => current + 1);
-    openSection('settings');
+    void openSection('settings');
   }
 
   useEffect(() => {
@@ -634,8 +683,9 @@ export function ManagerPage() {
     await refresh();
   }
 
-  async function prepareExport() {
-    await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' }));
+  async function prepareExport(kind: ExportKind = 'complete') {
+    const body = kind === 'album' ? JSON.stringify({ kind: 'album' }) : '{}';
+    await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body }));
     await refresh();
   }
   async function downloadExport(job: ExportView) {
@@ -803,7 +853,6 @@ export function ManagerPage() {
 
   const photoCount = event.storedMediaCount ?? 0;
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
-  const activeExport = exports[0];
   // Both entry actions are confirmed the same way, and both name the event so the
   // host cannot mistake which one they are typing into.
   const entryConfirmationForm = (action: EntryAction, verb: string, warning: string) => <fieldset
@@ -834,25 +883,32 @@ export function ManagerPage() {
     ? { type: 'load', failure: autosaveRecovery.failure }
     : coverAccessFailure
       ? { type: 'load', failure: coverAccessFailure }
+      : albumAccessFailure
+        ? { type: 'load', failure: albumAccessFailure }
     : actionError;
   return <div className="manager-shell manager-shell--intake">
     {/* The brand and the section navigation, which is a banner rather than complementary content. As
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
         `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
     <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => openSection('intake')}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
-      <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => openSection('rsvp')}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => openSection('gallery')}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
-      <button aria-label={guestbookSummary?.needsReviewCount ? `Guestbook ${guestbookSummary.needsReviewCount}` : 'Guestbook'} disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'guestbook'} className={section === 'guestbook' ? 'active' : ''} onClick={() => openSection('guestbook')}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Guestbook</span>{Boolean(guestbookSummary?.needsReviewCount) && <span className="manager-nav__count" aria-hidden="true">{guestbookSummary?.needsReviewCount}</span>}</button>
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => openSection('share')}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => openSection('settings')}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => { void openSection('intake'); }}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
+      <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => { void openSection('rsvp'); }}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => { void openSection('gallery'); }}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
+      <button aria-label={guestbookSummary?.needsReviewCount ? `Guestbook ${guestbookSummary.needsReviewCount}` : 'Guestbook'} disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'guestbook'} className={section === 'guestbook' ? 'active' : ''} onClick={() => { void openSection('guestbook'); }}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Guestbook</span>{Boolean(guestbookSummary?.needsReviewCount) && <span className="manager-nav__count" aria-hidden="true">{guestbookSummary?.needsReviewCount}</span>}</button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => { void openSection('share'); }}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
+      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => { void openSection('settings'); }}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
     </nav></header>
 
     <main className="manager-main">
       <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span></header>
       <div className="lifecycle"><p><strong>{photoCount}</strong> private deliveries</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
 
-      {visibleNotice && <section className="manager-action-error" aria-label="Manager notice">
+      {visibleNotice && <section
+        className="manager-action-error"
+        aria-label="Manager notice"
+        tabIndex={-1}
+        ref={managerNotice}
+      >
         <div className="manager-action-error__summary">
           <div className="manager-action-error__alert" role="alert">
             {visibleNotice.type === 'load'
@@ -864,8 +920,15 @@ export function ManagerPage() {
             className="manager-action-error__dismiss"
             aria-label="Dismiss error"
             onClick={() => {
-              if (autosaveRecovery) setAutosaveRecovery(null);
+              if (autosaveRecovery) {
+                // Album reports one access problem through both its domain state and
+                // its access callback. Dismiss those together; a blocked exit can
+                // raise the still-unresolved recovery again.
+                if (autosaveRecovery.domain === 'album') setAlbumAccessFailure(null);
+                setAutosaveRecovery(null);
+              }
               else if (coverAccessFailure) setCoverAccessFailure(null);
+              else if (albumAccessFailure) setAlbumAccessFailure(null);
               else setActionError(null);
             }}
           ><X aria-hidden="true" /></button>
@@ -914,6 +977,8 @@ export function ManagerPage() {
       />}
 
       {section === 'gallery' && <ManagerGalleryWorkspace
+        key={eventId}
+        ref={galleryWorkspace}
         event={event}
         eventId={eventId}
         shared={{
@@ -926,7 +991,7 @@ export function ManagerPage() {
             setSelected([]);
           },
           onSelectedChange: setSelected,
-          onBulk: (action) => runManagerAction(() => bulk(action)),
+          onBulk: (action) => runManagerAction(() => bulk(action), true),
           onChangePublication: (item, action) => runManagerAction(() => changePublication(item, action)),
           loadingMore,
           hasMore: Boolean(nextMediaCursor),
@@ -938,12 +1003,17 @@ export function ManagerPage() {
           settingsBlocked: rsvpCommitPending,
         }}
         exports={{
-          job: activeExport,
-          download: activeExport ? exportDownloads[activeExport.id] : undefined,
-          onPrepare: () => runManagerAction(prepareExport),
+          job: completeExport,
+          albumJob: albumExport,
+          activeJob: activeExport,
+          download: completeExport ? exportDownloads[completeExport.id] : undefined,
+          albumDownload: albumExport ? exportDownloads[albumExport.id] : undefined,
+          onPrepare: (kind = 'complete') => runManagerAction(() => prepareExport(kind)),
           onDownload: (job) => runManagerAction(() => downloadExport(job)),
           onRetry: (job) => runManagerAction(() => retryExport(job)),
         }}
+        onAlbumAutosaveStateChange={recordAutosaveState}
+        onAlbumAccessFailure={setAlbumAccessFailure}
       />}
 
       {section === 'share' && <section className="manager-panel">
@@ -984,7 +1054,7 @@ export function ManagerPage() {
         </section>}
         <section className="manager-export-route">
           <p>Prepare or retrieve the complete collection from the Gallery.</p>
-          <button type="button" className="button button--secondary" onClick={() => openSection('gallery')}>Open Gallery</button>
+          <button type="button" className="button button--secondary" onClick={() => { void openSection('gallery'); }}>Open Gallery</button>
         </section>
       </section>}
 
@@ -1106,9 +1176,21 @@ export function ManagerPage() {
       </section>}
       {!rsvpDraftDirty && blocker.state === 'blocked' && <UnsavedSettingsPrompt
         domains={unconfirmedDomains}
-        onLeave={() => blocker.proceed()}
+        leaveDisabled={albumPrepareResult?.navigationKey !== blockedNavigationKey
+          || albumPrepareResult.ready !== true}
+        onLeave={() => {
+          if (albumPrepareResult?.navigationKey === blockedNavigationKey
+            && albumPrepareResult.ready) blocker.proceed();
+        }}
         onStay={stuckDomains.length > 0
-          ? () => { blocker.reset(); openSettingsForRepair(); }
+          ? () => {
+              blocker.reset();
+              if (stuckDomains.some(({ domain }) => domain === 'album')) {
+                void galleryWorkspace.current?.prepareToLeave();
+              } else {
+                openSettingsForRepair();
+              }
+            }
           : undefined}
       />}
     </main>

@@ -131,20 +131,46 @@ Confirming an address gates notifications only, never access; a bounced confirma
 
 The API accepts JPEG, PNG, WebP, HEIC, and HEIF originals up to 20 MB, 10,000 media rows per event, and 100 GiB stored per event. `shared/constants.ts` is the single source of truth for these values; the authoritative quota guard is in the reservation SQL itself, so concurrent reservations cannot oversubscribe an event. The cap counts reserved plus stored rows, so in-flight reservations hold quota until they finalize or expire. Initiation reserves counters atomically and is idempotent per guest session. A phone may present a `.heic` or `.heif` file with an empty, vendor-specific, or `application/octet-stream` type, so reservation resolves the type from the extension only provisionally and finalization confirms it by container inspection. Finalization checks R2 size, content type, file signature, and dimensions before making the row visible. Invalid objects are deleted and reservations released. Abandoned reservations expire after fifteen minutes.
 
+## Album share credentials
+
+An album share is separate from the event's guest gallery and from every host credential. The URL
+keeps its random `id.secret` value in the fragment, and the browser exchanges it once in a POST body.
+D1 stores only an HMAC digest plus AES-256-GCM ciphertext of the secret. A successful exchange clears
+the fragment and mints a separate HttpOnly, Secure, SameSite=Strict cookie scoped to
+`/api/album-share`; the cookie digest uses `SESSION_HMAC_KEY`, expires after at most seven days, and
+cannot authorize an original-media or Manager request. Public album JSON and previews are
+`private, no-store`, and every preview read rechecks that the photo still belongs to the album.
+
+`ALBUM_SHARE_HMAC_KEY` and `ALBUM_SHARE_ENCRYPTION_KEY` must be independent from each other and from
+all event-entry, session, RSVP, and Guestbook keys, and preview and production must use independently
+generated pairs. The HMAC key contains at least 32 random bytes; the AES-256-GCM key decodes from
+unpadded base64url to exactly 32 bytes. These two bindings raise the application-secret inventory
+from eight to ten; binding verification proves names, not remote key material.
+
+Session admission atomically requires the still-active share and fewer than 2,000 sessions with a
+future expiry. Expired rows do not consume capacity. A full share returns HTTP 429 with
+`Retry-After` reaching the earliest active expiry. Stopping sharing deletes the parent share row, so
+foreign-key cascade revokes every derived album session immediately. Both the old fragment and an
+already-issued cookie then fail with the same `ALBUM_SHARE_UNAVAILABLE` response. An enable response
+that raced after stop cannot recreate access. Expired sessions are removed in 100-row cleanup
+statements, capped at 50 statements (5,000 rows) per daily invocation.
+
 ## Export safety
 
 Every cell in every generated CSV passes through `csvCell()` in `shared/csv.ts`. A cell whose first non-whitespace character is `=`, `+`, `-`, or `@` gains a leading apostrophe, so a guest-supplied name, filename, caption, or household label cannot become a formula when the host opens the file in a spreadsheet. Ordinary cells are byte-for-byte unchanged. This applies to the media CSV and manifest as well as the RSVP export; both keep backward-output regression coverage.
 
 ## Key rotation limits
 
-`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `LOGIN_HMAC_KEY` protect credentials that can be reissued, so rotating one costs an ordinary sign-out. Four keys are different in kind, because they protect data already written down:
+`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, and `LOGIN_HMAC_KEY` protect credentials that can be reissued, so rotating one costs an ordinary sign-out. Six keys are different in kind, because they protect data already written down:
 
 - `ENTRY_HMAC_KEY` digests the credential printed on every invitation. Rotating it without re-digesting `event_entry_credentials` makes every printed QR stop working.
 - `ENTRY_ENCRYPTION_KEY` encrypts the same credential for redisplay. Rotating it without re-encrypting makes the share link unrecoverable, though the printed code keeps working.
 - `RSVP_LOOKUP_HMAC_KEY` keys every stored name digest and every rate-limit scope. Rotating it without recomputing `rsvp_invitees.lookup_digest` makes every household unreachable by lookup.
 - `GUEST_MESSAGE_HMAC_KEY` domain-separates Guestbook session/IP window digests and durable request HMACs in purge receipts. Receipts survive ordinary deletion until event purge, so rotation requires a coordinated re-HMAC migration or an explicit receipt-invalidation decision.
+- `ALBUM_SHARE_HMAC_KEY` digests active album-link secrets. Rotating it without re-HMACing those decrypted secrets invalidates every active fragment link.
+- `ALBUM_SHARE_ENCRYPTION_KEY` encrypts the same secrets for Manager redisplay. Rotating it without re-encryption makes active share rows unreadable; the supported invalidating rotation revokes all shares first, which also cascades every derived album session.
 
-Rotating an internal guest grant or a management link is a routine operation and must never touch these four keys.
+Rotating an internal guest grant or a management link is a routine operation and must never touch these six keys.
 
 ## Data lifecycle
 

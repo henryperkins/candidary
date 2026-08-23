@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Heart, X } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -16,6 +16,8 @@ interface GalleryViewerProps {
   onIndexChange(index: number): void;
   onClose(): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
+  live?: boolean;
+  onAnnouncement?(message: string): void;
 }
 
 /**
@@ -38,6 +40,8 @@ export function GalleryViewer({
   onIndexChange,
   onClose,
   onFavorite,
+  live = true,
+  onAnnouncement,
 }: GalleryViewerProps) {
   const photo = photos[index];
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -46,6 +50,13 @@ export function GalleryViewer({
   // the failure without a reset effect and stepping back re-shows it.
   const [failedPreviewId, setFailedPreviewId] = useState<string | null>(null);
   const [host] = useState(() => document.createElement('div'));
+  const liveMessage = photo
+    ? `${positionLabel(index, photos.length, hasMore)}. ${galleryPhotoTitle(photo)}, from ${photo.guestName}.`
+    : '';
+
+  useEffect(() => {
+    if (!live && liveMessage) onAnnouncement?.(liveMessage);
+  }, [live, liveMessage, onAnnouncement]);
 
   /**
    * The same containment Cover Studio uses. `aria-modal` alone left the manager
@@ -59,6 +70,7 @@ export function GalleryViewer({
     const inerted: HTMLElement[] = [];
     for (const sibling of Array.from(document.body.children)) {
       if (sibling === host || !(sibling instanceof HTMLElement)) continue;
+      if (sibling.dataset.galleryLiveHost === 'true') continue;
       if (sibling.hasAttribute('inert')) continue;
       sibling.setAttribute('inert', '');
       inerted.push(sibling);
@@ -133,6 +145,18 @@ export function GalleryViewer({
     aria-labelledby={titleId}
     ref={dialogRef}
   >
+    {/* One region, mounted outside every branch below. Stepping through the gallery changes
+        only the photograph, so a region rendered beside its own first text is never announced
+        and the host navigates in silence. It carries position, title and contributor together
+        because those are the three things that tell them where they are. */}
+    <p
+      className="sr-only"
+      role={live ? 'status' : undefined}
+      aria-live={live ? 'polite' : undefined}
+      aria-atomic={live ? 'true' : undefined}
+    >
+      {liveMessage}
+    </p>
     <button type="button" className="gallery-viewer__close" ref={closeRef} aria-label="Close viewer" onClick={onClose}>
       <X aria-hidden="true" />
     </button>
@@ -184,11 +208,15 @@ export function GalleryViewer({
         type="button"
         className="gallery-viewer__favorite"
         aria-pressed={photo.isFavorite}
-        aria-label={`Favorite ${title}`}
+        aria-label={photo.isFavorite
+          ? `Remove ${title} from the album`
+          : `Add ${title} to the album`}
         disabled={favoritePendingIds.has(photo.id)}
         onClick={() => onFavorite(photo)}
       >
-        <Heart aria-hidden="true" fill={photo.isFavorite ? 'currentColor' : 'none'} /> Favorite
+        {photo.isFavorite
+          ? <><Check aria-hidden="true" /> <span aria-hidden="true">In album</span></>
+          : <><Plus aria-hidden="true" /> Add to album</>}
       </button>
     </div>
   </div>, host);

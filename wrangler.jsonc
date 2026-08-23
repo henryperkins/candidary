@@ -10,7 +10,7 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": [
-      "/", "/api/*", "/join", "/join/*", "/manage/*", "/create", "/create/", "/event/*",
+      "/", "/api/*", "/join", "/join/*", "/album", "/album/", "/manage/*", "/create", "/create/", "/event/*",
       "/recover/manage", "/recover/event-entry",
       "/host/unsubscribe/*", "/host/login", "/host/register",
       "/host/events", "/host/verify",
@@ -106,7 +106,9 @@
       "ENTRY_HMAC_KEY",
       "ENTRY_ENCRYPTION_KEY",
       "RSVP_LOOKUP_HMAC_KEY",
-      "GUEST_MESSAGE_HMAC_KEY"
+      "GUEST_MESSAGE_HMAC_KEY",
+      "ALBUM_SHARE_HMAC_KEY",
+      "ALBUM_SHARE_ENCRYPTION_KEY"
     ]
   },
   "observability": {
@@ -205,7 +207,9 @@
           "ENTRY_HMAC_KEY",
           "ENTRY_ENCRYPTION_KEY",
           "RSVP_LOOKUP_HMAC_KEY",
-          "GUEST_MESSAGE_HMAC_KEY"
+          "GUEST_MESSAGE_HMAC_KEY",
+          "ALBUM_SHARE_HMAC_KEY",
+          "ALBUM_SHARE_ENCRYPTION_KEY"
         ]
       },
       "observability": {

@@ -6,6 +6,8 @@ import type { ExportMediaEntryRecord, ExportPartRecord, ExportRecord } from './t
 interface ExportRow {
   id: string;
   event_id: string;
+  kind: ExportRecord['kind'];
+  album_entries_json: string | null;
   state: ExportRecord['state'];
   snapshot_at: string;
   object_key: string | null;
@@ -60,6 +62,7 @@ interface ExportMediaEntryRow {
   publication_status: ExportMediaEntryRecord['publicationStatus'];
   created_at: string;
   published_at: string | null;
+  album_tail_position: number | null;
 }
 
 export interface ReadyExportPart {
@@ -98,10 +101,22 @@ export type ExportRunClaim =
   | { owned: true; resumed: boolean; job: ExportRecord }
   | { owned: false; job: ExportRecord | null };
 
+/**
+ * Result of a guarded dispatch-failure write. `changed` is true only when the
+ * exact pristine attempt lost its Workflow dispatch; `job` is the post-fence
+ * row used to reconcile a concurrent claim, retry, artifact write, or delete.
+ */
+export interface ExportDispatchFailureFence {
+  changed: boolean;
+  job: ExportRecord | null;
+}
+
 function mapExport(row: ExportRow): ExportRecord {
   return {
     id: row.id,
     eventId: row.event_id,
+    kind: row.kind,
+    albumEntriesJson: row.album_entries_json,
     state: row.state,
     snapshotAt: row.snapshot_at,
     objectKey: row.object_key,
@@ -162,6 +177,7 @@ function mapMediaEntry(row: ExportMediaEntryRow): ExportMediaEntryRecord {
     publicationStatus: row.publication_status,
     createdAt: row.created_at,
     publishedAt: row.published_at,
+    albumTailPosition: row.album_tail_position,
   };
 }
 
@@ -183,6 +199,26 @@ function photoPartsComplete(parts: ReadyExportPart[]): boolean {
     && Number.isSafeInteger(part.sourceBytes)
     && part.sourceBytes >= 0
   ));
+}
+
+function batchRow<T>(result: D1Result | undefined): T | null {
+  return (result?.results[0] as T | undefined) ?? null;
+}
+
+function albumGuestbookFieldsEmpty(job: ExportRecord): boolean {
+  return job.guestbookEntryCount === null
+    && job.guestbookSharedCount === null
+    && job.guestbookEventName === null
+    && job.guestbookEventDate === null
+    && job.guestbookEventTimezone === null
+    && job.guestbookPrompt === null
+    && job.guestbookGalleryVisible === null
+    && job.guestbookHtmlObjectKey === null
+    && job.guestbookHtmlBytes === null
+    && job.guestbookHtmlSha256 === null
+    && job.guestbookCsvObjectKey === null
+    && job.guestbookCsvBytes === null
+    && job.guestbookCsvSha256 === null;
 }
 
 export class ExportsRepository {
@@ -269,8 +305,7 @@ export class ExportsRepository {
             WHERE event_id = events.id AND deleted_at IS NULL AND created_at <= ?3)
         )
     `).bind(input.id, input.eventId, input.snapshotAt, input.createdAt, MAX_EVENT_BYTES);
-    try {
-      const results = await this.db.batch([
+    const results = await this.db.batch([
         first,
         this.db.prepare(`
           INSERT INTO export_media_entries (
@@ -297,15 +332,16 @@ export class ExportsRepository {
           eventId: input.eventId,
           snapshotAt: input.snapshotAt,
         }),
+        this.db.prepare(`
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM export_jobs
+            WHERE event_id = ?1 AND id <> ?2 AND state IN ('queued', 'running')
+          ) THEN 1 ELSE 0 END AS active_conflict
+        `).bind(input.eventId, input.id),
       ]);
-      if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
-    } catch (error) {
-      const active = await this.hasActive(input.eventId);
-      if (active) throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
-      throw error;
-    }
-
-    if (await this.hasActive(input.eventId)) {
+    if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
+    const conflict = batchRow<{ active_conflict: number }>(results.at(-1));
+    if (conflict?.active_conflict === 1) {
       throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
     }
     const discriminators = await this.db.prepare(`
@@ -344,15 +380,135 @@ export class ExportsRepository {
     throw new ApiError('EXPORT_EMPTY', 'Deliver a photo or guestbook entry before preparing an export.', 409);
   }
 
-  private async hasActive(eventId: string): Promise<boolean> {
-    return Boolean(await this.db.prepare(`
-      SELECT 1 FROM export_jobs WHERE event_id = ? AND state IN ('queued', 'running') LIMIT 1
-    `).bind(eventId).first());
+  async createAlbumActive(input: CreateExportRecord): Promise<ExportRecord> {
+    const first = this.db.prepare(`
+      INSERT INTO export_jobs (
+        id, event_id, kind, album_entries_json, state, snapshot_at,
+        media_count, total_bytes, attempt, created_at
+      )
+      SELECT ?1, events.id, 'album',
+        CASE
+          WHEN json_valid(event_albums.entries) THEN CASE
+            WHEN json_type(event_albums.entries) = 'array' THEN json(event_albums.entries)
+            ELSE '[]'
+          END
+          ELSE '[]'
+        END,
+        'queued', ?3,
+        (SELECT count(*) FROM media
+          WHERE event_id = events.id AND upload_state = 'stored'
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3),
+        COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
+          WHERE event_id = events.id AND upload_state = 'stored'
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3), 0),
+        1, ?4
+      FROM events
+      JOIN event_albums ON event_albums.event_id = events.id
+      WHERE events.id = ?2 AND events.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM export_jobs
+          WHERE event_id = events.id AND state IN ('queued', 'running')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM media
+          WHERE event_id = events.id AND upload_state = 'stored'
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3
+            AND (
+              object_bucket_generation <> 'canonical'
+              OR object_key <> 'events/' || events.id || '/media/final/' || media.id
+            )
+        )
+        AND COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
+          WHERE event_id = events.id AND upload_state = 'stored'
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3), 0) <= ?5
+        AND EXISTS (
+          SELECT 1 FROM media
+          WHERE event_id = events.id AND upload_state = 'stored'
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3
+        )
+    `).bind(input.id, input.eventId, input.snapshotAt, input.createdAt, MAX_EVENT_BYTES);
+    const results = await this.db.batch([
+        first,
+        this.db.prepare(`
+          INSERT INTO export_media_entries (
+            export_job_id, media_id, object_key, object_bucket_generation,
+            original_filename, mime_type, declared_byte_size, byte_size,
+            width, height, guest_name, caption, publication_status, created_at,
+            published_at, album_tail_position
+          )
+          SELECT ?1, id, object_key, object_bucket_generation, original_filename, mime_type,
+            declared_byte_size, byte_size, width, height, guest_name, caption,
+            publication_status, created_at, published_at,
+            row_number() OVER (ORDER BY timeline_at ASC, id ASC)
+          FROM media
+          WHERE event_id = ?2 AND upload_state = 'stored' AND deleted_at IS NULL
+            AND created_at <= ?3 AND stored_at <= ?3 AND favorited_at <= ?3
+            AND object_bucket_generation = 'canonical'
+            AND object_key = 'events/' || ?2 || '/media/final/' || media.id
+            AND EXISTS (
+              SELECT 1 FROM export_jobs
+              WHERE id = ?1 AND event_id = ?2 AND kind = 'album'
+                AND snapshot_at = ?3 AND state = 'queued'
+            )
+          ORDER BY timeline_at ASC, id ASC
+        `).bind(input.id, input.eventId, input.snapshotAt),
+        this.db.prepare(`
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM export_jobs
+            WHERE event_id = ?1 AND id <> ?2 AND state IN ('queued', 'running')
+          ) THEN 1 ELSE 0 END AS active_conflict
+        `).bind(input.eventId, input.id),
+      ]);
+    if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
+    const conflict = batchRow<{ active_conflict: number }>(results.at(-1));
+    if (conflict?.active_conflict === 1) {
+      throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
+    }
+    const discriminators = await this.db.prepare(`
+      SELECT
+        COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
+          WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
+            AND created_at <= ?2 AND stored_at <= ?2 AND favorited_at <= ?2), 0) AS total_bytes,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM media
+          WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
+            AND created_at <= ?2 AND stored_at <= ?2 AND favorited_at <= ?2
+            AND (
+              object_bucket_generation <> 'canonical'
+              OR object_key <> 'events/' || ?1 || '/media/final/' || media.id
+            )
+        ) THEN 1 ELSE 0 END AS needs_media_upgrade,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM media
+          WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
+            AND created_at <= ?2 AND stored_at <= ?2 AND favorited_at <= ?2
+        ) THEN 0 ELSE 1 END AS is_empty
+    `).bind(input.eventId, input.snapshotAt).first<{
+      total_bytes: number;
+      needs_media_upgrade: number;
+      is_empty: number;
+    }>();
+    if (discriminators?.needs_media_upgrade === 1) {
+      throw new ApiError(
+        'EXPORT_MEDIA_UPGRADE_REQUIRED',
+        'Some album photos need a storage upgrade before they can be exported. Try again after the upgrade is complete.',
+        409,
+      );
+    }
+    if ((discriminators?.total_bytes ?? 0) > MAX_EVENT_BYTES) {
+      throw new ApiError('EXPORT_LIMIT_EXCEEDED', 'This album is too large to export.', 409);
+    }
+    throw new ApiError('EXPORT_EMPTY', 'Pick a photo before preparing an album export.', 409);
   }
 
   async listForEvent(eventId: string): Promise<ExportRecord[]> {
     const result = await this.db.prepare(`
-      SELECT * FROM export_jobs WHERE event_id = ? ORDER BY created_at DESC
+      SELECT * FROM export_jobs WHERE event_id = ? ORDER BY created_at DESC, id DESC
     `).bind(eventId).all<ExportRow>();
     return result.results.map(mapExport);
   }
@@ -392,6 +548,36 @@ export class ExportsRepository {
       entries: rows.map(mapMediaEntry),
       nextCursor: result.results.length > limit && last
         ? { createdAt: last.created_at, mediaId: last.media_id }
+        : null,
+    };
+  }
+
+  async listAlbumMediaEntries(
+    exportJobId: string,
+    afterPosition = 0,
+    limit = 100,
+  ): Promise<{
+      entries: ExportMediaEntryRecord[];
+      nextPosition: number | null;
+    }> {
+    if (!Number.isSafeInteger(afterPosition) || afterPosition < 0) {
+      throw new Error('Album export cursor must be a non-negative integer.');
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Export media page size must be between 1 and 100.');
+    }
+    const result = await this.db.prepare(`
+      SELECT * FROM export_media_entries
+      WHERE export_job_id = ?1 AND album_tail_position > ?2
+      ORDER BY album_tail_position ASC, media_id ASC
+      LIMIT ?3
+    `).bind(exportJobId, afterPosition, limit + 1).all<ExportMediaEntryRow>();
+    const rows = result.results.slice(0, limit);
+    const last = rows.at(-1);
+    return {
+      entries: rows.map(mapMediaEntry),
+      nextPosition: result.results.length > limit && last
+        ? last.album_tail_position
         : null,
     };
   }
@@ -443,8 +629,19 @@ export class ExportsRepository {
     if (!photoPartsComplete(inventory.parts)) {
       throw new Error('Photo inventory parts are incomplete or out of order.');
     }
-    const newFormat = job.guestbookEntryCount !== null;
-    if (newFormat) {
+    const albumFormat = job.kind === 'album';
+    const newCompleteFormat = !albumFormat && job.guestbookEntryCount !== null;
+    if (albumFormat) {
+      if (job.albumEntriesJson === null) {
+        throw new Error('An album export requires frozen album order.');
+      }
+      if (!albumGuestbookFieldsEmpty(job) || inventory.guestbook !== null) {
+        throw new Error('An album export cannot contain Guestbook data.');
+      }
+      if (!inventory.manifestObjectKey || !inventory.parts.length) {
+        throw new Error('An album export requires a manifest and parts.');
+      }
+    } else if (newCompleteFormat) {
       if (job.guestbookSharedCount === null || job.guestbookEventName === null
         || job.guestbookEventDate === null || job.guestbookEventTimezone === null
         || job.guestbookPrompt === null || job.guestbookGalleryVisible === null) {
@@ -540,20 +737,83 @@ export class ExportsRepository {
     return (await this.getById(id))!;
   }
 
+  async markInitialDispatchFailed(
+    id: string,
+    errorCode: string,
+  ): Promise<ExportDispatchFailureFence> {
+    const result = await this.db.prepare(`
+      UPDATE export_jobs SET state = 'failed', error_code = ?2
+      WHERE id = ?1 AND state = 'queued' AND attempt = 1 AND error_code IS NULL
+        AND object_key IS NULL AND manifest_object_key IS NULL AND part_count = 0
+        AND guestbook_html_object_key IS NULL AND guestbook_html_bytes IS NULL
+        AND guestbook_html_sha256 IS NULL AND guestbook_csv_object_key IS NULL
+        AND guestbook_csv_bytes IS NULL AND guestbook_csv_sha256 IS NULL
+        AND started_at IS NULL AND completed_at IS NULL AND expires_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM export_parts WHERE export_job_id = ?1)
+    `).bind(id, errorCode).run();
+    return {
+      changed: (result.meta.changes ?? 0) === 1,
+      job: await this.getById(id),
+    };
+  }
+
+  /**
+   * Fails only the exact pristine retry attempt that could not retain a
+   * Workflow. A concurrent Workflow claim or artifact write wins this fence.
+   */
+  async markRetryDispatchFailed(
+    id: string,
+    attempt: number,
+    errorCode: string,
+  ): Promise<ExportDispatchFailureFence> {
+    const result = await this.db.prepare(`
+      UPDATE export_jobs SET state = 'failed', error_code = ?3
+      WHERE id = ?1 AND state = 'queued' AND attempt = ?2 AND attempt > 1
+        AND error_code IS NULL AND object_key IS NULL AND manifest_object_key IS NULL
+        AND part_count = 0
+        AND guestbook_html_object_key IS NULL AND guestbook_html_bytes IS NULL
+        AND guestbook_html_sha256 IS NULL AND guestbook_csv_object_key IS NULL
+        AND guestbook_csv_bytes IS NULL AND guestbook_csv_sha256 IS NULL
+        AND started_at IS NULL AND completed_at IS NULL AND expires_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM export_parts WHERE export_job_id = ?1)
+    `).bind(id, attempt, errorCode).run();
+    return {
+      changed: (result.meta.changes ?? 0) === 1,
+      job: await this.getById(id),
+    };
+  }
+
   async retry(id: string): Promise<ExportRecord> {
     const results = await this.db.batch([
-      this.db.prepare(`
-        UPDATE export_jobs SET state = 'queued', attempt = attempt + 1, object_key = NULL,
-          manifest_object_key = NULL, part_count = 0, error_code = NULL,
-          guestbook_html_object_key = NULL, guestbook_html_bytes = NULL,
-          guestbook_html_sha256 = NULL, guestbook_csv_object_key = NULL,
-          guestbook_csv_bytes = NULL, guestbook_csv_sha256 = NULL,
-          started_at = NULL, completed_at = NULL, expires_at = NULL
-        WHERE id = ? AND state IN ('failed', 'expired')
-      `).bind(id),
-      this.db.prepare('DELETE FROM export_parts WHERE export_job_id = ? AND changes() = 1').bind(id),
-    ]);
+        this.db.prepare(`
+          UPDATE export_jobs SET state = 'queued', attempt = attempt + 1, object_key = NULL,
+            manifest_object_key = NULL, part_count = 0, error_code = NULL,
+            guestbook_html_object_key = NULL, guestbook_html_bytes = NULL,
+            guestbook_html_sha256 = NULL, guestbook_csv_object_key = NULL,
+            guestbook_csv_bytes = NULL, guestbook_csv_sha256 = NULL,
+            started_at = NULL, completed_at = NULL, expires_at = NULL
+          WHERE id = ?1 AND state IN ('failed', 'expired')
+            AND NOT EXISTS (
+              SELECT 1 FROM export_jobs AS active
+              WHERE active.event_id = export_jobs.event_id AND active.id <> export_jobs.id
+                AND active.state IN ('queued', 'running')
+            )
+        `).bind(id),
+        this.db.prepare('DELETE FROM export_parts WHERE export_job_id = ? AND changes() = 1').bind(id),
+        this.db.prepare(`
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM export_jobs AS active
+            JOIN export_jobs AS candidate ON candidate.id = ?1
+            WHERE active.event_id = candidate.event_id AND active.id <> candidate.id
+              AND active.state IN ('queued', 'running')
+          ) THEN 1 ELSE 0 END AS active_conflict
+        `).bind(id),
+      ]);
     if ((results[0]?.meta.changes ?? 0) !== 1) {
+      const conflict = batchRow<{ active_conflict: number }>(results.at(-1));
+      if (conflict?.active_conflict === 1) {
+        throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
+      }
       throw new ApiError('EXPORT_ALREADY_ACTIVE', 'Only failed or expired exports can be retried.', 409);
     }
     return (await this.getById(id))!;

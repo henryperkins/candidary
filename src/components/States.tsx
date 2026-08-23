@@ -6,8 +6,14 @@ import {
 } from '../../shared/load-failure';
 import { ClientApiError } from '../app/api';
 
-export function LoadingState({ label = 'Gathering the details…' }: { label?: string }) {
-  return <div className="state-card" role="status"><LoaderCircle className="spin" aria-hidden="true" /><p>{label}</p></div>;
+export function LoadingState({
+  label = 'Gathering the details…',
+  live = true,
+}: {
+  label?: string;
+  live?: boolean;
+}) {
+  return <div className="state-card" role={live ? 'status' : undefined}><LoaderCircle className="spin" aria-hidden="true" /><p>{label}</p></div>;
 }
 
 interface ErrorStateProps {

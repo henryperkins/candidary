@@ -1,11 +1,12 @@
-import { Eye, EyeOff, Image as ImageIcon } from 'lucide-react';
-import type { Dispatch, SetStateAction } from 'react';
+import { Eye, EyeOff, Image as ImageIcon, ImageOff } from 'lucide-react';
+import { useState, type Dispatch, type SetStateAction } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { MediaView } from '../../app/types';
 import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
 import type { EventView, PublicationStatus } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
+import { sharedSelectionCapacityMessage } from './selection-state';
 
 export type GallerySharedStatus = 'all' | PublicationStatus;
 
@@ -54,6 +55,23 @@ interface ManagerSharedGalleryProps {
   loadingMore: boolean;
   hasMore: boolean;
   onLoadMore(): Promise<void>;
+  onAnnouncement?(message: string): void;
+}
+
+function SharedPhotoPreview({ item, title }: { item: MediaView; title: string }) {
+  const [failed, setFailed] = useState(false);
+  return failed
+    ? <div className="gallery-shared__preview-fallback">
+        <ImageOff aria-hidden="true" />
+        <span>Preview unavailable</span>
+      </div>
+    : <img
+        src={mediaPreview(item.id)}
+        alt={title}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+      />;
 }
 
 /**
@@ -77,9 +95,37 @@ export function ManagerSharedGallery({
   loadingMore,
   hasMore,
   onLoadMore,
+  onAnnouncement,
 }: ManagerSharedGalleryProps) {
   const empty = SHARED_EMPTY_COPY[status];
+  const [activeBulk, setActiveBulk] = useState<'publish' | 'hide' | null>(null);
+
+  function changeStatus(next: GallerySharedStatus) {
+    if (next === status) return;
+    onSelectedChange([]);
+    onStatusChange(next);
+  }
+
+  async function runBulk(action: 'publish' | 'hide') {
+    if (activeBulk !== null || selected.length === 0) return;
+    const count = selected.length;
+    const progressive = action === 'publish' ? 'Publishing' : 'Hiding';
+    setActiveBulk(action);
+    onAnnouncement?.(`${progressive} ${count} selected photo${count === 1 ? '' : 's'}…`);
+    try {
+      await onBulk(action);
+      onAnnouncement?.(`${progressive} finished.`);
+    } catch {
+      onAnnouncement?.(`${progressive} could not be completed.`);
+    } finally {
+      setActiveBulk(null);
+    }
+  }
+
   return <div className="gallery-shared">
+    <p className="gallery-shared__lede">
+      Publication is a separate axis from the album. A photo is delivered privately whether or not it is published, and an album pick never publishes anything.
+    </p>
     <div className="filter-tabs" role="group" aria-label="Publication status">
       {(['unpublished', 'published', 'hidden'] as const).map((value) => (
         <button
@@ -87,7 +133,7 @@ export function ManagerSharedGallery({
           className={status === value ? 'active' : ''}
           aria-pressed={status === value}
           key={value}
-          onClick={() => onStatusChange(value)}
+          onClick={() => changeStatus(value)}
         >{SHARED_STATUS_LABELS[value]}</button>
       ))}
     </div>
@@ -100,10 +146,12 @@ export function ManagerSharedGallery({
         onClick={onOpenSettings}
       >Open settings</button>
     </div>}
-    <div className="bulk-bar">
-      <span id="bulk-selection-status" role="status" aria-live="polite">
+    <div className="bulk-bar" aria-busy={activeBulk !== null}>
+      <span
+        id="bulk-selection-status"
+      >
         {selectionAtLimit
-          ? `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`
+          ? sharedSelectionCapacityMessage()
           : selected.length
             ? `${selected.length} selected`
             : 'Select photos to update the optional gallery'}
@@ -111,15 +159,17 @@ export function ManagerSharedGallery({
       <button
         type="button"
         className="button button--approve"
-        disabled={!selected.length}
-        onClick={() => void onBulk('publish')}
-      ><Eye aria-hidden="true" /> Publish selected</button>
+        disabled={!selected.length || activeBulk !== null}
+        aria-busy={activeBulk === 'publish' || undefined}
+        onClick={() => void runBulk('publish')}
+      ><Eye aria-hidden="true" /> {activeBulk === 'publish' ? 'Publishing…' : 'Publish selected'}</button>
       <button
         type="button"
         className="button button--danger-outline"
-        disabled={!selected.length}
-        onClick={() => void onBulk('hide')}
-      ><EyeOff aria-hidden="true" /> Hide selected</button>
+        disabled={!selected.length || activeBulk !== null}
+        aria-busy={activeBulk === 'hide' || undefined}
+        onClick={() => void runBulk('hide')}
+      ><EyeOff aria-hidden="true" /> {activeBulk === 'hide' ? 'Hiding…' : 'Hide selected'}</button>
     </div>
     {media.length === 0
       ? <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>{empty.title}</h3><p>{empty.body}</p></div>
@@ -136,7 +186,7 @@ export function ManagerSharedGallery({
                 <div className="intake-photo">
                   <label className="intake-select"><input
                     type="checkbox"
-                    aria-label={`Select ${item.originalFilename}`}
+                    aria-label={`Select ${title}`}
                     aria-describedby={selectionUnavailable ? 'bulk-selection-status' : undefined}
                     checked={isSelected}
                     disabled={selectionUnavailable}
@@ -146,7 +196,7 @@ export function ManagerSharedGallery({
                       return [...current, item.id];
                     })}
                   /></label>
-                  <img src={mediaPreview(item.id)} alt={title} loading="lazy" decoding="async" />
+                  <SharedPhotoPreview item={item} title={title} />
                 </div>
                 <div>
                   <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>

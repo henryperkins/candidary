@@ -12,15 +12,16 @@ The daily `17 3 * * *` handler performs these idempotent phases in order:
 
 1. Sweep expired and consumed pending registrations, expired login challenges, and rate-limit buckets older than the enforcement window, in repeated bounded passes until each table is drained.
 2. Sweep expired or revoked RSVP sessions and lookup rate windows older than one 15-minute bucket, in the same bounded 100-row passes capped at 50 per run. Both statements report counts only; neither can name a household, a guest, or a scope.
-3. Delete objects for upload reservations older than fifteen minutes and release event counters.
-4. Run the same bounded durable media promotion pass used by the hourly trigger.
-5. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
-6. Resolve globally bounded backfill jobs whose exact legacy source is no longer current, rotating still-current blockers fairly rather than letting the oldest 100 starve newer work.
-7. Recover stale initial backfill creates with the same stored Workflow ID, then confirm their existing generation/fence.
-8. Reconcile retryable backfill jobs with platform status. Guarded Worker transitions own resume and restart. A successful `unknown` or unmapped status changes nothing. A failed lookup remains classified `unknown`, but after the exact D1/fence/generation/currentness/capacity/checkpoint claim succeeds the Worker replays its deterministic ID through idempotent `createBatch`; a retained ID is skipped, an absent ID is created, and an invalid ID is rejected.
-9. Close eligible backfill and verification runs. The Worker re-derives the four zero-legacy predicates inside the status-changing statement; no operator payload writes `verified_at`.
-10. Sweep cover drafts, previews, retired sets/masters/originals, receipts, fences, jobs, and closed runs in bounded classes, deleting R2 before the inventory row that named an object.
-11. Resume retention-due or already soft-deleted event purges. Cover fences are coordinated before R2, and cover children are deleted before the event. A failed purge remains selected on later passes rather than stranding objects.
+3. Delete expired album-share sessions in 100-row statements, stopping after a short batch or 50 batches (5,000 rows) in one invocation. A stopped share removes its sessions immediately through the share row's foreign-key cascade; this bounded sweep is for ordinary seven-day session expiry.
+4. Delete objects for upload reservations older than fifteen minutes and release event counters.
+5. Run the same bounded durable media promotion pass used by the hourly trigger.
+6. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
+7. Resolve globally bounded backfill jobs whose exact legacy source is no longer current, rotating still-current blockers fairly rather than letting the oldest 100 starve newer work.
+8. Recover stale initial backfill creates with the same stored Workflow ID, then confirm their existing generation/fence.
+9. Reconcile retryable backfill jobs with platform status. Guarded Worker transitions own resume and restart. A successful `unknown` or unmapped status changes nothing. A failed lookup remains classified `unknown`, but after the exact D1/fence/generation/currentness/capacity/checkpoint claim succeeds the Worker replays its deterministic ID through idempotent `createBatch`; a retained ID is skipped, an absent ID is created, and an invalid ID is rejected.
+10. Close eligible backfill and verification runs. The Worker re-derives the four zero-legacy predicates inside the status-changing statement; no operator payload writes `verified_at`.
+11. Sweep cover drafts, previews, retired sets/masters/originals, receipts, fences, jobs, and closed runs in bounded classes, deleting R2 before the inventory row that named an object.
+12. Resume retention-due or already soft-deleted event purges. Cover fences are coordinated before R2, and cover children are deleted before the event. A failed purge remains selected on later passes rather than stranding objects.
 
 Re-running cleanup is safe because D1 transitions and R2 deletes are idempotent.
 
@@ -86,6 +87,57 @@ A-compatible version with ingress, promotion, and purge disabled. Never route th
 HEAD requests, or a bucket lock cannot replace the permanent scanner/tombstone protocol.
 
 Closed gallery, delivery-history, and notes sections do not fetch their data or previews. The manager's visible Live intake refreshes event counts and private media every five seconds; polling pauses outside Intake and while the document is hidden.
+
+## Album sharing and album exports
+
+Provision `ALBUM_SHARE_HMAC_KEY` and `ALBUM_SHARE_ENCRYPTION_KEY` as independent Worker secrets in
+every environment before deploying this schema. The HMAC value must be an independent high-entropy
+secret of at least 32 random bytes. The encryption value must decode from unpadded base64url to
+exactly 32 bytes for AES-256-GCM. Preview and production values must also be independent from each
+other. With shell tracing disabled, pipe generated values directly to the intended environment:
+
+```bash
+# Preview pair
+node -e "process.stdout.write(require('node:crypto').randomBytes(48).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_HMAC_KEY --env preview --config wrangler.jsonc
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_ENCRYPTION_KEY --env preview --config wrangler.jsonc
+
+# Independently generated production pair
+node -e "process.stdout.write(require('node:crypto').randomBytes(48).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_HMAC_KEY --config wrangler.jsonc
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_ENCRYPTION_KEY --config wrangler.jsonc
+```
+
+Never copy either value into `wrangler.jsonc`, a migration, a log, or a ticket. `npm run
+verify:bindings` proves the binding names, not that production holds usable secret material.
+
+One active share admits at most 2,000 sessions whose expiry is later than the exchange time. Expired
+rows do not consume a slot. The count and insert run in one D1 batch, so concurrent exchanges cannot
+both claim the final slot. At capacity, exchange returns `RATE_LIMITED` with HTTP 429 and a
+`Retry-After` derived from the earliest still-active session expiry; the caller should not retry before
+that delay. Admission also verifies the share in the same transaction, so a concurrent stop wins as
+revocation rather than leaving an orphan session.
+
+**Stop sharing is the supported revocation operation.** It deletes the event's one
+`event_album_shares` row; D1 cascades that deletion to every `event_album_share_sessions` row. The
+fragment link, existing seven-day cookies, album reads, and album preview reads then all return the
+same unavailable response. Enabling sharing again creates a different credential; an old link never
+becomes valid again. An enable that observed the old row before a concurrent stop may return that
+observed URL, but it cannot recreate the deleted row or authorize a session. The daily cleanup removes
+naturally expired sessions in 100-row batches, with a 50-batch/5,000-row ceiling per invocation; a
+larger backlog is continued by the next daily pass.
+
+Do not rotate either album-share key as an ordinary session-key change. A deliberate invalidating
+rotation must use a maintenance window: revoke all active shares (and verify both share and session
+counts are zero), replace both Worker secrets together in every target environment, deploy, then let
+hosts create new links. Preserving active links instead requires a reviewed forward migration that,
+while the old keys are still available, decrypts each stored secret and atomically writes its digest
+and ciphertext under the new independent keys. No such migration is shipped by this repository.
+
+Library **Download all** creates a `complete` export: every stored, non-deleted original plus the
+photo manifest and printable/private Guestbook artifacts frozen at creation. Album **Download album
+photos** creates an `album` export from the album's immutable ordered photo snapshot; it omits
+Guestbook artifacts and never expands when the album later changes. Both kinds write manifest/ZIP
+artifacts with a 24-hour Ready window. The daily cleanup deletes expired objects before marking the
+job expired; immutable snapshot rows remain available for an authorized retry until event purge.
 
 ## Public pages, crawlers, and agents
 
@@ -293,6 +345,7 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `RSVP_ROSTER_BATCH_IDEMPOTENCY_CONFLICT` — a committed manager batch key was reused for different canonical content. Keep the original key only for an unchanged retry; changed staged work needs a fresh preview and key.
 - `RATE_LIMITED` on a lookup — the edge budget (30/IP/minute, `Retry-After: 60`) or a D1 budget (20/event/IP or 8/event/name per 15 minutes, `Retry-After: 900`) is spent. The body is deliberately generic.
 - `RATE_LIMITED` on a Guestbook submission — either the isolated edge budget (120/event/trusted-IP/minute) or a durable session/IP window is spent. Honor `Retry-After`, preserve the draft, and never log a raw IP or digest.
+- `RATE_LIMITED` on an album-share exchange — 2,000 unexpired sessions already exist for that share. Honor the exact `Retry-After`, which reaches the earliest active expiry; expired rows do not count.
 - `EXPORT_MEDIA_UPGRADE_REQUIRED` — one or more stored originals still point at the legacy bucket. Copy-only may already have verified the canonical bytes, but export remains closed until the reviewed canonical-live pointer cutover completes. Never bypass the canonical-generation snapshot rule.
 - `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED`, `EXPORT_LIMIT_EXCEEDED`, `EXPORT_SNAPSHOT_CHANGED` — inspect the active job, immutable Guestbook snapshot metadata, and persisted object inventory.
 
@@ -300,7 +353,8 @@ Production secret provisioning and remote D1 migration are explicit durable-stat
 steps hidden inside routine code deployment. Follow [deployment.md](deployment.md), and never rotate
 persisted-data keys merely to release application code.
 
-The active schema-v2 Worker requires eight application secrets and no R2 access-key secret. Do not
+The active schema-v2 Worker requires ten application secrets, including the two album-share keys, and
+no R2 access-key secret. Do not
 reintroduce `R2_ACCESS_KEY_ID` or `R2_SECRET_ACCESS_KEY`; the old signer token is revocation evidence,
 not a credential for Candidate A, copy-only, or Candidate B.
 

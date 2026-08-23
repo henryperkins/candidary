@@ -4,6 +4,7 @@ import { MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type * as ManagementLinkModule from '../../src/app/management-link';
+import type { MediaView } from '../../src/app/types';
 
 const { replaceManagementLocation } = vi.hoisted(() => ({
   replaceManagementLocation: vi.fn(),
@@ -891,7 +892,7 @@ describe('manager experience', () => {
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
 
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     await user.click(await screen.findByRole('button', { name: /^Publish / }));
     await waitFor(() => expect(reads).toBe(2));
 
@@ -1405,7 +1406,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /gallery/i }));
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid article')).toHaveLength(2));
 
     async function expectRecoverableFailure(label: string, act_: () => Promise<void>, heading: string) {
@@ -1415,7 +1416,7 @@ describe('manager experience', () => {
       expect(document.querySelectorAll('.moderation-grid article'), label).toHaveLength(2);
     }
 
-    await user.click(screen.getByRole('checkbox', { name: 'Select moment-2.jpg' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select Moment 2' }));
     await expectRecoverableFailure(
       'bulk publish',
       () => user.click(screen.getByRole('button', { name: 'Publish selected' })),
@@ -1426,7 +1427,7 @@ describe('manager experience', () => {
       () => user.click(screen.getByRole('button', { name: 'Hide selected' })),
       'Gallery',
     );
-    await user.click(screen.getByRole('button', { name: 'Private gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Library' }));
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
     expect(screen.getByRole('heading', { name: 'Gallery' }), 'export').toBeVisible();
@@ -1443,7 +1444,7 @@ describe('manager experience', () => {
    */
   it('surfaces a credential failure from the export poll instead of waiting on Preparing forever', async () => {
     const queued = {
-      id: 'export-a', state: 'queued', attempt: 1, mediaCount: 6, totalBytes: 1024,
+      id: 'export-a', kind: 'complete', state: 'queued', attempt: 1, mediaCount: 6, totalBytes: 1024,
       guestbookEntryCount: 0, errorCode: null, snapshotAt: '2026-09-20T00:00:00.000Z',
     };
     // Armed immediately before the poll tick, so the refusal belongs to the poll and not to a
@@ -1495,7 +1496,7 @@ describe('manager experience', () => {
 
   it('does not let a stale export answer put back a state the poll has already passed', async () => {
     const job = (state: string) => ({
-      id: 'export-a', state, attempt: 1, mediaCount: 6, totalBytes: 1024,
+      id: 'export-a', kind: 'complete', state, attempt: 1, mediaCount: 6, totalBytes: 1024,
       guestbookEntryCount: 0, errorCode: null, snapshotAt: '2026-09-20T00:00:00.000Z',
     });
     // Armed immediately before the first poll tick, so the held answer is that tick's and not
@@ -1533,7 +1534,7 @@ describe('manager experience', () => {
     await screen.findByRole('heading', { name: 'Live intake' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    await user.click(await screen.findByRole('button', { name: 'Private gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Library' }));
 
     const poll = await waitFor(() => {
       const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
@@ -1552,6 +1553,105 @@ describe('manager experience', () => {
     // job back to Preparing with nothing left running to correct it.
     await act(async () => { releaseStale(); });
     expect(shownState()).toBe('Ready');
+  });
+
+  it('keeps the latest complete and album exports on their independent Gallery surfaces', async () => {
+    const exportJob = (kind: 'complete' | 'album', state: 'ready' | 'failed', id: string) => ({
+      id, kind, state, attempt: state === 'failed' ? 2 : 1,
+      mediaCount: kind === 'complete' ? 9 : 2,
+      totalBytes: kind === 'complete' ? 1024 : 2048,
+      partCount: 1, expiresAt: '2026-09-21T00:00:00.000Z',
+      snapshotAt: '2026-09-20T00:00:00.000Z',
+      guestbookEntryCount: kind === 'complete' ? 3 : null,
+      guestbookSharedCount: kind === 'complete' ? 1 : null,
+      guestbookEventName: null, guestbookEventDate: null, guestbookEventTimezone: null,
+      guestbookPrompt: null, guestbookGalleryVisible: null,
+    });
+    const albumPhoto = {
+      id: 'album-photo', originalFilename: 'album-photo.png', guestName: 'Avery', caption: null,
+      publicationStatus: 'unpublished', previewAvailable: true, width: 800, height: 600,
+      receivedAt: '2026-09-20T00:00:00.000Z', timelineAt: '2026-09-20T00:00:00.000Z',
+      timelineSource: 'received', isFavorite: true,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/exports')) {
+        return json({ exports: [
+          exportJob('album', 'failed', 'album-latest'),
+          exportJob('complete', 'ready', 'complete-latest'),
+        ] });
+      }
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: albumPhoto.id, entries: [{ kind: 'photo', photo: albumPhoto }],
+        photoCount: 1, sectionCount: 0, totalBytes: 200,
+      } });
+      if (url.includes('/gallery')) return json({ media: [albumPhoto], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry.secret', disabledAt: null });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+
+    expect((await screen.findAllByText(/9 photos · 1 KB · 3 guestbook entries/))[0]).toBeVisible();
+    expect(screen.getByText('Ready')).toBeVisible();
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' })).getByRole('button', { name: /^Album/ }));
+    expect((await screen.findAllByText(/2 photos · 2 KB\. Attempt 2 failed/))[0]).toBeVisible();
+    expect(screen.getByText('Failed')).toBeVisible();
+  });
+
+  it('posts the exact album kind selector from Download album photos', async () => {
+    const exportBodies: string[] = [];
+    const albumPhoto = {
+      id: 'album-photo', originalFilename: 'album-photo.png', guestName: 'Avery', caption: null,
+      publicationStatus: 'unpublished', previewAvailable: true, width: 800, height: 600,
+      receivedAt: '2026-09-20T00:00:00.000Z', timelineAt: '2026-09-20T00:00:00.000Z',
+      timelineSource: 'received', isFavorite: true,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'POST' && url.endsWith('/exports')) {
+        exportBodies.push(String(init?.body));
+        return json({ export: {
+          id: 'album-new', kind: 'album', state: 'queued', attempt: 1,
+          mediaCount: 1, totalBytes: 64, partCount: 0, expiresAt: null,
+          snapshotAt: '2026-09-20T00:00:00.000Z', guestbookEntryCount: null,
+          guestbookSharedCount: null, guestbookEventName: null, guestbookEventDate: null,
+          guestbookEventTimezone: null, guestbookPrompt: null, guestbookGalleryVisible: null,
+        } }, 202);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: albumPhoto.id, entries: [{ kind: 'photo', photo: albumPhoto }],
+        photoCount: 1, sectionCount: 0, totalBytes: 64,
+      } });
+      if (url.includes('/gallery')) return json({ media: [albumPhoto], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry.secret', disabledAt: null });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' })).getByRole('button', { name: /^Album/ }));
+    await user.click(await screen.findByRole('button', { name: 'Download album photos' }));
+
+    await waitFor(() => expect(exportBodies).toEqual([JSON.stringify({ kind: 'album' })]));
   });
 
   it('caps cross-page bulk selection at 50 and submits only the selected ids', async () => {
@@ -1583,7 +1683,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
     const choices = await screen.findAllByRole('checkbox', { name: /^Select /u });
@@ -1592,12 +1692,14 @@ describe('manager experience', () => {
     for (const choice of choices.slice(0, MANAGER_BULK_SELECTION_MAX)) fireEvent.click(choice);
     const extra = choices[MANAGER_BULK_SELECTION_MAX]!;
     expect(screen.getByRole('status')).toHaveTextContent(
-      `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`,
+      '50 of 50 photos selected. Remove one to choose another.',
     );
     expect(extra).toBeDisabled();
     await user.click(extra);
     expect(extra).not.toBeChecked();
-    expect(screen.getByRole('status')).toHaveTextContent('50 of 50 photos selected');
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '50 of 50 photos selected. Remove one to choose another.',
+    );
 
     await user.click(choices[0]!);
     expect(extra, 'unchecking remains available as the recovery').toBeEnabled();
@@ -2128,8 +2230,8 @@ describe('manager experience', () => {
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
-    await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+    await user.click(screen.getByRole('checkbox', { name: /The toast/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/manage/events/event-a/media/bulk',
@@ -2137,6 +2239,391 @@ describe('manager experience', () => {
     ));
     const bulkCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/media/bulk'));
     expect(bulkCall?.[1]?.body).not.toContain('media-b');
+  });
+
+  it('keeps Shared publication separate, clears filters, and scopes its busy and preview states', async () => {
+    const rows: MediaView[] = [
+      {
+        id: 'media-a', originalFilename: 'private-camera-a.jpg', guestName: 'Avery',
+        caption: 'The toast', publicationStatus: 'unpublished', uploadState: 'stored',
+      },
+      {
+        id: 'media-b', originalFilename: 'private-camera-b.jpg', guestName: 'Jamie',
+        caption: 'First dance', publicationStatus: 'unpublished', uploadState: 'stored',
+      },
+    ];
+    let releaseBulk!: () => void;
+    const bulkGate = new Promise<void>((resolve) => { releaseBulk = resolve; });
+    let failBulk = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/bulk') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { ids: string[]; action: 'publish' | 'hide' };
+        await bulkGate;
+        if (failBulk) {
+          return errorJson({
+            code: 'INTERNAL_ERROR', message: 'The selected photos could not be published.', requestId: 'request-a',
+          }, 500);
+        }
+        for (const row of rows) {
+          if (body.ids.includes(row.id)) row.publicationStatus = body.action === 'publish' ? 'published' : 'hidden';
+        }
+        return json({ changed: body.ids });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) {
+        return json({ event: { ...MANAGED_EVENT, storedMediaCount: rows.length } });
+      }
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({ media: rows, nextCursor: null });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) {
+        return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      }
+      throw new Error(`Unexpected request ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+
+    expect(screen.getByText(
+      'Publication is a separate axis from the album. A photo is delivered privately whether or not it is published, and an album pick never publishes anything.',
+    )).toBeVisible();
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    const images = shared.querySelectorAll<HTMLImageElement>('.intake-photo img');
+    expect(images).toHaveLength(2);
+    fireEvent.error(images[0]!);
+    expect(within(shared).getByText('Preview unavailable')).toBeVisible();
+    expect(images[1]).toBeVisible();
+
+    const toast = within(shared).getByRole('checkbox', { name: 'Select The toast' });
+    await user.click(toast);
+    expect(toast).toBeChecked();
+    await user.click(within(shared).getByRole('button', { name: 'Published' }));
+    expect(toast).not.toBeChecked();
+    expect(within(shared).getByRole('button', { name: 'Publish selected' })).toBeDisabled();
+    expect(within(shared).getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+
+    await user.click(within(shared).getByRole('button', { name: 'Unpublished' }));
+    await user.click(toast);
+    await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
+    const publishing = within(shared).getByRole('button', { name: 'Publishing…' });
+    expect(publishing).toBeDisabled();
+    expect(publishing).toHaveAttribute('aria-busy', 'true');
+    expect(within(shared).getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+    expect(within(shared).queryByRole('button', { name: 'Hiding…' })).not.toBeInTheDocument();
+    expect(within(shared).getByText('1 selected').closest('.bulk-bar')).toHaveAttribute('aria-busy', 'true');
+    expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
+    expect(shared.querySelector('[role="status"]')).toBeNull();
+
+    releaseBulk();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/manage/events/event-a/media/bulk',
+      expect.objectContaining({ body: expect.stringContaining('media-a') }),
+    ));
+
+    failBulk = true;
+    const firstDance = await within(shared).findByRole('checkbox', { name: 'Select First dance' });
+    await user.click(firstDance);
+    await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
+    await screen.findByText('The selected photos could not be published.');
+    const liveStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    expect(liveStatus).toHaveTextContent('Publishing could not be completed.');
+    expect(liveStatus).not.toHaveTextContent('Publishing finished.');
+  });
+
+  it('drains Album work before a manager-section change and a router unmount', async () => {
+    let resolveFirstSave!: () => void;
+    let resolveSecondSave!: () => void;
+    const firstSave = new Promise<void>((resolve) => { resolveFirstSave = resolve; });
+    const secondSave = new Promise<void>((resolve) => { resolveSecondSave = resolve; });
+    const saveGates = [firstSave, secondSave];
+    let revision = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      if (url.endsWith('/album') && method === 'PUT') {
+        const write = revision;
+        await saveGates[write];
+        const body = JSON.parse(String(init?.body));
+        revision += 1;
+        return json({ album: {
+          revision,
+          saved: true,
+          ...body.metadata,
+          effectiveCoverMediaId: null,
+          entries: [],
+          photoCount: 0,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before Intake' } });
+    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    await act(async () => { resolveFirstSave(); });
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before route leave' } });
+    const navigation = router.navigate('/privacy');
+    await waitFor(() => expect(fetchMock.mock.calls.some(([request, requestInit]) => (
+      String(request).endsWith('/album') && requestInit?.method === 'PUT'
+    ))).toBe(true));
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    await act(async () => { resolveSecondSave(); });
+    await navigation;
+    expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
+  });
+
+  it('restarts Album preparation when a blocked router destination changes', async () => {
+    let resolveSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { resolveSave = resolve; });
+    let writes = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: writes,
+        saved: true,
+        title: writes === 0 ? 'Album' : 'Destination winner',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      if (url.endsWith('/album') && method === 'PUT') {
+        writes += 1;
+        await saveGate;
+        const body = JSON.parse(String(init?.body));
+        return json({ album: {
+          revision: writes,
+          saved: true,
+          ...body.metadata,
+          effectiveCoverMediaId: null,
+          entries: [],
+          photoCount: 0,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), {
+      target: { value: 'Destination winner' },
+    });
+
+    void router.navigate('/privacy');
+    await waitFor(() => expect(writes).toBe(1));
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.queryByRole('heading', { name: 'Privacy' })).not.toBeInTheDocument();
+
+    void router.navigate('/terms');
+    await act(async () => { await Promise.resolve(); });
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.queryByRole('heading', { name: 'Terms' })).not.toBeInTheDocument();
+
+    await act(async () => { resolveSave(); });
+
+    expect(await screen.findByRole('heading', { name: 'Terms' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Privacy' })).not.toBeInTheDocument();
+  });
+
+  it('does not continue a blocked router navigation when Album rejects the conflict exit', async () => {
+    let albumReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') {
+        albumReads += 1;
+        return json({ album: {
+          revision: 3,
+          saved: true,
+          title: 'Canonical album',
+          description: '',
+          coverMediaId: null,
+          effectiveCoverMediaId: null,
+          entries: [],
+          photoCount: 0,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      if (url.endsWith('/album') && method === 'PUT') {
+        return errorJson({
+          code: 'REVISION_CONFLICT',
+          message: 'A co-host saved a newer album.',
+          requestId: 'request-conflict',
+        }, 409);
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Losing edit' } });
+
+    const rejectedNavigation = router.navigate('/privacy');
+    await waitFor(() => expect(albumReads).toBeGreaterThanOrEqual(3));
+    await act(async () => {
+      await new Promise<void>((resolve) => { window.setTimeout(resolve, 80); });
+    });
+
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    const leaveNow = screen.getByRole('button', { name: 'Leave now' });
+    expect(leaveNow).toBeDisabled();
+    expect(screen.getByText('Finishing Album checks before Leave now is available.')).toBeVisible();
+    expect(leaveNow).toHaveAccessibleDescription(
+      'Finishing Album checks before Leave now is available.',
+    );
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    await rejectedNavigation;
+
+    // The rejected attempt is cancelled rather than left wedged in the router.
+    // With the canonical album now settled, a fresh explicit attempt may leave.
+    await router.navigate('/privacy');
+    expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
+  });
+
+  it('hoists a non-retryable Album load into focused manager access recovery', async () => {
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/album/share')) return json({ share: null });
+      if (url.endsWith('/album')) return errorJson({
+        code: 'SESSION_EXPIRED',
+        message: 'This session has expired.',
+        requestId: 'request-album',
+      }, 401);
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    const notice = await screen.findByLabelText('Manager notice');
+    expect(notice).toHaveTextContent('This session has expired.');
+    expect(notice).toHaveFocus();
+    expect(within(notice).getByRole('link', { name: 'Sign in' })).toBeVisible();
+    expect(within(notice).getByLabelText('Management link')).toBeVisible();
+
+    await user.click(within(notice).getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByLabelText('Manager notice')).not.toBeInTheDocument();
+    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    const restored = await screen.findByLabelText('Manager notice');
+    expect(restored).toHaveTextContent('This session has expired.');
+    expect(restored).toHaveFocus();
+    expect(within(managerNavigation).getByRole('button', { name: /gallery/i }))
+      .toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('focuses and re-escalates a dismissed non-retryable Album save recovery on exit', async () => {
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 0,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      if (url.endsWith('/album') && method === 'PUT') return errorJson({
+        code: 'SESSION_EXPIRED',
+        message: 'This management session has expired.',
+        requestId: 'request-save-expired',
+      }, 401);
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Cannot save' } });
+    await user.click(screen.getByRole('button', { name: 'Preview album' }));
+
+    const notice = await screen.findByLabelText('Manager notice');
+    expect(notice).toHaveTextContent('This management session has expired.');
+    expect(notice).toHaveFocus();
+    await user.click(within(notice).getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByLabelText('Manager notice')).not.toBeInTheDocument();
+
+    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    const restored = await screen.findByLabelText('Manager notice');
+    expect(restored).toHaveTextContent('This management session has expired.');
+    expect(restored).toHaveFocus();
   });
 });
 
@@ -2229,7 +2716,9 @@ describe('host account attachment and recovery', () => {
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     await registerFromCreate(user);
 
-    await user.click(screen.getByRole('button', { name: 'Send another code' }));
+    const resend = screen.getByRole('button', { name: 'Send another code' });
+    await waitFor(() => expect(resend).toBeEnabled());
+    await user.click(resend);
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register/resend')).toBe(true));
 
     await user.type(screen.getByLabelText('Confirmation code'), '424242');

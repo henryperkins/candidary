@@ -16,6 +16,7 @@ export type UploadState = 'reserved' | 'stored' | 'failed' | 'deleted';
 export type ModerationStatus = 'pending' | 'approved' | 'rejected';
 export type PublicationStatus = 'unpublished' | 'published' | 'hidden';
 export type TimelineSource = 'capture' | 'received';
+export type ExportKind = 'complete' | 'album';
 export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired';
 
 export interface ApiSuccess<T> {
@@ -293,6 +294,85 @@ export interface ManagerGalleryMediaView {
   timelineSource: TimelineSource;
   isFavorite: boolean;
 }
+
+// Album. One curated artifact per event, ordered, divided by host-authored sections.
+//
+// `isFavorite` above is album membership — the transport keeps saying favorite because
+// renaming it would be a breaking change to four components for a vocabulary shift the
+// reader never sees. Everything below is the *order* that membership is read in.
+//
+// A section carries its own id because it is the only entry with no natural key: two
+// sections may share a heading, and reorder, rename, and remove all need to name one.
+
+export type AlbumEntryKind = 'photo' | 'section';
+
+/** What the host stores: a position, never a membership claim. */
+export type AlbumEntryInput =
+  | { kind: 'photo'; mediaId: string }
+  | { kind: 'section'; id: string; heading: string };
+
+/**
+ * What the host reads back. Photo entries are resolved against the live picked set, so
+ * an entry whose photo was unpicked or deleted elsewhere is absent rather than broken —
+ * and a pick with no stored position is appended in timeline order, which is what makes
+ * picking in Library land somewhere sensible without a second write.
+ */
+export type AlbumEntryView =
+  | { kind: 'photo'; photo: ManagerGalleryMediaView }
+  | { kind: 'section'; id: string; heading: string };
+
+export interface AlbumMetadataInput {
+  title: string;
+  description: string;
+  coverMediaId: string | null;
+}
+
+export interface AlbumMetadataView extends AlbumMetadataInput {
+  effectiveCoverMediaId: string | null;
+}
+
+export interface AlbumSaveRequest {
+  revision: number;
+  entries: AlbumEntryInput[];
+  /** Optional only for compatibility with clients deployed before migration 0018. */
+  metadata?: AlbumMetadataInput;
+}
+
+export interface AlbumView extends AlbumMetadataInput {
+  /** Compare-and-set token. Every write carries the revision it was composed against. */
+  revision: number;
+  /** False until the host first commits an album; the only reconciliation signal. */
+  saved: boolean;
+  effectiveCoverMediaId: string | null;
+  entries: AlbumEntryView[];
+  /** Photos in the album. Sections are excluded — a divider is not a photograph. */
+  photoCount: number;
+  sectionCount: number;
+  totalBytes: number;
+}
+
+export type PublicAlbumEntryView =
+  | { kind: 'section'; id: string; heading: string }
+  | {
+      kind: 'photo';
+      photo: { id: string; caption: string | null; previewAvailable: boolean };
+    };
+
+export interface PublicAlbumView {
+  title: string;
+  description: string;
+  coverMediaId: string | null;
+  entries: PublicAlbumEntryView[];
+  photoCount: number;
+}
+
+export interface AlbumShareView {
+  active: true;
+  url: string;
+  sharedAt: string;
+}
+
+export type AlbumShareStatus = AlbumShareView | null;
 
 // RSVP. Every shape below is written out rather than derived from a database
 // record, because the difference between what a household may see and what a

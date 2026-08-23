@@ -4,6 +4,7 @@ import type {
   PublicationStatus,
 } from '../../shared/contracts';
 import {
+  ALBUM_MAX_ENTRIES,
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
@@ -23,7 +24,7 @@ import {
   assertWorkerIngressEnabled,
 } from '../media-upload-release';
 
-interface MediaRow {
+export interface MediaRow {
   id: string;
   event_id: string;
   uploader_session_id: string;
@@ -477,6 +478,17 @@ export class MediaRepository {
   }
 
   async setFavorite(eventId: string, mediaId: string, favoritedAt: string | null): Promise<MediaRecord> {
+    if (favoritedAt !== null) {
+      await this.addFavoritesWithinAlbumCapacity(eventId, [mediaId], favoritedAt);
+      const current = await this.getById(mediaId);
+      if (!current || current.eventId !== eventId) {
+        throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
+      }
+      if (current.uploadState !== 'stored' || current.deletedAt !== null) {
+        throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
+      }
+      return current;
+    }
     const result = await this.db.prepare(`
       UPDATE media
       SET favorited_at = CASE
@@ -495,6 +507,166 @@ export class MediaRepository {
       throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
     }
     throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
+  }
+
+  /**
+   * Adds all eligible requested ids or none of them. The capacity predicate and the
+   * membership mutation are one SQLite statement, so two hosts cannot both spend the
+   * same final slot after independent reads. The diagnostic runs in the same D1 batch:
+   * zero eligible ids remain after a successful write or a true no-op; remaining ids
+   * over capacity are the one case reported as ALBUM_FULL.
+   */
+  private async addFavoritesWithinAlbumCapacity(
+    eventId: string,
+    mediaIds: readonly string[],
+    favoritedAt: string,
+  ): Promise<ManagerGalleryMediaView[]> {
+    if (mediaIds.length === 0) return [];
+    const unique = [...new Set(mediaIds)];
+    if (unique.length > ALBUM_MAX_ENTRIES) {
+      throw new ApiError(
+        'VALIDATION_FAILED',
+        `Choose up to ${ALBUM_MAX_ENTRIES} photos at a time.`,
+        422,
+      );
+    }
+    const requested = JSON.stringify(unique);
+    const sectionCountSql = `
+      SELECT COUNT(*)
+      FROM event_albums AS album,
+        json_each(CASE WHEN json_valid(album.entries) THEN album.entries ELSE '[]' END) AS entry
+      WHERE album.event_id = ?
+        AND json_extract(entry.value, '$.kind') = 'section'
+    `;
+    const batch = await this.db.batch([
+      this.db.prepare(`
+        WITH
+          requested(id) AS MATERIALIZED (
+            SELECT DISTINCT CAST(value AS TEXT) FROM json_each(?)
+          ),
+          eligible(id) AS MATERIALIZED (
+            SELECT media.id
+            FROM media INNER JOIN requested ON requested.id = media.id
+            WHERE media.event_id = ?
+              AND media.upload_state = 'stored'
+              AND media.deleted_at IS NULL
+              AND media.favorited_at IS NULL
+          ),
+          capacity(allowed) AS MATERIALIZED (
+            SELECT (
+              (SELECT COUNT(*) FROM media
+                WHERE event_id = ?
+                  AND upload_state = 'stored'
+                  AND deleted_at IS NULL
+                  AND favorited_at IS NOT NULL)
+              + (${sectionCountSql})
+              + (SELECT COUNT(*) FROM eligible)
+            ) <= ?
+          )
+        UPDATE media
+        SET favorited_at = ?
+        WHERE id IN (SELECT id FROM eligible)
+          AND (SELECT allowed FROM capacity)
+        RETURNING
+          id, original_filename, guest_name, caption, publication_status,
+          upload_state, preview_object_key, width, height, created_at, stored_at,
+          captured_at, timeline_at, favorited_at
+      `).bind(
+        requested,
+        eventId,
+        eventId,
+        eventId,
+        ALBUM_MAX_ENTRIES,
+        favoritedAt,
+      ),
+      this.db.prepare(`
+        WITH requested(id) AS (
+          SELECT DISTINCT CAST(value AS TEXT) FROM json_each(?)
+        )
+        SELECT
+          (SELECT COUNT(*) FROM media
+            WHERE event_id = ?
+              AND upload_state = 'stored'
+              AND deleted_at IS NULL
+              AND favorited_at IS NOT NULL)
+            + (${sectionCountSql}) AS used,
+          (SELECT COUNT(*)
+            FROM media INNER JOIN requested ON requested.id = media.id
+            WHERE media.event_id = ?
+              AND media.upload_state = 'stored'
+              AND media.deleted_at IS NULL
+              AND media.favorited_at IS NULL) AS remaining
+      `).bind(requested, eventId, eventId, eventId),
+    ]);
+    const diagnostic = batch[1]?.results[0] as { used: number; remaining: number } | undefined;
+    if (diagnostic
+      && diagnostic.remaining > 0
+      && diagnostic.used + diagnostic.remaining > ALBUM_MAX_ENTRIES) {
+      throw new ApiError(
+        'ALBUM_FULL',
+        `An album holds up to ${ALBUM_MAX_ENTRIES} photos and sections. Remove an entry before adding more.`,
+        409,
+      );
+    }
+    return (batch[0]?.results as unknown as MediaRow[] | undefined)
+      ?.map(mapGalleryMediaRow) ?? [];
+  }
+
+  /**
+   * Album picks in bulk — the tray's `Add n to album` / `Remove n from album`, the undo
+   * that reverses either, and the restore behind `Start empty`.
+   *
+   * The predicate selects only rows that actually change, so `RETURNING` is exactly the
+   * set an undo has to reverse. Re-picking an already-picked photo is not an error and
+   * not a change; it simply does not come back. That is what lets `Select all` over a
+   * mixed page do the obvious thing, and it is why undoing `Add 12 to album` over a page
+   * where four were already picked leaves those four picked.
+   *
+   * Chunked rather than refused past D1's 100-value statement bound, because the callers
+   * have two different natural sizes — the tray is bounded by the selection cap, while
+   * restoring a cleared album is bounded by the album itself. One batch keeps both from
+   * committing halfway.
+   */
+  async setFavoriteBulk(
+    eventId: string,
+    mediaIds: readonly string[],
+    favoritedAt: string | null,
+  ): Promise<ManagerGalleryMediaView[]> {
+    const unique = [...new Set(mediaIds)];
+    if (unique.length === 0) return [];
+    if (unique.length > ALBUM_MAX_ENTRIES) {
+      throw new ApiError(
+        'VALIDATION_FAILED',
+        `Choose up to ${ALBUM_MAX_ENTRIES} photos at a time.`,
+        422,
+      );
+    }
+    if (favoritedAt !== null) {
+      return this.addFavoritesWithinAlbumCapacity(eventId, unique, favoritedAt);
+    }
+    const changing = 'favorited_at IS NOT NULL';
+    // Two bound values are spent on the event and the stamp before any id, so the chunk
+    // sits under the 100-value bound with room rather than exactly at it.
+    const chunkSize = 90;
+    const statements = [];
+    for (let offset = 0; offset < unique.length; offset += chunkSize) {
+      const chunk = unique.slice(offset, offset + chunkSize);
+      statements.push(this.db.prepare(`
+        UPDATE media
+        SET favorited_at = ?
+        WHERE event_id = ?
+          AND upload_state = 'stored'
+          AND deleted_at IS NULL
+          AND ${changing}
+          AND id IN (${chunk.map(() => '?').join(', ')})
+        RETURNING
+          id, original_filename, guest_name, caption, publication_status,
+          upload_state, preview_object_key, width, height, created_at, stored_at,
+          captured_at, timeline_at, favorited_at
+      `).bind(favoritedAt, eventId, ...chunk));
+    }
+    const batch = await this.db.batch<MediaRow>(statements);
+    return batch.flatMap((result) => result.results.map(mapGalleryMediaRow));
   }
 
   async countStoredTimelineSentinels(eventId?: string): Promise<number> {

@@ -5,6 +5,7 @@ import { GuestbookRepository } from '../db/guestbook';
 import { MediaRepository } from '../db/media';
 import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { buildExportManifest } from '../export/csv';
+import { resolveFrozenAlbumOrder } from '../export/album-order';
 import { buildGuestbookPrivateCsv, type GuestbookPhotoArchiveLocation } from '../export/guestbook-csv';
 import { buildGuestbookHtml } from '../export/guestbook-html';
 import { partitionExportSnapshot } from '../export/partition';
@@ -40,6 +41,22 @@ async function immutableMediaEntries(repository: ExportsRepository, jobId: strin
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
   return entries;
+}
+
+async function immutableAlbumMediaEntries(
+  repository: ExportsRepository,
+  jobId: string,
+  rawEntries: string,
+) {
+  const entries = [];
+  let afterPosition = 0;
+  for (;;) {
+    const page = await repository.listAlbumMediaEntries(jobId, afterPosition, 100);
+    entries.push(...page.entries);
+    if (page.nextPosition === null) break;
+    afterPosition = page.nextPosition;
+  }
+  return resolveFrozenAlbumOrder(rawEntries, entries);
 }
 
 async function clearIncompleteAttempt(bucket: R2Bucket, prefix: string) {
@@ -94,9 +111,11 @@ export async function processExport(
   const uploadedKeys: string[] = [];
   let readyWriteAttempted = false;
   try {
-    const snapshot = job.guestbookEntryCount === null
-      ? await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt)
-      : await immutableMediaEntries(exports, job.id);
+    const snapshot = job.kind === 'album'
+      ? await immutableAlbumMediaEntries(exports, job.id, job.albumEntriesJson ?? '[]')
+      : job.guestbookEntryCount === null
+        ? await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt)
+        : await immutableMediaEntries(exports, job.id);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
     const storedParts: ReadyExportPart[] = [];
@@ -148,7 +167,7 @@ export async function processExport(
     }
 
     let guestbook = null;
-    if (job.guestbookEntryCount !== null) {
+    if (job.kind === 'complete' && job.guestbookEntryCount !== null) {
       if (!job.guestbookEventName || !job.guestbookEventDate
         || !job.guestbookEventTimezone || !job.guestbookPrompt) {
         throw new Error('EXPORT_GUESTBOOK_SNAPSHOT_INVALID');

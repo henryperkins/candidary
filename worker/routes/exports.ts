@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
@@ -19,6 +20,7 @@ async function ownedJob(context: Context<AppBindings>) {
 function managerExport(job: ExportRecord) {
   return {
     id: job.id,
+    kind: job.kind,
     state: job.state,
     snapshotAt: job.snapshotAt,
     mediaCount: job.mediaCount,
@@ -34,6 +36,16 @@ function managerExport(job: ExportRecord) {
     guestbookPrompt: job.guestbookPrompt,
     guestbookGalleryVisible: job.guestbookGalleryVisible,
   };
+}
+
+function albumGuestbookSnapshotEmpty(job: ExportRecord): boolean {
+  return job.guestbookEntryCount === null
+    && job.guestbookSharedCount === null
+    && job.guestbookEventName === null
+    && job.guestbookEventDate === null
+    && job.guestbookEventTimezone === null
+    && job.guestbookPrompt === null
+    && job.guestbookGalleryVisible === null;
 }
 
 async function commitOrRecoverRetry(
@@ -73,19 +85,62 @@ function isRecoverableQueuedRetry(
 async function ensureRetryWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
-): Promise<void> {
+): Promise<'dispatched' | 'failed'> {
   const id = `${job.id}-${job.attempt}`;
   try {
     await workflow.createBatch([{ id, params: { jobId: job.id } }]);
+    return 'dispatched';
   } catch (error) {
     try {
       const observed = await (await workflow.get(id)).status();
-      if (observed.status !== 'unknown') return;
+      if (observed.status === 'errored'
+        || observed.status === 'terminated'
+        || observed.status === 'complete') {
+        return 'failed';
+      }
+      if (observed.status !== 'unknown') return 'dispatched';
     } catch {
       // The original creation failure remains authoritative when existence
       // cannot be observed. A later request can safely retry the same ID.
     }
     throw error;
+  }
+}
+
+async function ensureInitialWorkflow(
+  workflow: AppEnv['EXPORT_WORKFLOW'],
+  job: Awaited<ReturnType<typeof ownedJob>>,
+): Promise<'dispatched' | 'failed'> {
+  const input = [{ id: job.id, params: { jobId: job.id } }];
+  try {
+    await workflow.createBatch(input);
+    return 'dispatched';
+  } catch {
+    try {
+      const observed = await (await workflow.get(job.id)).status();
+      if (observed.status === 'errored'
+        || observed.status === 'terminated'
+        || observed.status === 'complete') {
+        return 'failed';
+      }
+      // A successful lookup is evidence that the deterministic instance ID is
+      // retained, even when status propagation still reports `unknown`.
+      return 'dispatched';
+    } catch {
+      // Neither a failed create response nor an unobservable lookup proves that
+      // the deterministic instance is absent. createBatch is idempotent for a
+      // retained ID, so replay exactly that ID instead of inventing a successor.
+    }
+    try {
+      await workflow.createBatch(input);
+      return 'dispatched';
+    } catch {
+      // Creation is still ambiguous, but leaving the D1 row queued would block every
+      // future export and attempt-1 is not eligible for retry redrive. The caller
+      // fences a pristine row to failed; if the Workflow concurrently claims it, that
+      // transition loses and the observed running row remains authoritative.
+      return 'failed';
+    }
   }
 }
 
@@ -112,6 +167,8 @@ async function deleteExportKeys(bucket: R2Bucket, keys: string[]): Promise<void>
 
 export const exportRoutes = new Hono<AppBindings>();
 
+const createExportSchema = z.object({ kind: z.literal('album').optional() }).strict();
+
 type ExportArtifactKind = 'manifest' | 'part' | 'printable-guestbook' | 'private-guestbook';
 
 async function ownedReadyArtifact(
@@ -121,6 +178,10 @@ async function ownedReadyArtifact(
 ) {
   await manager(context);
   const job = await ownedJob(context);
+  if (job.kind === 'album'
+    && (kind === 'printable-guestbook' || kind === 'private-guestbook')) {
+    throw new ApiError('EXPORT_FAILED', 'That export artifact is not available.', 404);
+  }
   if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
     throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
   }
@@ -244,12 +305,44 @@ exportRoutes.get('/manage/events/:eventId/exports', async (context) => {
 
 exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
   await manager(context, true);
+  const rawBody = await context.req.text();
+  let body: unknown = {};
+  if (rawBody.trim().length > 0) {
+    try {
+      body = JSON.parse(rawBody) as unknown;
+    } catch {
+      body = null;
+    }
+  }
+  const parsed = createExportSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Choose the album export or omit kind for the complete export.',
+      422,
+    );
+  }
   const snapshotAt = new Date().toISOString();
-  const job = await new ExportsRepository(context.env.DB).createActive({
+  const repository = new ExportsRepository(context.env.DB);
+  const input = {
     id: crypto.randomUUID(), eventId: context.req.param('eventId'), snapshotAt,
     createdAt: snapshotAt,
-  });
-  await context.env.EXPORT_WORKFLOW.create({ id: job.id, params: { jobId: job.id } });
+  };
+  let job = parsed.data.kind === 'album'
+    ? await repository.createAlbumActive(input)
+    : await repository.createActive(input);
+  const dispatch = await ensureInitialWorkflow(context.env.EXPORT_WORKFLOW, job);
+  if (dispatch === 'failed') {
+    const recovered = await repository.markInitialDispatchFailed(
+      job.id,
+      'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    );
+    if (recovered.job) job = recovered.job;
+  } else {
+    // A Workflow may claim the row before its create response reaches us. Return
+    // the claimed state without weakening the repository's queued->running fence.
+    job = await repository.getById(job.id) ?? job;
+  }
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 
@@ -277,8 +370,18 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
       current.guestbookHtmlObjectKey,
       current.guestbookCsvObjectKey,
     ].filter((key): key is string => Boolean(key));
-  const job = recovering ? current : await commitOrRecoverRetry(repository, current);
-  await ensureRetryWorkflow(context.env.EXPORT_WORKFLOW, job);
+  let job = recovering ? current : await commitOrRecoverRetry(repository, current);
+  const dispatch = await ensureRetryWorkflow(context.env.EXPORT_WORKFLOW, job);
+  if (dispatch === 'failed') {
+    const recovered = await repository.markRetryDispatchFailed(
+      job.id,
+      job.attempt,
+      'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    );
+    if (recovered.job) job = recovered.job;
+  } else {
+    job = await repository.getById(job.id) ?? job;
+  }
   await deleteExportKeys(context.env.MEDIA_BUCKET, keys);
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
@@ -291,8 +394,11 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
   }
   const repository = new ExportsRepository(context.env.DB);
   const parts = await repository.listParts(job.id);
-  const newFormat = job.guestbookEntryCount !== null;
-  const snapshotMetadataComplete = !newFormat || (
+  const albumFormat = job.kind === 'album';
+  const newCompleteFormat = !albumFormat && job.guestbookEntryCount !== null;
+  const snapshotMetadataComplete = albumFormat
+    ? job.albumEntriesJson !== null && albumGuestbookSnapshotEmpty(job)
+    : !newCompleteFormat || (
     job.guestbookSharedCount !== null && job.guestbookEventName !== null
     && job.guestbookEventDate !== null && job.guestbookEventTimezone !== null
     && job.guestbookPrompt !== null && job.guestbookGalleryVisible !== null
@@ -300,14 +406,18 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
   const partsComplete = parts.every((part, index) => part.partNumber === index + 1
     && part.mediaCount > 0 && part.sourceBytes >= 0 && Boolean(part.objectKey));
   const photoComplete = job.mediaCount === 0
-    ? newFormat && job.manifestObjectKey === null && job.partCount === 0 && parts.length === 0
+    ? newCompleteFormat && job.manifestObjectKey === null && job.partCount === 0 && parts.length === 0
     : Boolean(job.manifestObjectKey) && partsComplete
       && parts.length === job.partCount && job.partCount > 0
       && parts.reduce((count, part) => count + part.mediaCount, 0) === job.mediaCount;
-  const guestbookComplete = !newFormat || Boolean(
-    job.guestbookHtmlObjectKey && job.guestbookHtmlBytes !== null && job.guestbookHtmlSha256
-    && job.guestbookCsvObjectKey && job.guestbookCsvBytes !== null && job.guestbookCsvSha256,
-  );
+  const guestbookComplete = albumFormat
+    ? job.guestbookHtmlObjectKey === null && job.guestbookHtmlBytes === null
+      && job.guestbookHtmlSha256 === null && job.guestbookCsvObjectKey === null
+      && job.guestbookCsvBytes === null && job.guestbookCsvSha256 === null
+    : !newCompleteFormat || Boolean(
+      job.guestbookHtmlObjectKey && job.guestbookHtmlBytes !== null && job.guestbookHtmlSha256
+      && job.guestbookCsvObjectKey && job.guestbookCsvBytes !== null && job.guestbookCsvSha256,
+    );
   if (!snapshotMetadataComplete || !photoComplete || !guestbookComplete) {
     throw new ApiError('EXPORT_FAILED', 'This export is incomplete. Retry it.', 409);
   }

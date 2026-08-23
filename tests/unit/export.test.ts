@@ -2,6 +2,7 @@ import { strFromU8, unzipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 
 import { buildExportManifest, buildMediaCsv } from '../../worker/export/csv';
+import { resolveFrozenAlbumOrder } from '../../worker/export/album-order';
 import { partitionExportSnapshot } from '../../worker/export/partition';
 import { buildExportZip, buildExportZipStream, exportPath } from '../../worker/export/zip-stream';
 
@@ -101,5 +102,49 @@ describe('export metadata', () => {
     expect(manifest).toContain('1,photos-001.zip,photos/001-maya-laughing.png,media-a');
     expect(manifest).toContain('unpublished');
     expect(manifest).toContain('hidden');
+  });
+});
+
+describe('frozen album export order', () => {
+  const tail = [
+    { id: 'first', albumTailPosition: 1, filename: 'first.jpg' },
+    { id: 'second', albumTailPosition: 2, filename: 'second.jpg' },
+    { id: 'third', albumTailPosition: 3, filename: 'third.jpg' },
+  ];
+
+  it('places snapshot members in the stored photo order while sections consume no position', () => {
+    expect(resolveFrozenAlbumOrder(JSON.stringify([
+      { kind: 'section', id: 'section-a', heading: 'Dinner' },
+      { kind: 'photo', mediaId: 'third' },
+      { kind: 'photo', mediaId: 'first' },
+    ]), tail).map(({ id }) => id)).toEqual(['third', 'first', 'second']);
+  });
+
+  it('falls back to deterministic tail order when the frozen raw JSON is malformed', () => {
+    expect(resolveFrozenAlbumOrder('{not-json', [...tail].reverse()).map(({ id }) => id))
+      .toEqual(['first', 'second', 'third']);
+  });
+
+  it('ignores duplicate, stale, and malformed stored photo entries', () => {
+    expect(resolveFrozenAlbumOrder(JSON.stringify([
+      { kind: 'photo', mediaId: 'second' },
+      { kind: 'photo', mediaId: 'stale' },
+      { kind: 'photo', mediaId: 'second' },
+      { kind: 'photo', mediaId: '' },
+      null,
+    ]), tail).map(({ id }) => id)).toEqual(['second', 'first', 'third']);
+  });
+
+  it('appends absent snapshot members by tail position with an id tie-break', () => {
+    const unordered = [
+      { id: 'z-tail', albumTailPosition: 5 },
+      { id: 'stored', albumTailPosition: 3 },
+      { id: 'a-tail', albumTailPosition: 5 },
+      { id: 'null-tail', albumTailPosition: null },
+    ];
+    expect(resolveFrozenAlbumOrder(
+      JSON.stringify([{ kind: 'photo', mediaId: 'stored' }]),
+      unordered,
+    ).map(({ id }) => id)).toEqual(['stored', 'a-tail', 'z-tail', 'null-tail']);
   });
 });

@@ -14,6 +14,7 @@ import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
 import { managerGalleryMediaView, managerMediaView, MediaRepository } from '../db/media';
+import { AlbumRepository } from '../db/album';
 import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { requestOrigin } from '../origins';
@@ -22,6 +23,11 @@ import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
 import { RsvpService } from '../services/rsvp';
 import {
+  ALBUM_DESCRIPTION_MAX_LENGTH,
+  ALBUM_MAX_ENTRIES,
+  ALBUM_MAX_SECTIONS,
+  ALBUM_SECTION_HEADING_MAX_LENGTH,
+  ALBUM_TITLE_MAX_LENGTH,
   DEFAULT_GALLERY_TIMELINE_ORDER,
   GALLERY_TIMELINE_ORDERS,
   type GalleryTimelineOrder,
@@ -91,6 +97,44 @@ const galleryLimitSchema = z.coerce.number().int().min(1).max(PRIVATE_GALLERY_PA
   .default(PRIVATE_GALLERY_PAGE_SIZE);
 const favoriteSchema = z.object({ favorite: z.boolean() }).strict();
 const GALLERY_SEARCH_MAX_CODE_POINTS = 120;
+
+// Album. `strict()` throughout: an unknown key here is a client composing against a
+// contract this Worker does not implement, and silently dropping it would store an
+// order the host cannot see.
+const albumEntrySchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('photo'), mediaId: z.string().min(1).max(64) }).strict(),
+  z.object({
+    kind: z.literal('section'),
+    id: z.string().min(1).max(64),
+    // Trimmed, then required: a heading of spaces is a divider with no name, and the
+    // review grid has nowhere to put one.
+    heading: z.string()
+      .trim()
+      .min(1)
+      .refine((heading) => [...heading].length <= ALBUM_SECTION_HEADING_MAX_LENGTH),
+  }).strict(),
+]);
+const albumMetadataSchema = z.object({
+  title: z.string()
+    .trim()
+    .min(1)
+    .refine((title) => [...title].length <= ALBUM_TITLE_MAX_LENGTH),
+  description: z.string()
+    .refine((description) => [...description].length <= ALBUM_DESCRIPTION_MAX_LENGTH),
+  coverMediaId: z.string().min(1).max(64).nullable(),
+}).strict();
+const albumSaveSchema = z.object({
+  revision: z.number().int().min(0),
+  entries: z.array(albumEntrySchema).max(ALBUM_MAX_ENTRIES),
+  metadata: albumMetadataSchema.optional(),
+}).strict();
+const albumPicksSchema = z.object({
+  // The album cap, not the selection cap: the tray never sends more than a host can
+  // select, but undoing `Start empty` restores a whole album in one request.
+  mediaIds: z.array(z.string().min(1).max(64)).min(1).max(ALBUM_MAX_ENTRIES),
+  picked: z.boolean(),
+}).strict();
+const albumStartSchema = z.object({ start: z.enum(['from-picks', 'empty']) }).strict();
 
 function managerForEvent(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
@@ -417,8 +461,9 @@ manageRoutes.put('/manage/events/:eventId/media/:mediaId/favorite', async (conte
   const eventId = context.req.param('eventId');
   const mediaId = context.req.param('mediaId');
   const requestId = context.get('requestId');
+  const mediaRepository = new MediaRepository(context.env.DB);
   try {
-    const media = await new MediaRepository(context.env.DB).setFavorite(
+    const media = await mediaRepository.setFavorite(
       eventId,
       mediaId,
       parsed.data.favorite ? new Date().toISOString() : null,
@@ -447,6 +492,100 @@ manageRoutes.put('/manage/events/:eventId/media/:mediaId/favorite', async (conte
     }));
     throw error;
   }
+});
+
+manageRoutes.get('/manage/events/:eventId/album', async (context) => {
+  await managerForEvent(context);
+  const album = await new AlbumRepository(context.env.DB).get(context.req.param('eventId'));
+  return context.json({ data: { album }, requestId: context.get('requestId') });
+});
+
+/**
+ * Replaces the album's order. Reorder, add a section, rename one, and remove one are all
+ * this request — the client composes the list it wants and sends it whole, so there is no
+ * per-operation endpoint whose failure could leave the order half-applied.
+ *
+ * Membership is not settable here. A photo id the host has not picked is dropped on read
+ * rather than refused, because the two writes race by design: a co-host unpicking a photo
+ * while this host drags it must not fail the drag.
+ */
+manageRoutes.put('/manage/events/:eventId/album', async (context) => {
+  await managerForEvent(context, true);
+  const parsed = albumSaveSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    const sections = fieldErrors(parsed.error);
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      `An album holds up to ${ALBUM_MAX_ENTRIES} entries and ${ALBUM_MAX_SECTIONS} sections. Titles hold ${ALBUM_TITLE_MAX_LENGTH} characters, descriptions hold ${ALBUM_DESCRIPTION_MAX_LENGTH}, and section names hold ${ALBUM_SECTION_HEADING_MAX_LENGTH}.`,
+      422,
+      sections,
+    );
+  }
+  const album = await new AlbumRepository(context.env.DB).replace(
+    context.req.param('eventId'),
+    parsed.data.revision,
+    parsed.data.entries,
+    parsed.data.metadata,
+    new Date().toISOString(),
+  );
+  return context.json({ data: { album }, requestId: context.get('requestId') });
+});
+
+/**
+ * Bulk album picks — the selection tray, and the undo that reverses it.
+ *
+ * `changed` is the write's own account of what it altered, not an echo of the request:
+ * undo re-applies exactly that, so reversing `Add 12 to album` over a page where four
+ * were already picked restores those four to picked rather than removing them.
+ */
+manageRoutes.post('/manage/events/:eventId/album/picks', async (context) => {
+  await managerForEvent(context, true);
+  const parsed = albumPicksSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      `Choose between 1 and ${ALBUM_MAX_ENTRIES} photos.`,
+      422,
+    );
+  }
+  const eventId = context.req.param('eventId');
+  const requestId = context.get('requestId');
+  const media = new MediaRepository(context.env.DB);
+
+  const changed = await media.setFavoriteBulk(
+    eventId,
+    parsed.data.mediaIds,
+    parsed.data.picked ? new Date().toISOString() : null,
+  );
+  console.info(JSON.stringify({
+    event: 'manager_album_picks_write',
+    eventId,
+    requested: parsed.data.mediaIds.length,
+    changed: changed.length,
+    picked: parsed.data.picked,
+    result: 'succeeded',
+    requestId,
+  }));
+  return context.json({ data: { changed }, requestId });
+});
+
+/**
+ * Answers the reconciliation prompt once, for an event whose hosts used the heart before
+ * the album existed. `from-picks` keeps those photos and commits; `empty` clears them and
+ * commits. Both mark the album saved, so the prompt never returns — including for the
+ * co-host who was mid-scroll when it was answered.
+ */
+manageRoutes.post('/manage/events/:eventId/album/start', async (context) => {
+  await managerForEvent(context, true);
+  const parsed = albumStartSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Choose how to start this album.', 422);
+  const eventId = context.req.param('eventId');
+  const { album, started, cleared } = await new AlbumRepository(context.env.DB).start(
+    eventId,
+    parsed.data.start,
+    new Date().toISOString(),
+  );
+  return context.json({ data: { album, started, cleared }, requestId: context.get('requestId') });
 });
 
 manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => {
