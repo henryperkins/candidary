@@ -65,18 +65,22 @@ function signerFreeEnv() {
   });
 }
 
+const ALBUM_SNAPSHOT_SOURCE_AT = '2026-08-23T00:00:00.000Z';
+
 async function setAlbumSnapshotSource(
   access: Awaited<ReturnType<typeof eventAccess>>,
   pickedIds: string[],
   entriesJson: string,
 ) {
-  const now = '2026-08-23T00:00:00.000Z';
   await testEnv.DB.batch([
     testEnv.DB.prepare(`
-      UPDATE media SET favorited_at = CASE
+      UPDATE media SET
+        created_at = ?2,
+        stored_at = ?2,
+        favorited_at = CASE
         WHEN id IN (SELECT value FROM json_each(?1)) THEN ?2 ELSE NULL END
       WHERE event_id = ?3
-    `).bind(JSON.stringify(pickedIds), now, access.event.id),
+    `).bind(JSON.stringify(pickedIds), ALBUM_SNAPSHOT_SOURCE_AT, access.event.id),
     testEnv.DB.prepare(`
       INSERT INTO event_albums (
         event_id, entries, saved_at, revision, created_at, updated_at
@@ -84,7 +88,7 @@ async function setAlbumSnapshotSource(
       ON CONFLICT(event_id) DO UPDATE SET
         entries = excluded.entries, saved_at = excluded.saved_at,
         revision = event_albums.revision + 1, updated_at = excluded.updated_at
-    `).bind(access.event.id, entriesJson, now),
+    `).bind(access.event.id, entriesJson, ALBUM_SNAPSHOT_SOURCE_AT),
   ]);
 }
 

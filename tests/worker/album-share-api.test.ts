@@ -305,7 +305,7 @@ describe('public album exchange and projection', () => {
     ];
     const shapes = await Promise.all((await Promise.all(cases)).map(unavailableShape));
 
-    expect(new Set(shapes.map((shape) => JSON.stringify(shape)))).toHaveLength(1);
+    expect(new Set(shapes.map((shape) => JSON.stringify(shape))).size).toBe(1);
     expect(shapes[0]).toEqual({
       status: 410,
       code: 'ALBUM_SHARE_UNAVAILABLE',
@@ -512,7 +512,7 @@ describe('public album preview authorization', () => {
     ]);
     const shapes = await Promise.all(responses.map(unavailableShape));
 
-    expect(new Set(shapes.map((shape) => JSON.stringify(shape)))).toHaveLength(1);
+    expect(new Set(shapes.map((shape) => JSON.stringify(shape))).size).toBe(1);
     expect(shapes[0]?.code).toBe('ALBUM_SHARE_UNAVAILABLE');
 
     const original = await createApp().request(
