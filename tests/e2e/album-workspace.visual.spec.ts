@@ -1,5 +1,4 @@
 import AxeBuilder from '@axe-core/playwright';
-import { mkdir } from 'node:fs/promises';
 import { expect, test, type Locator, type Page, type TestInfo } from '@playwright/test';
 
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
@@ -8,7 +7,6 @@ import { measureDocument, measureTarget } from './helpers/geometry';
 import { settleRendering } from './helpers/rendering';
 
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
-const evidenceRoot = '/tmp/candidary-album-qa/implementation';
 const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
 
 function albumRows() {
@@ -70,8 +68,7 @@ async function parkAtTop(page: Page) {
   });
 }
 
-async function capture(page: Page, name: string) {
-  await mkdir(evidenceRoot, { recursive: true });
+async function capture(page: Page, testInfo: TestInfo, name: string) {
   // `:visible` includes lazy images far below the viewport. Waiting on their
   // decode would deadlock the capture because the browser has correctly chosen
   // not to fetch them. Only the pixels this viewport can paint must be ready.
@@ -84,7 +81,7 @@ async function capture(page: Page, name: string) {
     return !intersectsViewport || image.complete;
   }));
   await settleRendering(page, { parkPointer: true });
-  await page.screenshot({ path: `${evidenceRoot}/${name}.png`, fullPage: false });
+  await page.screenshot({ path: testInfo.outputPath(`${name}.png`), fullPage: false });
 }
 
 async function selectFirstMoment(page: Page) {
@@ -142,36 +139,36 @@ test('captures the seven handoff-aligned manager states at 924 by 540', async ({
   await openGallery(page);
 
   await parkAtTop(page);
-  await capture(page, 'desktop-01-library');
+  await capture(page, testInfo, 'desktop-01-library');
 
   await selectFirstMoment(page);
   await parkAtTop(page);
-  await capture(page, 'desktop-02-selection');
+  await capture(page, testInfo, 'desktop-02-selection');
 
   await openAlbumFromPicks(page);
   await parkAtTop(page);
-  await capture(page, 'desktop-03-reconciliation');
+  await capture(page, testInfo, 'desktop-03-reconciliation');
 
   await startAlbum(page);
   await page.locator('.album-metadata').evaluate((element) => {
     const top = element.getBoundingClientRect().top + window.scrollY - 16;
     window.scrollTo(0, top);
   });
-  await capture(page, 'desktop-04-editor-details');
+  await capture(page, testInfo, 'desktop-04-editor-details');
 
   await parkAtTop(page);
-  await capture(page, 'desktop-05-editor');
+  await capture(page, testInfo, 'desktop-05-editor');
 
   await page.getByRole('button', { name: 'Preview album' }).click();
   await expect(page.getByText('What a guest opening the link sees')).toBeVisible();
   await parkAtTop(page);
-  await capture(page, 'desktop-06-preview');
+  await capture(page, testInfo, 'desktop-06-preview');
 
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Shared/u }).click();
   await expect(page.getByText(/Publication is a separate axis from the album/u)).toBeVisible();
   await parkAtTop(page);
-  await capture(page, 'desktop-07-shared');
+  await capture(page, testInfo, 'desktop-07-shared');
 });
 
 test('captures and audits the mobile manager states at 390 by 844', async ({ page }, testInfo) => {
@@ -194,14 +191,14 @@ test('captures and audits the mobile manager states at 390 by 844', async ({ pag
   await expectAxeClean(page, 'mobile Library');
   await expectContained(page, 'mobile Library');
   await expectTargetsAtLeast44(managerTargets, 'mobile Library');
-  await capture(page, 'mobile-01-library');
+  await capture(page, testInfo, 'mobile-01-library');
 
   await selectFirstMoment(page);
   await parkAtTop(page);
   await expectAxeClean(page, 'mobile selection');
   await expectContained(page, 'mobile selection');
   await expectTargetsAtLeast44(managerTargets, 'mobile selection');
-  await capture(page, 'mobile-02-selection');
+  await capture(page, testInfo, 'mobile-02-selection');
 
   await openAlbumFromPicks(page);
   await startAlbum(page);
@@ -209,7 +206,7 @@ test('captures and audits the mobile manager states at 390 by 844', async ({ pag
   await expectAxeClean(page, 'mobile editor');
   await expectContained(page, 'mobile editor');
   await expectTargetsAtLeast44(managerTargets, 'mobile editor');
-  await capture(page, 'mobile-03-editor');
+  await capture(page, testInfo, 'mobile-03-editor');
 
   await page.getByRole('button', { name: 'Preview album' }).click();
   await expect(page.getByText('What a guest opening the link sees')).toBeVisible();
@@ -217,7 +214,7 @@ test('captures and audits the mobile manager states at 390 by 844', async ({ pag
   await expectAxeClean(page, 'mobile preview');
   await expectContained(page, 'mobile preview');
   await expectTargetsAtLeast44(managerTargets, 'mobile preview');
-  await capture(page, 'mobile-04-preview');
+  await capture(page, testInfo, 'mobile-04-preview');
 
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Shared/u }).click();
@@ -225,7 +222,7 @@ test('captures and audits the mobile manager states at 390 by 844', async ({ pag
   await expectAxeClean(page, 'mobile Shared');
   await expectContained(page, 'mobile Shared');
   await expectTargetsAtLeast44(managerTargets, 'mobile Shared');
-  await capture(page, 'mobile-05-shared');
+  await capture(page, testInfo, 'mobile-05-shared');
 });
 
 test('captures and audits the public album at 390 by 844', async ({ page }, testInfo) => {
@@ -242,7 +239,7 @@ test('captures and audits the public album at 390 by 844', async ({ page }, test
   await expect(page.getByRole('img', { name: rows[0]!.caption }).first()).toBeVisible();
   await expectAxeClean(page, 'mobile public album');
   await expectContained(page, 'mobile public album');
-  await capture(page, 'mobile-06-public');
+  await capture(page, testInfo, 'mobile-06-public');
 });
 
 test('album mode is keyboard-operable and respects reduced motion', async ({ page }, testInfo) => {

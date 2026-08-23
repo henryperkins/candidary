@@ -7,13 +7,16 @@ import {
   DEFAULT_GALLERY_TIMELINE_ORDER,
   ALBUM_MAX_ENTRIES,
   type GalleryTimelineOrder,
-  MANAGER_BULK_SELECTION_MAX,
 } from '../../../shared/constants';
 import type { EventView, ManagerGalleryMediaView } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
 import { GalleryTimeline } from './GalleryTimeline';
 import { GalleryViewer } from './GalleryViewer';
 import { setAlbumPicks } from './album-api';
+import {
+  transitionSelection,
+  type GallerySelectionAction,
+} from './selection-state';
 import { SelectionTray } from './SelectionTray';
 import { UndoBar, useUndo } from './undo';
 
@@ -138,6 +141,7 @@ export function ManagerPrivateGallery({
   const [favoritePendingIds, setFavoritePendingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const selectedIdsRef = useRef<ReadonlySet<string>>(selectedIds);
   const [bulkBusy, setBulkBusy] = useState(false);
   const undo = useUndo();
   const loadGeneration = useRef(0);
@@ -275,10 +279,7 @@ export function ManagerPrivateGallery({
 
   useEffect(() => {
     if (active) return;
-    if (selectedIds.size > 0) {
-      setSelectedIds(new Set());
-      setAnnouncement('Selection cleared.');
-    }
+    if (selectedIdsRef.current.size > 0) clearSelection();
     if (viewerPhotoId !== null) {
       setViewerPhotoId(null);
       viewerOrigin.current = null;
@@ -455,6 +456,13 @@ export function ManagerPrivateGallery({
     setFavoritesOnly((current) => !current);
   }
 
+  function commitSelection(action: GallerySelectionAction) {
+    const transition = transitionSelection(selectedIdsRef.current, action);
+    selectedIdsRef.current = transition.next;
+    setSelectedIds(transition.next);
+    if (transition.message !== null) setAnnouncement(transition.message);
+  }
+
   function clearSelection(announce = true) {
     if (
       document.activeElement instanceof HTMLElement
@@ -462,8 +470,7 @@ export function ManagerPrivateGallery({
     ) {
       restoreSelectionFocus.current = true;
     }
-    if (selectedIds.size > 0 && announce) setAnnouncement('Selection cleared.');
-    setSelectedIds(new Set());
+    commitSelection({ type: 'clear', announce });
   }
 
   const restoreSelectionControlFocus = useCallback(() => {
@@ -477,26 +484,15 @@ export function ManagerPrivateGallery({
   }, [restoreSelectionControlFocus, selectedIds.size]);
 
   function toggleSelecting() {
-    setSelecting((current) => {
-      if (current) clearSelection();
-      return !current;
-    });
+    if (selecting) clearSelection();
+    setSelecting(!selecting);
   }
 
   function toggleSelected(photo: ManagerGalleryMediaView) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(photo.id)) {
-        next.delete(photo.id);
-        setAnnouncement(`${galleryPhotoTitle(photo)} deselected. ${next.size} selected.`);
-      } else if (next.size < MANAGER_BULK_SELECTION_MAX) {
-        next.add(photo.id);
-        setAnnouncement(`${galleryPhotoTitle(photo)} selected. ${next.size} selected.`);
-      } else {
-        setAnnouncement(`${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once. Add these first, then select more.`);
-        return current;
-      }
-      return next;
+    commitSelection({
+      type: 'toggle',
+      id: photo.id,
+      label: galleryPhotoTitle(photo),
     });
   }
 
@@ -506,20 +502,10 @@ export function ManagerPrivateGallery({
    * sixty and got fifty needs to be told which fifty they have.
    */
   function selectMany(photos: readonly ManagerGalleryMediaView[], label: string) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      let added = 0;
-      for (const photo of photos) {
-        if (next.size >= MANAGER_BULK_SELECTION_MAX) break;
-        if (next.has(photo.id)) continue;
-        next.add(photo.id);
-        added += 1;
-      }
-      const capped = added < photos.filter((photo) => !current.has(photo.id)).length;
-      setAnnouncement(capped
-        ? `${added} of ${photos.length} ${label} selected. ${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once.`
-        : `${added} photo${added === 1 ? '' : 's'} selected from ${label}. ${next.size} selected in total.`);
-      return next;
+    commitSelection({
+      type: 'select-many',
+      ids: photos.map(({ id }) => id),
+      label,
     });
   }
 
@@ -529,28 +515,9 @@ export function ManagerPrivateGallery({
    * selection can always be backed out of in one action.
    */
   function toggleMoment(photos: readonly ManagerGalleryMediaView[]) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (photos.every((photo) => next.has(photo.id))) {
-        for (const photo of photos) next.delete(photo.id);
-        setAnnouncement(
-          `${photos.length} photo${photos.length === 1 ? '' : 's'} cleared from this moment. ${next.size} selected in total.`,
-        );
-        return next;
-      }
-
-      let added = 0;
-      for (const photo of photos) {
-        if (next.has(photo.id)) continue;
-        if (next.size >= MANAGER_BULK_SELECTION_MAX) break;
-        next.add(photo.id);
-        added += 1;
-      }
-      const unselected = photos.filter((photo) => !current.has(photo.id)).length;
-      setAnnouncement(added < unselected
-        ? `${added} of ${photos.length} photos in this moment selected. ${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once.`
-        : `${added} photo${added === 1 ? '' : 's'} selected from this moment. ${next.size} selected in total.`);
-      return next;
+    commitSelection({
+      type: 'toggle-moment',
+      ids: photos.map(({ id }) => id),
     });
   }
 
@@ -561,7 +528,7 @@ export function ManagerPrivateGallery({
    * second destructive act.
    */
   async function applyPicks(picked: boolean) {
-    const ids = [...selectedIds];
+    const ids = [...selectedIdsRef.current];
     if (ids.length === 0 || bulkBusy) return;
     const newPicks = ids.filter((id) => !rows.find((row) => row.id === id)?.isFavorite).length;
     if (picked && albumEntryCount + newPicks > ALBUM_MAX_ENTRIES) {

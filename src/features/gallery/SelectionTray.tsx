@@ -1,4 +1,4 @@
-import { Check, Plus, X } from 'lucide-react';
+import { Minus, Plus, X } from 'lucide-react';
 
 interface SelectionTrayProps {
   count: number;
@@ -41,7 +41,7 @@ export function SelectionTray({ count, busy, onAdd, onRemove, onClear }: Selecti
           className="button button--secondary"
           disabled={busy}
           onClick={onRemove}
-        ><Check aria-hidden="true" /> {busy ? 'Working…' : `Remove ${count} from album`}</button>
+        ><Minus aria-hidden="true" /> {busy ? 'Working…' : `Remove ${count} from album`}</button>
         <button
           type="button"
           className="selection-tray__clear"

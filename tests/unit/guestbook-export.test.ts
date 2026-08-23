@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { createElement } from 'react';
 
+import type { ExportView } from '../../src/app/types';
+import { AlbumExportControl } from '../../src/features/gallery/AlbumExportControl';
+import { EXPORT_STATE_LABELS } from '../../src/features/gallery/export-control-status';
 import { GalleryExportControl } from '../../src/features/gallery/GalleryExportControl';
 import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
 import { buildGuestbookPrivateCsv } from '../../worker/export/guestbook-csv';
@@ -14,6 +17,35 @@ const snapshot = {
   prompt: 'Tell us <iframe src="https://evil.test"></iframe> "everything".',
   snapshotAt: '2026-11-01T07:30:00.000Z',
 };
+
+const EXPORT_STATES = ['queued', 'running', 'ready', 'failed', 'expired'] as const;
+
+function exportView(state: ExportView['state'], kind: ExportView['kind']): ExportView {
+  return {
+    id: `${kind}-${state}`,
+    kind,
+    state,
+    snapshotAt: '2026-11-01T07:30:00.000Z',
+    mediaCount: 2,
+    totalBytes: 1_024,
+    attempt: 2,
+    partCount: 1,
+    expiresAt: '2026-11-02T07:30:00.000Z',
+    guestbookEntryCount: kind === 'complete' ? 2 : null,
+    guestbookSharedCount: kind === 'complete' ? 1 : null,
+    guestbookEventName: kind === 'complete' ? 'Maya & Ren' : null,
+    guestbookEventDate: kind === 'complete' ? '2026-11-01' : null,
+    guestbookEventTimezone: kind === 'complete' ? 'America/Chicago' : null,
+    guestbookPrompt: kind === 'complete' ? 'Share a memory' : null,
+    guestbookGalleryVisible: kind === 'complete' ? true : null,
+  };
+}
+
+function legacyCompleteExport(state: ExportView['state']) {
+  const { kind, ...legacy } = exportView(state, 'complete');
+  if (kind !== 'complete') throw new Error('Expected a complete export fixture.');
+  return legacy;
+}
 
 function entry(
   overrides: Partial<ExportGuestbookEntryRecord> = {},
@@ -141,5 +173,81 @@ describe('Manager Guestbook export downloads', () => {
     expect(screen.getByRole('link', { name: 'Printable guestbook' })).toHaveAttribute('href', 'https://signed.test/print');
     expect(screen.getByRole('link', { name: /Private entry archive.*Contains entries guests cannot see/iu }))
       .toHaveAttribute('href', 'https://signed.test/private');
+  });
+
+  it.each(EXPORT_STATES)('uses the shared %s state label for complete and album exports', (state) => {
+    const callbacks = {
+      onPrepare: async () => undefined,
+      onDownload: async () => undefined,
+      onRetry: async () => undefined,
+    };
+    const complete = render(createElement(GalleryExportControl, {
+      ...callbacks,
+      job: exportView(state, 'complete'),
+    }));
+    expect(complete.container.querySelector('.export-state strong'))
+      .toHaveTextContent(EXPORT_STATE_LABELS[state]);
+    complete.unmount();
+
+    const albumExport = render(createElement(AlbumExportControl, {
+      ...callbacks,
+      photoCount: 2,
+      totalBytes: 1_024,
+      job: exportView(state, 'album'),
+    }));
+    expect(albumExport.container.querySelector('.export-state strong'))
+      .toHaveTextContent(EXPORT_STATE_LABELS[state]);
+  });
+
+  it('keeps one live region mounted while each export control changes branches', () => {
+    const callbacks = {
+      onPrepare: async () => undefined,
+      onDownload: async () => undefined,
+      onRetry: async () => undefined,
+    };
+    const complete = render(createElement(GalleryExportControl, callbacks));
+    const completeStatus = complete.container.querySelector('[role="status"]');
+    complete.rerender(createElement(GalleryExportControl, {
+      ...callbacks,
+      job: exportView('queued', 'complete'),
+    }));
+    expect(complete.container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(complete.container.querySelector('[role="status"]')).toBe(completeStatus);
+    complete.unmount();
+
+    const albumExport = render(createElement(AlbumExportControl, {
+      ...callbacks,
+      photoCount: 2,
+      totalBytes: 1_024,
+    }));
+    const albumStatus = albumExport.container.querySelector('[role="status"]');
+    albumExport.rerender(createElement(AlbumExportControl, {
+      ...callbacks,
+      photoCount: 2,
+      totalBytes: 1_024,
+      job: exportView('queued', 'album'),
+    }));
+    expect(albumExport.container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(albumExport.container.querySelector('[role="status"]')).toBe(albumStatus);
+  });
+
+  it('normalizes legacy complete jobs before download and retry callbacks', () => {
+    const onDownload = vi.fn(async () => undefined);
+    const onRetry = vi.fn(async () => undefined);
+    const callbacks = {
+      onPrepare: async () => undefined,
+      onDownload,
+      onRetry,
+    };
+    const ready = legacyCompleteExport('ready');
+    const view = render(createElement(GalleryExportControl, { ...callbacks, job: ready }));
+
+    fireEvent.click(within(view.container).getByRole('button', { name: 'Get download links' }));
+    expect(onDownload).toHaveBeenCalledWith({ ...ready, kind: 'complete' });
+
+    const failed = legacyCompleteExport('failed');
+    view.rerender(createElement(GalleryExportControl, { ...callbacks, job: failed }));
+    fireEvent.click(within(view.container).getByRole('button', { name: 'Retry export' }));
+    expect(onRetry).toHaveBeenCalledWith({ ...failed, kind: 'complete' });
   });
 });

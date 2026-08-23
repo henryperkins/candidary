@@ -31,6 +31,7 @@ import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
+import { selectionCapacityMessage } from '../../src/features/gallery/selection-state';
 import { EventPage } from '../../src/pages/EventPage';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
@@ -1691,13 +1692,11 @@ describe('manager experience', () => {
 
     for (const choice of choices.slice(0, MANAGER_BULK_SELECTION_MAX)) fireEvent.click(choice);
     const extra = choices[MANAGER_BULK_SELECTION_MAX]!;
-    expect(screen.getByRole('status')).toHaveTextContent(
-      `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`,
-    );
+    expect(screen.getByRole('status')).toHaveTextContent(selectionCapacityMessage());
     expect(extra).toBeDisabled();
     await user.click(extra);
     expect(extra).not.toBeChecked();
-    expect(screen.getByRole('status')).toHaveTextContent('50 of 50 photos selected');
+    expect(screen.getByRole('status')).toHaveTextContent(selectionCapacityMessage());
 
     await user.click(choices[0]!);
     expect(extra, 'unchecking remains available as the recovery').toBeEnabled();

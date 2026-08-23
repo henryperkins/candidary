@@ -47,7 +47,13 @@ export function AlbumSharePage() {
       if (!token && !includeExistingSession) return;
 
       if (token) pendingToken.current = token;
-      window.history.replaceState(window.history.state, '', '/album');
+      if (token && window.location.hash.slice(1)) {
+        window.history.replaceState(
+          window.history.state,
+          '',
+          `${window.location.pathname}${window.location.search}`,
+        );
+      }
       requestVersion.current += 1;
       const version = requestVersion.current;
       requestController.current?.abort();

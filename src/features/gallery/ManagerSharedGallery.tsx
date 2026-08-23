@@ -54,7 +54,6 @@ interface ManagerSharedGalleryProps {
   loadingMore: boolean;
   hasMore: boolean;
   onLoadMore(): Promise<void>;
-  live?: boolean;
   onAnnouncement?(message: string): void;
 }
 

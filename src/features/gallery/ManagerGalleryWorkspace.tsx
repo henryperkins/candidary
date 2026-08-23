@@ -18,6 +18,7 @@ import { GalleryExportControl } from './GalleryExportControl';
 import { ManagerAlbum, type ManagerAlbumHandle } from './ManagerAlbum';
 import { ManagerPrivateGallery } from './ManagerPrivateGallery';
 import { ManagerSharedGallery, type GallerySharedStatus } from './ManagerSharedGallery';
+import { selectionCapacityMessage } from './selection-state';
 import type { Dispatch, SetStateAction } from 'react';
 
 type GalleryMode = 'library' | 'album' | 'shared';
@@ -167,7 +168,7 @@ ManagerGalleryWorkspaceProps
   useEffect(() => {
     if (mode !== 'shared') return;
     setAnnouncement(shared.selectionAtLimit
-      ? '50 of 50 photos selected. Remove one to choose another.'
+      ? selectionCapacityMessage()
       : shared.selected.length
         ? `${shared.selected.length} selected`
         : 'Select photos to update the optional gallery');
@@ -264,7 +265,6 @@ ManagerGalleryWorkspaceProps
       <ManagerSharedGallery
         event={event}
         {...shared}
-        live={false}
         onAnnouncement={setAnnouncement}
       />
     </div>

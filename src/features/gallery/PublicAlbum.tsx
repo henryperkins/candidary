@@ -61,6 +61,7 @@ export function PublicAlbum({ album }: { album: PublicAlbumView }) {
   return <main className="public-album">
     <header className="public-album__intro">
       {album.coverMediaId && <AlbumImage
+        key={album.coverMediaId}
         mediaId={album.coverMediaId}
         alt={`Cover for ${album.title}`}
         className="public-album__cover"

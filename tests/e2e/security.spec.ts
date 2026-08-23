@@ -158,9 +158,9 @@ test('an album fragment becomes only a narrow cookie and can never authorize an 
     },
   });
 
-  await page.goto(`/album#${token}`);
+  await page.goto(`/album?source=email#${token}`);
   await expect(page.getByRole('heading', { level: 1, name: 'Album', exact: true })).toBeVisible();
-  await expect(page).toHaveURL(/\/album$/u);
+  await expect(page).toHaveURL(/\/album\?source=email$/u);
 
   const exchangeRequests = requests.filter(({ url }) => new URL(url).pathname === '/api/album-share/exchange');
   expect(exchangeRequests).toHaveLength(1);
@@ -184,7 +184,7 @@ test('an album fragment becomes only a narrow cookie and can never authorize an 
   expect(browserState.hash).toBe('');
   expect(browserState.html).not.toContain(token);
   expect(browserState.historyState).not.toContain(token);
-  expect(browserState.historyWrites.at(-1)).toBe('/album');
+  expect(browserState.historyWrites.at(-1)).toBe('/album?source=email');
   expect(browserState.historyWrites.every((entry) => !entry.includes(token))).toBe(true);
   expect(browserState.imageSources.length).toBeGreaterThan(0);
   expect(browserState.imageSources.every((source) => (

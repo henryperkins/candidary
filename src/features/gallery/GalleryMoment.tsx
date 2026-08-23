@@ -91,9 +91,8 @@ function GalleryTile({
             onClick={(event) => onOpen(photo, event.currentTarget)}
           />
           {/* Plus-then-check, not a heart. A heart only ever reads "loved"; album membership
-              has to read in both directions, and a host scanning a page needs to see at a
-              glance which photographs are already in. The glyph swap is invisible to a screen
-              reader on its own, so `aria-pressed` and the hidden state text carry it. */}
+              has to read in both directions. The action label and `aria-pressed` expose that
+              state programmatically while the visible badge keeps it scannable. */}
           <button
             type="button"
             className="gallery-mosaic__favorite"
@@ -105,9 +104,6 @@ function GalleryTile({
             onClick={() => onFavorite(photo)}
           >
             {photo.isFavorite ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" />}
-            <span className="sr-only">
-              {photo.isFavorite ? 'In the album' : 'Not in the album'}
-            </span>
           </button>
           {photo.isFavorite && <span className="gallery-mosaic__album-badge" aria-hidden="true">
             In album

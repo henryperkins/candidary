@@ -424,6 +424,17 @@ describe('gallery modes', () => {
     expect(onSharedSelectedChange).toHaveBeenCalledOnce();
     expect(onSharedSelectedChange).toHaveBeenCalledWith([]);
   });
+
+  it('keeps Shared announcements in the workspace live region', async () => {
+    const { fetchMock } = harness();
+    renderWorkspace(fetchMock);
+    const modes = await screen.findByRole('group', { name: 'Gallery mode' });
+
+    await userEvent.setup().click(within(modes).getByRole('button', { name: 'Shared' }));
+
+    expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
+    expect(document.querySelector('.gallery-shared [role="status"]')).toBeNull();
+  });
 });
 
 describe('selecting photos into the album', () => {
@@ -443,6 +454,9 @@ describe('selecting photos into the album', () => {
     expect(within(tray).getByText(
       'Adding does not publish anything, and removing keeps the delivered original.',
     )).toBeVisible();
+    const remove = within(tray).getByRole('button', { name: 'Remove 1 from album' });
+    expect(remove.querySelector('.lucide-minus')).not.toBeNull();
+    expect(remove.querySelector('.lucide-check')).toBeNull();
     const galleryStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
     expect(galleryStatus).toHaveTextContent('First dance selected. 1 selected.');
 
@@ -475,8 +489,8 @@ describe('selecting photos into the album', () => {
     expect(screen.getByRole('button', {
       name: 'Add p2.jpg to the album',
     })).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByText('In the album')).toHaveClass('sr-only');
-    expect(screen.getByText('Not in the album')).toHaveClass('sr-only');
+    expect(screen.queryByText('In the album')).not.toBeInTheDocument();
+    expect(screen.queryByText('Not in the album')).not.toBeInTheDocument();
     expect(screen.getByText('In album')).toBeVisible();
 
     const picks = screen.getByRole('button', { name: 'Album picks (1)' });

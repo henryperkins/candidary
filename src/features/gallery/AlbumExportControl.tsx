@@ -1,8 +1,9 @@
 import { Download } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
+import { EXPORT_STATE_LABELS, ExportStatusAnnouncement } from './export-control-status';
 
 interface AlbumExportControlProps {
   photoCount: number;
@@ -16,14 +17,6 @@ interface AlbumExportControlProps {
   live?: boolean;
   onAnnouncement?(message: string): void;
 }
-
-const EXPORT_STATE_LABELS: Record<ExportView['state'], string> = {
-  queued: 'Preparing',
-  running: 'Preparing',
-  ready: 'Ready',
-  failed: 'Failed',
-  expired: 'Expired',
-};
 
 function jobDetail(job: ExportView): string {
   const counts = `${job.mediaCount.toLocaleString()} photos · ${formatBytes(job.totalBytes)}`;
@@ -62,17 +55,13 @@ export function AlbumExportControl({
   const liveMessage = job
     ? `${EXPORT_STATE_LABELS[job.state]}. ${jobDetail(job)}`
     : pendingAction === 'prepare' ? 'Preparing the album download…' : '';
-  useEffect(() => {
-    if (!live && liveMessage) onAnnouncement?.(liveMessage);
-  }, [live, liveMessage, onAnnouncement]);
 
   return <div className="gallery-export album-export">
-    <p
-      className="sr-only"
-      role={live ? 'status' : undefined}
-      aria-live={live ? 'polite' : undefined}
-      aria-atomic={live ? 'true' : undefined}
-    >{liveMessage}</p>
+    <ExportStatusAnnouncement
+      live={live}
+      message={liveMessage}
+      onAnnouncement={onAnnouncement}
+    />
     {job === undefined
       ? <>
           <p className="gallery-export__copy">

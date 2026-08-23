@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 
 import type { PublicAlbumView } from '../../shared/contracts';
 import { createAppRouter } from '../../src/app/router';
+import { PublicAlbum } from '../../src/features/gallery/PublicAlbum';
 
 const TOKEN = 'share-id.share-secret-that-must-not-enter-the-dom';
 const SECOND_TOKEN = 'second-share-id.second-share-secret-that-must-not-enter-the-dom';
@@ -68,6 +69,7 @@ afterEach(() => {
 
 describe('public album page', () => {
   it('erases the fragment before exchanging it and never renders the credential', async () => {
+    window.history.pushState(null, '', '/album?source=email');
     window.location.hash = `#${TOKEN}`;
     const historyState = window.history.state;
     let hashWhenFetched = 'not-called';
@@ -83,7 +85,7 @@ describe('public album page', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 
     const [path, init] = fetchMock.mock.calls[0]!;
-    expect(replaceState).toHaveBeenCalledWith(historyState, '', '/album');
+    expect(replaceState).toHaveBeenCalledWith(historyState, '', '/album?source=email');
     expect(hashWhenFetched).toBe('');
     expect(path).toBe('/api/album-share/exchange');
     expect(path).not.toContain(TOKEN);
@@ -91,14 +93,16 @@ describe('public album page', () => {
     expect(JSON.parse(String(init.body))).toEqual({ token: TOKEN });
     expect(view.container.innerHTML).not.toContain('share-secret');
     expect(window.location.hash).toBe('');
+    expect(window.location.search).toBe('?source=email');
   });
 
   it('reuses the narrow cookie on reload and renders only narrow preview URLs', async () => {
+    window.history.pushState(null, '', '/album?source=email');
+    replaceState.mockClear();
     const fetchMock = vi.fn<(path: string, init: RequestInit) => Promise<Response>>(
       () => success(),
     );
     vi.stubGlobal('fetch', fetchMock);
-    const historyState = window.history.state;
 
     renderAlbumRoute();
 
@@ -109,7 +113,8 @@ describe('public album page', () => {
     expect(path).toBe('/api/album-share');
     expect(init.method).toBeUndefined();
     expect(init.credentials).toBe('same-origin');
-    expect(replaceState).toHaveBeenCalledWith(historyState, '', '/album');
+    expect(replaceState).not.toHaveBeenCalled();
+    expect(window.location.search).toBe('?source=email');
 
     const sources = screen.getAllByRole('img').map((image) => image.getAttribute('src'));
     expect(sources).toEqual([
@@ -247,6 +252,18 @@ describe('public album page', () => {
     expect(screen.getByRole('img', { name: 'First dance' }).tagName).toBe('DIV');
     expect(screen.getByRole('img', { name: 'Album photo 2' }).tagName).toBe('DIV');
     expect(screen.getAllByText('Preview unavailable')).toHaveLength(3);
+  });
+
+  it('resets a failed cover when the album chooses a different cover photo', () => {
+    const view = render(<PublicAlbum album={album} />);
+    fireEvent.error(screen.getByRole('img', { name: 'Cover for The evening' }));
+    expect(screen.getByRole('img', { name: 'Cover for The evening' }).tagName).toBe('DIV');
+
+    view.rerender(<PublicAlbum album={{ ...album, coverMediaId: 'photo-1' }} />);
+
+    const replacement = screen.getByRole('img', { name: 'Cover for The evening' });
+    expect(replacement.tagName).toBe('IMG');
+    expect(replacement).toHaveAttribute('src', '/api/album-share/media/photo-1/preview');
   });
 
   it('uses the stable photo position for a loaded preview with an empty caption', async () => {

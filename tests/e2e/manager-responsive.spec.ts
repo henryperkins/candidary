@@ -454,7 +454,11 @@ test('the mobile Library tray, reopened Undo, Album, and Shared stay reachable a
     const selecting = page.getByRole('button', { name: /^(Select photos|Done selecting)$/u });
     if (await selecting.getAttribute('aria-pressed') === 'true') await selecting.click();
     await page.getByRole('button', { name: 'Select photos' }).click();
-    const first = page.getByRole('button', { name: new RegExp(`^Select ${rows[0]!.caption}`, 'u') });
+    const firstRow = rows[0]!;
+    const first = page.getByRole('button', {
+      name: `Select ${firstRow.caption}, from ${firstRow.guestName}`,
+      exact: true,
+    });
     await first.click();
     const tray = page.getByRole('region', { name: 'Album' });
     await expect(tray).toBeVisible();
@@ -484,13 +488,21 @@ test('the mobile Library tray, reopened Undo, Album, and Shared stay reachable a
   const selectionToggle = page.getByRole('button', { name: /^(Select photos|Done selecting)$/u });
   if (await selectionToggle.getAttribute('aria-pressed') === 'true') await selectionToggle.click();
   await page.getByRole('button', { name: 'Select photos' }).click();
-  await page.getByRole('button', { name: new RegExp(`^Select ${rows[0]!.caption}`, 'u') }).click();
+  const firstRow = rows[0]!;
+  await page.getByRole('button', {
+    name: `Select ${firstRow.caption}, from ${firstRow.guestName}`,
+    exact: true,
+  }).click();
   const tray = page.getByRole('region', { name: 'Album' });
   await tray.getByRole('button', { name: 'Add 1 to album' }).click();
   const undo = page.locator('.album-undo__bar');
   await expect(undo).toBeVisible();
   await page.getByRole('button', { name: 'Select photos' }).click();
-  await page.getByRole('button', { name: new RegExp(`^Select ${rows[1]!.caption}`, 'u') }).click();
+  const secondRow = rows[1]!;
+  await page.getByRole('button', {
+    name: `Select ${secondRow.caption}, from ${secondRow.guestName}`,
+    exact: true,
+  }).click();
   await expect(tray).toBeVisible();
   const reopenedTray = await tray.boundingBox();
   const undoBounds = await undo.boundingBox();
