@@ -94,7 +94,7 @@ describe('migration 0018 album end to end', () => {
     ).run()).resolves.toBeDefined();
   });
 
-  it('keeps one share per event and cascades shares and sessions', async () => {
+  it('keeps one share per event and cascades share and event deletions', async () => {
     await applyD1Migrations(env.DB, [...migrationsUpTo('0018'), migrationOnly('0018')]);
     await seedEvent();
     await env.DB.prepare(`
@@ -111,6 +111,26 @@ describe('migration 0018 album end to end', () => {
       INSERT INTO event_album_share_sessions (
         id, share_id, event_id, secret_digest, expires_at, created_at
       ) VALUES ('session-a', 'share-a', 'event-a', 'session-digest', ?, ?)
+    `).bind(NOW, NOW).run();
+
+    await env.DB.prepare(`DELETE FROM event_album_shares WHERE id = 'share-a'`).run();
+
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_album_share_sessions WHERE id = 'session-a'
+    `).first()).toEqual({ count: 0 });
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM events WHERE id = 'event-a'
+    `).first()).toEqual({ count: 1 });
+
+    await env.DB.prepare(`
+      INSERT INTO event_album_shares (
+        id, event_id, secret_digest, secret_ciphertext, shared_at, created_at
+      ) VALUES ('share-c', 'event-a', 'digest-c', 'cipher-c', ?, ?)
+    `).bind(NOW, NOW).run();
+    await env.DB.prepare(`
+      INSERT INTO event_album_share_sessions (
+        id, share_id, event_id, secret_digest, expires_at, created_at
+      ) VALUES ('session-c', 'share-c', 'event-a', 'session-digest-c', ?, ?)
     `).bind(NOW, NOW).run();
 
     await env.DB.prepare(`DELETE FROM events WHERE id = 'event-a'`).run();
