@@ -20,12 +20,13 @@ interface PresentedOffer extends UndoOffer {
 export interface UndoController {
   offer: PresentedOffer | null;
   running: boolean;
+  error: string | null;
   present(offer: UndoOffer): void;
   dismiss(): void;
   run(): void;
   /** Held while focus is inside the bar; see `UndoBar`. */
-  hold(): void;
-  release(): void;
+  hold(source: 'focus' | 'pointer'): void;
+  release(source: 'focus' | 'pointer'): void;
 }
 
 /**
@@ -40,9 +41,11 @@ export interface UndoController {
 export function useUndo(): UndoController {
   const [offer, setOffer] = useState<PresentedOffer | null>(null);
   const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const offerRef = useRef<PresentedOffer | null>(null);
   const sequence = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const holding = useRef(false);
+  const holds = useRef(new Set<'focus' | 'pointer'>());
   const expired = useRef(false);
 
   const clearTimer = useCallback(() => {
@@ -55,6 +58,9 @@ export function useUndo(): UndoController {
   const dismiss = useCallback(() => {
     clearTimer();
     expired.current = false;
+    holds.current.clear();
+    offerRef.current = null;
+    setError(null);
     setOffer(null);
   }, [clearTimer]);
 
@@ -62,38 +68,54 @@ export function useUndo(): UndoController {
     clearTimer();
     timer.current = setTimeout(() => {
       timer.current = null;
-      if (holding.current) {
+      if (offerRef.current?.sequence !== forSequence) return;
+      if (holds.current.size > 0) {
         expired.current = true;
         return;
       }
-      setOffer((current) => (current?.sequence === forSequence ? null : current));
+      offerRef.current = null;
+      setOffer(null);
     }, UNDO_WINDOW_MS);
   }, [clearTimer]);
 
   const present = useCallback((next: UndoOffer) => {
     const nextSequence = ++sequence.current;
     expired.current = false;
-    setOffer({ ...next, sequence: nextSequence });
+    holds.current.clear();
+    setError(null);
+    const presented = { ...next, sequence: nextSequence };
+    offerRef.current = presented;
+    setOffer(presented);
     startTimer(nextSequence);
   }, [startTimer]);
 
   const run = useCallback(() => {
     if (!offer || running) return;
     clearTimer();
+    setError(null);
     setRunning(true);
-    void offer.run().finally(() => {
-      setRunning(false);
+    void offer.run().then(() => {
+      if (offerRef.current?.sequence !== offer.sequence) return;
       expired.current = false;
-      setOffer((current) => (current?.sequence === offer.sequence ? null : current));
-    });
-  }, [clearTimer, offer, running]);
+      holds.current.clear();
+      offerRef.current = null;
+      setOffer(null);
+    }, (caught: unknown) => {
+      if (offerRef.current?.sequence !== offer.sequence) return;
+      setError(caught instanceof Error && caught.message
+        ? caught.message
+        : 'Undo could not be completed. Try again.');
+      startTimer(offer.sequence);
+    }).finally(() => setRunning(false));
+  }, [clearTimer, offer, running, startTimer]);
 
-  const hold = useCallback(() => {
-    holding.current = true;
+  const hold = useCallback((source: 'focus' | 'pointer') => {
+    holds.current.add(source);
   }, []);
 
-  const release = useCallback(() => {
-    holding.current = false;
+  const release = useCallback((source: 'focus' | 'pointer') => {
+    holds.current.delete(source);
+    if (holds.current.size > 0) return;
     // The window ran out while the host was on the control. Honour the hold rather than
     // the clock: give the offer back its full window from the moment they leave.
     if (expired.current) {
@@ -105,7 +127,7 @@ export function useUndo(): UndoController {
 
   useEffect(() => clearTimer, [clearTimer]);
 
-  return { offer, running, present, dismiss, run, hold, release };
+  return { offer, running, error, present, dismiss, run, hold, release };
 }
 
 /**
@@ -113,20 +135,34 @@ export function useUndo(): UndoController {
  * error, and an assertive interruption on every pick would make bulk work unusable with
  * a screen reader. The message is the live text; the controls are reachable but silent.
  */
-export function UndoBar({ controller }: { controller: UndoController }) {
-  const { offer, running, dismiss, run, hold, release } = controller;
+export function UndoBar({
+  controller,
+  live = true,
+}: {
+  controller: UndoController;
+  live?: boolean;
+}) {
+  const { offer, running, error, dismiss, run, hold, release } = controller;
   return <div className="album-undo" data-open={offer !== null}>
-    <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+    <p
+      className="sr-only"
+      role={live ? 'status' : undefined}
+      aria-live={live ? 'polite' : undefined}
+      aria-atomic={live ? 'true' : undefined}
+    >
       {offer ? `${offer.message} Undo is available for nine seconds.` : ''}
     </p>
     {offer && <div
       className="album-undo__bar"
-      onFocusCapture={hold}
-      onBlurCapture={release}
-      onPointerEnter={hold}
-      onPointerLeave={release}
+      onFocusCapture={() => hold('focus')}
+      onBlurCapture={(blur) => {
+        if (!blur.currentTarget.contains(blur.relatedTarget as Node | null)) release('focus');
+      }}
+      onPointerEnter={() => hold('pointer')}
+      onPointerLeave={() => release('pointer')}
     >
       <span className="album-undo__message">{offer.message}</span>
+      {error && <small className="album-undo__error" role={live ? 'alert' : undefined}>{error}</small>}
       <button
         type="button"
         className="album-undo__action"

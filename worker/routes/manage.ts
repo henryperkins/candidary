@@ -108,7 +108,10 @@ const albumEntrySchema = z.discriminatedUnion('kind', [
     id: z.string().min(1).max(64),
     // Trimmed, then required: a heading of spaces is a divider with no name, and the
     // review grid has nowhere to put one.
-    heading: z.string().trim().min(1).max(ALBUM_SECTION_HEADING_MAX_LENGTH),
+    heading: z.string()
+      .trim()
+      .min(1)
+      .refine((heading) => [...heading].length <= ALBUM_SECTION_HEADING_MAX_LENGTH),
   }).strict(),
 ]);
 const albumMetadataSchema = z.object({
@@ -458,8 +461,9 @@ manageRoutes.put('/manage/events/:eventId/media/:mediaId/favorite', async (conte
   const eventId = context.req.param('eventId');
   const mediaId = context.req.param('mediaId');
   const requestId = context.get('requestId');
+  const mediaRepository = new MediaRepository(context.env.DB);
   try {
-    const media = await new MediaRepository(context.env.DB).setFavorite(
+    const media = await mediaRepository.setFavorite(
       eventId,
       mediaId,
       parsed.data.favorite ? new Date().toISOString() : null,
@@ -546,24 +550,9 @@ manageRoutes.post('/manage/events/:eventId/album/picks', async (context) => {
   }
   const eventId = context.req.param('eventId');
   const requestId = context.get('requestId');
-  const albums = new AlbumRepository(context.env.DB);
+  const media = new MediaRepository(context.env.DB);
 
-  if (parsed.data.picked) {
-    // Advisory rather than transactional, and deliberately so: two hosts picking at once
-    // can land a few photos past the cap, which costs nothing and self-corrects as soon as
-    // either prunes. A counter column to make it exact would add a second source of truth
-    // for membership, which is the one thing this feature was built not to do.
-    const current = await albums.pickCount(eventId);
-    if (current + parsed.data.mediaIds.length > ALBUM_MAX_ENTRIES) {
-      throw new ApiError(
-        'ALBUM_FULL',
-        `An album holds up to ${ALBUM_MAX_ENTRIES} photos. Remove some picks before adding more.`,
-        409,
-      );
-    }
-  }
-
-  const changed = await new MediaRepository(context.env.DB).setFavoriteBulk(
+  const changed = await media.setFavoriteBulk(
     eventId,
     parsed.data.mediaIds,
     parsed.data.picked ? new Date().toISOString() : null,

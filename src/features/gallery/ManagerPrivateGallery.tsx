@@ -5,6 +5,7 @@ import { api, ClientApiError } from '../../app/api';
 import { ErrorState, LoadingState } from '../../components/States';
 import {
   DEFAULT_GALLERY_TIMELINE_ORDER,
+  ALBUM_MAX_ENTRIES,
   type GalleryTimelineOrder,
   MANAGER_BULK_SELECTION_MAX,
 } from '../../../shared/constants';
@@ -24,7 +25,11 @@ interface ManagerPrivateGalleryProps {
   active?: boolean;
   /** Album membership, for the filter's own label. Owned by the workspace so Album and Library agree. */
   pickCount: number;
+  /** Photos and sections share the same persisted album ceiling. */
+  albumEntryCount: number;
   onPicksChanged(): void;
+  live?: boolean;
+  onAnnouncement?(message: string): void;
 }
 
 interface GalleryPage {
@@ -107,7 +112,10 @@ export function ManagerPrivateGallery({
   eventId,
   active = true,
   pickCount,
+  albumEntryCount,
   onPicksChanged,
+  live = true,
+  onAnnouncement,
 }: ManagerPrivateGalleryProps) {
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
@@ -145,6 +153,13 @@ export function ManagerPrivateGallery({
   const resultsRef = useRef<HTMLDivElement>(null);
   const emptyRef = useRef<HTMLHeadingElement>(null);
   const rows = rowState.rows;
+
+  useEffect(() => {
+    if (!live && announcement) onAnnouncement?.(announcement);
+  }, [announcement, live, onAnnouncement]);
+  useEffect(() => {
+    if (!live && undo.error) onAnnouncement?.(undo.error);
+  }, [live, onAnnouncement, undo.error]);
 
   const galleryPath = useCallback((
     nextQuery: string,
@@ -329,11 +344,18 @@ export function ManagerPrivateGallery({
 
   async function toggleFavorite(photo: ManagerGalleryMediaView) {
     if (favoriteRequests.current.has(photo.id)) return;
+    const next = !photo.isFavorite;
+    if (next && albumEntryCount >= ALBUM_MAX_ENTRIES) {
+      setNotice({
+        message: `An album holds up to ${ALBUM_MAX_ENTRIES} photos and sections. Remove an entry before adding more.`,
+        retry: null,
+      });
+      return;
+    }
     favoriteRequests.current.add(photo.id);
     setFavoritePendingIds(new Set(favoriteRequests.current));
 
     const requestGeneration = loadGeneration.current;
-    const next = !photo.isFavorite;
     const confirmed = photo.isFavorite;
     dispatchRows({ type: 'favorite', id: photo.id, favorite: next });
     try {
@@ -476,6 +498,14 @@ export function ManagerPrivateGallery({
   async function applyPicks(picked: boolean) {
     const ids = [...selectedIds];
     if (ids.length === 0 || bulkBusy) return;
+    const newPicks = ids.filter((id) => !rows.find((row) => row.id === id)?.isFavorite).length;
+    if (picked && albumEntryCount + newPicks > ALBUM_MAX_ENTRIES) {
+      setNotice({
+        message: `An album holds up to ${ALBUM_MAX_ENTRIES} photos and sections. Remove an entry before adding more.`,
+        retry: null,
+      });
+      return;
+    }
     setBulkBusy(true);
     try {
       const result = await setAlbumPicks(eventId, ids, picked);
@@ -537,7 +567,7 @@ export function ManagerPrivateGallery({
 
   let content;
   if (loading && !hasConfirmedPage.current) {
-    content = <LoadingState label="Opening the private gallery…" />;
+    content = <LoadingState label="Opening the private gallery…" live={false} />;
   } else if (loadFailure) {
     content = <ErrorState
       message={loadFailure}
@@ -647,8 +677,13 @@ export function ManagerPrivateGallery({
         onClick={() => selectMany(rows, 'these results')}
       >Select all {rows.length} result{rows.length === 1 ? '' : 's'}</button>}
     </div>
-    {loading && hasConfirmedPage.current && <p className="sr-only" role="status">Updating photos…</p>}
-    <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
+    {loading && hasConfirmedPage.current && <p className="sr-only" role={live ? 'status' : undefined}>Updating photos…</p>}
+    <p
+      className="sr-only"
+      role={live ? 'status' : undefined}
+      aria-live={live ? 'polite' : undefined}
+      aria-atomic={live ? 'true' : undefined}
+    >{announcement}</p>
     {notice && <div className="manager-action-error" role="alert">
       <div className="manager-action-error__summary">
         <div className="manager-action-error__alert">
@@ -677,7 +712,7 @@ export function ManagerPrivateGallery({
       onRemove={() => void applyPicks(false)}
       onClear={clearSelection}
     />}
-    <UndoBar controller={undo} />
+    <UndoBar controller={undo} live={live} />
     {viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
       photos={rows}
       index={viewerIndex}
@@ -687,6 +722,8 @@ export function ManagerPrivateGallery({
       onIndexChange={changeViewerIndex}
       onClose={closeViewer}
       onFavorite={(photo) => void toggleFavorite(photo)}
+      live={live}
+      onAnnouncement={onAnnouncement}
     />}
   </div>;
 }

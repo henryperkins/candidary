@@ -1,5 +1,5 @@
 import { Download } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
@@ -13,6 +13,8 @@ interface AlbumExportControlProps {
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
+  live?: boolean;
+  onAnnouncement?(message: string): void;
 }
 
 const EXPORT_STATE_LABELS: Record<ExportView['state'], string> = {
@@ -47,6 +49,8 @@ export function AlbumExportControl({
   onPrepare,
   onDownload,
   onRetry,
+  live = true,
+  onAnnouncement,
 }: AlbumExportControlProps) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
   const otherExportActive = activeJob !== undefined && activeJob.id !== job?.id;
@@ -58,9 +62,17 @@ export function AlbumExportControl({
   const liveMessage = job
     ? `${EXPORT_STATE_LABELS[job.state]}. ${jobDetail(job)}`
     : pendingAction === 'prepare' ? 'Preparing the album download…' : '';
+  useEffect(() => {
+    if (!live && liveMessage) onAnnouncement?.(liveMessage);
+  }, [live, liveMessage, onAnnouncement]);
 
   return <div className="gallery-export album-export">
-    <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{liveMessage}</p>
+    <p
+      className="sr-only"
+      role={live ? 'status' : undefined}
+      aria-live={live ? 'polite' : undefined}
+      aria-atomic={live ? 'true' : undefined}
+    >{liveMessage}</p>
     {job === undefined
       ? <>
           <p className="gallery-export__copy">

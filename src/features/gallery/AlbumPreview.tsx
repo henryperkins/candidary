@@ -1,6 +1,5 @@
-import { X } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { ImageOff } from 'lucide-react';
+import { useState } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { AlbumEntryView } from '../../../shared/contracts';
@@ -8,128 +7,61 @@ import { galleryPhotoTitle } from './gallery-timeline';
 
 interface AlbumPreviewProps {
   entries: readonly AlbumEntryView[];
-  eventName: string;
-  onClose(): void;
+  title: string;
+  description: string;
 }
 
-/**
- * The album as the host arranged it, read rather than edited.
- *
- * This is the one surface in the manager where the photographs are the content and the
- * interface should get out of the way, so the controls are a single close button and the
- * page is the sequence itself. Sections become real headings with the space a chapter
- * break needs; without them the album is one continuous run, which is also a legitimate
- * album and not an empty state.
- *
- * Containment matches `GalleryViewer`: `aria-modal` alone leaves the manager shell
- * tabbable behind the dialog, so the other body children are inerted for as long as this
- * is open. Focus restoration stays with the caller, which knows which control opened it.
- */
-export function AlbumPreview({ entries, eventName, onClose }: AlbumPreviewProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const [host] = useState(() => document.createElement('div'));
-  const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(() => new Set());
+interface PreviewBlock {
+  key: string;
+  heading: string | null;
+  photos: Array<Extract<AlbumEntryView, { kind: 'photo' }>>;
+}
 
-  useLayoutEffect(() => {
-    document.body.append(host);
-    const inerted: HTMLElement[] = [];
-    for (const sibling of Array.from(document.body.children)) {
-      if (sibling === host || !(sibling instanceof HTMLElement)) continue;
-      if (sibling.hasAttribute('inert')) continue;
-      sibling.setAttribute('inert', '');
-      inerted.push(sibling);
+function previewBlocks(entries: readonly AlbumEntryView[]): PreviewBlock[] {
+  const blocks: PreviewBlock[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'section') {
+      blocks.push({ key: `section:${entry.id}`, heading: entry.heading, photos: [] });
+      continue;
     }
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      for (const sibling of inerted) sibling.removeAttribute('inert');
-      document.body.style.overflow = previousOverflow;
-      host.remove();
-    };
-  }, [host]);
+    if (blocks.length === 0) blocks.push({ key: 'lead', heading: null, photos: [] });
+    blocks.at(-1)!.photos.push(entry);
+  }
+  return blocks;
+}
 
-  useEffect(() => {
-    closeRef.current?.focus();
-  }, []);
+function PreviewPhoto({ entry }: { entry: Extract<AlbumEntryView, { kind: 'photo' }> }) {
+  const [failed, setFailed] = useState(false);
+  const title = galleryPhotoTitle(entry.photo);
+  const label = `${title}, from ${entry.photo.guestName}`;
+  if (!entry.photo.previewAvailable || failed) {
+    return <div className="album-preview__placeholder" role="img" aria-label={label}>
+      <ImageOff aria-hidden="true" />
+      <span>Preview unavailable</span>
+    </div>;
+  }
+  return <img
+    src={mediaPreview(entry.photo.id)}
+    alt={label}
+    loading="lazy"
+    decoding="async"
+    onError={() => setFailed(true)}
+  />;
+}
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
-      );
-      const first = focusable?.[0];
-      const last = focusable?.[focusable.length - 1];
-      if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
-
-  const photoCount = entries.filter((entry) => entry.kind === 'photo').length;
-
-  return createPortal(<div
-    className="album-preview"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="album-preview-title"
-    ref={dialogRef}
-  >
-    <header className="album-preview__bar">
-      <div>
-        <h2 id="album-preview-title">{eventName}</h2>
-        <p>{photoCount} photo{photoCount === 1 ? '' : 's'} · private to hosts</p>
-      </div>
-      <button
-        type="button"
-        className="album-preview__close"
-        ref={closeRef}
-        aria-label="Close album preview"
-        onClick={onClose}
-      ><X aria-hidden="true" /></button>
-    </header>
-
-    <div className="album-preview__page">
-      {entries.map((entry) => {
-        if (entry.kind === 'section') {
-          return <h3 className="album-preview__section" key={`section:${entry.id}`}>{entry.heading}</h3>;
-        }
-        const title = galleryPhotoTitle(entry.photo);
-        const failed = failedIds.has(entry.photo.id);
-        return <figure className="album-preview__figure" key={`photo:${entry.photo.id}`}>
-          {entry.photo.previewAvailable && !failed
-            ? <img
-                src={mediaPreview(entry.photo.id)}
-                alt={title}
-                width={entry.photo.width ?? undefined}
-                height={entry.photo.height ?? undefined}
-                loading="lazy"
-                decoding="async"
-                onError={() => setFailedIds((current) => new Set(current).add(entry.photo.id))}
-              />
-            : <div className="album-preview__placeholder">
-                <strong>{entry.photo.originalFilename}</strong>
-                <span>Preview unavailable. This photo was delivered and is included in your download.</span>
-              </div>}
-          <figcaption>
-            <strong>{title}</strong>
-            <span>From {entry.photo.guestName}</span>
-          </figcaption>
-        </figure>;
-      })}
+/** The guest-facing reading order, rendered inline so editing and preview never compete. */
+export function AlbumPreview({ entries, title, description }: AlbumPreviewProps) {
+  return <section className="album-preview" aria-labelledby="album-preview-title">
+    <p className="section-label">What a guest opening the link sees</p>
+    <h3 id="album-preview-title">{title}</h3>
+    {description && <p className="album-preview__description">{description}</p>}
+    <div className="album-preview__blocks">
+      {previewBlocks(entries).map((block) => <section className="album-preview__block" key={block.key}>
+        {block.heading && <h4>{block.heading}</h4>}
+        {block.photos.length > 0 && <div className="album-preview__photos">
+          {block.photos.map((entry) => <PreviewPhoto entry={entry} key={entry.photo.id} />)}
+        </div>}
+      </section>)}
     </div>
-  </div>, host);
+  </section>;
 }

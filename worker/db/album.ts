@@ -254,6 +254,18 @@ export class AlbumRepository {
       throw new ApiError('ALBUM_FULL', `An album holds up to ${ALBUM_MAX_SECTIONS} sections.`, 409);
     }
 
+    // Capacity and revision are predicates on the same UPDATE. D1 batches execute as
+    // one transaction, so this serializes against the guarded favorite UPDATE: a pick
+    // and a section save cannot both spend the final album slot.
+    const capacityGuard = `
+      (SELECT COUNT(*) FROM media
+        WHERE media.event_id = ?
+          AND media.upload_state = 'stored'
+          AND media.deleted_at IS NULL
+          AND media.favorited_at IS NOT NULL)
+        + ? <= ?
+    `;
+
     // Two statements, because one upsert cannot express this guard: the INSERT arm of
     // `ON CONFLICT` fires whatever revision the caller composed against, so a stale write
     // against a purged event would land as revision 1 rather than being refused. Seeding
@@ -271,6 +283,7 @@ export class AlbumRepository {
               revision = revision + 1,
               updated_at = ?
           WHERE event_id = ? AND revision = ?
+            AND (${capacityGuard})
         `).bind(
           JSON.stringify(entries),
           metadata.title,
@@ -280,6 +293,9 @@ export class AlbumRepository {
           now,
           eventId,
           expectedRevision,
+          eventId,
+          sections,
+          ALBUM_MAX_ENTRIES,
         )
       : this.db.prepare(`
           UPDATE event_albums
@@ -288,18 +304,51 @@ export class AlbumRepository {
               revision = revision + 1,
               updated_at = ?
           WHERE event_id = ? AND revision = ?
-        `).bind(JSON.stringify(entries), now, now, eventId, expectedRevision);
+            AND (${capacityGuard})
+        `).bind(
+          JSON.stringify(entries),
+          now,
+          now,
+          eventId,
+          expectedRevision,
+          eventId,
+          sections,
+          ALBUM_MAX_ENTRIES,
+        );
     const batch = await this.db.batch([
       this.db.prepare(`
         INSERT OR IGNORE INTO event_albums (event_id, entries, saved_at, revision, created_at, updated_at)
         VALUES (?, '[]', NULL, 0, ?, ?)
       `).bind(eventId, now, now),
       update,
+      this.db.prepare(`
+        SELECT
+          revision,
+          ((SELECT COUNT(*) FROM media
+            WHERE media.event_id = ?
+              AND media.upload_state = 'stored'
+              AND media.deleted_at IS NULL
+              AND media.favorited_at IS NOT NULL)
+            + ? > ?) AS album_full
+        FROM event_albums
+        WHERE event_id = ?
+      `).bind(eventId, sections, ALBUM_MAX_ENTRIES, eventId),
     ]);
 
     if (batch[1]?.meta.changes !== 1) {
+      const diagnostic = batch[2]?.results[0] as {
+        revision: number;
+        album_full: number;
+      } | undefined;
+      if (diagnostic?.revision === expectedRevision && diagnostic.album_full === 1) {
+        throw new ApiError(
+          'ALBUM_FULL',
+          `An album holds up to ${ALBUM_MAX_ENTRIES} photos and sections. Remove an entry before adding more.`,
+          409,
+        );
+      }
       throw new ApiError(
-        'VALIDATION_FAILED',
+        'REVISION_CONFLICT',
         'This album changed while you were arranging it. Reopen Album to see the current order.',
         409,
       );

@@ -61,7 +61,7 @@ export interface AutosaveHandle {
 }
 
 export interface DomainAutosaveState {
-  domain: 'settings' | 'appearance';
+  domain: 'settings' | 'appearance' | 'album';
   label: string;
   status: AutosaveStatus;
   failure: AutosaveFailure | null;
@@ -82,6 +82,9 @@ export interface AutosaveQueueOptions<S> {
 export interface AutosaveQueue<S> {
   submit(draft: AutosaveDraft<S>, immediate?: boolean): void;
   flush(): void;
+  waitForSettled(): Promise<AutosaveState>;
+  /** Drops work that has not started. A request already in flight still owns its response. */
+  discardPending(): void;
   adoptBaseline(key: string): void;
   state(): AutosaveState;
   dispose(): void;
@@ -107,6 +110,7 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
   let rebasing = false;
   let timer: number | null = null;
   let announced: AutosaveState = { status: 'saved', failure: null };
+  let settleWaiters: Array<(state: AutosaveState) => void> = [];
   let disposed = false;
 
   function cancelTimer() {
@@ -126,12 +130,28 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     return 'saved';
   }
 
+  function isSettled() {
+    return timer === null
+      && scheduled === null
+      && inFlight === null
+      && pending === null
+      && !rebasing;
+  }
+
+  function resolveSettled(next: AutosaveState) {
+    if (!isSettled() || settleWaiters.length === 0) return;
+    const ready = settleWaiters;
+    settleWaiters = [];
+    for (const resolve of ready) resolve(next);
+  }
+
   function emit() {
-    if (disposed) return;
     const next: AutosaveState = { status: derive(), failure };
-    if (next.status === announced.status && next.failure === announced.failure) return;
-    announced = next;
-    options.onChange(next);
+    if (next.status !== announced.status || next.failure !== announced.failure) {
+      announced = next;
+      if (!disposed) options.onChange(next);
+    }
+    resolveSettled(next);
   }
 
   function settle(sent: Ready<S>, error: unknown, outcome: AutosaveOutcome | null) {
@@ -253,6 +273,21 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
       scheduled = null;
       if (ready) start(ready);
     },
+    waitForSettled() {
+      const current: AutosaveState = { status: derive(), failure };
+      if (isSettled()) return Promise.resolve(current);
+      return new Promise((resolve) => { settleWaiters.push(resolve); });
+    },
+    discardPending() {
+      if (disposed) return;
+      cancelTimer();
+      latest = null;
+      scheduled = null;
+      pending = null;
+      failure = null;
+      rebasing = false;
+      emit();
+    },
     adoptBaseline(key: string) {
       baselineKey = key;
       emit();
@@ -274,6 +309,7 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
       cancelTimer();
       scheduled = null;
       pending = null;
+      emit();
     },
   };
 }

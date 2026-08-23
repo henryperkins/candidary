@@ -338,6 +338,21 @@ describe('album order', () => {
     }, 'PUT');
     expect(response.status).toBe(422);
   });
+
+  it('measures section headings by Unicode code point at the Worker boundary', async () => {
+    const access = await eventAccess();
+    const accepted = await write(access, '', {
+      revision: 0,
+      entries: [{ kind: 'section', id: 'sec-emoji', heading: '💍'.repeat(80) }],
+    }, 'PUT');
+    const refused = await write(access, '', {
+      revision: 1,
+      entries: [{ kind: 'section', id: 'sec-emoji', heading: '💍'.repeat(81) }],
+    }, 'PUT');
+
+    expect(accepted.status).toBe(200);
+    expect(refused.status).toBe(422);
+  });
 });
 
 describe('album picks', () => {
@@ -361,6 +376,191 @@ describe('album picks', () => {
     const body = await response.json() as { data: { changed: unknown[] } };
     expect(body.data.changed).toEqual([]);
     expect((await albumOf(other)).photoCount).toBe(0);
+  });
+
+  it('refuses single and bulk picks when photos plus sections already fill the album', async () => {
+    const access = await eventAccess();
+    const sections = Array.from({ length: 40 }, (_, index) => ({
+      kind: 'section' as const,
+      id: `sec-${index}`,
+      heading: `Section ${index + 1}`,
+    }));
+    expect((await write(access, '', { revision: 0, entries: sections }, 'PUT')).status).toBe(200);
+    const session = await env.DB
+      .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+      .bind(access.event.id)
+      .first<{ id: string }>();
+    if (!session) throw new Error('Expected a guest session for the capacity fixture.');
+    await env.DB.prepare(`
+      WITH RECURSIVE seq(i) AS (
+        SELECT 1000
+        UNION ALL
+        SELECT i + 1 FROM seq WHERE i < 1459
+      )
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, byte_size, width, height,
+        guest_name, caption, upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+        favorited_at, deleted_at
+      )
+      SELECT
+        printf('00000000-0000-4000-8000-%012d', i), ?, ?,
+        'events/' || ? || '/media/final/' || i, 'canonical',
+        'capacity-' || i || '.jpg', 'image/jpeg', 1024, 1024, 800, 600,
+        'Avery Stone', NULL, 'stored', 'unpublished', 'capacity-' || i,
+        ?, ?, ?, NULL, ?, ?, NULL
+      FROM seq
+    `).bind(
+      access.event.id,
+      session.id,
+      access.event.id,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+    ).run();
+    const bulkCandidate = await seedStored(access, 900);
+    const singleCandidate = await seedStored(access, 901);
+
+    const bulk = await write(access, '/picks', { mediaIds: [bulkCandidate], picked: true });
+    const single = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${singleCandidate}/favorite`,
+      {
+        method: 'PUT',
+        headers: { ...writeHeaders(access.manager), 'content-type': 'application/json', origin },
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+
+    expect(bulk.status).toBe(409);
+    expect((await bulk.json() as { code: string }).code).toBe('ALBUM_FULL');
+    expect(single.status).toBe(409);
+    expect((await single.json() as { code: string }).code).toBe('ALBUM_FULL');
+    expect((await albumOf(access)).entries).toHaveLength(ALBUM_MAX_ENTRIES);
+  });
+
+  it('atomically admits at most the remaining slot across concurrent single and bulk picks', async () => {
+    const access = await eventAccess();
+    const sections = Array.from({ length: 40 }, (_, index) => ({
+      kind: 'section' as const,
+      id: `sec-${index}`,
+      heading: `Section ${index + 1}`,
+    }));
+    expect((await write(access, '', { revision: 0, entries: sections }, 'PUT')).status).toBe(200);
+    const session = await env.DB
+      .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+      .bind(access.event.id)
+      .first<{ id: string }>();
+    if (!session) throw new Error('Expected a guest session for the capacity fixture.');
+    await env.DB.prepare(`
+      WITH RECURSIVE seq(i) AS (
+        SELECT 2000
+        UNION ALL
+        SELECT i + 1 FROM seq WHERE i < 2458
+      )
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, byte_size, width, height,
+        guest_name, caption, upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+        favorited_at, deleted_at
+      )
+      SELECT
+        printf('00000000-0000-4000-8000-%012d', i), ?, ?,
+        'events/' || ? || '/media/final/' || i, 'canonical',
+        'capacity-' || i || '.jpg', 'image/jpeg', 1024, 1024, 800, 600,
+        'Avery Stone', NULL, 'stored', 'unpublished', 'capacity-' || i,
+        ?, ?, ?, NULL, ?, ?, NULL
+      FROM seq
+    `).bind(
+      access.event.id,
+      session.id,
+      access.event.id,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+    ).run();
+    expect((await albumOf(access)).entries).toHaveLength(ALBUM_MAX_ENTRIES - 1);
+    const bulkCandidate = await seedStored(access, 902);
+    const singleCandidate = await seedStored(access, 903);
+
+    const [bulk, single] = await Promise.all([
+      write(access, '/picks', { mediaIds: [bulkCandidate], picked: true }),
+      createApp().request(
+        `/api/manage/events/${access.event.id}/media/${singleCandidate}/favorite`,
+        {
+          method: 'PUT',
+          headers: { ...writeHeaders(access.manager), 'content-type': 'application/json', origin },
+          body: JSON.stringify({ favorite: true }),
+        },
+        testEnv,
+      ),
+    ]);
+
+    expect([bulk.status, single.status].sort()).toEqual([200, 409]);
+    const refused = bulk.status === 409 ? bulk : single;
+    expect((await refused.json() as { code: string }).code).toBe('ALBUM_FULL');
+    expect((await albumOf(access)).entries).toHaveLength(ALBUM_MAX_ENTRIES);
+  });
+
+  it('atomically shares the final slot between a pick and a same-revision section save', async () => {
+    const access = await eventAccess();
+    const session = await env.DB
+      .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+      .bind(access.event.id)
+      .first<{ id: string }>();
+    if (!session) throw new Error('Expected a guest session for the capacity fixture.');
+    await env.DB.prepare(`
+      WITH RECURSIVE seq(i) AS (
+        SELECT 3000
+        UNION ALL
+        SELECT i + 1 FROM seq WHERE i < 3498
+      )
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, byte_size, width, height,
+        guest_name, caption, upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+        favorited_at, deleted_at
+      )
+      SELECT
+        printf('00000000-0000-4000-8000-%012d', i), ?, ?,
+        'events/' || ? || '/media/final/' || i, 'canonical',
+        'capacity-' || i || '.jpg', 'image/jpeg', 1024, 1024, 800, 600,
+        'Avery Stone', NULL, 'stored', 'unpublished', 'capacity-' || i,
+        ?, ?, ?, NULL, ?, ?, NULL
+      FROM seq
+    `).bind(
+      access.event.id,
+      session.id,
+      access.event.id,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+    ).run();
+    expect((await albumOf(access)).entries).toHaveLength(ALBUM_MAX_ENTRIES - 1);
+    const candidate = await seedStored(access, 905);
+
+    const [pick, section] = await Promise.all([
+      write(access, '/picks', { mediaIds: [candidate], picked: true }),
+      write(access, '', {
+        revision: 0,
+        entries: [{ kind: 'section', id: 'last-slot', heading: 'Last slot' }],
+        metadata: { title: 'Album', description: '', coverMediaId: null },
+      }, 'PUT'),
+    ]);
+
+    expect([pick.status, section.status].sort()).toEqual([200, 409]);
+    const refused = pick.status === 409 ? pick : section;
+    expect((await refused.json() as { code: string }).code).toBe('ALBUM_FULL');
+    expect((await albumOf(access)).entries.length).toBeLessThanOrEqual(ALBUM_MAX_ENTRIES);
   });
 });
 

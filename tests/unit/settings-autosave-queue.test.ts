@@ -90,6 +90,51 @@ describe('autosave queue', () => {
     expect(sent).toEqual(['v1']);
   });
 
+  it('waits for scheduled, in-flight, and coalesced work before reporting saved', async () => {
+    const { queue, sent, gates, draft } = harness();
+    queue.submit(draft('v1'));
+    const settled = queue.waitForSettled();
+    let resolved = false;
+    void settled.then(() => { resolved = true; });
+
+    queue.flush();
+    queue.submit(draft('v2'), true);
+    await Promise.resolve();
+    expect(sent).toEqual(['v1']);
+    expect(resolved).toBe(false);
+
+    gates[0]!.confirm();
+    await vi.waitFor(() => expect(sent).toEqual(['v1', 'v2']));
+    expect(resolved).toBe(false);
+
+    gates[1]!.confirm();
+    await expect(settled).resolves.toEqual({ status: 'saved', failure: null });
+  });
+
+  it('waits for an older request before returning the latest invalid state', async () => {
+    const { queue, gates, draft } = harness();
+    queue.submit(draft('v1'), true);
+    queue.submit({ key: 'blank-title', intent: 'blank-title', snapshot: null });
+
+    const settled = queue.waitForSettled();
+    let resolved = false;
+    void settled.then(() => { resolved = true; });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    gates[0]!.confirm();
+    await expect(settled).resolves.toEqual({ status: 'invalid', failure: null });
+  });
+
+  it('returns the current failure only after the queue is settled', async () => {
+    const { queue, gates, draft } = harness();
+    queue.submit(draft('v1'), true);
+    const settled = queue.waitForSettled();
+
+    gates[0]!.reject(new Error('offline'));
+    await expect(settled).resolves.toEqual({ status: 'failed', failure: RETRYABLE });
+  });
+
   it('sends immediate drafts without waiting', () => {
     const { queue, sent, draft } = harness();
     queue.submit(draft('v1'), true);

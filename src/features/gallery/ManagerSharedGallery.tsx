@@ -54,6 +54,7 @@ interface ManagerSharedGalleryProps {
   loadingMore: boolean;
   hasMore: boolean;
   onLoadMore(): Promise<void>;
+  live?: boolean;
 }
 
 /**
@@ -77,6 +78,7 @@ export function ManagerSharedGallery({
   loadingMore,
   hasMore,
   onLoadMore,
+  live = true,
 }: ManagerSharedGalleryProps) {
   const empty = SHARED_EMPTY_COPY[status];
   return <div className="gallery-shared">
@@ -101,7 +103,11 @@ export function ManagerSharedGallery({
       >Open settings</button>
     </div>}
     <div className="bulk-bar">
-      <span id="bulk-selection-status" role="status" aria-live="polite">
+      <span
+        id="bulk-selection-status"
+        role={live ? 'status' : undefined}
+        aria-live={live ? 'polite' : undefined}
+      >
         {selectionAtLimit
           ? `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`
           : selected.length

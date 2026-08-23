@@ -5,12 +5,18 @@ import type { DomainAutosaveState } from '../features/settings/autosave-queue';
 interface UnsavedSettingsPromptProps {
   domains: readonly DomainAutosaveState[];
   onLeave(): void;
+  leaveDisabled?: boolean;
   // Offered only when staying would achieve something: a draft that cannot be
   // sent, or a save that failed. A request merely in flight has nothing to fix.
   onStay?(): void;
 }
 
-export function UnsavedSettingsPrompt({ domains, onLeave, onStay }: UnsavedSettingsPromptProps) {
+export function UnsavedSettingsPrompt({
+  domains,
+  onLeave,
+  leaveDisabled = false,
+  onStay,
+}: UnsavedSettingsPromptProps) {
   const container = useRef<HTMLDivElement>(null);
   // The host asked to navigate, so this answers their own action and focus
   // belongs on it. Background save errors never move focus.
@@ -34,7 +40,12 @@ export function UnsavedSettingsPrompt({ domains, onLeave, onStay }: UnsavedSetti
       that has not been sent.
     </p>
     <div className="button-row">
-      <button type="button" className="button button--secondary" onClick={onLeave}>Leave now</button>
+      <button
+        type="button"
+        className="button button--secondary"
+        disabled={leaveDisabled}
+        onClick={onLeave}
+      >Leave now</button>
       {onStay && <button type="button" className="button button--primary" onClick={onStay}>
         Stay and fix settings
       </button>}

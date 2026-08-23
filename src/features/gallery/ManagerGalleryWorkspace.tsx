@@ -1,10 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import { createPortal } from 'react-dom';
 
 import type { ExportDownloadView, ExportView, MediaView } from '../../app/types';
 import type { EventView, ExportKind } from '../../../shared/contracts';
+import type { LoadFailure } from '../../components/States';
+import type { DomainAutosaveState } from '../settings/autosave-queue';
 import { fetchAlbum } from './album-api';
 import { GalleryExportControl } from './GalleryExportControl';
-import { ManagerAlbum } from './ManagerAlbum';
+import { ManagerAlbum, type ManagerAlbumHandle } from './ManagerAlbum';
 import { ManagerPrivateGallery } from './ManagerPrivateGallery';
 import { ManagerSharedGallery, type GallerySharedStatus } from './ManagerSharedGallery';
 import type { Dispatch, SetStateAction } from 'react';
@@ -27,9 +38,9 @@ const MODE_LABELS: Record<GalleryMode, string> = {
  * these is visible to guests — is not inferable from the names.
  */
 const MODE_NOTES: Record<GalleryMode, string> = {
-  library: 'Every photo guests have delivered. Private to hosts.',
-  album: 'Your curated album. Private to hosts — picking a photo never publishes it.',
-  shared: 'What guests can see right now. Only this mode publishes.',
+  library: 'Everything delivered privately, newest first. Picking a photo adds it to the album for every host on this event — it does not publish it.',
+  album: 'One album per event. Its order and sections are yours; the delivered originals stay exactly where they are.',
+  shared: 'What guests can see right now. Publishing and hiding change the shared gallery only.',
 };
 
 interface ManagerGalleryWorkspaceProps {
@@ -60,6 +71,12 @@ interface ManagerGalleryWorkspaceProps {
     onDownload(job: ExportView): Promise<void>;
     onRetry(job: ExportView): Promise<void>;
   };
+  onAlbumAutosaveStateChange?(state: DomainAutosaveState): void;
+  onAlbumAccessFailure?(failure: LoadFailure | null): void;
+}
+
+export interface ManagerGalleryWorkspaceHandle {
+  prepareToLeave(): Promise<boolean>;
 }
 
 /**
@@ -72,10 +89,29 @@ interface ManagerGalleryWorkspaceProps {
  * and they must not disagree: Library labels its filter with it while Album is unmounted,
  * and Album changes it while Library is unmounted.
  */
-export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: ManagerGalleryWorkspaceProps) {
+export const ManagerGalleryWorkspace = forwardRef<
+ManagerGalleryWorkspaceHandle,
+ManagerGalleryWorkspaceProps
+>(function ManagerGalleryWorkspace({
+  event,
+  eventId,
+  shared,
+  exports,
+  onAlbumAutosaveStateChange,
+  onAlbumAccessFailure,
+}, ref) {
   const [mode, setMode] = useState<GalleryMode>('library');
   const [pickCount, setPickCount] = useState(0);
+  const [albumEntryCount, setAlbumEntryCount] = useState(0);
+  const [announcement, setAnnouncement] = useState('');
+  const [liveHost] = useState(() => {
+    const element = document.createElement('div');
+    element.dataset.galleryLiveHost = 'true';
+    return element;
+  });
   const pickGeneration = useRef(0);
+  const albumRef = useRef<ManagerAlbumHandle>(null);
+  const modeTransitionPending = useRef(false);
 
   const refreshPickCount = useCallback(() => {
     const generation = ++pickGeneration.current;
@@ -83,14 +119,73 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
     // good number rather than replacing the filter's label with an error.
     fetchAlbum(eventId)
       .then((result) => {
-        if (generation === pickGeneration.current) setPickCount(result.album.photoCount);
+        if (generation !== pickGeneration.current) return;
+        setPickCount(result.album.photoCount);
+        setAlbumEntryCount(result.album.entries.length);
       })
       .catch(() => {});
   }, [eventId]);
 
-  useEffect(refreshPickCount, [refreshPickCount]);
+  // The viewer makes the application shell inert. Gallery owns one persistent live
+  // region in a sibling body host so movement inside that portal remains announceable
+  // without adding a second competing status node to the dialog.
+  useLayoutEffect(() => {
+    document.body.append(liveHost);
+    return () => { liveHost.remove(); };
+  }, [liveHost]);
 
-  return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
+  useEffect(() => {
+    setMode('library');
+    setPickCount(0);
+    setAlbumEntryCount(0);
+    setAnnouncement('');
+    pickGeneration.current += 1;
+    refreshPickCount();
+  }, [eventId, refreshPickCount]);
+
+  const prepareToLeave = useCallback(async () => {
+    if (mode !== 'album') return true;
+    const ready = await albumRef.current?.prepareToLeave() ?? true;
+    if (ready) onAlbumAutosaveStateChange?.({
+      domain: 'album',
+      label: 'Album',
+      status: 'saved',
+      failure: null,
+      blockingField: null,
+    });
+    return ready;
+  }, [mode, onAlbumAutosaveStateChange]);
+
+  useImperativeHandle(ref, () => ({ prepareToLeave }), [prepareToLeave]);
+
+  useEffect(() => {
+    if (mode !== 'shared') return;
+    setAnnouncement(shared.selectionAtLimit
+      ? '50 of 50 photos selected. Remove one to choose another.'
+      : shared.selected.length
+        ? `${shared.selected.length} selected`
+        : 'Select photos to update the optional gallery');
+  }, [mode, shared.selected.length, shared.selectionAtLimit]);
+
+  async function changeMode(next: GalleryMode) {
+    if (next === mode || modeTransitionPending.current) return;
+    if (mode === 'album') {
+      modeTransitionPending.current = true;
+      try {
+        if (await prepareToLeave() === false) return;
+      } finally {
+        modeTransitionPending.current = false;
+      }
+    }
+    setMode(next);
+  }
+
+  return <>
+    {createPortal(
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>,
+      liveHost,
+    )}
+    <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">Gallery</h2>
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
@@ -100,7 +195,7 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
             key={value}
             aria-pressed={mode === value}
             className={mode === value ? 'active' : ''}
-            onClick={() => setMode(value)}
+            onClick={() => { void changeMode(value); }}
           >{MODE_LABELS[value]}{value === 'album' && pickCount > 0 ? ` (${pickCount})` : ''}</button>
         ))}
       </div>
@@ -117,6 +212,8 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
           onPrepare={exports.onPrepare}
           onDownload={exports.onDownload}
           onRetry={exports.onRetry}
+          live={false}
+          onAnnouncement={setAnnouncement}
         />
       </div>
       <ManagerPrivateGallery
@@ -124,7 +221,10 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
         eventId={eventId}
         active={mode === 'library'}
         pickCount={pickCount}
+        albumEntryCount={albumEntryCount}
         onPicksChanged={refreshPickCount}
+        live={false}
+        onAnnouncement={setAnnouncement}
       />
     </div>
 
@@ -133,9 +233,11 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
         expire on a surface the host cannot see it on. */}
     {mode === 'album' && <div className="gallery-album-mode">
       <ManagerAlbum
-        event={event}
+        key={eventId}
+        ref={albumRef}
         eventId={eventId}
         active={mode === 'album'}
+        onGoToLibrary={() => { void changeMode('library'); }}
         onPicksChanged={refreshPickCount}
         exportJob={exports.albumJob}
         activeExport={exports.activeJob}
@@ -143,11 +245,15 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
         onPrepareExport={() => exports.onPrepare('album')}
         onDownloadExport={exports.onDownload}
         onRetryExport={exports.onRetry}
+        onAutosaveStateChange={onAlbumAutosaveStateChange}
+        onAccessFailure={onAlbumAccessFailure}
+        onAnnouncement={setAnnouncement}
       />
     </div>}
 
     <div className="gallery-shared-mode" hidden={mode !== 'shared'}>
-      <ManagerSharedGallery event={event} {...shared} />
+      <ManagerSharedGallery event={event} {...shared} live={false} />
     </div>
-  </section>;
-}
+    </section>
+  </>;
+});

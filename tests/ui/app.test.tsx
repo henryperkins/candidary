@@ -2237,6 +2237,219 @@ describe('manager experience', () => {
     const bulkCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/media/bulk'));
     expect(bulkCall?.[1]?.body).not.toContain('media-b');
   });
+
+  it('drains Album work before a manager-section change and a router unmount', async () => {
+    let resolveFirstSave!: () => void;
+    let resolveSecondSave!: () => void;
+    const firstSave = new Promise<void>((resolve) => { resolveFirstSave = resolve; });
+    const secondSave = new Promise<void>((resolve) => { resolveSecondSave = resolve; });
+    const saveGates = [firstSave, secondSave];
+    let revision = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      if (url.endsWith('/album') && method === 'PUT') {
+        const write = revision;
+        await saveGates[write];
+        const body = JSON.parse(String(init?.body));
+        revision += 1;
+        return json({ album: {
+          revision,
+          saved: true,
+          ...body.metadata,
+          effectiveCoverMediaId: null,
+          entries: [],
+          photoCount: 0,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before Intake' } });
+    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    await act(async () => { resolveFirstSave(); });
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before route leave' } });
+    const navigation = router.navigate('/privacy');
+    await waitFor(() => expect(fetchMock.mock.calls.some(([request, requestInit]) => (
+      String(request).endsWith('/album') && requestInit?.method === 'PUT'
+    ))).toBe(true));
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    await act(async () => { resolveSecondSave(); });
+    await navigation;
+    expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
+  });
+
+  it('does not continue a blocked router navigation when Album rejects the conflict exit', async () => {
+    let albumReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') {
+        albumReads += 1;
+        return json({ album: {
+          revision: 3,
+          saved: true,
+          title: 'Canonical album',
+          description: '',
+          coverMediaId: null,
+          effectiveCoverMediaId: null,
+          entries: [],
+          photoCount: 0,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      if (url.endsWith('/album') && method === 'PUT') {
+        return errorJson({
+          code: 'REVISION_CONFLICT',
+          message: 'A co-host saved a newer album.',
+          requestId: 'request-conflict',
+        }, 409);
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Losing edit' } });
+
+    const rejectedNavigation = router.navigate('/privacy');
+    await waitFor(() => expect(albumReads).toBeGreaterThanOrEqual(3));
+    await act(async () => {
+      await new Promise<void>((resolve) => { window.setTimeout(resolve, 80); });
+    });
+
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    const leaveNow = screen.getByRole('button', { name: 'Leave now' });
+    await user.click(leaveNow);
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.getByLabelText('Album title')).toBeVisible();
+    await rejectedNavigation;
+
+    // The rejected attempt is cancelled rather than left wedged in the router.
+    // With the canonical album now settled, a fresh explicit attempt may leave.
+    await router.navigate('/privacy');
+    expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
+  });
+
+  it('hoists a non-retryable Album load into focused manager access recovery', async () => {
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/album/share')) return json({ share: null });
+      if (url.endsWith('/album')) return errorJson({
+        code: 'SESSION_EXPIRED',
+        message: 'This session has expired.',
+        requestId: 'request-album',
+      }, 401);
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    const notice = await screen.findByLabelText('Manager notice');
+    expect(notice).toHaveTextContent('This session has expired.');
+    expect(notice).toHaveFocus();
+    expect(within(notice).getByRole('link', { name: 'Sign in' })).toBeVisible();
+    expect(within(notice).getByLabelText('Management link')).toBeVisible();
+
+    await user.click(within(notice).getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByLabelText('Manager notice')).not.toBeInTheDocument();
+    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    const restored = await screen.findByLabelText('Manager notice');
+    expect(restored).toHaveTextContent('This session has expired.');
+    expect(restored).toHaveFocus();
+    expect(within(managerNavigation).getByRole('button', { name: /gallery/i }))
+      .toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('focuses and re-escalates a dismissed non-retryable Album save recovery on exit', async () => {
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 0,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      if (url.endsWith('/album') && method === 'PUT') return errorJson({
+        code: 'SESSION_EXPIRED',
+        message: 'This management session has expired.',
+        requestId: 'request-save-expired',
+      }, 401);
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Cannot save' } });
+    await user.click(screen.getByRole('button', { name: 'Preview album' }));
+
+    const notice = await screen.findByLabelText('Manager notice');
+    expect(notice).toHaveTextContent('This management session has expired.');
+    expect(notice).toHaveFocus();
+    await user.click(within(notice).getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByLabelText('Manager notice')).not.toBeInTheDocument();
+
+    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    const restored = await screen.findByLabelText('Manager notice');
+    expect(restored).toHaveTextContent('This management session has expired.');
+    expect(restored).toHaveFocus();
+  });
 });
 
 describe('host account attachment and recovery', () => {
