@@ -117,6 +117,9 @@ describe('known application origins', () => {
       'https://feature-release-candidary-preview.lfd.workers.dev',
     )).toBe(true);
     expect(isKnownApplicationOrigin(
+      'https://0dc03334-candidary-preview.lfd.workers.dev',
+    )).toBe(true);
+    expect(isKnownApplicationOrigin(
       'https://feature-release-candidary-preview.lfd.workers.dev.evil.test',
     )).toBe(false);
     expect(isKnownApplicationOrigin(

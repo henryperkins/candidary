@@ -68,6 +68,10 @@ describe('the origins a deployment answers on', () => {
     } as AppEnv;
 
     expect(isApplicationOrigin(previewEnv, aliasOrigin)).toBe(true);
+    expect(isApplicationOrigin(
+      previewEnv,
+      'https://0dc03334-candidary-preview.lfd.workers.dev',
+    )).toBe(true);
     expect(isApplicationOrigin(testEnv, aliasOrigin)).toBe(false);
     expect(isApplicationOrigin(previewEnv, `${aliasOrigin}.evil.test`)).toBe(false);
   });

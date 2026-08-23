@@ -18,7 +18,9 @@ export const PREVIEW_APPLICATION_ROOT_ORIGIN =
   'https://candidary-preview.lfd.workers.dev' as const;
 
 const PREVIEW_APPLICATION_ROOT_HOST = new URL(PREVIEW_APPLICATION_ROOT_ORIGIN).hostname;
-const PREVIEW_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,44}$/u;
+// Cloudflare uses both branch aliases and hexadecimal version prefixes here;
+// a commit-preview hostname may therefore legitimately begin with a digit.
+const PREVIEW_ALIAS_PATTERN = /^[a-z0-9][a-z0-9-]{0,44}$/u;
 
 const ROOT_HTTP_ORIGIN = /^https?:\/\/[^/?#\\@\s]+\/?$/iu;
 
