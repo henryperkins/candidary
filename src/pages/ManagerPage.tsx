@@ -271,11 +271,11 @@ export function ManagerPage() {
 
   useEffect(() => {
     const generation = ++albumPrepareGeneration.current;
-    if (blocker.state !== 'blocked') {
+    if (blockedNavigationKey === null) {
       setAlbumPrepareResult(null);
       return;
     }
-    const navigationKey = blocker.location.key;
+    const navigationKey = blockedNavigationKey;
     settingsAutosave.current?.flush();
     appearanceAutosave.current?.flush();
     void (async () => {
@@ -283,7 +283,7 @@ export function ManagerPage() {
       if (generation !== albumPrepareGeneration.current) return;
       setAlbumPrepareResult({ navigationKey, ready });
     })();
-  }, [blocker.state]);
+  }, [blockedNavigationKey]);
   useEffect(() => {
     // The requested navigation happens by itself the moment both domains
     // confirm; the host never has to answer the prompt twice.

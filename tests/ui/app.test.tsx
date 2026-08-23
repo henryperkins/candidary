@@ -2412,6 +2412,72 @@ describe('manager experience', () => {
     expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
   });
 
+  it('restarts Album preparation when a blocked router destination changes', async () => {
+    let resolveSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { resolveSave = resolve; });
+    let writes = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: writes,
+        saved: true,
+        title: writes === 0 ? 'Album' : 'Destination winner',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      if (url.endsWith('/album') && method === 'PUT') {
+        writes += 1;
+        await saveGate;
+        const body = JSON.parse(String(init?.body));
+        return json({ album: {
+          revision: writes,
+          saved: true,
+          ...body.metadata,
+          effectiveCoverMediaId: null,
+          entries: [],
+          photoCount: 0,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    fireEvent.change(await screen.findByLabelText('Album title'), {
+      target: { value: 'Destination winner' },
+    });
+
+    void router.navigate('/privacy');
+    await waitFor(() => expect(writes).toBe(1));
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.queryByRole('heading', { name: 'Privacy' })).not.toBeInTheDocument();
+
+    void router.navigate('/terms');
+    await act(async () => { await Promise.resolve(); });
+    expect(router.state.location.pathname).toBe('/manage/event/event-a');
+    expect(screen.queryByRole('heading', { name: 'Terms' })).not.toBeInTheDocument();
+
+    await act(async () => { resolveSave(); });
+
+    expect(await screen.findByRole('heading', { name: 'Terms' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Privacy' })).not.toBeInTheDocument();
+  });
+
   it('does not continue a blocked router navigation when Album rejects the conflict exit', async () => {
     let albumReads = 0;
     const base = managerFetch({ first: { media: [], nextCursor: null } });
@@ -2462,7 +2528,11 @@ describe('manager experience', () => {
     expect(router.state.location.pathname).toBe('/manage/event/event-a');
     expect(screen.getByLabelText('Album title')).toBeVisible();
     const leaveNow = screen.getByRole('button', { name: 'Leave now' });
-    await user.click(leaveNow);
+    expect(leaveNow).toBeDisabled();
+    expect(screen.getByText('Finishing Album checks before Leave now is available.')).toBeVisible();
+    expect(leaveNow).toHaveAccessibleDescription(
+      'Finishing Album checks before Leave now is available.',
+    );
     expect(router.state.location.pathname).toBe('/manage/event/event-a');
     expect(screen.getByLabelText('Album title')).toBeVisible();
     await rejectedNavigation;

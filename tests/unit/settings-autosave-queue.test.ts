@@ -278,6 +278,36 @@ describe('autosave queue', () => {
     await vi.waitFor(() => expect(queue.state().status).toBe('saved'));
   });
 
+  it('settles a waiter when disposal ends ownership of a rebased request', async () => {
+    const { queue, gates, draft } = harness('v0');
+    queue.submit(draft('v1'), true);
+    gates[0]!.rebase();
+    await vi.waitFor(() => expect(queue.state().status).toBe('saving'));
+
+    const settled = queue.waitForSettled();
+    let resolution: AutosaveState | undefined;
+    void settled.then((state) => { resolution = state; });
+    queue.dispose();
+    await Promise.resolve();
+
+    expect(resolution).toEqual({ status: 'saved', failure: null });
+  });
+
+  it('discards scheduled and pending drafts while allowing the sent request to settle', async () => {
+    const { queue, sent, gates, draft } = harness('v0');
+    queue.submit(draft('v1'), true);
+    queue.submit(draft('v2'), true);
+    queue.submit(draft('v3'));
+    const settled = queue.waitForSettled();
+
+    queue.discardPending();
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS);
+    gates[0]!.confirm();
+
+    await expect(settled).resolves.toEqual({ status: 'saved', failure: null });
+    expect(sent).toEqual(['v1']);
+  });
+
   it('tells a response whether the screen moved on, even when the payload did not', async () => {
     const { queue, sent, intents, gates, draft } = harness('v0');
     queue.submit(draft('v1', 'v1-raw'), true);

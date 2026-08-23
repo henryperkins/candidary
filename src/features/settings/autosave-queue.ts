@@ -309,6 +309,7 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
       cancelTimer();
       scheduled = null;
       pending = null;
+      rebasing = false;
       emit();
     },
   };
