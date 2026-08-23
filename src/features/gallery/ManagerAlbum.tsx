@@ -323,6 +323,16 @@ export function ManagerAlbum({
         },
       });
       try {
+        // Let every response from the active order write and its coalesced
+        // successors land before membership reconciliation. The unpick is
+        // already committed and undoable; this only serializes the later read
+        // so an older save response cannot overwrite its authoritative state.
+        await drainOrderSaves();
+      } catch {
+        // The save path has already reloaded or surfaced canonical state. The
+        // committed membership change still needs its own authoritative read.
+      }
+      try {
         const refreshed = await fetchAlbum(eventId);
         // The response is authoritative: another manager may already have
         // repicked the photo while this refresh was in flight.

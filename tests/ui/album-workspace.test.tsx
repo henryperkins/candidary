@@ -97,6 +97,7 @@ interface Harness {
   albumReadGates: Array<Promise<void> | undefined>;
   albumReadErrors: Array<string | undefined>;
   orderWrites: AlbumEntryView[][];
+  orderRevisions: number[];
   orderGates: Promise<void>[];
   orderErrors: Array<string | undefined>;
   bytesById: Record<string, number>;
@@ -127,6 +128,7 @@ function harness(overrides: Partial<Harness> = {}) {
     albumReadGates: overrides.albumReadGates ?? [],
     albumReadErrors: overrides.albumReadErrors ?? [],
     orderWrites: [],
+    orderRevisions: [],
     orderGates: overrides.orderGates ?? [],
     orderErrors: overrides.orderErrors ?? [],
     bytesById: overrides.bytesById ?? {},
@@ -185,6 +187,7 @@ function harness(overrides: Partial<Harness> = {}) {
           ? { kind: 'section', id: entry.id!, heading: entry.heading! }
           : { kind: 'photo', photo: state.galleryRows.find((item) => item.id === entry.mediaId)! }));
       state.orderWrites.push(entries);
+      state.orderRevisions.push(body.revision as number);
       const write = state.orderWrites.length - 1;
       await state.orderGates[write];
       const writeError = state.orderErrors[write];
@@ -657,6 +660,58 @@ describe('the album', () => {
 
     expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the album' })).toBeEnabled();
     expect(screen.getByText(/2 photos · 3 KB/)).toBeVisible();
+  });
+
+  it('reconciles a committed removal after the active and coalesced order saves', async () => {
+    const firstSave = deferred();
+    const successorSave = deferred();
+    const refresh = deferred();
+    const controlled = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true }),
+        photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+        photo('p3', '2026-08-16T04:48:00.000Z', { isFavorite: true }),
+      ],
+      bytesById: { p1: 1024, p2: 2048, p3: 3072 },
+      orderGates: [firstSave.promise, successorSave.promise],
+    });
+    renderWorkspace(controlled.fetchMock);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await user.click(await screen.findByRole('button', { name: /^Move First dance down/ }));
+    await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: /^Move First dance down/ }));
+
+    const authoritativeRead = controlled.state.albumReads;
+    controlled.state.albumReadGates[authoritativeRead] = refresh.promise;
+    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the album' }));
+    await waitFor(() => expect(controlled.state.pickWrites).toEqual([
+      { mediaIds: ['p2'], picked: false },
+    ]));
+    expect(controlled.state.albumReads).toBe(authoritativeRead);
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled();
+
+    // Another manager repicks p2 while both older order writes are unresolved.
+    controlled.state.galleryRows.find(({ id }) => id === 'p2')!.isFavorite = true;
+    await act(async () => { firstSave.resolve(); });
+    await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(2));
+    expect(controlled.state.albumReads).toBe(authoritativeRead);
+
+    await act(async () => { successorSave.resolve(); });
+    await waitFor(() => expect(controlled.state.albumReads).toBe(authoritativeRead + 1));
+    controlled.state.album.revision = 41;
+    await act(async () => { refresh.resolve(); });
+
+    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the album' })).toBeEnabled();
+    expect(screen.getByText(/3 photos · 6 KB/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: /^Move First dance up/ }));
+    await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(3));
+    expect(controlled.state.orderRevisions[2]).toBe(41);
   });
 
   it('explains an empty album without promising publication', async () => {
