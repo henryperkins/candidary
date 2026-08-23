@@ -101,16 +101,25 @@ describe('public album page', () => {
     expect(sources.join(' ')).not.toContain('/api/media/');
   });
 
-  it('keeps a failed preview local to that photo', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => success()));
+  it('keeps accessible image identity for initial and failed preview fallbacks', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => success({
+      ...album,
+      entries: album.entries.map((entry) => entry.kind === 'photo' && entry.photo.id === 'photo-2'
+        ? { ...entry, photo: { ...entry.photo, previewAvailable: false } }
+        : entry),
+    })));
     renderAlbumRoute();
     await screen.findByRole('heading', { name: 'The evening' });
-    const images = screen.getAllByRole('img');
+    const cover = screen.getByRole('img', { name: 'Cover for The evening' });
+    const captionedPhoto = screen.getByRole('img', { name: 'First dance' });
 
-    fireEvent.error(images[1]!);
+    fireEvent.error(cover);
+    fireEvent.error(captionedPhoto);
 
-    expect(screen.getByText('Preview unavailable')).toBeInTheDocument();
-    expect(screen.getAllByRole('img')).toHaveLength(2);
+    expect(screen.getByRole('img', { name: 'Cover for The evening' }).tagName).toBe('DIV');
+    expect(screen.getByRole('img', { name: 'First dance' }).tagName).toBe('DIV');
+    expect(screen.getByRole('img', { name: 'Album photo 2' }).tagName).toBe('DIV');
+    expect(screen.getAllByText('Preview unavailable')).toHaveLength(3);
   });
 
   it('shows one non-enumerating unavailable state for an exchange refusal', async () => {

@@ -4,6 +4,17 @@ import { useState } from 'react';
 import type { PublicAlbumView } from '../../../shared/contracts';
 import { publicAlbumPreview } from './album-share-api';
 
+function AlbumPreviewFallback({ label, className }: { label: string; className?: string }) {
+  return <div
+    className={`public-album__preview-fallback ${className ?? ''}`}
+    role="img"
+    aria-label={label}
+  >
+    <ImageOff aria-hidden="true" />
+    <span>Preview unavailable</span>
+  </div>;
+}
+
 function AlbumImage({ mediaId, alt, className }: {
   mediaId: string;
   alt: string;
@@ -11,10 +22,7 @@ function AlbumImage({ mediaId, alt, className }: {
 }) {
   const [failed, setFailed] = useState(false);
   if (failed) {
-    return <div className={`public-album__preview-fallback ${className ?? ''}`}>
-      <ImageOff aria-hidden="true" />
-      <span>Preview unavailable</span>
-    </div>;
+    return <AlbumPreviewFallback label={alt} className={className} />;
   }
   return <img
     className={className}
@@ -55,10 +63,9 @@ export function PublicAlbum({ album }: { album: PublicAlbumView }) {
                 mediaId={entry.photo.id}
                 alt={entry.photo.caption ?? `Album photo ${position}`}
               />
-            : <div className="public-album__preview-fallback">
-                <ImageOff aria-hidden="true" />
-                <span>Preview unavailable</span>
-              </div>}
+            : <AlbumPreviewFallback
+                label={entry.photo.caption ?? `Album photo ${position}`}
+              />}
           {entry.photo.caption && <figcaption>{entry.photo.caption}</figcaption>}
         </figure>;
       })}

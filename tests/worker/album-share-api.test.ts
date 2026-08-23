@@ -166,6 +166,28 @@ describe('manager album sharing', () => {
     expect((await managerShare(access)).status).toBe(200);
   });
 
+  it('marks every manager share response private and no-store, including failures', async () => {
+    const access = await eventAccess();
+    await shareableAlbum(access);
+
+    const denied = await createApp().request(
+      `/api/manage/events/${access.event.id}/album/share`,
+      {},
+      testEnv,
+    );
+    const enabled = await managerShare(access, 'POST');
+    const recovered = await managerShare(access, 'GET');
+    const stopped = await managerShare(access, 'DELETE');
+
+    expect(denied.status).toBe(401);
+    expect(enabled.status).toBe(200);
+    expect(recovered.status).toBe(200);
+    expect(stopped.status).toBe(200);
+    for (const response of [denied, enabled, recovered, stopped]) {
+      expect(response.headers.get('cache-control')).toBe('private, no-store');
+    }
+  });
+
   it('refuses both an unsaved album and a saved album with no live photos', async () => {
     const unsaved = await eventAccess('Unsaved album');
     await seedPhoto(unsaved);
@@ -292,6 +314,21 @@ describe('public album exchange and projection', () => {
     });
   });
 
+  it('rejects a valid share credential with a trailing dot suffix', async () => {
+    const access = await eventAccess();
+    await shareableAlbum(access);
+    const share = await enabledShare(access);
+
+    const response = await exchange(`${fragment(share.url)}.`);
+
+    expect(await unavailableShape(response)).toMatchObject({
+      status: 410,
+      code: 'ALBUM_SHARE_UNAVAILABLE',
+    });
+    expect(await env.DB.prepare('SELECT count(*) AS count FROM event_album_share_sessions')
+      .first<number>('count')).toBe(0);
+  });
+
   it('returns only the allowlisted live album and puts the session in one narrow cookie', async () => {
     const access = await eventAccess();
     const photoIds = await shareableAlbum(access, 2);
@@ -356,6 +393,20 @@ describe('public album exchange and projection', () => {
     expect(JSON.stringify(row)).not.toContain(session.token);
     expect(Date.parse(row!.expires_at)).toBeGreaterThanOrEqual(before + (7 * 24 * 60 * 60 * 1000));
     expect(Date.parse(row!.expires_at)).toBeLessThanOrEqual(after + (7 * 24 * 60 * 60 * 1000));
+  });
+
+  it('rejects a valid album session cookie with a trailing dot suffix', async () => {
+    const access = await eventAccess();
+    await shareableAlbum(access);
+    const share = await enabledShare(access);
+    const session = albumCookie(await exchange(fragment(share.url)));
+
+    const response = await publicAlbum(`${session.cookie}.`);
+
+    expect(await unavailableShape(response)).toMatchObject({
+      status: 410,
+      code: 'ALBUM_SHARE_UNAVAILABLE',
+    });
   });
 
   it('caps a new session at the event purge boundary when it comes first', async () => {

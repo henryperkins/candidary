@@ -19,17 +19,15 @@ import {
 } from '../security/crypto';
 
 const ALBUM_SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
-const TOKEN_PART = /^[A-Za-z0-9_-]{1,128}$/u;
+const TOKEN = /^([A-Za-z0-9_-]{1,128})\.([A-Za-z0-9_-]{1,128})$/u;
 
 export function albumShareUnavailable(): ApiError {
   return new ApiError('ALBUM_SHARE_UNAVAILABLE', 'This album is not available.', 410);
 }
 
 function tokenParts(token: string): { id: string; secret: string } | null {
-  const [id, secret, extra] = token.split('.');
-  return id && secret && !extra && TOKEN_PART.test(id) && TOKEN_PART.test(secret)
-    ? { id, secret }
-    : null;
+  const match = TOKEN.exec(token);
+  return match ? { id: match[1]!, secret: match[2]! } : null;
 }
 
 function publicProjection(album: Awaited<ReturnType<AlbumRepository['get']>>): PublicAlbumView {

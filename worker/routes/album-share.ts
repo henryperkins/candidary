@@ -17,6 +17,7 @@ const privateNoStore: MiddlewareHandler<AppBindings> = async (context, next) => 
 
 albumShareRoutes.use('/album-share', privateNoStore);
 albumShareRoutes.use('/album-share/*', privateNoStore);
+albumShareRoutes.use('/manage/events/:eventId/album/share', privateNoStore);
 
 albumShareRoutes.get('/manage/events/:eventId/album/share', async (context) => {
   await requireManager(context);
