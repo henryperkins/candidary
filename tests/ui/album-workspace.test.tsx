@@ -3,9 +3,10 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
-import type { AlbumEntryView, EventView, ManagerGalleryMediaView } from '../../shared/contracts';
+import type { AlbumEntryView, EventView, ExportKind, ManagerGalleryMediaView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { ManagerGalleryWorkspace } from '../../src/features/gallery/ManagerGalleryWorkspace';
+import type { ExportDownloadView, ExportView } from '../../src/app/types';
 
 afterEach(cleanup);
 
@@ -126,6 +127,7 @@ function harness(overrides: Partial<Harness> = {}) {
       entries,
       photoCount: entries.filter((entry) => entry.kind === 'photo').length,
       sectionCount: entries.filter((entry) => entry.kind === 'section').length,
+      totalBytes: entries.filter((entry) => entry.kind === 'photo').length * 64,
     };
   }
 
@@ -182,8 +184,16 @@ function harness(overrides: Partial<Harness> = {}) {
 
 const noop = () => Promise.resolve();
 
-function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>) {
+function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
+  job?: ExportView;
+  albumJob?: ExportView;
+  activeJob?: ExportView;
+  download?: ExportDownloadView;
+  albumDownload?: ExportDownloadView;
+  onPrepare?: (kind?: ExportKind) => Promise<void>;
+} = {}) {
   vi.stubGlobal('fetch', fetchMock);
+  const onPrepare = exportOverrides.onPrepare ?? vi.fn(noop);
   render(<ManagerGalleryWorkspace
     event={event}
     eventId="event-a"
@@ -202,8 +212,14 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>) {
       hasMore: false,
       onLoadMore: noop,
     }}
-    exports={{ onPrepare: noop, onDownload: noop, onRetry: noop }}
+    exports={{
+      ...exportOverrides,
+      onPrepare,
+      onDownload: noop,
+      onRetry: noop,
+    }}
   />);
+  return { onPrepare };
 }
 
 describe('gallery modes', () => {
@@ -267,6 +283,63 @@ describe('selecting photos into the album', () => {
 });
 
 describe('the album', () => {
+  it('starts an album-only export with the exact kind selector and disables an empty album', async () => {
+    const pickedHarness = harness({
+      galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
+    });
+    const onPrepare = vi.fn(noop);
+    renderWorkspace(pickedHarness.fetchMock, { onPrepare });
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await user.click(await screen.findByRole('button', { name: 'Download album photos' }));
+    expect(onPrepare).toHaveBeenCalledOnce();
+    expect(onPrepare).toHaveBeenCalledWith('album');
+
+    cleanup();
+    const emptyHarness = harness();
+    renderWorkspace(emptyHarness.fetchMock);
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    expect(await screen.findByRole('button', { name: 'Download album photos' })).toBeDisabled();
+  });
+
+  it('renders ordered album part links and never offers Guestbook artifacts', async () => {
+    const pickedHarness = harness({
+      galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
+    });
+    const albumJob: ExportView = {
+      id: 'album-export', kind: 'album', state: 'ready',
+      snapshotAt: '2026-08-23T12:00:00.000Z', mediaCount: 2, totalBytes: 128,
+      attempt: 1, partCount: 2, expiresAt: '2026-08-24T12:00:00.000Z',
+      guestbookEntryCount: null, guestbookSharedCount: null, guestbookEventName: null,
+      guestbookEventDate: null, guestbookEventTimezone: null, guestbookPrompt: null,
+      guestbookGalleryVisible: null,
+    };
+    const albumDownload: ExportDownloadView = {
+      manifest: { url: '/manifest', expiresAt: albumJob.expiresAt!, filename: 'manifest.csv' },
+      parts: [
+        { partNumber: 1, mediaCount: 1, sourceBytes: 64, url: '/part-1', expiresAt: albumJob.expiresAt!, filename: 'part-1.zip' },
+        { partNumber: 2, mediaCount: 1, sourceBytes: 64, url: '/part-2', expiresAt: albumJob.expiresAt!, filename: 'part-2.zip' },
+      ],
+      printableGuestbook: { url: '/must-not-render.html', expiresAt: albumJob.expiresAt!, filename: 'guestbook.html' },
+      privateGuestbook: { url: '/must-not-render.csv', expiresAt: albumJob.expiresAt!, filename: 'guestbook.csv' },
+    };
+    renderWorkspace(pickedHarness.fetchMock, { albumJob, albumDownload });
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    expect(await screen.findByRole('link', { name: /Photo part 1 of 2/ })).toHaveAttribute('href', '/part-1');
+    expect(screen.getByRole('link', { name: /Photo part 2 of 2/ })).toHaveAttribute('href', '/part-2');
+    expect(screen.getByRole('link', { name: 'Photo manifest' })).toHaveAttribute('href', '/manifest');
+    expect(screen.queryByRole('link', { name: /guestbook/i })).not.toBeInTheDocument();
+  });
+
   it('asks once before adopting favorites that predate albums', async () => {
     const { state, fetchMock } = harness({
       galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],

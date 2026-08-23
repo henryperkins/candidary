@@ -2,8 +2,9 @@ import type {
   ChallengePurpose,
   EventThemeConfigV1,
   EventHostRole,
-  NotificationKind,
+  ExportKind,
   ExportState,
+  NotificationKind,
   ModerationStatus,
   PublicationStatus,
   Role,
@@ -510,11 +511,14 @@ export type ExportableMediaRecord = Pick<
 
 export interface ExportMediaEntryRecord extends ExportableMediaRecord {
   exportJobId: string;
+  albumTailPosition: number | null;
 }
 
 export interface ExportRecord {
   id: string;
   eventId: string;
+  kind: ExportKind;
+  albumEntriesJson: string | null;
   state: ExportState;
   snapshotAt: string;
   objectKey: string | null;

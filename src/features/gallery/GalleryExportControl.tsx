@@ -4,8 +4,12 @@ import { useState } from 'react';
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
 
+// Complete-export rendering predates the wire-level `kind` discriminator. Direct callers that
+// still supply that legacy shape remain source-compatible; current API jobs retain the field.
+type CompleteExportView = ExportView | Omit<ExportView, 'kind'>;
+
 interface GalleryExportControlProps {
-  job?: ExportView;
+  job?: CompleteExportView;
   download?: ExportDownloadView;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
@@ -26,7 +30,7 @@ const EXPORT_STATE_LABELS: Record<ExportView['state'], string> = {
 
 // A host planning a multi-gigabyte download needs the size before they start, not after.
 // `totalBytes` and each part's `sourceBytes` were already on the wire and unused.
-function exportStateDetail(job: ExportView): string {
+function exportStateDetail(job: CompleteExportView): string {
   const counts = [
     `${job.mediaCount.toLocaleString()} photos`,
     formatBytes(job.totalBytes),
@@ -71,7 +75,7 @@ export function GalleryExportControl({
     {!job
       ? <>
           <p className="gallery-export__copy">
-            Every private photo, the photo manifest, and the printable and private guestbook files. Search and favorites do not change this.
+            Every private photo, the photo manifest, and the printable and private guestbook files. Search and album picks do not change this.
           </p>
           <button
             type="button"
@@ -89,7 +93,7 @@ export function GalleryExportControl({
           <strong>{EXPORT_STATE_LABELS[job.state]}</strong>
           <span>{exportStateDetail(job)}</span>
           {job.state === 'ready' && !download && (
-            <button type="button" className="button button--secondary" onClick={() => void onDownload(job)}>
+            <button type="button" className="button button--secondary" onClick={() => void onDownload(job as ExportView)}>
               <Download aria-hidden="true" /> Get download links
             </button>
           )}
@@ -113,7 +117,7 @@ export function GalleryExportControl({
             {download.privateGuestbook && <a href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
           </div>}
           {(job.state === 'failed' || job.state === 'expired') && (
-            <button type="button" className="button button--secondary" onClick={() => void onRetry(job)}>
+            <button type="button" className="button button--secondary" onClick={() => void onRetry(job as ExportView)}>
               Retry export
             </button>
           )}

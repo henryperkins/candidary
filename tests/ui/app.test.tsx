@@ -1443,7 +1443,7 @@ describe('manager experience', () => {
    */
   it('surfaces a credential failure from the export poll instead of waiting on Preparing forever', async () => {
     const queued = {
-      id: 'export-a', state: 'queued', attempt: 1, mediaCount: 6, totalBytes: 1024,
+      id: 'export-a', kind: 'complete', state: 'queued', attempt: 1, mediaCount: 6, totalBytes: 1024,
       guestbookEntryCount: 0, errorCode: null, snapshotAt: '2026-09-20T00:00:00.000Z',
     };
     // Armed immediately before the poll tick, so the refusal belongs to the poll and not to a
@@ -1495,7 +1495,7 @@ describe('manager experience', () => {
 
   it('does not let a stale export answer put back a state the poll has already passed', async () => {
     const job = (state: string) => ({
-      id: 'export-a', state, attempt: 1, mediaCount: 6, totalBytes: 1024,
+      id: 'export-a', kind: 'complete', state, attempt: 1, mediaCount: 6, totalBytes: 1024,
       guestbookEntryCount: 0, errorCode: null, snapshotAt: '2026-09-20T00:00:00.000Z',
     });
     // Armed immediately before the first poll tick, so the held answer is that tick's and not
@@ -1552,6 +1552,105 @@ describe('manager experience', () => {
     // job back to Preparing with nothing left running to correct it.
     await act(async () => { releaseStale(); });
     expect(shownState()).toBe('Ready');
+  });
+
+  it('keeps the latest complete and album exports on their independent Gallery surfaces', async () => {
+    const exportJob = (kind: 'complete' | 'album', state: 'ready' | 'failed', id: string) => ({
+      id, kind, state, attempt: state === 'failed' ? 2 : 1,
+      mediaCount: kind === 'complete' ? 9 : 2,
+      totalBytes: kind === 'complete' ? 1024 : 2048,
+      partCount: 1, expiresAt: '2026-09-21T00:00:00.000Z',
+      snapshotAt: '2026-09-20T00:00:00.000Z',
+      guestbookEntryCount: kind === 'complete' ? 3 : null,
+      guestbookSharedCount: kind === 'complete' ? 1 : null,
+      guestbookEventName: null, guestbookEventDate: null, guestbookEventTimezone: null,
+      guestbookPrompt: null, guestbookGalleryVisible: null,
+    });
+    const albumPhoto = {
+      id: 'album-photo', originalFilename: 'album-photo.png', guestName: 'Avery', caption: null,
+      publicationStatus: 'unpublished', previewAvailable: true, width: 800, height: 600,
+      receivedAt: '2026-09-20T00:00:00.000Z', timelineAt: '2026-09-20T00:00:00.000Z',
+      timelineSource: 'received', isFavorite: true,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/exports')) {
+        return json({ exports: [
+          exportJob('album', 'failed', 'album-latest'),
+          exportJob('complete', 'ready', 'complete-latest'),
+        ] });
+      }
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: albumPhoto.id, entries: [{ kind: 'photo', photo: albumPhoto }],
+        photoCount: 1, sectionCount: 0, totalBytes: 200,
+      } });
+      if (url.includes('/gallery')) return json({ media: [albumPhoto], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry.secret', disabledAt: null });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+
+    expect((await screen.findAllByText(/9 photos · 1 KB · 3 guestbook entries/))[0]).toBeVisible();
+    expect(screen.getByText('Ready')).toBeVisible();
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' })).getByRole('button', { name: /^Album/ }));
+    expect((await screen.findAllByText(/2 photos · 2 KB\. Attempt 2 failed/))[0]).toBeVisible();
+    expect(screen.getByText('Failed')).toBeVisible();
+  });
+
+  it('posts the exact album kind selector from Download album photos', async () => {
+    const exportBodies: string[] = [];
+    const albumPhoto = {
+      id: 'album-photo', originalFilename: 'album-photo.png', guestName: 'Avery', caption: null,
+      publicationStatus: 'unpublished', previewAvailable: true, width: 800, height: 600,
+      receivedAt: '2026-09-20T00:00:00.000Z', timelineAt: '2026-09-20T00:00:00.000Z',
+      timelineSource: 'received', isFavorite: true,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (method === 'POST' && url.endsWith('/exports')) {
+        exportBodies.push(String(init?.body));
+        return json({ export: {
+          id: 'album-new', kind: 'album', state: 'queued', attempt: 1,
+          mediaCount: 1, totalBytes: 64, partCount: 0, expiresAt: null,
+          snapshotAt: '2026-09-20T00:00:00.000Z', guestbookEntryCount: null,
+          guestbookSharedCount: null, guestbookEventName: null, guestbookEventDate: null,
+          guestbookEventTimezone: null, guestbookPrompt: null, guestbookGalleryVisible: null,
+        } }, 202);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: albumPhoto.id, entries: [{ kind: 'photo', photo: albumPhoto }],
+        photoCount: 1, sectionCount: 0, totalBytes: 64,
+      } });
+      if (url.includes('/gallery')) return json({ media: [albumPhoto], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry.secret', disabledAt: null });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' })).getByRole('button', { name: /^Album/ }));
+    await user.click(await screen.findByRole('button', { name: 'Download album photos' }));
+
+    await waitFor(() => expect(exportBodies).toEqual([JSON.stringify({ kind: 'album' })]));
   });
 
   it('caps cross-page bulk selection at 50 and submits only the selected ids', async () => {

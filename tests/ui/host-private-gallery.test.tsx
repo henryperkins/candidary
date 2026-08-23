@@ -552,14 +552,17 @@ describe('host private gallery', () => {
     await screen.findByRole('heading', { name: 'Gallery' });
 
     expect(screen.getByText(/Every private photo, the photo manifest, and the printable and private guestbook files/)).toBeVisible();
+    expect(screen.getByText(/Search and album picks do not change this/)).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(onPrepare).toHaveBeenCalledTimes(1);
+    expect(onPrepare).toHaveBeenCalledWith();
   });
 
   it('shows the ready export job with its named contents instead of a second entry point', async () => {
     renderGallery({
       exportJob: {
         id: 'export-a',
+        kind: 'complete',
         state: 'ready',
         snapshotAt: '2026-09-19T00:00:00Z',
         mediaCount: 842,
@@ -596,6 +599,7 @@ describe('host private gallery', () => {
     renderGallery({
       exportJob: {
         id: 'export-a',
+        kind: 'complete',
         state: 'failed',
         snapshotAt: '2026-09-19T00:00:00Z',
         mediaCount: 842,
@@ -633,6 +637,7 @@ describe('host private gallery', () => {
     renderGallery({
       exportJob: {
         id: 'export-a',
+        kind: 'complete',
         state: 'ready',
         snapshotAt: '2026-09-19T00:00:00Z',
         mediaCount: 4812,

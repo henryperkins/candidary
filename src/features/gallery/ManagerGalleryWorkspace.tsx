@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { ExportDownloadView, ExportView, MediaView } from '../../app/types';
-import type { EventView } from '../../../shared/contracts';
+import type { EventView, ExportKind } from '../../../shared/contracts';
 import { fetchAlbum } from './album-api';
 import { GalleryExportControl } from './GalleryExportControl';
 import { ManagerAlbum } from './ManagerAlbum';
@@ -52,8 +52,11 @@ interface ManagerGalleryWorkspaceProps {
   };
   exports: {
     job?: ExportView;
+    albumJob?: ExportView;
+    activeJob?: ExportView;
     download?: ExportDownloadView;
-    onPrepare(): Promise<void>;
+    albumDownload?: ExportDownloadView;
+    onPrepare(kind?: ExportKind): Promise<void>;
     onDownload(job: ExportView): Promise<void>;
     onRetry(job: ExportView): Promise<void>;
   };
@@ -133,6 +136,12 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
         eventId={eventId}
         active={mode === 'album'}
         onPicksChanged={refreshPickCount}
+        exportJob={exports.albumJob}
+        activeExport={exports.activeJob}
+        exportDownload={exports.albumDownload}
+        onPrepareExport={() => exports.onPrepare('album')}
+        onDownloadExport={exports.onDownload}
+        onRetryExport={exports.onRetry}
       />
     </div>}
 

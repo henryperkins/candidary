@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { z } from 'zod';
 
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
@@ -19,6 +20,7 @@ async function ownedJob(context: Context<AppBindings>) {
 function managerExport(job: ExportRecord) {
   return {
     id: job.id,
+    kind: job.kind,
     state: job.state,
     snapshotAt: job.snapshotAt,
     mediaCount: job.mediaCount,
@@ -111,6 +113,8 @@ async function deleteExportKeys(bucket: R2Bucket, keys: string[]): Promise<void>
 }
 
 export const exportRoutes = new Hono<AppBindings>();
+
+const createExportSchema = z.object({ kind: z.literal('album').optional() }).strict();
 
 type ExportArtifactKind = 'manifest' | 'part' | 'printable-guestbook' | 'private-guestbook';
 
@@ -244,11 +248,32 @@ exportRoutes.get('/manage/events/:eventId/exports', async (context) => {
 
 exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
   await manager(context, true);
+  const rawBody = await context.req.text();
+  let body: unknown = {};
+  if (rawBody.trim().length > 0) {
+    try {
+      body = JSON.parse(rawBody) as unknown;
+    } catch {
+      body = null;
+    }
+  }
+  const parsed = createExportSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'Choose the album export or omit kind for the complete export.',
+      422,
+    );
+  }
   const snapshotAt = new Date().toISOString();
-  const job = await new ExportsRepository(context.env.DB).createActive({
+  const repository = new ExportsRepository(context.env.DB);
+  const input = {
     id: crypto.randomUUID(), eventId: context.req.param('eventId'), snapshotAt,
     createdAt: snapshotAt,
-  });
+  };
+  const job = parsed.data.kind === 'album'
+    ? await repository.createAlbumActive(input)
+    : await repository.createActive(input);
   await context.env.EXPORT_WORKFLOW.create({ id: job.id, params: { jobId: job.id } });
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
@@ -291,8 +316,11 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
   }
   const repository = new ExportsRepository(context.env.DB);
   const parts = await repository.listParts(job.id);
-  const newFormat = job.guestbookEntryCount !== null;
-  const snapshotMetadataComplete = !newFormat || (
+  const albumFormat = job.kind === 'album';
+  const newCompleteFormat = !albumFormat && job.guestbookEntryCount !== null;
+  const snapshotMetadataComplete = albumFormat
+    ? job.albumEntriesJson !== null
+    : !newCompleteFormat || (
     job.guestbookSharedCount !== null && job.guestbookEventName !== null
     && job.guestbookEventDate !== null && job.guestbookEventTimezone !== null
     && job.guestbookPrompt !== null && job.guestbookGalleryVisible !== null
@@ -300,14 +328,18 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
   const partsComplete = parts.every((part, index) => part.partNumber === index + 1
     && part.mediaCount > 0 && part.sourceBytes >= 0 && Boolean(part.objectKey));
   const photoComplete = job.mediaCount === 0
-    ? newFormat && job.manifestObjectKey === null && job.partCount === 0 && parts.length === 0
+    ? newCompleteFormat && job.manifestObjectKey === null && job.partCount === 0 && parts.length === 0
     : Boolean(job.manifestObjectKey) && partsComplete
       && parts.length === job.partCount && job.partCount > 0
       && parts.reduce((count, part) => count + part.mediaCount, 0) === job.mediaCount;
-  const guestbookComplete = !newFormat || Boolean(
-    job.guestbookHtmlObjectKey && job.guestbookHtmlBytes !== null && job.guestbookHtmlSha256
-    && job.guestbookCsvObjectKey && job.guestbookCsvBytes !== null && job.guestbookCsvSha256,
-  );
+  const guestbookComplete = albumFormat
+    ? job.guestbookHtmlObjectKey === null && job.guestbookHtmlBytes === null
+      && job.guestbookHtmlSha256 === null && job.guestbookCsvObjectKey === null
+      && job.guestbookCsvBytes === null && job.guestbookCsvSha256 === null
+    : !newCompleteFormat || Boolean(
+      job.guestbookHtmlObjectKey && job.guestbookHtmlBytes !== null && job.guestbookHtmlSha256
+      && job.guestbookCsvObjectKey && job.guestbookCsvBytes !== null && job.guestbookCsvSha256,
+    );
   if (!snapshotMetadataComplete || !photoComplete || !guestbookComplete) {
     throw new ApiError('EXPORT_FAILED', 'This export is incomplete. Retry it.', 409);
   }

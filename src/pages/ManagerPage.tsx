@@ -11,7 +11,7 @@ import {
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
-import type { PhotoIntakeState } from '../../shared/contracts';
+import type { ExportKind, PhotoIntakeState } from '../../shared/contracts';
 import type { EventView, ExportDownloadView, ExportView, ManagerMediaPage, MediaView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -516,7 +516,10 @@ export function ManagerPage() {
    * unrelated manager action happened to run a full refresh. Ten seconds while a job is
    * actually in flight, on the same visibility guard intake uses, and never otherwise.
    */
-  const activeExportState = exports[0]?.state;
+  const completeExport = exports.find((job) => job.kind === 'complete');
+  const albumExport = exports.find((job) => job.kind === 'album');
+  const activeExport = exports.find((job) => job.state === 'queued' || job.state === 'running');
+  const activeExportState = activeExport?.state;
   useEffect(() => {
     if (section !== 'gallery') return;
     if (activeExportState !== 'queued' && activeExportState !== 'running') return;
@@ -634,8 +637,9 @@ export function ManagerPage() {
     await refresh();
   }
 
-  async function prepareExport() {
-    await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body: '{}' }));
+  async function prepareExport(kind: ExportKind = 'complete') {
+    const body = kind === 'album' ? JSON.stringify({ kind: 'album' }) : '{}';
+    await eventWrite(() => api(`/api/manage/events/${eventId}/exports`, { method: 'POST', body }));
     await refresh();
   }
   async function downloadExport(job: ExportView) {
@@ -803,7 +807,6 @@ export function ManagerPage() {
 
   const photoCount = event.storedMediaCount ?? 0;
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
-  const activeExport = exports[0];
   // Both entry actions are confirmed the same way, and both name the event so the
   // host cannot mistake which one they are typing into.
   const entryConfirmationForm = (action: EntryAction, verb: string, warning: string) => <fieldset
@@ -938,9 +941,12 @@ export function ManagerPage() {
           settingsBlocked: rsvpCommitPending,
         }}
         exports={{
-          job: activeExport,
-          download: activeExport ? exportDownloads[activeExport.id] : undefined,
-          onPrepare: () => runManagerAction(prepareExport),
+          job: completeExport,
+          albumJob: albumExport,
+          activeJob: activeExport,
+          download: completeExport ? exportDownloads[completeExport.id] : undefined,
+          albumDownload: albumExport ? exportDownloads[albumExport.id] : undefined,
+          onPrepare: (kind = 'complete') => runManagerAction(() => prepareExport(kind)),
           onDownload: (job) => runManagerAction(() => downloadExport(job)),
           onRetry: (job) => runManagerAction(() => retryExport(job)),
         }}

@@ -2,11 +2,13 @@ import { ArrowDown, ArrowUp, BookOpen, ImageOff, Plus, Trash2 } from 'lucide-rea
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ClientApiError, mediaPreview } from '../../app/api';
+import type { ExportDownloadView, ExportView } from '../../app/types';
 import { ErrorState, LoadingState } from '../../components/States';
 import { ALBUM_MAX_SECTIONS, ALBUM_SECTION_HEADING_MAX_LENGTH } from '../../../shared/constants';
 import type { AlbumEntryView, AlbumView, EventView } from '../../../shared/contracts';
 import { fetchAlbum, moveEntry, saveAlbumOrder, setAlbumPicks, startAlbum, toEntryInput } from './album-api';
 import { AlbumPreview } from './AlbumPreview';
+import { AlbumExportControl } from './AlbumExportControl';
 import { galleryPhotoTitle } from './gallery-timeline';
 import { UndoBar, useUndo } from './undo';
 
@@ -16,6 +18,12 @@ interface ManagerAlbumProps {
   active: boolean;
   /** Raised whenever membership changes here, so Library's `Album picks (n)` stays true. */
   onPicksChanged(): void;
+  exportJob?: ExportView;
+  activeExport?: ExportView;
+  exportDownload?: ExportDownloadView;
+  onPrepareExport(): Promise<void>;
+  onDownloadExport(job: ExportView): Promise<void>;
+  onRetryExport(job: ExportView): Promise<void>;
 }
 
 function errorMessage(caught: unknown, fallback: string): string {
@@ -38,7 +46,18 @@ function entryName(entry: AlbumEntryView): string {
  * copy says so at the top, in the tray, and in the empty state, because a curated album
  * that quietly became guest-visible is the single worst failure this product could have.
  */
-export function ManagerAlbum({ event, eventId, active, onPicksChanged }: ManagerAlbumProps) {
+export function ManagerAlbum({
+  event,
+  eventId,
+  active,
+  onPicksChanged,
+  exportJob,
+  activeExport,
+  exportDownload,
+  onPrepareExport,
+  onDownloadExport,
+  onRetryExport,
+}: ManagerAlbumProps) {
   const [album, setAlbum] = useState<AlbumView | null>(null);
   const [entries, setEntries] = useState<AlbumEntryView[]>([]);
   const [revision, setRevision] = useState(0);
@@ -369,6 +388,17 @@ export function ManagerAlbum({ event, eventId, active, onPicksChanged }: Manager
             </div>
             <p className="sr-only" role="status" aria-live="polite">{saving ? 'Saving the album order…' : ''}</p>
           </div>
+
+          <AlbumExportControl
+            photoCount={photoCount}
+            totalBytes={album?.totalBytes ?? 0}
+            job={exportJob}
+            activeJob={activeExport}
+            download={exportDownload}
+            onPrepare={onPrepareExport}
+            onDownload={onDownloadExport}
+            onRetry={onRetryExport}
+          />
 
           {entries.length === 0
             ? <div className="empty-state">

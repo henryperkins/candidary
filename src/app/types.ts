@@ -1,3 +1,5 @@
+import type { ExportKind } from '../../shared/contracts';
+
 export type {
   EventView,
   GuestEventView,
@@ -39,6 +41,7 @@ export interface MessageView {
 
 export interface ExportView {
   id: string;
+  kind: ExportKind;
   state: 'queued' | 'running' | 'ready' | 'failed' | 'expired';
   snapshotAt: string;
   mediaCount: number;
