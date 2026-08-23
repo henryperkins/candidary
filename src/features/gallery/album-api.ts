@@ -2,6 +2,8 @@ import { api } from '../../app/api';
 import type {
   AlbumEntryInput,
   AlbumEntryView,
+  AlbumMetadataInput,
+  AlbumSaveRequest,
   AlbumView,
   ManagerGalleryMediaView,
 } from '../../../shared/contracts';
@@ -23,10 +25,12 @@ export function saveAlbumOrder(
   eventId: string,
   revision: number,
   entries: AlbumEntryInput[],
+  metadata?: AlbumMetadataInput,
 ): Promise<{ album: AlbumView }> {
+  const request = { revision, entries, metadata } satisfies AlbumSaveRequest;
   return api<{ album: AlbumView }>(albumPath(eventId), {
     method: 'PUT',
-    body: JSON.stringify({ revision, entries }),
+    body: JSON.stringify(request),
   });
 }
 
@@ -76,5 +80,15 @@ export function moveEntry<T>(entries: readonly T[], index: number, delta: -1 | 1
   const moved = next[index]!;
   next[index] = next[target]!;
   next[target] = moved;
+  return next;
+}
+
+export function moveEntryTo<T>(entries: readonly T[], from: number, to: number): T[] {
+  if (from < 0 || to < 0 || from >= entries.length || to >= entries.length || from === to) {
+    return [...entries];
+  }
+  const next = [...entries];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved!);
   return next;
 }

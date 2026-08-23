@@ -16,6 +16,7 @@ export type UploadState = 'reserved' | 'stored' | 'failed' | 'deleted';
 export type ModerationStatus = 'pending' | 'approved' | 'rejected';
 export type PublicationStatus = 'unpublished' | 'published' | 'hidden';
 export type TimelineSource = 'capture' | 'received';
+export type ExportKind = 'complete' | 'album';
 export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired';
 
 export interface ApiSuccess<T> {
@@ -320,15 +321,34 @@ export type AlbumEntryView =
   | { kind: 'photo'; photo: ManagerGalleryMediaView }
   | { kind: 'section'; id: string; heading: string };
 
-export interface AlbumView {
+export interface AlbumMetadataInput {
+  title: string;
+  description: string;
+  coverMediaId: string | null;
+}
+
+export interface AlbumMetadataView extends AlbumMetadataInput {
+  effectiveCoverMediaId: string | null;
+}
+
+export interface AlbumSaveRequest {
+  revision: number;
+  entries: AlbumEntryInput[];
+  /** Optional only for compatibility with clients deployed before migration 0018. */
+  metadata?: AlbumMetadataInput;
+}
+
+export interface AlbumView extends AlbumMetadataInput {
   /** Compare-and-set token. Every write carries the revision it was composed against. */
   revision: number;
   /** False until the host first commits an album; the only reconciliation signal. */
   saved: boolean;
+  effectiveCoverMediaId: string | null;
   entries: AlbumEntryView[];
   /** Photos in the album. Sections are excluded — a divider is not a photograph. */
   photoCount: number;
   sectionCount: number;
+  totalBytes: number;
 }
 
 // RSVP. Every shape below is written out rather than derived from a database

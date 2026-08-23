@@ -23,9 +23,11 @@ import { EventEntryService } from '../services/event-entry';
 import { LinkService } from '../services/links';
 import { RsvpService } from '../services/rsvp';
 import {
+  ALBUM_DESCRIPTION_MAX_LENGTH,
   ALBUM_MAX_ENTRIES,
   ALBUM_MAX_SECTIONS,
   ALBUM_SECTION_HEADING_MAX_LENGTH,
+  ALBUM_TITLE_MAX_LENGTH,
   DEFAULT_GALLERY_TIMELINE_ORDER,
   GALLERY_TIMELINE_ORDERS,
   type GalleryTimelineOrder,
@@ -109,9 +111,19 @@ const albumEntrySchema = z.discriminatedUnion('kind', [
     heading: z.string().trim().min(1).max(ALBUM_SECTION_HEADING_MAX_LENGTH),
   }).strict(),
 ]);
-const albumOrderSchema = z.object({
+const albumMetadataSchema = z.object({
+  title: z.string()
+    .trim()
+    .min(1)
+    .refine((title) => [...title].length <= ALBUM_TITLE_MAX_LENGTH),
+  description: z.string()
+    .refine((description) => [...description].length <= ALBUM_DESCRIPTION_MAX_LENGTH),
+  coverMediaId: z.string().min(1).max(64).nullable(),
+}).strict();
+const albumSaveSchema = z.object({
   revision: z.number().int().min(0),
   entries: z.array(albumEntrySchema).max(ALBUM_MAX_ENTRIES),
+  metadata: albumMetadataSchema.optional(),
 }).strict();
 const albumPicksSchema = z.object({
   // The album cap, not the selection cap: the tray never sends more than a host can
@@ -495,20 +507,21 @@ manageRoutes.get('/manage/events/:eventId/album', async (context) => {
  */
 manageRoutes.put('/manage/events/:eventId/album', async (context) => {
   await managerForEvent(context, true);
-  const parsed = albumOrderSchema.safeParse(await context.req.json().catch(() => null));
+  const parsed = albumSaveSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) {
     const sections = fieldErrors(parsed.error);
     throw new ApiError(
       'VALIDATION_FAILED',
-      `An album holds up to ${ALBUM_MAX_ENTRIES} entries and ${ALBUM_MAX_SECTIONS} sections, each named in ${ALBUM_SECTION_HEADING_MAX_LENGTH} characters or fewer.`,
+      `An album holds up to ${ALBUM_MAX_ENTRIES} entries and ${ALBUM_MAX_SECTIONS} sections. Titles hold ${ALBUM_TITLE_MAX_LENGTH} characters, descriptions hold ${ALBUM_DESCRIPTION_MAX_LENGTH}, and section names hold ${ALBUM_SECTION_HEADING_MAX_LENGTH}.`,
       422,
       sections,
     );
   }
-  const album = await new AlbumRepository(context.env.DB).replaceOrder(
+  const album = await new AlbumRepository(context.env.DB).replace(
     context.req.param('eventId'),
     parsed.data.revision,
     parsed.data.entries,
+    parsed.data.metadata,
     new Date().toISOString(),
   );
   return context.json({ data: { album }, requestId: context.get('requestId') });

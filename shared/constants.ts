@@ -41,6 +41,9 @@ export const ALBUM_MAX_ENTRIES = 500;
 export const ALBUM_SECTION_HEADING_MAX_LENGTH = 80;
 /** Sections are dividers, not a hierarchy; a host who needs forty has an outline, not an album. */
 export const ALBUM_MAX_SECTIONS = 40;
+export const ALBUM_TITLE_MAX_LENGTH = 120;
+export const ALBUM_DESCRIPTION_MAX_LENGTH = 1_000;
+export const ALBUM_SHARE_SESSION_SECONDS = 7 * 24 * 60 * 60;
 export const GUEST_MESSAGE_PAGE_SIZE = 50;
 export const DEFAULT_GUESTBOOK_PROMPT = 'Share a wish, memory, or moment from the day.';
 export const MAX_EVENT_GUEST_NOTES = 1_000;

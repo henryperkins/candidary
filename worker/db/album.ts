@@ -1,6 +1,7 @@
 import type {
   AlbumEntryInput,
   AlbumEntryView,
+  AlbumMetadataInput,
   AlbumView,
   ManagerGalleryMediaView,
 } from '../../shared/contracts';
@@ -14,6 +15,9 @@ interface AlbumRow {
   entries: string;
   saved_at: string | null;
   revision: number;
+  title: string;
+  description: string;
+  cover_media_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -55,12 +59,32 @@ function parseEntries(raw: string): AlbumEntryInput[] {
   return entries;
 }
 
-const EMPTY_ALBUM = { entries: [] as AlbumEntryInput[], savedAt: null, revision: 0 };
+const EMPTY_ALBUM = {
+  entries: [] as AlbumEntryInput[],
+  savedAt: null,
+  revision: 0,
+  title: 'Album',
+  description: '',
+  coverMediaId: null,
+};
 
-export interface StoredAlbum {
+export interface StoredAlbum extends AlbumMetadataInput {
   entries: AlbumEntryInput[];
   savedAt: string | null;
   revision: number;
+}
+
+function parseMetadata(row: AlbumRow): AlbumMetadataInput {
+  const title = typeof row.title === 'string' && row.title.trim().length > 0
+    ? row.title.trim()
+    : EMPTY_ALBUM.title;
+  const description = typeof row.description === 'string'
+    ? row.description
+    : EMPTY_ALBUM.description;
+  const coverMediaId = typeof row.cover_media_id === 'string' && row.cover_media_id.length > 0
+    ? row.cover_media_id
+    : null;
+  return { title, description, coverMediaId };
 }
 
 /**
@@ -76,6 +100,7 @@ export interface StoredAlbum {
 export function resolveAlbum(
   stored: StoredAlbum,
   picked: readonly ManagerGalleryMediaView[],
+  totalBytes = 0,
 ): AlbumView {
   const byId = new Map(picked.map((photo) => [photo.id, photo]));
   const placed = new Set<string>();
@@ -94,12 +119,21 @@ export function resolveAlbum(
     if (placed.has(photo.id)) continue;
     entries.push({ kind: 'photo', photo });
   }
+  const coverMediaId = stored.coverMediaId !== null && byId.has(stored.coverMediaId)
+    ? stored.coverMediaId
+    : null;
+  const firstPhoto = entries.find((entry) => entry.kind === 'photo');
   return {
     revision: stored.revision,
     saved: stored.savedAt !== null,
+    title: stored.title,
+    description: stored.description,
+    coverMediaId,
+    effectiveCoverMediaId: coverMediaId ?? (firstPhoto?.kind === 'photo' ? firstPhoto.photo.id : null),
     entries,
     photoCount: entries.filter((entry) => entry.kind === 'photo').length,
     sectionCount: entries.filter((entry) => entry.kind === 'section').length,
+    totalBytes,
   };
 }
 
@@ -113,7 +147,7 @@ export function albumPickQuery(): string {
     SELECT
       id, original_filename, guest_name, caption, publication_status,
       upload_state, preview_object_key, width, height, created_at, stored_at,
-      captured_at, timeline_at, favorited_at
+      captured_at, timeline_at, favorited_at, declared_byte_size, byte_size
     FROM media
     WHERE event_id = ?
       AND upload_state = 'stored'
@@ -137,17 +171,21 @@ export class AlbumRepository {
       entries: parseEntries(row.entries),
       savedAt: row.saved_at,
       revision: row.revision,
+      ...parseMetadata(row),
     };
   }
 
-  private async picks(eventId: string): Promise<ManagerGalleryMediaView[]> {
+  private async picks(eventId: string): Promise<{
+    photos: ManagerGalleryMediaView[];
+    totalBytes: number;
+  }> {
     // One over the cap: reading it is how an album that filled up before the cap
     // existed still renders, rather than silently truncating to exactly the limit.
     const result = await this.db
       .prepare(albumPickQuery())
       .bind(eventId, ALBUM_MAX_ENTRIES + 1)
       .all<MediaRow>();
-    return result.results.map((row) => managerGalleryMediaView({
+    const photos = result.results.map((row) => managerGalleryMediaView({
       id: row.id,
       originalFilename: row.original_filename,
       guestName: row.guest_name,
@@ -162,6 +200,11 @@ export class AlbumRepository {
       timelineAt: row.timeline_at,
       favoritedAt: row.favorited_at,
     }));
+    const totalBytes = result.results.reduce(
+      (sum, row) => sum + (row.byte_size ?? row.declared_byte_size),
+      0,
+    );
+    return { photos, totalBytes };
   }
 
   async get(eventId: string): Promise<AlbumView> {
@@ -169,7 +212,7 @@ export class AlbumRepository {
       this.storedAlbum(eventId),
       this.picks(eventId),
     ]);
-    return resolveAlbum(stored, picked);
+    return resolveAlbum(stored, picked.photos, picked.totalBytes);
   }
 
   /** How many photos are picked right now. The cap is charged against this, not the stored order. */
@@ -192,10 +235,11 @@ export class AlbumRepository {
    * rather than overwriting a co-host's arrangement. Composing against revision 0 is
    * how a first save works, and the upsert makes that the same statement.
    */
-  async replaceOrder(
+  async replace(
     eventId: string,
     expectedRevision: number,
     entries: AlbumEntryInput[],
+    metadata: AlbumMetadataInput | undefined,
     now: string,
   ): Promise<AlbumView> {
     if (entries.length > ALBUM_MAX_ENTRIES) {
@@ -216,19 +260,41 @@ export class AlbumRepository {
     // the row first and guarding the UPDATE puts the compare-and-set in SQL, where the
     // house pattern wants it, and a lost race affects zero rows instead of overwriting a
     // co-host's arrangement.
+    const update = metadata
+      ? this.db.prepare(`
+          UPDATE event_albums
+          SET entries = ?,
+              title = ?,
+              description = ?,
+              cover_media_id = ?,
+              saved_at = COALESCE(saved_at, ?),
+              revision = revision + 1,
+              updated_at = ?
+          WHERE event_id = ? AND revision = ?
+        `).bind(
+          JSON.stringify(entries),
+          metadata.title,
+          metadata.description,
+          metadata.coverMediaId,
+          now,
+          now,
+          eventId,
+          expectedRevision,
+        )
+      : this.db.prepare(`
+          UPDATE event_albums
+          SET entries = ?,
+              saved_at = COALESCE(saved_at, ?),
+              revision = revision + 1,
+              updated_at = ?
+          WHERE event_id = ? AND revision = ?
+        `).bind(JSON.stringify(entries), now, now, eventId, expectedRevision);
     const batch = await this.db.batch([
       this.db.prepare(`
         INSERT OR IGNORE INTO event_albums (event_id, entries, saved_at, revision, created_at, updated_at)
         VALUES (?, '[]', NULL, 0, ?, ?)
       `).bind(eventId, now, now),
-      this.db.prepare(`
-        UPDATE event_albums
-        SET entries = ?,
-            saved_at = COALESCE(saved_at, ?),
-            revision = revision + 1,
-            updated_at = ?
-        WHERE event_id = ? AND revision = ?
-      `).bind(JSON.stringify(entries), now, now, eventId, expectedRevision),
+      update,
     ]);
 
     if (batch[1]?.meta.changes !== 1) {
