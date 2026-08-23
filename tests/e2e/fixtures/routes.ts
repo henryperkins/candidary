@@ -1,6 +1,9 @@
 import type { Page, Route } from '@playwright/test';
 
 import type {
+  AlbumEntryInput,
+  AlbumShareStatus,
+  AlbumView,
   EventThemeConfigV1,
   EventThemeOverridesV1,
   EventThemePresetId,
@@ -8,6 +11,7 @@ import type {
   GuestEventView,
   GuestGuestbookItem,
   ManagerGuestbookItem,
+  ManagerGalleryMediaView,
   PhotoIntakeState,
   RsvpHouseholdDetail,
   RsvpHouseholdListPage,
@@ -24,7 +28,9 @@ import type {
   RsvpSubmissionRequest,
   RsvpSubmissionResponse,
   RsvpSummary,
+  PublicAlbumView,
 } from '../../../shared/contracts';
+import type { ExportDownloadView, ExportView } from '../../../src/app/types';
 import {
   EVENT_COVER_EFFECTS,
   type EventCoverEffectId,
@@ -293,6 +299,29 @@ export interface CoverStudioRouteScenario {
   slotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
 }
 
+export interface AlbumWorkspaceRouteOptions {
+  pickedMediaIds?: readonly string[];
+  title?: string;
+  description?: string;
+  coverMediaId?: string | null;
+  entries?: readonly AlbumEntryInput[];
+  saved?: boolean;
+  shareActive?: boolean;
+  shareToken?: string;
+  managerPreviewFailures?: readonly string[];
+  publicPreviewFailures?: readonly string[];
+  managerPreviewGates?: Readonly<Record<string, Promise<void>>>;
+  publicPreviewGates?: Readonly<Record<string, Promise<void>>>;
+  bulkPublicationGate?: Promise<void>;
+  albumReadGate?: Promise<void>;
+  albumWriteGate?: Promise<void>;
+  shareGate?: Promise<void>;
+  exchangeGate?: Promise<void>;
+  publicReadGate?: Promise<void>;
+  exportGate?: Promise<void>;
+  exportReadyAfterReads?: number;
+}
+
 interface ManagerRouteOptions {
   event?: Partial<EventView>;
   // Keyed by the cursor the client sends back; `first` answers a request that carries no cursor.
@@ -304,6 +333,7 @@ interface ManagerRouteOptions {
     actionGate?: Promise<void>;
   };
   exports?: unknown[];
+  album?: AlbumWorkspaceRouteOptions;
   cover?: Buffer;
   coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
   coverScenario?: CoverStudioRouteScenario;
@@ -314,6 +344,14 @@ interface ManagerRouteOptions {
     detail?: RsvpHouseholdDetail;
     preview?: RsvpImportPreview;
   };
+}
+
+export interface AlbumRouteObservation {
+  method: string;
+  path: string;
+  body: unknown;
+  headers: Record<string, string>;
+  responseStatus: number;
 }
 
 export interface GuestbookSummaryFixture {
@@ -935,6 +973,121 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   const currentGuestbookSummary = () => options.guestbook?.summary
     ?? managerSummary(guestbookItems, event.galleryVisible);
   const base = `**/api/manage/events/${event.id}`;
+  const albumOptions = options.album ?? {};
+  const albumRequests: AlbumRouteObservation[] = [];
+  const initialMedia = options.mediaPages.first?.media ?? [];
+  const entryPickedIds = albumOptions.entries?.flatMap((entry) => (
+    entry.kind === 'photo' ? [entry.mediaId] : []
+  )) ?? [];
+  const pickedMediaIds = new Set(albumOptions.pickedMediaIds ?? entryPickedIds);
+  let galleryMedia: ManagerGalleryMediaView[] = initialMedia.map((item, index) => {
+    const receivedAt = item.createdAt ?? new Date(Date.UTC(2026, 8, 19, 20, 0, index)).toISOString();
+    return {
+      id: item.id,
+      originalFilename: item.originalFilename,
+      guestName: item.guestName,
+      caption: item.caption,
+      publicationStatus: item.publicationStatus,
+      previewAvailable: true,
+      width: item.width ?? 1200,
+      height: item.height ?? 800,
+      receivedAt,
+      timelineAt: receivedAt,
+      timelineSource: 'received',
+      isFavorite: pickedMediaIds.has(item.id),
+    };
+  });
+  let albumEntries: AlbumEntryInput[] = albumOptions.entries
+    ? albumOptions.entries.map((entry) => ({ ...entry }))
+    : [...pickedMediaIds].map((mediaId) => ({ kind: 'photo', mediaId }));
+  let albumRevision = 1;
+  let albumSaved = albumOptions.saved ?? true;
+  let albumTitle = albumOptions.title ?? 'Album';
+  let albumDescription = albumOptions.description ?? '';
+  let albumCoverMediaId = albumOptions.coverMediaId ?? null;
+  let shareActive = albumOptions.shareActive ?? false;
+  const shareToken = albumOptions.shareToken ?? 'album-share-id.album-share-secret';
+  let albumSessionActive = false;
+  const sharedAt = '2026-08-23T12:00:00.000Z';
+  const managerPreviewFailures = new Set(albumOptions.managerPreviewFailures ?? []);
+  const publicPreviewFailures = new Set(albumOptions.publicPreviewFailures ?? []);
+  const exportJobs = [...(options.exports ?? [])] as ExportView[];
+  let createdExportId: string | null = null;
+  let createdExportReads = 0;
+
+  const observeAlbumRoute = (route: Route, responseStatus: number) => {
+    albumRequests.push({
+      method: route.request().method(),
+      path: new URL(route.request().url()).pathname,
+      body: requestBody(route),
+      headers: route.request().headers(),
+      responseStatus,
+    });
+  };
+
+  const resolveAlbumEntries = () => {
+    const placed = new Set<string>();
+    const entries: AlbumView['entries'] = [];
+    for (const entry of albumEntries) {
+      if (entry.kind === 'section') {
+        entries.push({ ...entry });
+        continue;
+      }
+      if (!pickedMediaIds.has(entry.mediaId) || placed.has(entry.mediaId)) continue;
+      const photo = galleryMedia.find(({ id }) => id === entry.mediaId);
+      if (!photo) continue;
+      placed.add(photo.id);
+      entries.push({ kind: 'photo', photo: { ...photo, isFavorite: true } });
+    }
+    for (const photo of galleryMedia) {
+      if (!pickedMediaIds.has(photo.id) || placed.has(photo.id)) continue;
+      placed.add(photo.id);
+      entries.push({ kind: 'photo', photo: { ...photo, isFavorite: true } });
+    }
+    return entries;
+  };
+
+  const albumView = (): AlbumView => {
+    const entries = resolveAlbumEntries();
+    const firstPhotoId = entries.find((entry) => entry.kind === 'photo')?.photo.id ?? null;
+    const coverIsPicked = albumCoverMediaId !== null && pickedMediaIds.has(albumCoverMediaId);
+    return {
+      revision: albumRevision,
+      saved: albumSaved,
+      title: albumTitle,
+      description: albumDescription,
+      coverMediaId: coverIsPicked ? albumCoverMediaId : null,
+      effectiveCoverMediaId: coverIsPicked ? albumCoverMediaId : firstPhotoId,
+      entries,
+      photoCount: entries.filter((entry) => entry.kind === 'photo').length,
+      sectionCount: entries.filter((entry) => entry.kind === 'section').length,
+      totalBytes: entries.filter((entry) => entry.kind === 'photo').length * 128,
+    };
+  };
+
+  const publicAlbumView = (): PublicAlbumView => {
+    const album = albumView();
+    return {
+      title: album.title,
+      description: album.description,
+      coverMediaId: album.effectiveCoverMediaId,
+      entries: album.entries.map((entry) => entry.kind === 'section'
+        ? { kind: 'section' as const, id: entry.id, heading: entry.heading }
+        : {
+            kind: 'photo' as const,
+            photo: {
+              id: entry.photo.id,
+              caption: entry.photo.caption,
+              previewAvailable: true,
+            },
+          }),
+      photoCount: album.photoCount,
+    };
+  };
+
+  const shareStatus = (origin: string): AlbumShareStatus => shareActive
+    ? { active: true, url: `${origin}/album#${shareToken}`, sharedAt }
+    : null;
   const scenario = options.coverScenario;
   const coverSlotAttempts = new Map<'webp' | 'jpeg', number>();
 
@@ -1421,5 +1574,367 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       },
     });
   });
-  return audit;
+
+  // Stateful Task 5 routes are registered after their broad legacy counterparts.
+  // Playwright resolves routes last-in-first-out, so these exact handlers own the
+  // album journey without changing the long-standing default fixtures above.
+  await page.route(`${base}/album**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    if (path.endsWith('/picks') && method === 'POST') {
+      await albumOptions.albumWriteGate;
+      const payload = route.request().postDataJSON() as { mediaIds: string[]; picked: boolean };
+      const changed: ManagerGalleryMediaView[] = [];
+      for (const mediaId of new Set(payload.mediaIds)) {
+        const current = galleryMedia.find((item) => item.id === mediaId);
+        if (!current || current.isFavorite === payload.picked) continue;
+        if (payload.picked) pickedMediaIds.add(mediaId);
+        else pickedMediaIds.delete(mediaId);
+        const next = { ...current, isFavorite: payload.picked };
+        galleryMedia = galleryMedia.map((item) => item.id === mediaId ? next : item);
+        changed.push(next);
+      }
+      if (changed.length > 0) {
+        albumRevision += 1;
+        if (!payload.picked) {
+          const changedIds = new Set(changed.map(({ id }) => id));
+          albumEntries = albumEntries.filter((entry) => (
+            entry.kind === 'section' || !changedIds.has(entry.mediaId)
+          ));
+          if (albumCoverMediaId && changedIds.has(albumCoverMediaId)) albumCoverMediaId = null;
+        }
+      }
+      observeAlbumRoute(route, 200);
+      return route.fulfill({
+        json: { data: { changed }, requestId: 'request-a' },
+      });
+    }
+    if (path.endsWith('/start') && method === 'POST') {
+      await albumOptions.albumWriteGate;
+      const payload = route.request().postDataJSON() as { start: 'from-picks' | 'empty' };
+      const cleared = payload.start === 'empty' ? [...pickedMediaIds] : [];
+      if (payload.start === 'empty') {
+        pickedMediaIds.clear();
+        galleryMedia = galleryMedia.map((photo) => ({ ...photo, isFavorite: false }));
+        albumEntries = [];
+        albumCoverMediaId = null;
+      } else {
+        albumEntries = galleryMedia
+          .filter(({ id }) => pickedMediaIds.has(id))
+          .map(({ id }) => ({ kind: 'photo', mediaId: id }));
+      }
+      albumSaved = true;
+      albumRevision += 1;
+      observeAlbumRoute(route, 200);
+      return route.fulfill({
+        json: { data: { album: albumView(), cleared }, requestId: 'request-a' },
+      });
+    }
+    if (method === 'PUT' && path.endsWith('/album')) {
+      await albumOptions.albumWriteGate;
+      const payload = route.request().postDataJSON() as {
+        entries: AlbumEntryInput[];
+        metadata?: { title: string; description: string; coverMediaId: string | null };
+      };
+      albumEntries = payload.entries.map((entry) => ({ ...entry }));
+      if (payload.metadata) {
+        albumTitle = payload.metadata.title;
+        albumDescription = payload.metadata.description;
+        albumCoverMediaId = payload.metadata.coverMediaId;
+      }
+      albumSaved = true;
+      albumRevision += 1;
+      observeAlbumRoute(route, 200);
+      return route.fulfill({
+        json: { data: { album: albumView() }, requestId: 'request-a' },
+      });
+    }
+    if (method === 'GET' && path.endsWith('/album')) {
+      await albumOptions.albumReadGate;
+      observeAlbumRoute(route, 200);
+      return route.fulfill({
+        json: { data: { album: albumView() }, requestId: 'request-a' },
+      });
+    }
+    observeAlbumRoute(route, 404);
+    return route.fulfill({
+      status: 404,
+      json: { code: 'ALBUM_NOT_FOUND', message: 'Album route not found.', requestId: 'request-a' },
+    });
+  });
+
+  // More exact than `/album**`, therefore intentionally registered afterwards.
+  await page.route(`${base}/album/share`, async (route) => {
+    await albumOptions.shareGate;
+    const method = route.request().method();
+    const origin = new URL(route.request().url()).origin;
+    if (method === 'POST') shareActive = true;
+    if (method === 'DELETE') {
+      shareActive = false;
+      albumSessionActive = false;
+    }
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      headers: { 'cache-control': 'private, no-store' },
+      json: {
+        data: { share: method === 'DELETE' ? null : shareStatus(origin) },
+        requestId: 'request-a',
+      },
+    });
+  });
+
+  await page.route(`${base}/media/bulk`, async (route) => {
+    await albumOptions.bulkPublicationGate;
+    const payload = route.request().postDataJSON() as {
+      ids: string[];
+      action: 'publish' | 'hide';
+      expectedStatus?: ManagerGalleryMediaView['publicationStatus'];
+    };
+    const nextStatus = payload.action === 'publish' ? 'published' : 'hidden';
+    const changed: string[] = [];
+    for (const id of payload.ids) {
+      const current = galleryMedia.find((item) => item.id === id);
+      if (!current || current.publicationStatus === nextStatus) continue;
+      if (payload.expectedStatus && current.publicationStatus !== payload.expectedStatus) continue;
+      changed.push(id);
+      galleryMedia = galleryMedia.map((item) => item.id === id
+        ? { ...item, publicationStatus: nextStatus }
+        : item);
+      for (const pageFixture of Object.values(options.mediaPages)) {
+        const source = pageFixture.media.find((item) => item.id === id);
+        if (source) source.publicationStatus = nextStatus;
+      }
+    }
+    observeAlbumRoute(route, 200);
+    return route.fulfill({ json: { data: { changed }, requestId: 'request-a' } });
+  });
+
+  await page.route(`${base}/gallery**`, (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const search = query.get('query')?.toLocaleLowerCase() ?? '';
+    const favoritesOnly = query.get('favorites') === '1';
+    const order = query.get('order') === 'earliest' ? 'earliest' : 'newest';
+    const media = galleryMedia
+      .filter((photo) => !favoritesOnly || photo.isFavorite)
+      .filter((photo) => !search || [photo.caption, photo.originalFilename, photo.guestName]
+        .some((value) => value?.toLocaleLowerCase().includes(search)))
+      .toSorted((left, right) => order === 'earliest'
+        ? left.timelineAt.localeCompare(right.timelineAt)
+        : right.timelineAt.localeCompare(left.timelineAt));
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      json: { data: { media, nextCursor: null }, requestId: 'request-a' },
+    });
+  });
+
+  await page.route(new RegExp(`/api/manage/events/${event.id}/media/[^/?]+/favorite$`, 'u'), async (route) => {
+    await albumOptions.albumWriteGate;
+    const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    const favorite = (route.request().postDataJSON() as { favorite: boolean }).favorite;
+    const current = galleryMedia.find((item) => item.id === mediaId);
+    if (!current) {
+      observeAlbumRoute(route, 404);
+      return route.fulfill({
+        status: 404,
+        json: { code: 'MEDIA_NOT_FOUND', message: 'Photo not found.', requestId: 'request-a' },
+      });
+    }
+    if (favorite !== current.isFavorite) {
+      if (favorite) pickedMediaIds.add(mediaId);
+      else {
+        pickedMediaIds.delete(mediaId);
+        albumEntries = albumEntries.filter((entry) => entry.kind === 'section' || entry.mediaId !== mediaId);
+        if (albumCoverMediaId === mediaId) albumCoverMediaId = null;
+      }
+      albumRevision += 1;
+    }
+    const media = { ...current, isFavorite: favorite };
+    galleryMedia = galleryMedia.map((item) => item.id === mediaId ? media : item);
+    observeAlbumRoute(route, 200);
+    return route.fulfill({ json: { data: { media }, requestId: 'request-a' } });
+  });
+
+  // The list/create route comes after the legacy `/exports` route above. The
+  // download and retry handlers are still more exact and are registered last.
+  await page.route(`${base}/exports`, async (route) => {
+    const method = route.request().method();
+    if (method === 'POST') {
+      await albumOptions.exportGate;
+      const payload = requestBody(route) as { kind?: 'complete' | 'album' } | null;
+      const kind = payload?.kind === 'album' ? 'album' : 'complete';
+      const album = albumView();
+      const mediaCount = kind === 'album' ? album.photoCount : galleryMedia.length;
+      const job: ExportView = {
+        id: `${kind}-export-e2e`,
+        kind,
+        state: 'queued',
+        snapshotAt: '2026-08-23T12:00:00.000Z',
+        mediaCount,
+        totalBytes: mediaCount * 128,
+        attempt: 1,
+        partCount: 0,
+        expiresAt: null,
+        guestbookEntryCount: kind === 'album' ? null : guestbookItems.length,
+        guestbookSharedCount: kind === 'album' ? null : currentGuestbookSummary().sharedCount,
+        guestbookEventName: kind === 'album' ? null : event.name,
+        guestbookEventDate: kind === 'album' ? null : event.eventDate,
+        guestbookEventTimezone: kind === 'album' ? null : event.eventTimezone,
+        guestbookPrompt: kind === 'album' ? null : event.guestbookPrompt,
+        guestbookGalleryVisible: kind === 'album' ? null : event.galleryVisible,
+      };
+      exportJobs.unshift(job);
+      createdExportId = job.id;
+      createdExportReads = 0;
+      observeAlbumRoute(route, 202);
+      return route.fulfill({
+        status: 202,
+        json: { data: { export: job }, requestId: 'request-a' },
+      });
+    }
+
+    if (createdExportId) {
+      createdExportReads += 1;
+      const readyAfter = Math.max(1, albumOptions.exportReadyAfterReads ?? 2);
+      if (createdExportReads >= readyAfter) {
+        const index = exportJobs.findIndex(({ id }) => id === createdExportId);
+        const current = exportJobs[index];
+        if (current && current.state !== 'ready') {
+          exportJobs[index] = {
+            ...current,
+            state: 'ready',
+            partCount: current.mediaCount > 0 ? 1 : 0,
+            expiresAt: '2026-08-24T12:00:00.000Z',
+          };
+        }
+      }
+    }
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      json: { data: { exports: exportJobs }, requestId: 'request-a' },
+    });
+  });
+
+  await page.route(`${base}/exports/*/retry`, (route) => {
+    const exportId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    const index = exportJobs.findIndex(({ id }) => id === exportId);
+    if (index >= 0) exportJobs[index] = { ...exportJobs[index]!, state: 'queued', attempt: exportJobs[index]!.attempt + 1 };
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      json: { data: { export: index >= 0 ? exportJobs[index] : null }, requestId: 'request-a' },
+    });
+  });
+
+  await page.route(`${base}/exports/*/download`, (route) => {
+    const exportId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    const job = exportJobs.find(({ id }) => id === exportId);
+    const albumOnly = job?.kind === 'album';
+    const origin = new URL(route.request().url()).origin;
+    const download: ExportDownloadView = {
+      manifest: job && job.mediaCount > 0 ? {
+        url: `${origin}/downloads/${exportId}/manifest.csv`,
+        expiresAt: '2026-08-24T12:00:00.000Z',
+        filename: `${event.slug}-${albumOnly ? 'album-' : ''}manifest.csv`,
+      } : null,
+      parts: job && job.mediaCount > 0 ? [{
+        partNumber: 1,
+        mediaCount: job.mediaCount,
+        sourceBytes: job.totalBytes,
+        url: `${origin}/downloads/${exportId}/photos-1.zip`,
+        expiresAt: '2026-08-24T12:00:00.000Z',
+        filename: `${event.slug}-${albumOnly ? 'album-' : ''}photos-1.zip`,
+      }] : [],
+      printableGuestbook: albumOnly ? null : {
+        url: `${origin}/downloads/${exportId}/guestbook.pdf`,
+        expiresAt: '2026-08-24T12:00:00.000Z',
+        filename: `${event.slug}-guestbook.pdf`,
+      },
+      privateGuestbook: albumOnly ? null : {
+        url: `${origin}/downloads/${exportId}/guestbook-private.json`,
+        expiresAt: '2026-08-24T12:00:00.000Z',
+        filename: `${event.slug}-guestbook-private.json`,
+      },
+    };
+    observeAlbumRoute(route, job ? 200 : 404);
+    return route.fulfill(job
+      ? { json: { data: download, requestId: 'request-a' } }
+      : { status: 404, json: { code: 'EXPORT_NOT_FOUND', message: 'Export not found.', requestId: 'request-a' } });
+  });
+
+  await page.route('**/api/media/*/preview', async (route) => {
+    const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    await albumOptions.managerPreviewGates?.[mediaId];
+    const failed = managerPreviewFailures.has(mediaId);
+    observeAlbumRoute(route, failed ? 404 : 200);
+    return route.fulfill(failed
+      ? { status: 404, json: { code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' } }
+      : { status: 200, contentType: 'image/png', body: PHOTOGRAPHIC_COVER });
+  });
+
+  await page.route('**/api/media/*/original', (route) => {
+    observeAlbumRoute(route, 403);
+    return route.fulfill({
+      status: 403,
+      headers: { 'cache-control': 'private, no-store' },
+      json: { code: 'ORIGINAL_FORBIDDEN', message: 'Original access is not available.', requestId: 'request-a' },
+    });
+  });
+
+  const unavailableAlbum = (route: Route) => {
+    observeAlbumRoute(route, 410);
+    return route.fulfill({
+      status: 410,
+      headers: { 'cache-control': 'private, no-store' },
+      json: { code: 'ALBUM_SHARE_UNAVAILABLE', message: 'This album is not available.', requestId: 'request-a' },
+    });
+  };
+
+  // Broad public read first; exchange and media preview are more exact and win by
+  // being registered afterwards.
+  await page.route('**/api/album-share**', async (route) => {
+    await albumOptions.publicReadGate;
+    const cookie = route.request().headers().cookie ?? '';
+    if (!shareActive || !albumSessionActive || !cookie.includes('candidary_album=')) {
+      return unavailableAlbum(route);
+    }
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      headers: { 'cache-control': 'private, no-store' },
+      json: { data: { album: publicAlbumView() }, requestId: 'request-a' },
+    });
+  });
+
+  await page.route('**/api/album-share/exchange', async (route) => {
+    await albumOptions.exchangeGate;
+    const token = (route.request().postDataJSON() as { token?: string }).token;
+    if (!shareActive || token !== shareToken) return unavailableAlbum(route);
+    albumSessionActive = true;
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      headers: {
+        'cache-control': 'private, no-store',
+        'set-cookie': 'candidary_album=album-session.fixture-secret; Max-Age=3600; Path=/api/album-share; HttpOnly; Secure; SameSite=Strict',
+      },
+      json: { data: { album: publicAlbumView() }, requestId: 'request-a' },
+    });
+  });
+
+  await page.route('**/api/album-share/media/*/preview', async (route) => {
+    const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    await albumOptions.publicPreviewGates?.[mediaId];
+    const cookie = route.request().headers().cookie ?? '';
+    const permitted = shareActive
+      && albumSessionActive
+      && cookie.includes('candidary_album=')
+      && pickedMediaIds.has(mediaId);
+    if (!permitted || publicPreviewFailures.has(mediaId)) return unavailableAlbum(route);
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      status: 200,
+      headers: { 'cache-control': 'private, no-store' },
+      contentType: 'image/png',
+      body: PHOTOGRAPHIC_COVER,
+    });
+  });
+
+  return { ...audit, album: { requests: albumRequests } };
 }

@@ -1,7 +1,7 @@
 import { ImageOff } from 'lucide-react';
 import { useState } from 'react';
 
-import type { PublicAlbumView } from '../../../shared/contracts';
+import type { PublicAlbumEntryView, PublicAlbumView } from '../../../shared/contracts';
 import { publicAlbumPreview } from './album-share-api';
 
 function AlbumPreviewFallback({ label, className }: { label: string; className?: string }) {
@@ -34,8 +34,30 @@ function AlbumImage({ mediaId, alt, className }: {
   />;
 }
 
+type PublicPhotoEntry = Extract<PublicAlbumEntryView, { kind: 'photo' }>;
+
+interface PublicAlbumBlock {
+  key: string;
+  heading: string | null;
+  photos: Array<{ entry: PublicPhotoEntry; position: number }>;
+}
+
+function publicAlbumBlocks(entries: readonly PublicAlbumEntryView[]): PublicAlbumBlock[] {
+  const blocks: PublicAlbumBlock[] = [];
+  let position = 0;
+  for (const entry of entries) {
+    if (entry.kind === 'section') {
+      blocks.push({ key: `section:${entry.id}`, heading: entry.heading, photos: [] });
+      continue;
+    }
+    if (blocks.length === 0) blocks.push({ key: 'lead', heading: null, photos: [] });
+    position += 1;
+    blocks.at(-1)!.photos.push({ entry, position });
+  }
+  return blocks;
+}
+
 export function PublicAlbum({ album }: { album: PublicAlbumView }) {
-  let photoPosition = 0;
   return <main className="public-album">
     <header className="public-album__intro">
       {album.coverMediaId && <AlbumImage
@@ -50,24 +72,27 @@ export function PublicAlbum({ album }: { album: PublicAlbumView }) {
       </div>
     </header>
 
-    <div className="public-album__entries">
-      {album.entries.map((entry) => {
-        if (entry.kind === 'section') {
-          return <h2 className="public-album__section" key={entry.id}>{entry.heading}</h2>;
-        }
-        photoPosition += 1;
-        const position = photoPosition;
-        const label = entry.photo.caption?.trim() || `Album photo ${position}`;
-        return <figure className="public-album__photo" key={entry.photo.id}>
-          {entry.photo.previewAvailable
-            ? <AlbumImage
-                mediaId={entry.photo.id}
-                alt={label}
-              />
-            : <AlbumPreviewFallback label={label} />}
-          {entry.photo.caption && <figcaption>{entry.photo.caption}</figcaption>}
-        </figure>;
-      })}
+    <div className="public-album__blocks">
+      {publicAlbumBlocks(album.entries).map((block) => <section
+        className="public-album__block"
+        key={block.key}
+      >
+        {block.heading && <h2 className="public-album__section">{block.heading}</h2>}
+        {block.photos.length > 0 && <div className="public-album__photos">
+          {block.photos.map(({ entry, position }) => {
+            const label = entry.photo.caption?.trim() || `Album photo ${position}`;
+            return <figure className="public-album__photo" key={entry.photo.id}>
+              {entry.photo.previewAvailable
+                ? <AlbumImage
+                    mediaId={entry.photo.id}
+                    alt={label}
+                  />
+                : <AlbumPreviewFallback label={label} />}
+              {entry.photo.caption && <figcaption>{entry.photo.caption}</figcaption>}
+            </figure>;
+          })}
+        </div>}
+      </section>)}
     </div>
   </main>;
 }

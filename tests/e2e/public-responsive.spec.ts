@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
-import { EVENT_FIXTURE } from './fixtures/routes';
-import { UNBROKEN_TOKEN } from './fixtures/ui-data';
+import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
+import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
 import {
   measureDocument,
   measureFold,
@@ -331,4 +331,70 @@ test('a refused deadline takes focus and reads as a description at 320', async (
 
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+test('a long public album keeps its cover, sections, captions, failed preview, and paper inside phones', async ({ page }) => {
+  const token = 'album-share-id.album-share-secret';
+  const title = `Album${'MayaTheo'.repeat(14)}`.slice(0, 120);
+  const description = `Story${'kepttogether'.repeat(90)}`.slice(0, 1_000);
+  const heading = `Dinner${'anddancing'.repeat(8)}`.slice(0, 80);
+  const caption = `Photograph${'fromtheevening'.repeat(18)}`;
+  const rows = makeMedia(18, 'unpublished').map((item, index) => ({
+    ...item,
+    originalFilename: `private-${index + 1}.jpg`,
+    caption: index === 1 ? caption : `Album photograph ${index + 1}`,
+  }));
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    album: {
+      pickedMediaIds: rows.map(({ id }) => id),
+      title,
+      description,
+      coverMediaId: rows[0]!.id,
+      entries: [
+        { kind: 'photo', mediaId: rows[0]!.id },
+        { kind: 'section', id: 'section-long', heading },
+        ...rows.slice(1).map(({ id }) => ({ kind: 'photo' as const, mediaId: id })),
+      ],
+      publicPreviewFailures: [rows[2]!.id],
+      shareActive: true,
+      shareToken: token,
+    },
+  });
+
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    // Moving only from `/album` to `/album#token` is a same-document navigation;
+    // begin a fresh page mount so each phone width proves the fragment exchange.
+    await page.goto('/');
+    await page.goto(`/album#${token}`);
+    await expect(page).toHaveURL(/\/album$/u);
+    await expect(page.getByRole('heading', { level: 1, name: title })).toBeVisible();
+    await expect(page.getByRole('img', { name: `Cover for ${title}` })).toBeVisible();
+    await expect(page.getByRole('heading', { name: heading })).toBeVisible();
+    await expect(page.getByText(caption)).toBeVisible();
+    await expect(page.getByText('Preview unavailable')).toHaveCount(1);
+    await expect(page.locator('.public-album__block')).toHaveCount(2);
+    await expect(page.locator('.public-album__photo')).toHaveCount(rows.length);
+
+    for (const element of [
+      page.locator('.public-album__copy h1'),
+      page.locator('.public-album__copy p'),
+      page.locator('.public-album__section'),
+      page.locator('.public-album__photo figcaption').filter({ hasText: caption }),
+    ]) {
+      const size = await measureOverflow(element);
+      expect(size.scrollWidth, `public album text wraps at ${width}`)
+        .toBeLessThanOrEqual(size.clientWidth + 1);
+    }
+    const controls = page.locator('.public-album-shell a, .public-album-shell button');
+    for (let index = 0; index < await controls.count(); index += 1) {
+      const target = await measureTarget(controls.nth(index));
+      expect(target.width, `public album control ${index + 1} width at ${width}`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `public album control ${index + 1} height at ${width}`).toBeGreaterThanOrEqual(44);
+    }
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth, `public album document at ${width}`)
+      .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
 });

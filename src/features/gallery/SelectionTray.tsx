@@ -23,11 +23,11 @@ interface SelectionTrayProps {
  */
 export function SelectionTray({ count, busy, onAdd, onRemove, onClear }: SelectionTrayProps) {
   const photos = `${count} photo${count === 1 ? '' : 's'}`;
-  return <div className="selection-tray" role="group" aria-label="Selected photos">
+  return <div className="selection-tray" role="region" aria-label="Album">
     <div className="selection-tray__inner">
       <div className="selection-tray__count">
         <strong>{photos} selected</strong>
-        <span>Adding to the album never publishes anything to guests.</span>
+        <span>Adding does not publish anything, and removing keeps the delivered original.</span>
       </div>
       <div className="selection-tray__actions">
         <button

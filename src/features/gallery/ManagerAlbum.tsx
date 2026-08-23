@@ -1426,7 +1426,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 </section>
 
                 <header className="album-order-heading">
-                  <p className="section-label">The order guests will see</p>
+                  <h3 className="section-label">The order guests will see</h3>
                   <button type="button" className="button button--secondary" onClick={addSection}>
                     <Plus aria-hidden="true" /> Add a section
                   </button>

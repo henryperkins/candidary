@@ -4,6 +4,7 @@ import { MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type * as ManagementLinkModule from '../../src/app/management-link';
+import type { MediaView } from '../../src/app/types';
 
 const { replaceManagementLocation } = vi.hoisted(() => ({
   replaceManagementLocation: vi.fn(),
@@ -1415,7 +1416,7 @@ describe('manager experience', () => {
       expect(document.querySelectorAll('.moderation-grid article'), label).toHaveLength(2);
     }
 
-    await user.click(screen.getByRole('checkbox', { name: 'Select moment-2.jpg' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select Moment 2' }));
     await expectRecoverableFailure(
       'bulk publish',
       () => user.click(screen.getByRole('button', { name: 'Publish selected' })),
@@ -2228,7 +2229,7 @@ describe('manager experience', () => {
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Shared' }));
-    await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
+    await user.click(screen.getByRole('checkbox', { name: /The toast/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/manage/events/event-a/media/bulk',
@@ -2236,6 +2237,108 @@ describe('manager experience', () => {
     ));
     const bulkCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/media/bulk'));
     expect(bulkCall?.[1]?.body).not.toContain('media-b');
+  });
+
+  it('keeps Shared publication separate, clears filters, and scopes its busy and preview states', async () => {
+    const rows: MediaView[] = [
+      {
+        id: 'media-a', originalFilename: 'private-camera-a.jpg', guestName: 'Avery',
+        caption: 'The toast', publicationStatus: 'unpublished', uploadState: 'stored',
+      },
+      {
+        id: 'media-b', originalFilename: 'private-camera-b.jpg', guestName: 'Jamie',
+        caption: 'First dance', publicationStatus: 'unpublished', uploadState: 'stored',
+      },
+    ];
+    let releaseBulk!: () => void;
+    const bulkGate = new Promise<void>((resolve) => { releaseBulk = resolve; });
+    let failBulk = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/bulk') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { ids: string[]; action: 'publish' | 'hide' };
+        await bulkGate;
+        if (failBulk) {
+          return errorJson({
+            code: 'INTERNAL_ERROR', message: 'The selected photos could not be published.', requestId: 'request-a',
+          }, 500);
+        }
+        for (const row of rows) {
+          if (body.ids.includes(row.id)) row.publicationStatus = body.action === 'publish' ? 'published' : 'hidden';
+        }
+        return json({ changed: body.ids });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) {
+        return json({ event: { ...MANAGED_EVENT, storedMediaCount: rows.length } });
+      }
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({ media: rows, nextCursor: null });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) {
+        return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      }
+      throw new Error(`Unexpected request ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+
+    expect(screen.getByText(
+      'Publication is a separate axis from the album. A photo is delivered privately whether or not it is published, and an album pick never publishes anything.',
+    )).toBeVisible();
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    const images = shared.querySelectorAll<HTMLImageElement>('.intake-photo img');
+    expect(images).toHaveLength(2);
+    fireEvent.error(images[0]!);
+    expect(within(shared).getByText('Preview unavailable')).toBeVisible();
+    expect(images[1]).toBeVisible();
+
+    const toast = within(shared).getByRole('checkbox', { name: 'Select The toast' });
+    await user.click(toast);
+    expect(toast).toBeChecked();
+    await user.click(within(shared).getByRole('button', { name: 'Published' }));
+    expect(toast).not.toBeChecked();
+    expect(within(shared).getByRole('button', { name: 'Publish selected' })).toBeDisabled();
+    expect(within(shared).getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+
+    await user.click(within(shared).getByRole('button', { name: 'Unpublished' }));
+    await user.click(toast);
+    await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
+    const publishing = within(shared).getByRole('button', { name: 'Publishing…' });
+    expect(publishing).toBeDisabled();
+    expect(publishing).toHaveAttribute('aria-busy', 'true');
+    expect(within(shared).getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+    expect(within(shared).queryByRole('button', { name: 'Hiding…' })).not.toBeInTheDocument();
+    expect(within(shared).getByText('1 selected').closest('.bulk-bar')).toHaveAttribute('aria-busy', 'true');
+    expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
+    expect(shared.querySelector('[role="status"]')).toBeNull();
+
+    releaseBulk();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/manage/events/event-a/media/bulk',
+      expect.objectContaining({ body: expect.stringContaining('media-a') }),
+    ));
+
+    failBulk = true;
+    const firstDance = await within(shared).findByRole('checkbox', { name: 'Select First dance' });
+    await user.click(firstDance);
+    await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
+    await screen.findByText('The selected photos could not be published.');
+    const liveStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    expect(liveStatus).toHaveTextContent('Publishing could not be completed.');
+    expect(liveStatus).not.toHaveTextContent('Publishing finished.');
   });
 
   it('drains Album work before a manager-section change and a router unmount', async () => {

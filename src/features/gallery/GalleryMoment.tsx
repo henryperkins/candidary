@@ -76,7 +76,7 @@ function GalleryTile({
           type="button"
           className="gallery-mosaic__open gallery-mosaic__select"
           aria-pressed={selected}
-          aria-label={`Select ${title}, from ${photo.guestName}`}
+          aria-label={`${selected ? 'Deselect' : 'Select'} ${title}, from ${photo.guestName}`}
           onClick={() => onToggleSelected(photo)}
         >
           <span className="gallery-mosaic__checkbox" aria-hidden="true">
@@ -98,14 +98,20 @@ function GalleryTile({
             type="button"
             className="gallery-mosaic__favorite"
             aria-pressed={photo.isFavorite}
+            aria-label={photo.isFavorite
+              ? `Remove ${title} from the album`
+              : `Add ${title} to the album`}
             disabled={favoritePending}
             onClick={() => onFavorite(photo)}
           >
             {photo.isFavorite ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" />}
             <span className="sr-only">
-              {photo.isFavorite ? `In the album: ${title}` : `Not in the album: ${title}`}
+              {photo.isFavorite ? 'In the album' : 'Not in the album'}
             </span>
           </button>
+          {photo.isFavorite && <span className="gallery-mosaic__album-badge" aria-hidden="true">
+            In album
+          </span>}
         </>}
     {/* Only the hero carries a visible caption. On a unit tile the band covered ~59% of the
         photograph to restate a camera filename the open control already announces, and its
@@ -144,6 +150,7 @@ export function GalleryMoment({
 }: GalleryMomentProps) {
   const [expanded, setExpanded] = useState(false);
   const photos = expanded ? moment.photos : moment.photos.slice(0, COMPACT_MOSAIC_LIMIT);
+  const wholeMomentSelected = moment.photos.every((photo) => selectedIds.has(photo.id));
 
   return <section className="gallery-moment" aria-labelledby={`moment-heading-${moment.key}`}>
     <header className="gallery-moment__heading">
@@ -157,7 +164,7 @@ export function GalleryMoment({
         type="button"
         className="gallery-moment__select"
         onClick={() => onSelectMoment(moment.photos)}
-      >Select this moment</button>}
+      >{wholeMomentSelected ? 'Clear this moment' : 'Select this moment'}</button>}
     </header>
     <div className="gallery-mosaic" id={`moment-photos-${moment.key}`}>
       {photos.map((photo, index) => (

@@ -1,4 +1,4 @@
-import { ListChecks, Search, X } from 'lucide-react';
+import { Check, ListChecks, Search, X } from 'lucide-react';
 import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 
 import { api, ClientApiError } from '../../app/api';
@@ -160,6 +160,11 @@ export function ManagerPrivateGallery({
   useEffect(() => {
     if (!live && undo.error) onAnnouncement?.(undo.error);
   }, [live, onAnnouncement, undo.error]);
+  useEffect(() => {
+    if (!live && undo.offer) {
+      onAnnouncement?.(`${undo.offer.message} Undo is available for nine seconds.`);
+    }
+  }, [live, onAnnouncement, undo.offer]);
 
   const galleryPath = useCallback((
     nextQuery: string,
@@ -267,10 +272,16 @@ export function ManagerPrivateGallery({
   }, [rowState.focusRequest]);
 
   useEffect(() => {
-    if (active || viewerPhotoId === null) return;
-    setViewerPhotoId(null);
-    viewerOrigin.current = null;
-  }, [active, viewerPhotoId]);
+    if (active) return;
+    if (selectedIds.size > 0) {
+      setSelectedIds(new Set());
+      setAnnouncement('Selection cleared.');
+    }
+    if (viewerPhotoId !== null) {
+      setViewerPhotoId(null);
+      viewerOrigin.current = null;
+    }
+  }, [active, selectedIds.size, viewerPhotoId]);
 
   /**
    * The viewer inerts the rest of the document while it is open, and an inert element
@@ -442,7 +453,8 @@ export function ManagerPrivateGallery({
     setFavoritesOnly((current) => !current);
   }
 
-  function clearSelection() {
+  function clearSelection(announce = true) {
+    if (selectedIds.size > 0 && announce) setAnnouncement('Selection cleared.');
     setSelectedIds(new Set());
   }
 
@@ -456,9 +468,13 @@ export function ManagerPrivateGallery({
   function toggleSelected(photo: ManagerGalleryMediaView) {
     setSelectedIds((current) => {
       const next = new Set(current);
-      if (next.has(photo.id)) next.delete(photo.id);
-      else if (next.size < MANAGER_BULK_SELECTION_MAX) next.add(photo.id);
-      else {
+      if (next.has(photo.id)) {
+        next.delete(photo.id);
+        setAnnouncement(`${galleryPhotoTitle(photo)} deselected. ${next.size} selected.`);
+      } else if (next.size < MANAGER_BULK_SELECTION_MAX) {
+        next.add(photo.id);
+        setAnnouncement(`${galleryPhotoTitle(photo)} selected. ${next.size} selected.`);
+      } else {
         setAnnouncement(`${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once. Add these first, then select more.`);
         return current;
       }
@@ -490,6 +506,37 @@ export function ManagerPrivateGallery({
   }
 
   /**
+   * Moment selection is a toggle across the whole run, including photos hidden behind
+   * the compact eight-tile view. Clearing is checked before the cap, so a full fifty-photo
+   * selection can always be backed out of in one action.
+   */
+  function toggleMoment(photos: readonly ManagerGalleryMediaView[]) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (photos.every((photo) => next.has(photo.id))) {
+        for (const photo of photos) next.delete(photo.id);
+        setAnnouncement(
+          `${photos.length} photo${photos.length === 1 ? '' : 's'} cleared from this moment. ${next.size} selected in total.`,
+        );
+        return next;
+      }
+
+      let added = 0;
+      for (const photo of photos) {
+        if (next.has(photo.id)) continue;
+        if (next.size >= MANAGER_BULK_SELECTION_MAX) break;
+        next.add(photo.id);
+        added += 1;
+      }
+      const unselected = photos.filter((photo) => !current.has(photo.id)).length;
+      setAnnouncement(added < unselected
+        ? `${added} of ${photos.length} photos in this moment selected. ${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once.`
+        : `${added} photo${added === 1 ? '' : 's'} selected from this moment. ${next.size} selected in total.`);
+      return next;
+    });
+  }
+
+  /**
    * The tray's two verbs. The write reports which photos it actually changed, and undo
    * reverses exactly that — so undoing `Add 12 to album` over a page where four were
    * already in leaves those four in, which is the only reading of undo that is not a
@@ -514,7 +561,7 @@ export function ManagerPrivateGallery({
         dispatchRows({ type: 'favorite', id, favorite: picked });
       }
       onPicksChanged();
-      clearSelection();
+      clearSelection(false);
       setSelecting(false);
       const verb = picked ? 'added to' : 'removed from';
       setAnnouncement(changed.length === 0
@@ -616,7 +663,7 @@ export function ManagerPrivateGallery({
         onOpen={openViewer}
         onFavorite={(photo) => void toggleFavorite(photo)}
         onToggleSelected={toggleSelected}
-        onSelectMoment={(photos) => selectMany(photos, 'this moment')}
+        onSelectMoment={toggleMoment}
       />
     </div>;
   }
@@ -645,7 +692,7 @@ export function ManagerPrivateGallery({
           className="button button--secondary gallery-search__favorites"
           aria-pressed={favoritesOnly}
           onClick={toggleFavorites}
-        >Album picks{pickCount > 0 ? ` (${pickCount})` : ''}</button>
+        ><Check aria-hidden="true" /> Album picks{pickCount > 0 ? ` (${pickCount})` : ''}</button>
       </div>
     </form>
     {/* Named for the photograph the host lands on, not for the sort key. "Newest first"

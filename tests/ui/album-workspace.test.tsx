@@ -392,18 +392,105 @@ describe('selecting photos into the album', () => {
     const user = userEvent.setup();
     await screen.findByText('First dance');
 
-    expect(screen.queryByRole('group', { name: 'Selected photos' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /Select photos/ }));
     await user.click(await screen.findByRole('button', { name: /^Select First dance/ }));
 
-    const tray = await screen.findByRole('group', { name: 'Selected photos' });
+    const tray = await screen.findByRole('region', { name: 'Album' });
     expect(within(tray).getByText('1 photo selected')).toBeVisible();
-    expect(within(tray).getByText(/never publishes anything to guests/)).toBeVisible();
+    expect(within(tray).getByText(
+      'Adding does not publish anything, and removing keeps the delivered original.',
+    )).toBeVisible();
+    const galleryStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    expect(galleryStatus).toHaveTextContent('First dance selected. 1 selected.');
 
     await user.click(within(tray).getByRole('button', { name: 'Add 1 to album' }));
     await waitFor(() => expect(state.pickWrites).toEqual([{ mediaIds: ['p1'], picked: true }]));
-    await waitFor(() => expect(screen.queryByRole('group', { name: 'Selected photos' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument());
+    expect(galleryStatus).toHaveTextContent(
+      '1 photo added to the album. Nothing was published. Undo is available for nine seconds.',
+    );
+    expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
+  });
+
+  it('names pick and selection state independently and shows the album badge', async () => {
+    const { fetchMock } = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', {
+          caption: 'First dance',
+          isFavorite: true,
+        }),
+        photo('p2', '2026-08-15T22:43:00.000Z'),
+      ],
+    });
+    renderWorkspace(fetchMock);
+    const user = userEvent.setup();
+    await screen.findByText('First dance');
+
+    expect(screen.getByRole('button', {
+      name: 'Remove First dance from the album',
+    })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', {
+      name: 'Add p2.jpg to the album',
+    })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('In the album')).toHaveClass('sr-only');
+    expect(screen.getByText('Not in the album')).toHaveClass('sr-only');
+    expect(screen.getByText('In album')).toBeVisible();
+
+    const picks = screen.getByRole('button', { name: 'Album picks (1)' });
+    expect(picks.querySelector('.lucide-check')).not.toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
+    const first = screen.getByRole('button', { name: 'Select First dance, from Jose' });
+    await user.click(first);
+    expect(screen.getByRole('button', {
+      name: 'Deselect First dance, from Jose',
+    })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(within(screen.getByRole('region', { name: 'Album' }))
+      .getByRole('button', { name: 'Clear selection' }));
+    expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
+      .toHaveTextContent('Selection cleared.');
+  });
+
+  it('selects and clears an entire collapsed moment, including at the selection cap', async () => {
+    const rows = Array.from({ length: 50 }, (_, index) => photo(
+      `p${index + 1}`,
+      new Date(Date.parse('2026-08-15T22:42:00.000Z') + index * 1_000).toISOString(),
+    ));
+    const { fetchMock } = harness({ galleryRows: rows });
+    renderWorkspace(fetchMock);
+    const user = userEvent.setup();
+    await screen.findByText('p1.jpg');
+
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
+    expect(document.querySelectorAll('.gallery-mosaic__item')).toHaveLength(8);
+    await user.click(screen.getByRole('button', { name: 'Select this moment' }));
+    expect(await screen.findByRole('region', { name: 'Album' })).toHaveTextContent('50 photos selected');
+    expect(screen.getByRole('button', { name: 'Clear this moment' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: 'Clear this moment' }));
+    expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select this moment' })).toBeEnabled();
+  });
+
+  it('clears Library selection when its Gallery mode is left', async () => {
+    const { fetchMock } = harness();
+    renderWorkspace(fetchMock);
+    const user = userEvent.setup();
+    await screen.findByText('First dance');
+
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
+    await user.click(screen.getByRole('button', { name: 'Select First dance, from Jose' }));
+    expect(screen.getByRole('region', { name: 'Album' })).toBeVisible();
+
+    const modes = screen.getByRole('group', { name: 'Gallery mode' });
+    await user.click(within(modes).getByRole('button', { name: 'Shared' }));
+    await user.click(within(modes).getByRole('button', { name: 'Library' }));
+    expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'Select First dance, from Jose',
+    })).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('offers an undo that names what survived, and reverses only what changed', async () => {
@@ -424,8 +511,14 @@ describe('selecting photos into the album', () => {
 
     // p2 was already in the album, so only p1 changed and only p1 comes back out.
     expect(await screen.findByText('1 photo added to the album. Nothing was published.')).toBeVisible();
+    const galleryStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    expect(galleryStatus).toHaveTextContent(
+      '1 photo added to the album. Nothing was published. Undo is available for nine seconds.',
+    );
     await user.click(screen.getByRole('button', { name: 'Undo' }));
     await waitFor(() => expect(state.pickWrites.at(-1)).toEqual({ mediaIds: ['p1'], picked: false }));
+    expect(galleryStatus).toHaveTextContent('1 photo removed from the album.');
+    expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
     expect(state.galleryRows.find((item) => item.id === 'p2')?.isFavorite).toBe(true);
   });
 });
@@ -2044,7 +2137,7 @@ describe('album review regressions', () => {
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
     await screen.findByText('First dance');
-    await user.click(screen.getByRole('button', { name: /not in the album: first dance/i }));
+    await user.click(screen.getByRole('button', { name: 'Add First dance to the album' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('500 photos and sections');
     expect(controlled.state.pickWrites).toHaveLength(0);
 

@@ -208,12 +208,16 @@ export function GalleryViewer({
         type="button"
         className="gallery-viewer__favorite"
         aria-pressed={photo.isFavorite}
+        aria-label={photo.isFavorite
+          ? `Remove ${title} from the album`
+          : `Add ${title} to the album`}
         disabled={favoritePendingIds.has(photo.id)}
         onClick={() => onFavorite(photo)}
       >
         {photo.isFavorite
-          ? <><Check aria-hidden="true" /> In the album</>
+          ? <><Check aria-hidden="true" /> <span aria-hidden="true">In album</span></>
           : <><Plus aria-hidden="true" /> Add to album</>}
+        <span className="sr-only">{photo.isFavorite ? 'In the album' : 'Not in the album'}</span>
       </button>
     </div>
   </div>, host);

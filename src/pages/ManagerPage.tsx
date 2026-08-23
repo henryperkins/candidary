@@ -528,12 +528,13 @@ export function ManagerPage() {
 
   // Every host mutation reports through here, so a rejected write leaves the current cards, filters,
   // and section exactly where they were and only adds a dismissible notice.
-  async function runManagerAction(action: () => Promise<void>) {
+  async function runManagerAction(action: () => Promise<void>, rethrow = false) {
     setActionError(null);
     try {
       await action();
     } catch (caught) {
       setActionError(managerNoticeFor(caught, 'The manager action could not be completed.'));
+      if (rethrow) throw caught;
     }
   }
 
@@ -990,7 +991,7 @@ export function ManagerPage() {
             setSelected([]);
           },
           onSelectedChange: setSelected,
-          onBulk: (action) => runManagerAction(() => bulk(action)),
+          onBulk: (action) => runManagerAction(() => bulk(action), true),
           onChangePublication: (item, action) => runManagerAction(() => changePublication(item, action)),
           loadingMore,
           hasMore: Boolean(nextMediaCursor),

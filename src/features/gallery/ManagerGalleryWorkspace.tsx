@@ -252,7 +252,12 @@ ManagerGalleryWorkspaceProps
     </div>}
 
     <div className="gallery-shared-mode" hidden={mode !== 'shared'}>
-      <ManagerSharedGallery event={event} {...shared} live={false} />
+      <ManagerSharedGallery
+        event={event}
+        {...shared}
+        live={false}
+        onAnnouncement={setAnnouncement}
+      />
     </div>
     </section>
   </>;
