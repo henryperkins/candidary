@@ -10,6 +10,7 @@ type CompleteExportView = ExportView | Omit<ExportView, 'kind'>;
 
 interface GalleryExportControlProps {
   job?: CompleteExportView;
+  activeJob?: ExportView;
   download?: ExportDownloadView;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
@@ -56,12 +57,14 @@ const DESKTOP_ADVISORY_BYTES = 2 * 1024 ** 3;
  */
 export function GalleryExportControl({
   job,
+  activeJob,
   download,
   onPrepare,
   onDownload,
   onRetry,
 }: GalleryExportControlProps) {
   const [preparing, setPreparing] = useState(false);
+  const otherExportActive = activeJob !== undefined && activeJob.id !== job?.id;
   // One live region that outlives every branch below. A `role="status"` inserted alongside its own
   // first text is not announced, and the prepare button cannot carry the news either: it is disabled
   // the moment it is pressed, which blurs it. So the region is mounted outside the branch and filled
@@ -80,7 +83,7 @@ export function GalleryExportControl({
           <button
             type="button"
             className="button button--primary"
-            disabled={preparing}
+            disabled={preparing || otherExportActive}
             onClick={() => {
               setPreparing(true);
               void onPrepare().finally(() => setPreparing(false));
@@ -117,7 +120,12 @@ export function GalleryExportControl({
             {download.privateGuestbook && <a href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
           </div>}
           {(job.state === 'failed' || job.state === 'expired') && (
-            <button type="button" className="button button--secondary" onClick={() => void onRetry(job as ExportView)}>
+            <button
+              type="button"
+              className="button button--secondary"
+              disabled={otherExportActive}
+              onClick={() => void onRetry(job as ExportView)}
+            >
               Retry export
             </button>
           )}

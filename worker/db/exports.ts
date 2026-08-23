@@ -191,6 +191,26 @@ function photoPartsComplete(parts: ReadyExportPart[]): boolean {
   ));
 }
 
+function batchRow<T>(result: D1Result | undefined): T | null {
+  return (result?.results[0] as T | undefined) ?? null;
+}
+
+function albumGuestbookFieldsEmpty(job: ExportRecord): boolean {
+  return job.guestbookEntryCount === null
+    && job.guestbookSharedCount === null
+    && job.guestbookEventName === null
+    && job.guestbookEventDate === null
+    && job.guestbookEventTimezone === null
+    && job.guestbookPrompt === null
+    && job.guestbookGalleryVisible === null
+    && job.guestbookHtmlObjectKey === null
+    && job.guestbookHtmlBytes === null
+    && job.guestbookHtmlSha256 === null
+    && job.guestbookCsvObjectKey === null
+    && job.guestbookCsvBytes === null
+    && job.guestbookCsvSha256 === null;
+}
+
 export class ExportsRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -275,8 +295,7 @@ export class ExportsRepository {
             WHERE event_id = events.id AND deleted_at IS NULL AND created_at <= ?3)
         )
     `).bind(input.id, input.eventId, input.snapshotAt, input.createdAt, MAX_EVENT_BYTES);
-    try {
-      const results = await this.db.batch([
+    const results = await this.db.batch([
         first,
         this.db.prepare(`
           INSERT INTO export_media_entries (
@@ -303,15 +322,16 @@ export class ExportsRepository {
           eventId: input.eventId,
           snapshotAt: input.snapshotAt,
         }),
+        this.db.prepare(`
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM export_jobs
+            WHERE event_id = ?1 AND id <> ?2 AND state IN ('queued', 'running')
+          ) THEN 1 ELSE 0 END AS active_conflict
+        `).bind(input.eventId, input.id),
       ]);
-      if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
-    } catch (error) {
-      const active = await this.hasActive(input.eventId);
-      if (active) throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
-      throw error;
-    }
-
-    if (await this.hasActive(input.eventId)) {
+    if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
+    const conflict = batchRow<{ active_conflict: number }>(results.at(-1));
+    if (conflict?.active_conflict === 1) {
       throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
     }
     const discriminators = await this.db.prepare(`
@@ -356,13 +376,23 @@ export class ExportsRepository {
         id, event_id, kind, album_entries_json, state, snapshot_at,
         media_count, total_bytes, attempt, created_at
       )
-      SELECT ?1, events.id, 'album', json(event_albums.entries), 'queued', ?3,
+      SELECT ?1, events.id, 'album',
+        CASE
+          WHEN json_valid(event_albums.entries) THEN CASE
+            WHEN json_type(event_albums.entries) = 'array' THEN json(event_albums.entries)
+            ELSE '[]'
+          END
+          ELSE '[]'
+        END,
+        'queued', ?3,
         (SELECT count(*) FROM media
           WHERE event_id = events.id AND upload_state = 'stored'
-            AND deleted_at IS NULL AND favorited_at IS NOT NULL AND created_at <= ?3),
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3),
         COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
           WHERE event_id = events.id AND upload_state = 'stored'
-            AND deleted_at IS NULL AND favorited_at IS NOT NULL AND created_at <= ?3), 0),
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3), 0),
         1, ?4
       FROM events
       JOIN event_albums ON event_albums.event_id = events.id
@@ -374,7 +404,8 @@ export class ExportsRepository {
         AND NOT EXISTS (
           SELECT 1 FROM media
           WHERE event_id = events.id AND upload_state = 'stored'
-            AND deleted_at IS NULL AND favorited_at IS NOT NULL AND created_at <= ?3
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3
             AND (
               object_bucket_generation <> 'canonical'
               OR object_key <> 'events/' || events.id || '/media/final/' || media.id
@@ -382,15 +413,16 @@ export class ExportsRepository {
         )
         AND COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
           WHERE event_id = events.id AND upload_state = 'stored'
-            AND deleted_at IS NULL AND favorited_at IS NOT NULL AND created_at <= ?3), 0) <= ?5
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3), 0) <= ?5
         AND EXISTS (
           SELECT 1 FROM media
           WHERE event_id = events.id AND upload_state = 'stored'
-            AND deleted_at IS NULL AND favorited_at IS NOT NULL AND created_at <= ?3
+            AND deleted_at IS NULL AND created_at <= ?3
+            AND stored_at <= ?3 AND favorited_at <= ?3
         )
     `).bind(input.id, input.eventId, input.snapshotAt, input.createdAt, MAX_EVENT_BYTES);
-    try {
-      const results = await this.db.batch([
+    const results = await this.db.batch([
         first,
         this.db.prepare(`
           INSERT INTO export_media_entries (
@@ -405,7 +437,7 @@ export class ExportsRepository {
             row_number() OVER (ORDER BY timeline_at ASC, id ASC)
           FROM media
           WHERE event_id = ?2 AND upload_state = 'stored' AND deleted_at IS NULL
-            AND favorited_at IS NOT NULL AND created_at <= ?3
+            AND created_at <= ?3 AND stored_at <= ?3 AND favorited_at <= ?3
             AND object_bucket_generation = 'canonical'
             AND object_key = 'events/' || ?2 || '/media/final/' || media.id
             AND EXISTS (
@@ -415,27 +447,27 @@ export class ExportsRepository {
             )
           ORDER BY timeline_at ASC, id ASC
         `).bind(input.id, input.eventId, input.snapshotAt),
+        this.db.prepare(`
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM export_jobs
+            WHERE event_id = ?1 AND id <> ?2 AND state IN ('queued', 'running')
+          ) THEN 1 ELSE 0 END AS active_conflict
+        `).bind(input.eventId, input.id),
       ]);
-      if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
-    } catch (error) {
-      if (await this.hasActive(input.eventId)) {
-        throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
-      }
-      throw error;
-    }
-
-    if (await this.hasActive(input.eventId)) {
+    if ((results[0]?.meta.changes ?? 0) === 1) return (await this.getById(input.id))!;
+    const conflict = batchRow<{ active_conflict: number }>(results.at(-1));
+    if (conflict?.active_conflict === 1) {
       throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
     }
     const discriminators = await this.db.prepare(`
       SELECT
         COALESCE((SELECT sum(COALESCE(byte_size, declared_byte_size)) FROM media
           WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
-            AND favorited_at IS NOT NULL AND created_at <= ?2), 0) AS total_bytes,
+            AND created_at <= ?2 AND stored_at <= ?2 AND favorited_at <= ?2), 0) AS total_bytes,
         CASE WHEN EXISTS (
           SELECT 1 FROM media
           WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
-            AND favorited_at IS NOT NULL AND created_at <= ?2
+            AND created_at <= ?2 AND stored_at <= ?2 AND favorited_at <= ?2
             AND (
               object_bucket_generation <> 'canonical'
               OR object_key <> 'events/' || ?1 || '/media/final/' || media.id
@@ -444,7 +476,7 @@ export class ExportsRepository {
         CASE WHEN EXISTS (
           SELECT 1 FROM media
           WHERE event_id = ?1 AND upload_state = 'stored' AND deleted_at IS NULL
-            AND favorited_at IS NOT NULL AND created_at <= ?2
+            AND created_at <= ?2 AND stored_at <= ?2 AND favorited_at <= ?2
         ) THEN 0 ELSE 1 END AS is_empty
     `).bind(input.eventId, input.snapshotAt).first<{
       total_bytes: number;
@@ -464,15 +496,9 @@ export class ExportsRepository {
     throw new ApiError('EXPORT_EMPTY', 'Pick a photo before preparing an album export.', 409);
   }
 
-  private async hasActive(eventId: string): Promise<boolean> {
-    return Boolean(await this.db.prepare(`
-      SELECT 1 FROM export_jobs WHERE event_id = ? AND state IN ('queued', 'running') LIMIT 1
-    `).bind(eventId).first());
-  }
-
   async listForEvent(eventId: string): Promise<ExportRecord[]> {
     const result = await this.db.prepare(`
-      SELECT * FROM export_jobs WHERE event_id = ? ORDER BY created_at DESC
+      SELECT * FROM export_jobs WHERE event_id = ? ORDER BY created_at DESC, id DESC
     `).bind(eventId).all<ExportRow>();
     return result.results.map(mapExport);
   }
@@ -599,8 +625,8 @@ export class ExportsRepository {
       if (job.albumEntriesJson === null) {
         throw new Error('An album export requires frozen album order.');
       }
-      if (inventory.guestbook !== null) {
-        throw new Error('An album export cannot contain Guestbook inventory.');
+      if (!albumGuestbookFieldsEmpty(job) || inventory.guestbook !== null) {
+        throw new Error('An album export cannot contain Guestbook data.');
       }
       if (!inventory.manifestObjectKey || !inventory.parts.length) {
         throw new Error('An album export requires a manifest and parts.');
@@ -701,10 +727,28 @@ export class ExportsRepository {
     return (await this.getById(id))!;
   }
 
+  async markInitialDispatchFailed(id: string, errorCode: string): Promise<{
+    changed: boolean;
+    job: ExportRecord | null;
+  }> {
+    const result = await this.db.prepare(`
+      UPDATE export_jobs SET state = 'failed', error_code = ?2
+      WHERE id = ?1 AND state = 'queued' AND attempt = 1 AND error_code IS NULL
+        AND object_key IS NULL AND manifest_object_key IS NULL AND part_count = 0
+        AND guestbook_html_object_key IS NULL AND guestbook_html_bytes IS NULL
+        AND guestbook_html_sha256 IS NULL AND guestbook_csv_object_key IS NULL
+        AND guestbook_csv_bytes IS NULL AND guestbook_csv_sha256 IS NULL
+        AND started_at IS NULL AND completed_at IS NULL AND expires_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM export_parts WHERE export_job_id = ?1)
+    `).bind(id, errorCode).run();
+    return {
+      changed: (result.meta.changes ?? 0) === 1,
+      job: await this.getById(id),
+    };
+  }
+
   async retry(id: string): Promise<ExportRecord> {
-    let results: D1Result[];
-    try {
-      results = await this.db.batch([
+    const results = await this.db.batch([
         this.db.prepare(`
           UPDATE export_jobs SET state = 'queued', attempt = attempt + 1, object_key = NULL,
             manifest_object_key = NULL, part_count = 0, error_code = NULL,
@@ -720,30 +764,23 @@ export class ExportsRepository {
             )
         `).bind(id),
         this.db.prepare('DELETE FROM export_parts WHERE export_job_id = ? AND changes() = 1').bind(id),
+        this.db.prepare(`
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM export_jobs AS active
+            JOIN export_jobs AS candidate ON candidate.id = ?1
+            WHERE active.event_id = candidate.event_id AND active.id <> candidate.id
+              AND active.state IN ('queued', 'running')
+          ) THEN 1 ELSE 0 END AS active_conflict
+        `).bind(id),
       ]);
-    } catch (error) {
-      if (await this.hasDifferentActive(id)) {
-        throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
-      }
-      throw error;
-    }
     if ((results[0]?.meta.changes ?? 0) !== 1) {
-      if (await this.hasDifferentActive(id)) {
+      const conflict = batchRow<{ active_conflict: number }>(results.at(-1));
+      if (conflict?.active_conflict === 1) {
         throw new ApiError('EXPORT_ALREADY_ACTIVE', 'An export is already being prepared for this event.', 409);
       }
       throw new ApiError('EXPORT_ALREADY_ACTIVE', 'Only failed or expired exports can be retried.', 409);
     }
     return (await this.getById(id))!;
-  }
-
-  private async hasDifferentActive(id: string): Promise<boolean> {
-    return Boolean(await this.db.prepare(`
-      SELECT 1 FROM export_jobs AS active
-      JOIN export_jobs AS candidate ON candidate.id = ?1
-      WHERE active.event_id = candidate.event_id AND active.id <> candidate.id
-        AND active.state IN ('queued', 'running')
-      LIMIT 1
-    `).bind(id).first());
   }
 
   async listExpiredReady(now: string): Promise<ExportRecord[]> {

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -85,8 +85,16 @@ interface Harness {
   galleryRows: ManagerGalleryMediaView[];
   album: AlbumState;
   orderWrites: AlbumEntryView[][];
+  orderGates: Promise<void>[];
+  bytesById: Record<string, number>;
   pickWrites: { mediaIds: string[]; picked: boolean }[];
   startWrites: string[];
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
 }
 
 /**
@@ -103,6 +111,8 @@ function harness(overrides: Partial<Harness> = {}) {
     ],
     album: overrides.album ?? { revision: 0, saved: true, entries: [] },
     orderWrites: [],
+    orderGates: overrides.orderGates ?? [],
+    bytesById: overrides.bytesById ?? {},
     pickWrites: [],
     startWrites: [],
   };
@@ -127,11 +137,13 @@ function harness(overrides: Partial<Harness> = {}) {
       entries,
       photoCount: entries.filter((entry) => entry.kind === 'photo').length,
       sectionCount: entries.filter((entry) => entry.kind === 'section').length,
-      totalBytes: entries.filter((entry) => entry.kind === 'photo').length * 64,
+      totalBytes: entries.reduce((sum, entry) => (
+        entry.kind === 'photo' ? sum + (state.bytesById[entry.photo.id] ?? 64) : sum
+      ), 0),
     };
   }
 
-  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'https://candidary.test');
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : null;
@@ -152,6 +164,7 @@ function harness(overrides: Partial<Harness> = {}) {
           ? { kind: 'section', id: entry.id!, heading: entry.heading! }
           : { kind: 'photo', photo: state.galleryRows.find((item) => item.id === entry.mediaId)! }));
       state.orderWrites.push(entries);
+      await state.orderGates[state.orderWrites.length - 1];
       state.album = { revision: state.album.revision + 1, saved: true, entries };
       return success({ album: resolvedAlbum() });
     }
@@ -307,6 +320,71 @@ describe('the album', () => {
     expect(await screen.findByRole('button', { name: 'Download album photos' })).toBeDisabled();
   });
 
+  it('drains the current and coalesced successor order saves before creating an album export', async () => {
+    const firstSave = deferred();
+    const successorSave = deferred();
+    const controlled = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true }),
+        photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+        photo('p3', '2026-08-16T04:48:00.000Z', { isFavorite: true }),
+      ],
+      orderGates: [firstSave.promise, successorSave.promise],
+    });
+    const onPrepare = vi.fn(noop);
+    renderWorkspace(controlled.fetchMock, { onPrepare });
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await user.click(await screen.findByRole('button', { name: /^Move First dance down/ }));
+    await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: /^Move First dance down/ }));
+    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    expect(onPrepare).not.toHaveBeenCalled();
+
+    await act(async () => { firstSave.resolve(); });
+    await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(2));
+    expect(onPrepare).not.toHaveBeenCalled();
+
+    await act(async () => { successorSave.resolve(); });
+    await waitFor(() => expect(onPrepare).toHaveBeenCalledWith('album'));
+    expect(controlled.state.orderWrites[1]?.map((entry) => (
+      entry.kind === 'photo' ? entry.photo.id : entry.id
+    ))).toEqual(['p2', 'p3', 'p1']);
+  });
+
+  it('disables complete prepare and retry for an active album while keeping ready downloads usable', async () => {
+    const activeAlbum: ExportView = {
+      id: 'album-active', kind: 'album', state: 'running', attempt: 1,
+      snapshotAt: '2026-08-23T12:00:00.000Z', mediaCount: 1, totalBytes: 64,
+      partCount: 0, expiresAt: null, guestbookEntryCount: null, guestbookSharedCount: null,
+      guestbookEventName: null, guestbookEventDate: null, guestbookEventTimezone: null,
+      guestbookPrompt: null, guestbookGalleryVisible: null,
+    };
+    const completeJob = (state: 'failed' | 'ready'): ExportView => ({
+      id: `complete-${state}`, kind: 'complete', state, attempt: 1,
+      snapshotAt: '2026-08-22T12:00:00.000Z', mediaCount: 2, totalBytes: 128,
+      partCount: state === 'ready' ? 1 : 0,
+      expiresAt: state === 'ready' ? '2026-08-24T12:00:00.000Z' : null,
+      guestbookEntryCount: 0, guestbookSharedCount: 0, guestbookEventName: 'Maya & Theo',
+      guestbookEventDate: '2026-09-19', guestbookEventTimezone: 'America/Chicago',
+      guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT, guestbookGalleryVisible: true,
+    });
+
+    renderWorkspace(harness().fetchMock, { activeJob: activeAlbum });
+    expect(await screen.findByRole('button', { name: 'Download all' })).toBeDisabled();
+
+    cleanup();
+    renderWorkspace(harness().fetchMock, { job: completeJob('failed'), activeJob: activeAlbum });
+    expect(await screen.findByRole('button', { name: 'Retry export' })).toBeDisabled();
+
+    cleanup();
+    renderWorkspace(harness().fetchMock, { job: completeJob('ready'), activeJob: activeAlbum });
+    expect(await screen.findByRole('button', { name: 'Get download links' })).toBeEnabled();
+  });
+
   it('renders ordered album part links and never offers Guestbook artifacts', async () => {
     const pickedHarness = harness({
       galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
@@ -405,6 +483,26 @@ describe('the album', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Remove First dance from the album' }));
     expect(await screen.findByText('1 photo removed from the album. The original is still delivered.')).toBeVisible();
+  });
+
+  it('adopts the exact remaining byte total after a photo leaves the album', async () => {
+    const { fetchMock } = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true }),
+        photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+      ],
+      bytesById: { p1: 1024, p2: 2048 },
+    });
+    renderWorkspace(fetchMock);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    expect(await screen.findByText(/2 photos · 3 KB/)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the album' }));
+
+    expect(await screen.findByText(/1 photos · 1 KB/)).toBeVisible();
   });
 
   it('explains an empty album without promising publication', async () => {

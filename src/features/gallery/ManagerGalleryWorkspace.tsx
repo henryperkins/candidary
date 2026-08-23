@@ -112,6 +112,7 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
         <p className="gallery-total">{event.storedMediaCount.toLocaleString()} photos</p>
         <GalleryExportControl
           job={exports.job}
+          activeJob={exports.activeJob}
           download={exports.download}
           onPrepare={exports.onPrepare}
           onDownload={exports.onDownload}

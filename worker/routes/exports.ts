@@ -38,6 +38,16 @@ function managerExport(job: ExportRecord) {
   };
 }
 
+function albumGuestbookSnapshotEmpty(job: ExportRecord): boolean {
+  return job.guestbookEntryCount === null
+    && job.guestbookSharedCount === null
+    && job.guestbookEventName === null
+    && job.guestbookEventDate === null
+    && job.guestbookEventTimezone === null
+    && job.guestbookPrompt === null
+    && job.guestbookGalleryVisible === null;
+}
+
 async function commitOrRecoverRetry(
   repository: ExportsRepository,
   current: Awaited<ReturnType<typeof ownedJob>>,
@@ -91,6 +101,24 @@ async function ensureRetryWorkflow(
   }
 }
 
+async function ensureInitialWorkflow(
+  workflow: AppEnv['EXPORT_WORKFLOW'],
+  job: Awaited<ReturnType<typeof ownedJob>>,
+): Promise<void> {
+  try {
+    await workflow.create({ id: job.id, params: { jobId: job.id } });
+  } catch (error) {
+    try {
+      const observed = await (await workflow.get(job.id)).status();
+      if (observed.status !== 'unknown') return;
+    } catch {
+      // The creation error remains authoritative if its deterministic ID cannot
+      // be observed. The pristine queued row is made retryable below.
+    }
+    throw error;
+  }
+}
+
 async function priorAttemptKeys(
   bucket: R2Bucket,
   job: Awaited<ReturnType<typeof ownedJob>>,
@@ -125,6 +153,10 @@ async function ownedReadyArtifact(
 ) {
   await manager(context);
   const job = await ownedJob(context);
+  if (job.kind === 'album'
+    && (kind === 'printable-guestbook' || kind === 'private-guestbook')) {
+    throw new ApiError('EXPORT_FAILED', 'That export artifact is not available.', 404);
+  }
   if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
     throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
   }
@@ -271,10 +303,20 @@ exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
     id: crypto.randomUUID(), eventId: context.req.param('eventId'), snapshotAt,
     createdAt: snapshotAt,
   };
-  const job = parsed.data.kind === 'album'
+  let job = parsed.data.kind === 'album'
     ? await repository.createAlbumActive(input)
     : await repository.createActive(input);
-  await context.env.EXPORT_WORKFLOW.create({ id: job.id, params: { jobId: job.id } });
+  try {
+    await ensureInitialWorkflow(context.env.EXPORT_WORKFLOW, job);
+  } catch (error) {
+    const recovered = await repository.markInitialDispatchFailed(
+      job.id,
+      'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    );
+    if (recovered.changed) throw error;
+    if (!recovered.job || recovered.job.state === 'queued') throw error;
+    job = recovered.job;
+  }
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 
@@ -319,7 +361,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
   const albumFormat = job.kind === 'album';
   const newCompleteFormat = !albumFormat && job.guestbookEntryCount !== null;
   const snapshotMetadataComplete = albumFormat
-    ? job.albumEntriesJson !== null
+    ? job.albumEntriesJson !== null && albumGuestbookSnapshotEmpty(job)
     : !newCompleteFormat || (
     job.guestbookSharedCount !== null && job.guestbookEventName !== null
     && job.guestbookEventDate !== null && job.guestbookEventTimezone !== null

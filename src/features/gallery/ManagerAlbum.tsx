@@ -74,6 +74,7 @@ export function ManagerAlbum({
   const loadGeneration = useRef(0);
   const savingRef = useRef(false);
   const pendingOrder = useRef<AlbumEntryView[] | null>(null);
+  const saveCycle = useRef<Promise<void> | null>(null);
   const listRef = useRef<HTMLOListElement>(null);
   const refocusKey = useRef<string | null>(null);
   const previewOrigin = useRef<HTMLElement | null>(null);
@@ -128,31 +129,59 @@ export function ManagerAlbum({
     }
     savingRef.current = true;
     setSaving(true);
-    const run = (order: AlbumEntryView[], composedAgainst: number) => {
-      saveAlbumOrder(eventId, composedAgainst, toEntryInput(order))
-        .then((result) => {
+    const run = async () => {
+      let order = next;
+      let composedAgainst = revision;
+      try {
+        for (;;) {
+          const result = await saveAlbumOrder(eventId, composedAgainst, toEntryInput(order));
           setAlbum(result.album);
           setRevision(result.album.revision);
           const queued = pendingOrder.current;
-          if (queued) {
-            pendingOrder.current = null;
-            run(queued, result.album.revision);
+          if (!queued) {
+            setEntries(result.album.entries);
             return;
           }
-          savingRef.current = false;
-          setSaving(false);
-          setEntries(result.album.entries);
-        })
-        .catch((caught) => {
           pendingOrder.current = null;
-          savingRef.current = false;
-          setSaving(false);
-          setNotice(errorMessage(caught, 'The album order could not be saved.'));
-          load();
-        });
+          order = queued;
+          composedAgainst = result.album.revision;
+        }
+      } catch (caught) {
+        pendingOrder.current = null;
+        setNotice(errorMessage(caught, 'The album order could not be saved.'));
+        load();
+        throw caught;
+      } finally {
+        savingRef.current = false;
+        setSaving(false);
+        if (saveCycle.current === cycle) saveCycle.current = null;
+      }
     };
-    run(next, revision);
+    const cycle = run();
+    saveCycle.current = cycle;
+    // The control consumes a rejection from `drainOrderSaves`; this fallback also
+    // handles a save failure when no export is waiting without an unhandled promise.
+    void cycle.catch(() => {});
   }, [eventId, load, revision]);
+
+  const drainOrderSaves = useCallback(async () => {
+    for (;;) {
+      const current = saveCycle.current;
+      if (!current) return;
+      await current;
+    }
+  }, []);
+
+  const prepareAlbumExport = useCallback(async () => {
+    try {
+      await drainOrderSaves();
+    } catch {
+      // The save path has already surfaced the failure and reloaded canonical state.
+      // Do not snapshot the older stored order while that recovery is in progress.
+      return;
+    }
+    await onPrepareExport();
+  }, [drainOrderSaves, onPrepareExport]);
 
   function rearrange(next: AlbumEntryView[], message: string) {
     setEntries(next);
@@ -246,10 +275,11 @@ export function ManagerAlbum({
     const title = galleryPhotoTitle(entry.photo);
     try {
       await setAlbumPicks(eventId, [photoId], false);
+      const refreshed = await fetchAlbum(eventId);
+      adopt(refreshed.album);
       setEntries((current) => current.filter((item) => (
         item.kind !== 'photo' || item.photo.id !== photoId
       )));
-      setAlbum((current) => (current ? { ...current, photoCount: current.photoCount - 1 } : current));
       onPicksChanged();
       setAnnouncement(`${title} removed from the album. The original is still delivered.`);
       undo.present({
@@ -395,7 +425,7 @@ export function ManagerAlbum({
             job={exportJob}
             activeJob={activeExport}
             download={exportDownload}
-            onPrepare={onPrepareExport}
+            onPrepare={prepareAlbumExport}
             onDownload={onDownloadExport}
             onRetry={onRetryExport}
           />
