@@ -57,15 +57,14 @@ export function PublicAlbum({ album }: { album: PublicAlbumView }) {
         }
         photoPosition += 1;
         const position = photoPosition;
+        const label = entry.photo.caption?.trim() || `Album photo ${position}`;
         return <figure className="public-album__photo" key={entry.photo.id}>
           {entry.photo.previewAvailable
             ? <AlbumImage
                 mediaId={entry.photo.id}
-                alt={entry.photo.caption ?? `Album photo ${position}`}
+                alt={label}
               />
-            : <AlbumPreviewFallback
-                label={entry.photo.caption ?? `Album photo ${position}`}
-              />}
+            : <AlbumPreviewFallback label={label} />}
           {entry.photo.caption && <figcaption>{entry.photo.caption}</figcaption>}
         </figure>;
       })}

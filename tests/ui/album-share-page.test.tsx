@@ -122,6 +122,49 @@ describe('public album page', () => {
     expect(screen.getAllByText('Preview unavailable')).toHaveLength(3);
   });
 
+  it('uses the stable photo position for a loaded preview with an empty caption', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => success({
+      ...album,
+      entries: album.entries.map((entry) => entry.kind === 'photo' && entry.photo.id === 'photo-1'
+        ? { ...entry, photo: { ...entry.photo, caption: '' } }
+        : entry),
+    })));
+
+    renderAlbumRoute();
+
+    expect(await screen.findByRole('img', { name: 'Album photo 1' })).toHaveAttribute(
+      'src',
+      '/api/album-share/media/photo-1/preview',
+    );
+  });
+
+  it('uses stable photo positions for unavailable and failed previews with whitespace captions', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => success({
+      ...album,
+      entries: album.entries.map((entry) => entry.kind === 'photo'
+        ? {
+            ...entry,
+            photo: {
+              ...entry.photo,
+              caption: entry.photo.id === 'photo-1' ? '   ' : '\t',
+              previewAvailable: entry.photo.id === 'photo-1',
+            },
+          }
+        : entry),
+    })));
+    renderAlbumRoute();
+    await screen.findByRole('heading', { name: 'The evening' });
+    const loadedPhoto = document.querySelector<HTMLImageElement>(
+      'img[src="/api/album-share/media/photo-1/preview"]',
+    );
+    expect(loadedPhoto).not.toBeNull();
+
+    fireEvent.error(loadedPhoto!);
+
+    expect(screen.getByRole('img', { name: 'Album photo 1' }).tagName).toBe('DIV');
+    expect(screen.getByRole('img', { name: 'Album photo 2' }).tagName).toBe('DIV');
+  });
+
   it('shows one non-enumerating unavailable state for an exchange refusal', async () => {
     window.location.hash = `#${TOKEN}`;
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(JSON.stringify({
