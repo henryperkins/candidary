@@ -31,7 +31,6 @@ import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
-import { selectionCapacityMessage } from '../../src/features/gallery/selection-state';
 import { EventPage } from '../../src/pages/EventPage';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
@@ -1692,11 +1691,15 @@ describe('manager experience', () => {
 
     for (const choice of choices.slice(0, MANAGER_BULK_SELECTION_MAX)) fireEvent.click(choice);
     const extra = choices[MANAGER_BULK_SELECTION_MAX]!;
-    expect(screen.getByRole('status')).toHaveTextContent(selectionCapacityMessage());
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '50 of 50 photos selected. Remove one to choose another.',
+    );
     expect(extra).toBeDisabled();
     await user.click(extra);
     expect(extra).not.toBeChecked();
-    expect(screen.getByRole('status')).toHaveTextContent(selectionCapacityMessage());
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '50 of 50 photos selected. Remove one to choose another.',
+    );
 
     await user.click(choices[0]!);
     expect(extra, 'unchecking remains available as the recovery').toBeEnabled();
@@ -2713,7 +2716,9 @@ describe('host account attachment and recovery', () => {
     render(<RouterProvider router={createAppRouter(['/create'])} />);
     await registerFromCreate(user);
 
-    await user.click(screen.getByRole('button', { name: 'Send another code' }));
+    const resend = screen.getByRole('button', { name: 'Send another code' });
+    await waitFor(() => expect(resend).toBeEnabled());
+    await user.click(resend);
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register/resend')).toBe(true));
 
     await user.type(screen.getByLabelText('Confirmation code'), '424242');
