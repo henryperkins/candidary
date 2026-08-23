@@ -34,6 +34,7 @@ const LOAD_FAILURE_DECISION = {
   UPLOAD_FINALIZE_CONFLICT: decision('retry'),
   MEDIA_STATE_CONFLICT: decision('retry'),
   ALBUM_FULL: decision('retry'),
+  ALBUM_SHARE_UNAVAILABLE: decision('retry'),
   MESSAGE_SUBMISSION_CONFLICT: decision('retry'),
   MESSAGE_STATE_CONFLICT: decision('retry'),
   MESSAGE_EVENT_LIMIT: decision('retry'),

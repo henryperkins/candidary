@@ -351,6 +351,29 @@ export interface AlbumView extends AlbumMetadataInput {
   totalBytes: number;
 }
 
+export type PublicAlbumEntryView =
+  | { kind: 'section'; id: string; heading: string }
+  | {
+      kind: 'photo';
+      photo: { id: string; caption: string | null; previewAvailable: boolean };
+    };
+
+export interface PublicAlbumView {
+  title: string;
+  description: string;
+  coverMediaId: string | null;
+  entries: PublicAlbumEntryView[];
+  photoCount: number;
+}
+
+export interface AlbumShareView {
+  active: true;
+  url: string;
+  sharedAt: string;
+}
+
+export type AlbumShareStatus = AlbumShareView | null;
+
 // RSVP. Every shape below is written out rather than derived from a database
 // record, because the difference between what a household may see and what a
 // host may see is the whole privacy story.

@@ -16,6 +16,7 @@ describe('load failure classification', () => {
     ['RESOURCE_FORBIDDEN', 'retry'],
     ['OWNER_CLAIM_REQUIRED', 'retry'],
     ['GUEST_LINK_UNAVAILABLE', 'retry'],
+    ['ALBUM_SHARE_UNAVAILABLE', 'retry'],
     ['EVENT_NOT_FOUND', 'ended-event'],
     ['EVENT_EXPIRED', 'ended-event'],
     ['UPLOADS_DISABLED', 'retry'],

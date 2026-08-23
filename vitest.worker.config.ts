@@ -42,6 +42,8 @@ export default defineConfig({
           ENTRY_ENCRYPTION_KEY: 'ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA',
           RSVP_LOOKUP_HMAC_KEY: 'test-rsvp-lookup-hmac-key-with-at-least-32-bytes',
           GUEST_MESSAGE_HMAC_KEY: 'test-guest-message-hmac-key-with-at-least-32-bytes',
+          ALBUM_SHARE_HMAC_KEY: 'test-album-share-hmac-key-with-at-least-32-bytes',
+          ALBUM_SHARE_ENCRYPTION_KEY: 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU',
           EMAIL_FROM: 'hello@candidary.test',
         },
         d1Databases: ['DB'],

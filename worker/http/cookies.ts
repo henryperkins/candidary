@@ -14,6 +14,7 @@ import type { AppBindings } from '../env';
 // all three at once, and each route accepts exactly one of them.
 export type CookieScope = 'event' | 'host' | 'rsvp';
 const REGISTRATION_COOKIE = 'candidary_registration';
+const ALBUM_SHARE_COOKIE = 'candidary_album';
 
 const COOKIE_NAMES = {
   event: { session: 'candidary_session', csrf: 'candidary_csrf' },
@@ -90,4 +91,22 @@ export function clearRegistrationCookie(context: Context<AppBindings>): void {
     httpOnly: true,
     sameSite: 'Lax',
   });
+}
+
+export function setAlbumShareCookie(
+  context: Context<AppBindings>,
+  session: SecretToken,
+  maxAgeSeconds: number,
+): void {
+  setCookie(context, ALBUM_SHARE_COOKIE, session.token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Strict',
+    path: '/api/album-share',
+    maxAge: maxAgeSeconds,
+  });
+}
+
+export function getAlbumShareCookie(context: Context<AppBindings>): string | undefined {
+  return getCookie(context, ALBUM_SHARE_COOKIE);
 }

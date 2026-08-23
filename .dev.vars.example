@@ -20,3 +20,8 @@ ENTRY_HMAC_KEY=replace-with-a-different-32-byte-or-longer-random-secret
 ENTRY_ENCRYPTION_KEY=replace-with-32-random-bytes-encoded-as-base64url
 RSVP_LOOKUP_HMAC_KEY=replace-with-another-32-byte-or-longer-random-secret
 GUEST_MESSAGE_HMAC_KEY=replace-with-an-independent-32-byte-or-longer-random-secret
+
+# Persisted album-share credentials. Rotating either value invalidates active
+# links unless their stored digests/ciphertexts are migrated in coordination.
+ALBUM_SHARE_HMAC_KEY=replace-with-an-independent-32-byte-or-longer-random-secret
+ALBUM_SHARE_ENCRYPTION_KEY=replace-with-32-random-bytes-encoded-as-base64url

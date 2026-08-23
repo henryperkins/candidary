@@ -5052,3 +5052,43 @@ describe('bounded cover storage sweep', () => {
     expect(await foreignKeyCheck()).toEqual([]);
   });
 });
+
+describe('album-share session cleanup', () => {
+  beforeEach(resetDatabase);
+
+  it('deletes at most one bounded page of expired sessions per scheduled pass', async () => {
+    const cleanupNow = new Date('2026-08-23T12:00:00.000Z');
+    const expiredAt = '2026-08-20T00:00:00.000Z';
+    const futureAt = '2026-08-25T00:00:00.000Z';
+    const access = await eventAccess('Album session cleanup');
+    const shareId = crypto.randomUUID();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_album_shares (
+        id, event_id, secret_digest, secret_ciphertext, shared_at, created_at
+      ) VALUES (?, ?, 'share-digest', 'v1.iv.ciphertext', ?, ?)
+    `).bind(shareId, access.event.id, expiredAt, expiredAt).run();
+
+    const sessions = Array.from({ length: 102 }, (_, index) => testEnv.DB.prepare(`
+      INSERT INTO event_album_share_sessions (
+        id, share_id, event_id, secret_digest, expires_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      `expired-album-session-${index.toString().padStart(3, '0')}`,
+      shareId,
+      access.event.id,
+      `digest-${index}`,
+      index === 101 ? futureAt : expiredAt,
+      expiredAt,
+    ));
+    await batchD1Statements(testEnv.DB, sessions);
+
+    await scheduledCleanup(testEnv, cleanupNow);
+
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at <= ?
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM event_album_share_sessions WHERE expires_at > ?
+    `).bind(cleanupNow.toISOString()).first<number>('count')).toBe(1);
+  });
+});

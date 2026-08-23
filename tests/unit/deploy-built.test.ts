@@ -18,6 +18,8 @@ const REQUIRED_SECRETS = [
   'ENTRY_ENCRYPTION_KEY',
   'RSVP_LOOKUP_HMAC_KEY',
   'GUEST_MESSAGE_HMAC_KEY',
+  'ALBUM_SHARE_HMAC_KEY',
+  'ALBUM_SHARE_ENCRYPTION_KEY',
 ];
 
 function productionTopology(): Record<string, unknown> {

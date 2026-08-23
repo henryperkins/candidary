@@ -17,6 +17,7 @@ import {
 } from '../media-upload-release';
 import { legacyMediaScannerContract } from '../legacy-media-scanner-contract';
 import { ExportsRepository } from '../db/exports';
+import { AlbumSharesRepository } from '../db/album-shares';
 import {
   LegacyMediaScanRepository,
   type LegacyMediaScanObservation,
@@ -107,6 +108,18 @@ export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Prom
     if (await repository.markExpired(job.id, timestamp)) cleaned += 1;
   }
   return cleaned;
+}
+
+export const ALBUM_SHARE_SESSION_CLEANUP_LIMIT = 100;
+
+export function cleanupExpiredAlbumShareSessions(
+  env: AppEnv,
+  now = new Date(),
+): Promise<number> {
+  return new AlbumSharesRepository(env.DB).deleteExpiredSessions(
+    now.toISOString(),
+    ALBUM_SHARE_SESSION_CLEANUP_LIMIT,
+  );
 }
 
 export const LEGACY_STORED_MEDIA_PROMOTION_LIMIT = 25;
@@ -2473,6 +2486,7 @@ export async function scheduledCleanup(
   await cleanupAuthScratch(env, now);
   await cleanupRsvpScratch(env, now);
   await cleanupGuestMessageRateEvents(env, now);
+  await cleanupExpiredAlbumShareSessions(env, now);
   await cleanupExpiredReservations(env, now);
   const mediaPromotionPromise = legacyMediaCopyEnabled()
     ? promoteLegacyStoredMedia(env, now)
