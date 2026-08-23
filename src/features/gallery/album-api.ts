@@ -48,8 +48,8 @@ export function setAlbumPicks(
 export function startAlbum(
   eventId: string,
   start: 'from-picks' | 'empty',
-): Promise<{ album: AlbumView; cleared: string[] }> {
-  return api<{ album: AlbumView; cleared: string[] }>(albumPath(eventId, '/start'), {
+): Promise<{ album: AlbumView; started: boolean; cleared: string[] }> {
+  return api<{ album: AlbumView; started: boolean; cleared: string[] }>(albumPath(eventId, '/start'), {
     method: 'POST',
     body: JSON.stringify({ start }),
   });

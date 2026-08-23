@@ -5,7 +5,26 @@ test('serves the robots policy as plain text instead of the SPA shell', async ({
 
   expect(response.status()).toBe(200);
   expect(response.headers()['content-type']).toMatch(/^text\/plain(?:;|$)/iu);
-  expect(await response.text()).toContain('Sitemap: https://candidary.app/sitemap.xml');
+  const robots = await response.text();
+  expect(robots).toContain('Sitemap: https://candidary.app/sitemap.xml');
+  expect(robots).toMatch(/^Disallow: \/album$/mu);
+});
+
+test('marks the private album document noindex', async ({ page }) => {
+  await page.route('**/api/album-share', (route) => route.fulfill({
+    status: 410,
+    headers: { 'cache-control': 'private, no-store' },
+    json: {
+      code: 'ALBUM_SHARE_UNAVAILABLE',
+      message: 'This album is not available.',
+      requestId: 'request-a',
+    },
+  }));
+
+  await page.goto('/album');
+
+  await expect(page.locator('head meta[name="robots"]'))
+    .toHaveAttribute('content', 'noindex, nofollow');
 });
 
 test('serves the canonical public-page sitemap as XML instead of the SPA shell', async ({ request }) => {

@@ -1641,6 +1641,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-section__input { width: 100%; min-height: 48px; padding: 8px 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--chestnut); font: inherit; font-size: 1rem; font-weight: 700; letter-spacing: -.01em; }
 .album-section__input:hover { border-color: rgb(63 109 149 / 35%); }
 .album-section__input:focus { border-color: var(--denim); background: var(--paper); outline: none; }
+.album-section__input:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .album-entry__controls { display: flex; flex-wrap: wrap; gap: 4px; }
 .album-entry__controls .icon-button { width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--moss); cursor: pointer; }
 .album-entry__controls .icon-button svg { width: 18px; height: 18px; }

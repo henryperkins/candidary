@@ -357,26 +357,117 @@ export class AlbumRepository {
   }
 
   /**
-   * Marks the album committed without touching the order. `Start from picks` and
-   * `Start empty` both end here: the reconciliation prompt is driven entirely by
-   * `saved_at`, so a host who answered it once must not be asked again.
+   * Answers the pre-album reconciliation prompt once.
    *
-   * Deliberately unguarded by revision, because it is idempotent by construction —
-   * `COALESCE` keeps the first commit's instant, so a co-host racing the same choice
-   * changes nothing and neither caller has to lose.
+   * Every effect is in one D1 batch and conditioned on `saved_at IS NULL`, so two
+   * hosts may race opposite answers but only the first transaction changes either
+   * membership or order. A stale `Start empty` retry therefore cannot clear picks
+   * added after reconciliation. Starting from picks freezes their current timeline
+   * order so future picks append even when their capture time is earlier.
    */
-  async markSaved(eventId: string, now: string): Promise<AlbumView> {
-    await this.db.batch([
+  async start(
+    eventId: string,
+    choice: 'from-picks' | 'empty',
+    now: string,
+  ): Promise<{ album: AlbumView; started: boolean; cleared: string[] }> {
+    const statements = [
       this.db.prepare(`
         INSERT OR IGNORE INTO event_albums (event_id, entries, saved_at, revision, created_at, updated_at)
         VALUES (?, '[]', NULL, 0, ?, ?)
       `).bind(eventId, now, now),
-      this.db.prepare(`
+    ];
+    let clearedResultIndex: number | null = null;
+    let startedResultIndex: number;
+
+    if (choice === 'from-picks') {
+      startedResultIndex = statements.length;
+      statements.push(this.db.prepare(`
         UPDATE event_albums
-        SET saved_at = COALESCE(saved_at, ?), updated_at = ?
-        WHERE event_id = ? AND saved_at IS NULL
-      `).bind(now, now, eventId),
-    ]);
-    return this.get(eventId);
+        SET entries = (
+              SELECT COALESCE(
+                json_group_array(json_object('kind', 'photo', 'mediaId', picked.id)),
+                '[]'
+              )
+              FROM (
+                SELECT id FROM media
+                WHERE event_id = ?1
+                  AND upload_state = 'stored'
+                  AND deleted_at IS NULL
+                  AND favorited_at IS NOT NULL
+                ORDER BY timeline_at ASC, id ASC
+              ) AS picked
+            ),
+            saved_at = ?2,
+            updated_at = ?2
+        WHERE event_id = ?1 AND saved_at IS NULL
+          AND (SELECT COUNT(*) FROM media
+            WHERE media.event_id = ?1
+              AND media.upload_state = 'stored'
+              AND media.deleted_at IS NULL
+              AND media.favorited_at IS NOT NULL) <= ?3
+      `).bind(eventId, now, ALBUM_MAX_ENTRIES));
+    } else {
+      clearedResultIndex = statements.length;
+      statements.push(this.db.prepare(`
+        UPDATE media
+        SET favorited_at = NULL
+        WHERE event_id = ?1
+          AND upload_state = 'stored'
+          AND deleted_at IS NULL
+          AND favorited_at IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM event_albums
+            WHERE event_id = ?1 AND saved_at IS NULL
+          )
+          AND (SELECT COUNT(*) FROM media AS picked
+            WHERE picked.event_id = ?1
+              AND picked.upload_state = 'stored'
+              AND picked.deleted_at IS NULL
+              AND picked.favorited_at IS NOT NULL) <= ?2
+        RETURNING id
+      `).bind(eventId, ALBUM_MAX_ENTRIES));
+      startedResultIndex = statements.length;
+      statements.push(this.db.prepare(`
+        UPDATE event_albums
+        SET entries = '[]', saved_at = ?2, updated_at = ?2
+        WHERE event_id = ?1 AND saved_at IS NULL
+          AND (SELECT COUNT(*) FROM media
+            WHERE media.event_id = ?1
+              AND media.upload_state = 'stored'
+              AND media.deleted_at IS NULL
+              AND media.favorited_at IS NOT NULL) <= ?3
+      `).bind(eventId, now, ALBUM_MAX_ENTRIES));
+    }
+
+    const diagnosticResultIndex = statements.length;
+    statements.push(this.db.prepare(`
+      SELECT saved_at,
+        (SELECT COUNT(*) FROM media
+          WHERE media.event_id = event_albums.event_id
+            AND media.upload_state = 'stored'
+            AND media.deleted_at IS NULL
+            AND media.favorited_at IS NOT NULL) AS pick_count
+      FROM event_albums
+      WHERE event_id = ?
+    `).bind(eventId));
+    const results = await this.db.batch(statements);
+    const started = results[startedResultIndex]?.meta.changes === 1;
+    const diagnostic = results[diagnosticResultIndex]?.results[0] as {
+      saved_at: string | null;
+      pick_count: number;
+    } | undefined;
+    if (!started && diagnostic?.saved_at === null
+      && diagnostic.pick_count > ALBUM_MAX_ENTRIES) {
+      throw new ApiError(
+        'ALBUM_FULL',
+        `An album holds up to ${ALBUM_MAX_ENTRIES} photos. Remove picks in Library before starting this album.`,
+        409,
+      );
+    }
+    const cleared = started && clearedResultIndex !== null
+      ? ((results[clearedResultIndex]?.results as Array<{ id: string }> | undefined) ?? [])
+        .map((row) => row.id)
+      : [];
+    return { album: await this.get(eventId), started, cleared };
   }
 }

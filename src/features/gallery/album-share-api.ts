@@ -27,15 +27,22 @@ export function stopAlbumShare(eventId: string): Promise<{ share: null }> {
   return api<{ share: null }>(managerSharePath(eventId), { method: 'DELETE' });
 }
 
-export function exchangeAlbumShare(token: string): Promise<{ album: PublicAlbumView }> {
+export function exchangeAlbumShare(
+  token: string,
+  signal?: AbortSignal,
+): Promise<{ album: PublicAlbumView }> {
   return api<{ album: PublicAlbumView }>('/api/album-share/exchange', {
     method: 'POST',
     body: JSON.stringify({ token }),
+    ...(signal ? { signal } : {}),
   });
 }
 
-export function fetchPublicAlbum(): Promise<{ album: PublicAlbumView }> {
-  return api<{ album: PublicAlbumView }>('/api/album-share');
+export function fetchPublicAlbum(signal?: AbortSignal): Promise<{ album: PublicAlbumView }> {
+  return api<{ album: PublicAlbumView }>(
+    '/api/album-share',
+    signal ? { signal } : {},
+  );
 }
 
 export function publicAlbumPreview(mediaId: string): string {

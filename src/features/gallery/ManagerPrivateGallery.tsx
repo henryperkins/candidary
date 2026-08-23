@@ -150,6 +150,8 @@ export function ManagerPrivateGallery({
   const favoriteRequests = useRef(new Set<string>());
   const viewerOrigin = useRef<HTMLElement | null>(null);
   const restoreFocus = useRef<HTMLElement | null>(null);
+  const selectToggleRef = useRef<HTMLButtonElement>(null);
+  const restoreSelectionFocus = useRef(false);
   const resultsRef = useRef<HTMLDivElement>(null);
   const emptyRef = useRef<HTMLHeadingElement>(null);
   const rows = rowState.rows;
@@ -454,9 +456,25 @@ export function ManagerPrivateGallery({
   }
 
   function clearSelection(announce = true) {
+    if (
+      document.activeElement instanceof HTMLElement
+      && document.activeElement.closest('.selection-tray')
+    ) {
+      restoreSelectionFocus.current = true;
+    }
     if (selectedIds.size > 0 && announce) setAnnouncement('Selection cleared.');
     setSelectedIds(new Set());
   }
+
+  const restoreSelectionControlFocus = useCallback(() => {
+    selectToggleRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (selectedIds.size !== 0 || !restoreSelectionFocus.current) return;
+    restoreSelectionFocus.current = false;
+    restoreSelectionControlFocus();
+  }, [restoreSelectionControlFocus, selectedIds.size]);
 
   function toggleSelecting() {
     setSelecting((current) => {
@@ -714,6 +732,7 @@ export function ManagerPrivateGallery({
     <div className="gallery-selection-controls">
       <button
         type="button"
+        ref={selectToggleRef}
         className="button button--secondary gallery-select-toggle"
         aria-pressed={selecting}
         onClick={toggleSelecting}
@@ -759,7 +778,7 @@ export function ManagerPrivateGallery({
       onRemove={() => void applyPicks(false)}
       onClear={clearSelection}
     />}
-    <UndoBar controller={undo} live={live} />
+    <UndoBar controller={undo} live={live} onRestoreFocus={restoreSelectionControlFocus} />
     {viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
       photos={rows}
       index={viewerIndex}

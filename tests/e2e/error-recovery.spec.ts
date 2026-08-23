@@ -309,9 +309,9 @@ async function openGallery(page: Page) {
 
 async function openSharedGallery(page: Page) {
   await openGallery(page);
-  await page.getByRole('button', { name: 'Shared gallery' }).click();
+  await page.getByRole('button', { name: 'Shared' }).click();
   await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Shared gallery' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Shared' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.moderation-grid article')).toHaveCount(2);
 }
 
@@ -350,13 +350,13 @@ test('a refused bulk publish keeps the gallery, its filter, and the selection', 
 
   const first = page.locator('.moderation-grid article').first();
   await first.getByRole('checkbox').check();
-  await expect(page.getByText('1 selected')).toBeVisible();
+  await expect(page.locator('#bulk-selection-status')).toHaveText('1 selected');
   await page.getByRole('button', { name: 'Publish selected' }).click();
 
   await expectRecoverableNotice(page, 'Gallery');
   // The filter the host had chosen and the selection they had made are both still true.
   await expect(page.locator('.filter-tabs button.active')).toHaveText('Unpublished');
-  await expect(page.getByText('1 selected')).toBeVisible();
+  await expect(page.locator('#bulk-selection-status')).toHaveText('1 selected');
   await expect(first.getByRole('checkbox')).toBeChecked();
 });
 

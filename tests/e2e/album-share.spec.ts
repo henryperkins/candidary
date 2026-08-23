@@ -14,6 +14,40 @@ async function openAlbum(page: Page) {
   await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
 }
 
+test('consumes a new share fragment on an already-mounted unavailable album', async ({ page }) => {
+  const shareToken = 'same-document-id.same-document-secret';
+  const rows = makeMedia(1, 'unpublished').map((item) => ({
+    ...item,
+    caption: 'A newly shared photograph',
+  }));
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    album: {
+      pickedMediaIds: [rows[0]!.id],
+      title: 'The same-document album',
+      entries: [{ kind: 'photo', mediaId: rows[0]!.id }],
+      shareActive: true,
+      shareToken,
+    },
+  });
+
+  await page.goto('/album');
+  await expect(page.getByRole('heading', { name: 'This album is not available.' })).toBeVisible();
+  await page.locator('html').evaluate((documentElement) => {
+    documentElement.dataset.albumDocument = 'mounted';
+  });
+
+  await page.evaluate((token) => {
+    window.location.hash = token;
+  }, shareToken);
+
+  await expect(page).toHaveURL(/\/album$/u);
+  await expect(page.locator('html')).toHaveAttribute('data-album-document', 'mounted');
+  await expect(page.getByRole('heading', { name: 'The same-document album' })).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText('The same-document album is ready. 1 photo.');
+  expect(await page.content()).not.toContain(shareToken);
+});
+
 test('a manager shares, copies, opens, and stops the same fragment album link', async ({ page, context }) => {
   const rows = makeMedia(4, 'unpublished').map((item, index) => ({
     ...item,
@@ -72,6 +106,7 @@ test('a manager shares, copies, opens, and stops the same fragment album link', 
 
   await page.goto('/album');
   await expect(page.getByRole('heading', { name: 'This album is not available.' })).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText('This album is not available.');
   await page.goto(shareUrl);
   await expect(page.getByRole('heading', { name: 'This album is not available.' })).toBeVisible();
 });

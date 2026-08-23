@@ -580,17 +580,12 @@ manageRoutes.post('/manage/events/:eventId/album/start', async (context) => {
   const parsed = albumStartSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new ApiError('VALIDATION_FAILED', 'Choose how to start this album.', 422);
   const eventId = context.req.param('eventId');
-  const albums = new AlbumRepository(context.env.DB);
-  const now = new Date().toISOString();
-
-  let cleared: string[] = [];
-  if (parsed.data.start === 'empty') {
-    // Returned so `Start empty` is undoable by the same bulk path as every other pick
-    // change. Bounded by the album cap, which is what keeps this one statement.
-    cleared = await new MediaRepository(context.env.DB).clearAllFavorites(eventId);
-  }
-  const album = await albums.markSaved(eventId, now);
-  return context.json({ data: { album, cleared }, requestId: context.get('requestId') });
+  const { album, started, cleared } = await new AlbumRepository(context.env.DB).start(
+    eventId,
+    parsed.data.start,
+    new Date().toISOString(),
+  );
+  return context.json({ data: { album, started, cleared }, requestId: context.get('requestId') });
 });
 
 manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => {

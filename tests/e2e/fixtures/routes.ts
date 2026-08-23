@@ -1627,7 +1627,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       albumRevision += 1;
       observeAlbumRoute(route, 200);
       return route.fulfill({
-        json: { data: { album: albumView(), cleared }, requestId: 'request-a' },
+        json: { data: { album: albumView(), started: true, cleared }, requestId: 'request-a' },
       });
     }
     if (method === 'PUT' && path.endsWith('/album')) {

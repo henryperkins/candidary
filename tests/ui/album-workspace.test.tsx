@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -128,6 +129,11 @@ interface Harness {
   pickGates: Array<Promise<void> | undefined>;
   pickErrors: Array<string | undefined>;
   startWrites: string[];
+  startResults: Array<{
+    started: boolean;
+    album?: AlbumState;
+    cleared?: string[];
+  } | undefined>;
   share: AlbumShareStatus;
   shareWrites: Array<'share' | 'stop'>;
   shareGates: Array<Promise<void> | undefined>;
@@ -171,6 +177,7 @@ function harness(overrides: Partial<Harness> = {}) {
     pickGates: overrides.pickGates ?? [],
     pickErrors: overrides.pickErrors ?? [],
     startWrites: [],
+    startResults: overrides.startResults ?? [],
     share: overrides.share ?? null,
     shareWrites: [],
     shareGates: overrides.shareGates ?? [],
@@ -272,14 +279,24 @@ function harness(overrides: Partial<Harness> = {}) {
       return success({ changed });
     }
     if (url.pathname.endsWith('/album/start') && method === 'POST') {
+      const write = state.startWrites.length;
       state.startWrites.push(body.start);
+      const configured = state.startResults[write];
+      if (configured) {
+        if (configured.album) state.album = configured.album;
+        return success({
+          album: resolvedAlbum(),
+          started: configured.started,
+          cleared: configured.cleared ?? [],
+        });
+      }
       let cleared: string[] = [];
       if (body.start === 'empty') {
         cleared = state.galleryRows.filter((item) => item.isFavorite).map((item) => item.id);
         for (const item of state.galleryRows) item.isFavorite = false;
       }
       state.album = { ...state.album, saved: true };
-      return success({ album: resolvedAlbum(), cleared });
+      return success({ album: resolvedAlbum(), started: true, cleared });
     }
     if (url.pathname.endsWith('/album/share') && method === 'GET') {
       const read = state.shareReads++;
@@ -322,6 +339,9 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
 } = {}, workspaceOverrides: {
   eventId?: string;
   onAlbumAccessFailure?: (failure: LoadFailure | null) => void;
+  sharedSelected?: string[];
+  onSharedSelectedChange?: (value: string[] | ((current: string[]) => string[])) => void;
+  strictMode?: boolean;
 } = {}) {
   vi.stubGlobal('fetch', fetchMock);
   const onPrepare = exportOverrides.onPrepare ?? vi.fn(noop);
@@ -332,10 +352,10 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
     shared={{
       media: [],
       status: 'unpublished',
-      selected: [],
+      selected: workspaceOverrides.sharedSelected ?? [],
       selectionAtLimit: false,
       onStatusChange: vi.fn(),
-      onSelectedChange: vi.fn(),
+      onSelectedChange: workspaceOverrides.onSharedSelectedChange ?? vi.fn(),
       onBulk: noop,
       onChangePublication: noop,
       onOpenSettings: vi.fn(),
@@ -351,7 +371,10 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
       onRetry: noop,
     }}
   />;
-  const rendered = render(props(workspaceOverrides.eventId ?? 'event-a'));
+  const workspace = props(workspaceOverrides.eventId ?? 'event-a');
+  const rendered = render(workspaceOverrides.strictMode
+    ? <StrictMode>{workspace}</StrictMode>
+    : workspace);
   return {
     onPrepare,
     rerenderForEvent(eventId: string) { rendered.rerender(props(eventId)); },
@@ -382,6 +405,24 @@ describe('gallery modes', () => {
   it('stacks the three-mode switch throughout the narrow layout range', () => {
     const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
     expect(styles).toMatch(/@media \(max-width: 760px\) \{\s*\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}/u);
+  });
+
+  it('clears Shared selections when the host leaves that mode', async () => {
+    const { fetchMock } = harness();
+    const onSharedSelectedChange = vi.fn();
+    renderWorkspace(fetchMock, {}, {
+      sharedSelected: ['p1'],
+      onSharedSelectedChange,
+    });
+    const user = userEvent.setup();
+    const modes = await screen.findByRole('group', { name: 'Gallery mode' });
+
+    await user.click(within(modes).getByRole('button', { name: 'Shared' }));
+    onSharedSelectedChange.mockClear();
+    await user.click(within(modes).getByRole('button', { name: 'Library' }));
+
+    expect(onSharedSelectedChange).toHaveBeenCalledOnce();
+    expect(onSharedSelectedChange).toHaveBeenCalledWith([]);
   });
 });
 
@@ -493,6 +534,33 @@ describe('selecting photos into the album', () => {
     })).toHaveAttribute('aria-pressed', 'false');
   });
 
+  it('restores focus after Clear, a completed bulk action, and Dismiss remove their bars', async () => {
+    const { fetchMock } = harness();
+    renderWorkspace(fetchMock);
+    const user = userEvent.setup();
+    const selectPhotos = await screen.findByRole('button', { name: 'Select photos' });
+
+    await user.click(selectPhotos);
+    await user.click(screen.getByRole('button', { name: 'Select First dance, from Jose' }));
+    const clear = within(screen.getByRole('region', { name: 'Album' }))
+      .getByRole('button', { name: 'Clear selection' });
+    clear.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(selectPhotos).toHaveFocus());
+
+    await user.click(screen.getByRole('button', { name: 'Select First dance, from Jose' }));
+    const add = within(screen.getByRole('region', { name: 'Album' }))
+      .getByRole('button', { name: 'Add 1 to album' });
+    add.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(selectPhotos).toHaveFocus());
+
+    const dismiss = await screen.findByRole('button', { name: 'Dismiss' });
+    dismiss.focus();
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(selectPhotos).toHaveFocus());
+  });
+
   it('offers an undo that names what survived, and reverses only what changed', async () => {
     const { state, fetchMock } = harness({
       galleryRows: [
@@ -591,6 +659,28 @@ describe('the album', () => {
       description: 'The photographs we kept together.',
       coverMediaId: null,
     });
+  });
+
+  it('keeps the album autosave queue usable after StrictMode effect replay', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const { state, fetchMock } = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 2,
+        saved: true,
+        entries: [{ kind: 'photo', photo: p1 }],
+      },
+    });
+    renderWorkspace(fetchMock, {}, { strictMode: true });
+    await openAlbum();
+    const title = await screen.findByLabelText('Album title');
+    vi.useFakeTimers();
+
+    fireEvent.change(title, { target: { value: 'Strict album' } });
+    expect(screen.getByText('Saving…')).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(state.metadataWrites.at(-1)).toMatchObject({ title: 'Strict album' });
   });
 
   it('keeps a blank title local, blocks preview and mode exit, and focuses the title recovery', async () => {
@@ -697,6 +787,33 @@ describe('the album', () => {
     ))).toEqual(['section:s1', 'photo:p2', 'photo:p1']);
   });
 
+  it('keeps keyboard focus on an enabled move control at both order boundaries', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true });
+    const p2 = photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true });
+    const { fetchMock } = harness({
+      galleryRows: [p1, p2],
+      album: {
+        revision: 1,
+        saved: true,
+        entries: [
+          { kind: 'photo', photo: p1 },
+          { kind: 'photo', photo: p2 },
+        ],
+      },
+    });
+    renderWorkspace(fetchMock);
+    const user = await openAlbum();
+
+    const moveToStart = await screen.findByRole('button', { name: 'Move p2.jpg earlier' });
+    moveToStart.focus();
+    await user.keyboard('{Enter}');
+    const moveFromStart = screen.getByRole('button', { name: 'Move p2.jpg later' });
+    await waitFor(() => expect(moveFromStart).toHaveFocus());
+
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Move p2.jpg earlier' })).toHaveFocus());
+  });
+
   it('trims section names and keeps section removal undoable for nine seconds while focus is inside', async () => {
     const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
     const { state, fetchMock } = harness({
@@ -734,6 +851,62 @@ describe('the album', () => {
     });
     expect(screen.getByDisplayValue('Speeches')).toBeVisible();
     vi.useRealTimers();
+  });
+
+  it('queues section renames while the field stays focused and reports the pending save', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const { state, fetchMock } = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 2,
+        saved: true,
+        entries: [
+          { kind: 'section', id: 's1', heading: 'Reception' },
+          { kind: 'photo', photo: p1 },
+        ],
+      },
+    });
+    renderWorkspace(fetchMock);
+    await openAlbum();
+    const sectionName = await screen.findByLabelText('Section name');
+    vi.useFakeTimers();
+    sectionName.focus();
+    fireEvent.change(sectionName, { target: { value: 'Speeches' } });
+    expect(sectionName).toHaveFocus();
+    expect(screen.getByText('Saving…')).toBeVisible();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(state.orderWrites.at(-1)?.[0]).toMatchObject({
+      kind: 'section',
+      heading: 'Speeches',
+    });
+    expect(sectionName).toHaveFocus();
+  });
+
+  it('uses the derived saving state in the visible chip during membership work', async () => {
+    const removal = deferred();
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const { fetchMock } = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 2,
+        saved: true,
+        entries: [{ kind: 'photo', photo: p1 }],
+      },
+      pickGates: [removal.promise],
+    });
+    renderWorkspace(fetchMock);
+    const user = await openAlbum();
+
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the album' }));
+    expect(screen.getByText('Saving…')).toBeVisible();
+    removal.resolve();
+    await waitFor(() => expect(screen.getByText('Saved')).toBeVisible());
+  });
+
+  it('retains a visible focus indicator for section-name inputs', () => {
+    const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
+    expect(styles).toMatch(/\.album-section__input:focus-visible\s*\{[^}]*outline:/u);
   });
 
   it('resets to timeline order without sections and restores the whole draft with Undo', async () => {
@@ -1214,6 +1387,28 @@ describe('the album', () => {
     await user.click(screen.getByRole('button', { name: 'Start the album from it' }));
     await waitFor(() => expect(state.startWrites).toEqual(['from-picks']));
     await waitFor(() => expect(screen.queryByRole('heading', { name: '1 photo was favorited before this album existed.' })).not.toBeInTheDocument());
+  });
+
+  it('adopts a co-host reconciliation loser without false success or an invalid Undo', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const { state, fetchMock } = harness({
+      galleryRows: [p1],
+      album: { revision: 0, saved: false, entries: [] },
+      startResults: [{
+        started: false,
+        album: { revision: 0, saved: true, entries: [{ kind: 'photo', photo: p1 }] },
+      }],
+    });
+    renderWorkspace(fetchMock);
+    const user = await openAlbum();
+
+    await user.click(await screen.findByRole('button', { name: 'Start empty' }));
+
+    expect(await screen.findByText('The album was already started. The current version is open now.'))
+      .toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    expect(screen.queryByText('The album starts empty. The hearts were cleared.')).not.toBeInTheDocument();
+    expect(state.pickWrites).toEqual([]);
   });
 
   it('reorders with buttons and saves the arrangement it is showing', async () => {

@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
@@ -6,6 +7,7 @@ import type { PublicAlbumView } from '../../shared/contracts';
 import { createAppRouter } from '../../src/app/router';
 
 const TOKEN = 'share-id.share-secret-that-must-not-enter-the-dom';
+const SECOND_TOKEN = 'second-share-id.second-share-secret-that-must-not-enter-the-dom';
 
 const album: PublicAlbumView = {
   title: 'The evening',
@@ -30,17 +32,32 @@ function success(publicAlbum: PublicAlbumView = album) {
   ));
 }
 
+function unavailable() {
+  return Promise.resolve(new Response(JSON.stringify({
+    code: 'ALBUM_SHARE_UNAVAILABLE',
+    message: 'This album is not available.',
+    requestId: 'request-a',
+  }), { status: 410, headers: { 'content-type': 'application/json' } }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function renderAlbumRoute() {
-  return render(<RouterProvider router={createAppRouter(['/album'])} />);
+  const router = createAppRouter(['/album']);
+  return { router, ...render(<RouterProvider router={router} />) };
 }
 
 beforeEach(() => {
-  window.location.hash = '';
-  replaceState = vi.spyOn(window.history, 'replaceState').mockImplementation(
-    (_data, _title, url) => {
-      if (!String(url ?? '').includes('#')) window.location.hash = '';
-    },
-  );
+  window.history.replaceState(null, '', '/album');
+  replaceState = vi.spyOn(window.history, 'replaceState');
 });
 
 afterEach(() => {
@@ -52,6 +69,7 @@ afterEach(() => {
 describe('public album page', () => {
   it('erases the fragment before exchanging it and never renders the credential', async () => {
     window.location.hash = `#${TOKEN}`;
+    const historyState = window.history.state;
     let hashWhenFetched = 'not-called';
     const fetchMock = vi.fn<(path: string, init: RequestInit) => Promise<Response>>(
       () => {
@@ -65,7 +83,7 @@ describe('public album page', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 
     const [path, init] = fetchMock.mock.calls[0]!;
-    expect(replaceState).toHaveBeenCalledWith(null, '', '/album');
+    expect(replaceState).toHaveBeenCalledWith(historyState, '', '/album');
     expect(hashWhenFetched).toBe('');
     expect(path).toBe('/api/album-share/exchange');
     expect(path).not.toContain(TOKEN);
@@ -80,6 +98,7 @@ describe('public album page', () => {
       () => success(),
     );
     vi.stubGlobal('fetch', fetchMock);
+    const historyState = window.history.state;
 
     renderAlbumRoute();
 
@@ -90,7 +109,7 @@ describe('public album page', () => {
     expect(path).toBe('/api/album-share');
     expect(init.method).toBeUndefined();
     expect(init.credentials).toBe('same-origin');
-    expect(replaceState).toHaveBeenCalledWith(null, '', '/album');
+    expect(replaceState).toHaveBeenCalledWith(historyState, '', '/album');
 
     const sources = screen.getAllByRole('img').map((image) => image.getAttribute('src'));
     expect(sources).toEqual([
@@ -99,6 +118,114 @@ describe('public album page', () => {
       '/api/album-share/media/photo-2/preview',
     ]);
     expect(sources.join(' ')).not.toContain('/api/media/');
+  });
+
+  it('marks the album document noindex only while the private route is mounted', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => success()));
+    const { router } = renderAlbumRoute();
+
+    expect(document.head.querySelector('meta[name="robots"]'))
+      .toHaveAttribute('content', 'noindex, nofollow');
+
+    await act(async () => router.navigate('/'));
+    expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
+  });
+
+  it('consumes and clears a share fragment added after the album route is already mounted', async () => {
+    const fetchMock = vi.fn<(path: string, init: RequestInit) => Promise<Response>>()
+      .mockImplementationOnce(() => unavailable())
+      .mockImplementationOnce(() => success());
+    vi.stubGlobal('fetch', fetchMock);
+    const { router } = renderAlbumRoute();
+    await screen.findByRole('heading', { name: 'This album is not available.' });
+
+    await act(async () => router.navigate(`/album#${TOKEN}`));
+
+    expect(await screen.findByRole('heading', { name: 'The evening' })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [path, init] = fetchMock.mock.calls[1]!;
+    expect(path).toBe('/api/album-share/exchange');
+    expect(JSON.parse(String(init.body))).toEqual({ token: TOKEN });
+    expect(window.location.hash).toBe('');
+    expect(document.documentElement.innerHTML).not.toContain(TOKEN);
+  });
+
+  it('keeps a newer fragment result when an older exchange settles last', async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const fetchMock = vi.fn<(path: string, init: RequestInit) => Promise<Response>>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    vi.stubGlobal('fetch', fetchMock);
+    window.location.hash = `#${TOKEN}`;
+    const { router } = renderAlbumRoute();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => router.navigate(`/album#${SECOND_TOKEN}`));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const newerAlbum = { ...album, title: 'The newer evening' };
+    second.resolve(await success(newerAlbum));
+    expect(await screen.findByRole('heading', { name: newerAlbum.title })).toBeInTheDocument();
+
+    await act(async () => {
+      first.resolve(await success({ ...album, title: 'The stale evening' }));
+      await first.promise;
+    });
+    expect(screen.getByRole('heading', { name: newerAlbum.title })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'The stale evening' })).not.toBeInTheDocument();
+  });
+
+  it('replays an erased fragment exchange during StrictMode effect verification', async () => {
+    const firstExchange = deferred<Response>();
+    let exchangeCalls = 0;
+    const fetchMock = vi.fn<(path: string, init: RequestInit) => Promise<Response>>(
+      (path) => {
+        if (path !== '/api/album-share/exchange') return unavailable();
+        exchangeCalls += 1;
+        return exchangeCalls === 1 ? firstExchange.promise : success();
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    window.location.hash = `#${TOKEN}`;
+    const router = createAppRouter(['/album']);
+
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+
+    expect(await screen.findByRole('heading', { name: album.title })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/album-share/exchange',
+      '/api/album-share/exchange',
+    ]);
+  });
+
+  it('announces the ready album through the live region that existed while loading', async () => {
+    const pending = deferred<Response>();
+    vi.stubGlobal('fetch', vi.fn(() => pending.promise));
+    renderAlbumRoute();
+
+    const status = screen.getByRole('status');
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(status).toHaveAttribute('aria-atomic', 'true');
+
+    pending.resolve(await success());
+    await screen.findByRole('heading', { name: album.title });
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status).toHaveTextContent(`${album.title} is ready. 2 photos.`);
+  });
+
+  it('announces an exchange refusal through the live region that existed while loading', async () => {
+    const pending = deferred<Response>();
+    vi.stubGlobal('fetch', vi.fn(() => pending.promise));
+    window.location.hash = `#${TOKEN}`;
+    renderAlbumRoute();
+
+    const status = screen.getByRole('status');
+    pending.resolve(await unavailable());
+    await screen.findByRole('heading', { name: 'This album is not available.' });
+
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status).toHaveTextContent('This album is not available.');
   });
 
   it('keeps accessible image identity for initial and failed preview fallbacks', async () => {

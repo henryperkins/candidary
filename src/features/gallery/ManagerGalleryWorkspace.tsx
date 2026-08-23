@@ -134,11 +134,17 @@ ManagerGalleryWorkspaceProps
     return () => { liveHost.remove(); };
   }, [liveHost]);
 
+  // Clear the previous event's announcement before child passive effects forward their
+  // initial state. Clearing it in the passive reset below ran after those child effects and
+  // erased ready or failed export news before Gallery's one live region could expose it.
+  useLayoutEffect(() => {
+    setAnnouncement('');
+  }, [eventId]);
+
   useEffect(() => {
     setMode('library');
     setPickCount(0);
     setAlbumEntryCount(0);
-    setAnnouncement('');
     pickGeneration.current += 1;
     refreshPickCount();
   }, [eventId, refreshPickCount]);
@@ -176,6 +182,9 @@ ManagerGalleryWorkspaceProps
       } finally {
         modeTransitionPending.current = false;
       }
+    }
+    if (mode === 'shared' && shared.selected.length > 0) {
+      shared.onSelectedChange([]);
     }
     setMode(next);
   }

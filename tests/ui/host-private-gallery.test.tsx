@@ -414,10 +414,12 @@ describe('host private gallery', () => {
       });
     const before = galleryGets().length;
 
-    const favoriteTile = await screen.findByRole('button', { name: /the album: First dance/i });
+    const favoriteTile = await screen.findByRole('button', { name: 'Add First dance to the album' });
     await user.click(favoriteTile);
-    await waitFor(() => expect(screen.getByRole('button', { name: /the album: First dance/i })).toHaveAttribute('aria-pressed', 'true'));
-    expect(await screen.findByText('First dance added to the album. This does not publish it.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove First dance from the album' }))
+      .toHaveAttribute('aria-pressed', 'true'));
+    await waitFor(() => expect(screen.getByRole('status'))
+      .toHaveTextContent('First dance added to the album. This does not publish it.'));
     expect(galleryGets().length).toBe(before);
 
     await user.click(screen.getByRole('button', { name: /^Album picks/ }));
@@ -430,9 +432,9 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Gallery' });
 
-    await user.click(await screen.findByRole('button', { name: /the album: First dance/i }));
+    await user.click(await screen.findByRole('button', { name: 'Add First dance to the album' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('manager action');
-    await waitFor(() => expect(screen.getByRole('button', { name: /the album: First dance/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add First dance to the album' }))
       .toHaveAttribute('aria-pressed', 'false'));
   });
 
@@ -534,7 +536,7 @@ describe('host private gallery', () => {
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
     await user.click(screen.getByRole('button', { name: /open p2/i }));
     const dialog = await screen.findByRole('dialog', { name: 'p2.jpg' });
-    const viewerFavorite = within(dialog).getByRole('button', { name: /^(Add to album|In the album)$/ });
+    const viewerFavorite = within(dialog).getByRole('button', { name: 'Remove p2.jpg from the album' });
     await user.click(viewerFavorite);
     expect(viewerFavorite).toBeDisabled();
 
@@ -588,10 +590,11 @@ describe('host private gallery', () => {
       /842 photos · 1 KB · 3 guestbook entries\. Download links last 24 hours\./,
       { selector: 'span' },
     )).toBeVisible();
-    // The visible label alone would announce the bare word "Ready", so one live region carries the
-    // whole sentence. It is mounted before any job exists, which is the only way it is ever spoken.
-    expect(screen.getByText(/^Ready\. 842 photos · 1 KB · 3 guestbook entries\./, { selector: 'p' }))
-      .toHaveAttribute('role', 'status');
+    // The visible label alone would announce the bare word "Ready", so Gallery's one persistent
+    // live region carries the whole sentence while the child export control stays non-live.
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole('status'))
+      .toHaveTextContent(/^Ready\. 842 photos · 1 KB · 3 guestbook entries\./));
     expect(screen.queryByText(/attempt/i)).not.toBeInTheDocument();
   });
 
@@ -620,8 +623,9 @@ describe('host private gallery', () => {
 
     expect(screen.getByText('Failed')).toBeVisible();
     expect(screen.getByText(/Attempt 2 failed/, { selector: 'span' })).toBeVisible();
-    expect(screen.getByText(/^Failed\. 842 photos · 1 KB · 3 guestbook entries\. Attempt 2 failed\./, { selector: 'p' }))
-      .toHaveAttribute('role', 'status');
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole('status'))
+      .toHaveTextContent(/^Failed\. 842 photos · 1 KB · 3 guestbook entries\. Attempt 2 failed\./));
     expect(screen.getByRole('button', { name: 'Retry export' })).toBeVisible();
   });
 

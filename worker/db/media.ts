@@ -669,25 +669,6 @@ export class MediaRepository {
     return batch.flatMap((result) => result.results.map(mapGalleryMediaRow));
   }
 
-  /**
-   * Empties the album's membership in one statement — the `Start empty` half of the
-   * reconciliation prompt. Returns what it cleared so the choice is undoable through
-   * `setFavoriteBulk`, which is bounded by the album cap and therefore always able to
-   * take the whole list back.
-   */
-  async clearAllFavorites(eventId: string): Promise<string[]> {
-    const result = await this.db.prepare(`
-      UPDATE media
-      SET favorited_at = NULL
-      WHERE event_id = ?
-        AND upload_state = 'stored'
-        AND deleted_at IS NULL
-        AND favorited_at IS NOT NULL
-      RETURNING id
-    `).bind(eventId).all<{ id: string }>();
-    return result.results.map((row) => row.id);
-  }
-
   async countStoredTimelineSentinels(eventId?: string): Promise<number> {
     const predicates = [
       "upload_state = 'stored'",

@@ -62,6 +62,37 @@ async function seedStored(
   return id;
 }
 
+async function seedLegacyFavorites(access: Access, count: number) {
+  const session = await env.DB
+    .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+    .bind(access.event.id)
+    .first<{ id: string }>();
+  if (!session) throw new Error('Expected a guest session for the legacy favorites fixture.');
+  const first = 1_000;
+  const last = first + count - 1;
+  await env.DB.prepare(`
+    WITH RECURSIVE seq(i) AS (
+      SELECT ?1
+      UNION ALL
+      SELECT i + 1 FROM seq WHERE i < ?2
+    )
+    INSERT INTO media (
+      id, event_id, uploader_session_id, object_key, object_bucket_generation,
+      original_filename, mime_type, declared_byte_size, byte_size, width, height,
+      guest_name, caption, upload_state, publication_status, idempotency_key,
+      reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+      favorited_at, deleted_at
+    )
+    SELECT
+      printf('00000000-0000-4000-8000-%012d', i), ?3, ?4,
+      'events/' || ?3 || '/media/final/' || printf('00000000-0000-4000-8000-%012d', i),
+      'canonical', 'legacy-' || i || '.jpg', 'image/jpeg', 1024, 1024, 800, 600,
+      'Avery Stone', NULL, 'stored', 'unpublished', 'legacy-' || i,
+      ?5, ?5, ?5, NULL, ?5, ?5, NULL
+    FROM seq
+  `).bind(first, last, access.event.id, session.id, NOW).run();
+}
+
 function getAlbum(access: Access) {
   return createApp().request(`/api/manage/events/${access.event.id}/album`, {
     headers: { cookie: access.manager.cookie },
@@ -565,6 +596,29 @@ describe('album picks', () => {
 });
 
 describe('album start', () => {
+  it.each(['from-picks', 'empty'] as const)(
+    'refuses %s without changing an unsaved legacy set above the album cap',
+    async (start) => {
+      const access = await eventAccess();
+      await seedLegacyFavorites(access, ALBUM_MAX_ENTRIES + 1);
+
+      const response = await write(access, '/start', { start });
+
+      expect(response.status).toBe(409);
+      expect(await response.json() as { code: string; message: string }).toMatchObject({
+        code: 'ALBUM_FULL',
+        message: expect.stringMatching(/remove picks in Library/iu),
+      });
+      expect(await env.DB.prepare(`
+        SELECT COUNT(*) AS count FROM media
+        WHERE event_id = ? AND favorited_at IS NOT NULL
+      `).bind(access.event.id).first<number>('count')).toBe(ALBUM_MAX_ENTRIES + 1);
+      expect(await env.DB.prepare(`
+        SELECT entries, saved_at FROM event_albums WHERE event_id = ?
+      `).bind(access.event.id).first()).toEqual({ entries: '[]', saved_at: null });
+    },
+  );
+
   it('keeps earlier favorites and marks the album saved', async () => {
     const access = await eventAccess();
     await seedStored(access, 1, { favoritedAt: '2026-09-20T00:00:00.000Z' });
@@ -574,6 +628,31 @@ describe('album start', () => {
     const album = await albumOf(access);
     expect(album.saved).toBe(true);
     expect(album.photoCount).toBe(1);
+  });
+
+  it('stores the starting picks in timeline order so a later older pick appends', async () => {
+    const access = await eventAccess();
+    const later = await seedStored(access, 2, {
+      timelineAt: '2026-09-19T12:00:00.000Z',
+      favoritedAt: '2026-09-20T00:00:00.000Z',
+    });
+    const earlier = await seedStored(access, 1, {
+      timelineAt: '2026-09-19T11:00:00.000Z',
+      favoritedAt: '2026-09-20T00:00:00.000Z',
+    });
+    const pickedAfterStart = await seedStored(access, 3, {
+      timelineAt: '2026-09-19T10:00:00.000Z',
+    });
+
+    expect((await write(access, '/start', { start: 'from-picks' })).status).toBe(200);
+    expect((await write(access, '/picks', {
+      mediaIds: [pickedAfterStart],
+      picked: true,
+    })).status).toBe(200);
+
+    const album = await albumOf(access);
+    expect(album.entries.map((entry) => entry.kind === 'photo' ? entry.photo.id : entry.id))
+      .toEqual([earlier, later, pickedAfterStart]);
   });
 
   it('clears earlier favorites, reports them, and stays saved', async () => {
@@ -600,5 +679,33 @@ describe('album start', () => {
     const restored = await write(access, '/picks', { mediaIds: body.data.cleared, picked: true });
     expect(restored.status).toBe(200);
     expect((await albumOf(access)).photoCount).toBe(1);
+  });
+
+  it('does not let a stale Start empty retry clear a pick added after reconciliation', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { favoritedAt: '2026-09-20T00:00:00.000Z' });
+    const pickedAfterStart = await seedStored(access, 2);
+
+    const winner = await write(access, '/start', { start: 'empty' });
+    expect(winner.status).toBe(200);
+    expect((await winner.json() as { data: { started: boolean; cleared: string[] } }).data)
+      .toMatchObject({ started: true, cleared: [mediaId(1)] });
+    expect((await write(access, '/picks', {
+      mediaIds: [pickedAfterStart],
+      picked: true,
+    })).status).toBe(200);
+
+    const staleRetry = await write(access, '/start', { start: 'empty' });
+    expect(staleRetry.status).toBe(200);
+    expect((await staleRetry.json() as {
+      data: { started: boolean; cleared: string[]; album: AlbumView };
+    }).data).toMatchObject({
+      started: false,
+      cleared: [],
+      album: { saved: true, photoCount: 1 },
+    });
+    expect((await albumOf(access)).entries.map((entry) => (
+      entry.kind === 'photo' ? entry.photo.id : entry.id
+    ))).toEqual([pickedAfterStart]);
   });
 });

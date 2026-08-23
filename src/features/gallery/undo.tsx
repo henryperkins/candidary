@@ -138,11 +138,36 @@ export function useUndo(): UndoController {
 export function UndoBar({
   controller,
   live = true,
+  onRestoreFocus,
 }: {
   controller: UndoController;
   live?: boolean;
+  onRestoreFocus?: () => void;
 }) {
   const { offer, running, error, dismiss, run, hold, release } = controller;
+  const barRef = useRef<HTMLDivElement>(null);
+  const closeFocusOrigin = useRef<HTMLElement | null>(null);
+  const previousOffer = useRef(offer);
+
+  const rememberCloseFocus = useCallback(() => {
+    const active = document.activeElement;
+    closeFocusOrigin.current = active instanceof HTMLElement && barRef.current?.contains(active)
+      ? active
+      : null;
+  }, []);
+
+  useEffect(() => {
+    const previous = previousOffer.current;
+    previousOffer.current = offer;
+    if (!previous || offer) return;
+    const origin = closeFocusOrigin.current;
+    closeFocusOrigin.current = null;
+    if (!origin) return;
+    if (document.activeElement === origin || document.activeElement === document.body) {
+      onRestoreFocus?.();
+    }
+  }, [offer, onRestoreFocus]);
+
   return <div className="album-undo" data-open={offer !== null}>
     <p
       className="sr-only"
@@ -153,6 +178,7 @@ export function UndoBar({
       {offer ? `${offer.message} Undo is available for nine seconds.` : ''}
     </p>
     {offer && <div
+      ref={barRef}
       className="album-undo__bar"
       onFocusCapture={() => hold('focus')}
       onBlurCapture={(blur) => {
@@ -167,14 +193,20 @@ export function UndoBar({
         type="button"
         className="album-undo__action"
         disabled={running}
-        onClick={run}
+        onClick={() => {
+          rememberCloseFocus();
+          run();
+        }}
       >{running ? 'Undoing…' : 'Undo'}</button>
       <button
         type="button"
         className="album-undo__dismiss"
         aria-label="Dismiss"
         disabled={running}
-        onClick={dismiss}
+        onClick={() => {
+          rememberCloseFocus();
+          dismiss();
+        }}
       >Dismiss</button>
     </div>}
   </div>;

@@ -114,12 +114,16 @@ function draftFromAlbum(album: AlbumView): AlbumDraft {
   };
 }
 
+function canonicalSectionHeading(heading: string): string {
+  return heading.trim() || 'New section';
+}
+
 function canonicalDraft(draft: AlbumDraft): AlbumDraft {
   return {
     ...draft,
     title: draft.title.trim(),
     entries: draft.entries.map((entry) => (
-      entry.kind === 'section' ? { ...entry, heading: entry.heading.trim() } : entry
+      entry.kind === 'section' ? { ...entry, heading: canonicalSectionHeading(entry.heading) } : entry
     )),
   };
 }
@@ -151,6 +155,27 @@ function draftIntent(draft: AlbumDraft): string {
 
 function titleIsInvalid(draft: AlbumDraft): boolean {
   return draft.title.trim().length === 0;
+}
+
+function effectiveAlbumAutosaveState(
+  autosave: AutosaveState,
+  loading: boolean,
+  pendingOperationCount: number,
+  accessFailure: LoadFailure | null,
+): AutosaveState {
+  if (accessFailure) {
+    return {
+      status: 'failed',
+      failure: {
+        message: accessFailure.message,
+        retryable: accessFailure.retryable,
+        ...(accessFailure.retryable ? {} : { escalation: accessFailure }),
+      },
+    };
+  }
+  return (loading || pendingOperationCount > 0) && autosave.status === 'saved'
+    ? { status: 'saving', failure: null }
+    : autosave;
 }
 
 function clampCodePoints(value: string, maximum: number): string {
@@ -517,6 +542,13 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const operationJournal = useRef<JournalledAlbumOperation[]>([]);
   const loadCanonicalRef = useRef<((rejected: RejectedAlbumDraft) => Promise<AlbumView>) | null>(null);
   const queueRef = useRef<AutosaveQueue<AlbumQueueSnapshot> | null>(null);
+  const queueLifecycle = useRef(0);
+
+  const restoreAlbumEditorFocus = useCallback(() => {
+    rootRef.current?.querySelector<HTMLElement>(
+      '#album-title, .album-order-heading button:not(:disabled), .album-exits button:not(:disabled)',
+    )?.focus();
+  }, []);
 
   if (queueRef.current === null) {
     queueRef.current = createAutosaveQueue<AlbumQueueSnapshot>({
@@ -688,9 +720,19 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     return () => controller.abort();
   }, [active, eventId, loadCanonical]);
 
-  useEffect(() => () => {
-    queue.dispose();
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+  useEffect(() => {
+    queueLifecycle.current += 1;
+    return () => {
+      const cleanupGeneration = ++queueLifecycle.current;
+      // React StrictMode immediately replays passive effects without remounting the
+      // component. Defer irreversible queue disposal by one microtask so the replayed
+      // setup can claim this same queue; a real unmount has no successor and disposes it.
+      queueMicrotask(() => {
+        if (queueLifecycle.current !== cleanupGeneration) return;
+        queue.dispose();
+        if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      });
+    };
   }, [queue]);
 
   useEffect(() => {
@@ -709,18 +751,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       ? { label: 'Album title', message: 'Give this album a title.' }
       : null;
     const accessFailure = reconciliationFailure ?? loadFailure;
-    const state = accessFailure
-      ? {
-          status: 'failed' as const,
-          failure: {
-            message: accessFailure.message,
-            retryable: accessFailure.retryable,
-            ...(accessFailure.retryable ? {} : { escalation: accessFailure }),
-          },
-        }
-      : (loading || pendingOperationCount > 0) && autosave.status === 'saved'
-        ? { status: 'saving' as const, failure: null }
-        : autosave;
+    const state = effectiveAlbumAutosaveState(
+      autosave,
+      loading,
+      pendingOperationCount,
+      accessFailure,
+    );
     onAutosaveStateChange?.({
       domain: 'album',
       label: 'Album',
@@ -858,7 +894,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     if (!key) return;
     refocusKey.current = null;
     listRef.current
-      ?.querySelector<HTMLElement>(`[data-entry-key="${CSS.escape(key)}"] .album-entry__move-earlier`)
+      ?.querySelector<HTMLElement>(
+        `[data-entry-key="${CSS.escape(key)}"] .album-entry__move-earlier:not(:disabled), `
+        + `[data-entry-key="${CSS.escape(key)}"] .album-entry__move-later:not(:disabled)`,
+      )
       ?.focus();
   }, [draft.entries]);
 
@@ -923,23 +962,20 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
         entry.kind === 'section' && entry.id === id ? { ...entry, heading } : entry
       )),
     };
-    recordOperations([{
+    applyDraft(next, false, [{
       kind: 'rename-section',
       section: { ...section, heading },
       previousKey: context.previousKey,
       nextKey: context.nextKey,
       prefer: context.previousKey ? 'previous' : 'next',
     }]);
-    draftGeneration.current += 1;
-    draftRef.current = next;
-    setDraft(next);
   }
 
   function commitSectionName(id: string) {
     const current = draftRef.current;
     const section = current.entries.find((entry) => entry.kind === 'section' && entry.id === id);
     if (!section || section.kind !== 'section') return;
-    const heading = section.heading.trim() || 'New section';
+    const heading = canonicalSectionHeading(section.heading);
     const context = removedEntryContext(current.entries, `section:${id}`);
     applyDraft({
       ...current,
@@ -1144,9 +1180,16 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       const result = await startAlbum(eventId, start);
       adoptCanonical(result.album, true);
       onPicksChanged();
+      if (!result.started) {
+        setAnnouncement('The album was already started. The current version is open now.');
+        return;
+      }
       if (start === 'empty') {
-        const message = 'The album starts empty. The hearts were cleared.';
+        const message = result.cleared.length > 0
+          ? 'The album starts empty. The hearts were cleared.'
+          : 'The album starts empty.';
         setAnnouncement(message);
+        if (result.cleared.length === 0) return;
         undo.present({
           message,
           run: () => trackOperation(async () => {
@@ -1271,6 +1314,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const effectiveCoverId = effectiveCover?.id ?? null;
   const needsReconciliation = album !== null && !album.saved && photoCount > 0;
   const invalidTitle = titleIsInvalid(draft);
+  const visibleAutosave = effectiveAlbumAutosaveState(
+    autosave,
+    loading,
+    pendingOperationCount,
+    reconciliationFailure ?? loadFailure,
+  );
 
   let photoPosition = 0;
   return <div className="gallery-album" ref={rootRef}>
@@ -1328,7 +1377,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
           <div className="album-autosave-row">
             <AutosaveStatus
               label="Album"
-              state={autosave}
+              state={visibleAutosave}
               blockingField={invalidTitle ? { label: 'Album title', message: 'Give this album a title.' } : null}
               onRetry={() => applyDraft(draftRef.current, true)}
               live={false}
@@ -1627,6 +1676,6 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
           </section>
         </>}
 
-    <UndoBar controller={undo} live={false} />
+    <UndoBar controller={undo} live={false} onRestoreFocus={restoreAlbumEditorFocus} />
   </div>;
 });

@@ -60,14 +60,21 @@ const GUESTBOOK_CHECK_TABLE_LIST = [
   'export_jobs',
   'media',
 ].map((name) => `'${name}'`).join(',');
+const ALBUM_SCHEMA_TABLES = [
+  'event_album_share_sessions',
+  'event_album_shares',
+  'event_albums',
+] as const;
+const ALBUM_SCHEMA_TABLE_LIST = ALBUM_SCHEMA_TABLES
+  .map((name) => `'${name}'`).join(',');
 
 /**
  * Read-only, and appended to rather than reordered.
  *
  * The six original statements keep their positions because the unit fixture
  * patches `events` rows by ordinal index, and this string is compared
- * byte-for-byte in three places. Everything the cover schema adds is a new
- * statement at the end.
+ * byte-for-byte in three places. Every later schema family appends statements
+ * at the end so existing result ordinals remain stable.
  *
  * The six cover statements use joined table-valued pragmas rather than one
  * pragma per table. That is not a shortcut: a joined pragma also proves no
@@ -130,14 +137,20 @@ SELECT name,
       (instr(sql, 'guestbook_entry_count IS NULL OR guestbook_entry_count >= 0') > 0) || '|' ||
       (instr(sql, 'guestbook_shared_count >= 0 AND guestbook_shared_count <= guestbook_entry_count') > 0) || '|' ||
       (instr(sql, 'guestbook_prompt IS NULL OR length(trim(guestbook_prompt)) BETWEEN 1 AND 160') > 0) || '|' ||
-      (instr(sql, 'guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)') > 0)
+      (instr(sql, 'guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)') > 0) || '|' ||
+      (instr(sql, 'kind IN (''complete'', ''album'')') > 0) || '|' ||
+      (instr(sql, '(kind = ''complete'' AND album_entries_json IS NULL)') > 0) || '|' ||
+      (instr(sql, '(kind = ''album'' AND album_entries_json IS NOT NULL') > 0) || '|' ||
+      (instr(sql, 'json_valid(album_entries_json)') > 0) || '|' ||
+      (instr(sql, 'json_type(album_entries_json) = ''array''') > 0)
     WHEN 'export_media_entries' THEN
       (instr(sql, 'object_bucket_generation IN (''legacy'', ''canonical'')') > 0) || '|' ||
       (instr(sql, 'declared_byte_size >= 0') > 0) || '|' ||
       (instr(sql, 'byte_size IS NULL OR byte_size >= 0') > 0) || '|' ||
       (instr(sql, 'width IS NULL OR width > 0') > 0) || '|' ||
       (instr(sql, 'height IS NULL OR height > 0') > 0) || '|' ||
-      (instr(sql, 'publication_status IN (''unpublished'', ''published'', ''hidden'')') > 0)
+      (instr(sql, 'publication_status IN (''unpublished'', ''published'', ''hidden'')') > 0) || '|' ||
+      (instr(sql, 'album_tail_position IS NULL OR album_tail_position >= 1') > 0)
     WHEN 'guest_message_purge_receipts' THEN
       (instr(sql, 'length(idempotency_key) BETWEEN 1 AND 128') > 0) || ''
     WHEN 'legacy_media_scan_quarantine' THEN
@@ -193,9 +206,76 @@ FROM sqlite_master
 WHERE type = 'table' AND name IN (${GUESTBOOK_CHECK_TABLE_LIST})
 ORDER BY name;
 SELECT name, sql FROM sqlite_master
-  WHERE type = 'table' AND name = 'media_object_promotions';`;
+  WHERE type = 'table' AND name = 'media_object_promotions';
+SELECT name FROM sqlite_master
+  WHERE type = 'table' AND name IN (${ALBUM_SCHEMA_TABLE_LIST}) ORDER BY name;
+SELECT 'event_album_share_sessions' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('event_album_share_sessions') p
+UNION ALL
+SELECT 'event_album_shares' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('event_album_shares') p
+UNION ALL
+SELECT 'event_albums' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('event_albums') p
+UNION ALL
+SELECT 'export_jobs' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('export_jobs') p
+  WHERE p.name IN ('kind', 'album_entries_json')
+UNION ALL
+SELECT 'export_media_entries' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('export_media_entries') p
+  WHERE p.name = 'album_tail_position'
+ORDER BY tbl, cid;
+SELECT m.name AS tbl, f."table" AS parent, f."from" AS col, f.on_delete AS on_delete
+  FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f
+  WHERE m.type = 'table' AND m.name IN (${ALBUM_SCHEMA_TABLE_LIST})
+  ORDER BY m.name, f."from";
+SELECT 'event_album_share_sessions' AS tbl, i.name AS idx, i."unique" AS uniq,
+       i.partial AS partial, x.sql AS sql
+  FROM pragma_index_list('event_album_share_sessions') i
+  LEFT JOIN sqlite_master x ON x.type = 'index' AND x.name = i.name
+UNION ALL
+SELECT 'event_album_shares' AS tbl, i.name AS idx, i."unique" AS uniq,
+       i.partial AS partial, x.sql AS sql
+  FROM pragma_index_list('event_album_shares') i
+  LEFT JOIN sqlite_master x ON x.type = 'index' AND x.name = i.name
+UNION ALL
+SELECT 'event_albums' AS tbl, i.name AS idx, i."unique" AS uniq,
+       i.partial AS partial, x.sql AS sql
+  FROM pragma_index_list('event_albums') i
+  LEFT JOIN sqlite_master x ON x.type = 'index' AND x.name = i.name
+UNION ALL
+SELECT 'export_media_entries' AS tbl, i.name AS idx, i."unique" AS uniq,
+       i.partial AS partial, x.sql AS sql
+  FROM pragma_index_list('export_media_entries') i
+  LEFT JOIN sqlite_master x ON x.type = 'index' AND x.name = i.name
+  WHERE i.name = 'export_album_media_position'
+ORDER BY tbl, idx;
+SELECT name,
+  CASE name
+    WHEN 'event_albums' THEN
+      (instr(sql, 'length(trim(title)) BETWEEN 1 AND 120') > 0) || '|' ||
+      (instr(sql, 'length(description) <= 1000') > 0)
+    WHEN 'export_jobs' THEN
+      (instr(sql, 'kind IN (''complete'', ''album'')') > 0) || '|' ||
+      (instr(sql, '(kind = ''complete'' AND album_entries_json IS NULL)') > 0) || '|' ||
+      (instr(sql, '(kind = ''album'' AND album_entries_json IS NOT NULL') > 0) || '|' ||
+      (instr(sql, 'json_valid(album_entries_json)') > 0) || '|' ||
+      (instr(sql, 'json_type(album_entries_json) = ''array''') > 0)
+    WHEN 'export_media_entries' THEN
+      (instr(sql, 'album_tail_position IS NULL OR album_tail_position >= 1') > 0) || ''
+    ELSE ''
+  END AS checks
+FROM sqlite_master
+WHERE type = 'table' AND name IN ('event_albums', 'export_jobs', 'export_media_entries')
+ORDER BY name;`;
 
-const INVARIANT_STATEMENT_COUNT = 18;
+const INVARIANT_STATEMENT_COUNT = 23;
 
 /**
  * Pinned, not derived.
@@ -205,13 +285,12 @@ const INVARIANT_STATEMENT_COUNT = 18;
  * file that is not checked in is never seen, and a correctly numbered extra file
  * that *is* checked in would simply be accepted as the next entry.
  *
- * Sixteen after the Host Private Gallery landing: `0014` closes the Cover
- * Studio invariants, `0015_curated_private_guestbook.sql` shipped the Guestbook
- * cutover, and `0016_host_private_gallery.sql` is the new active terminal
- * migration. Count, terminal event metadata, and exact trigger hashes move
- * together in this candidate.
+ * Eighteen after the Album end-to-end landing: `0016_host_private_gallery.sql`
+ * establishes the favorite set, `0017_event_album.sql` stores its curated
+ * order and share capability, and `0018_album_end_to_end.sql` adds album export
+ * snapshots. Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 16;
+const EXPECTED_MIGRATION_COUNT = 18;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
@@ -393,11 +472,15 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     'guestbook_csv_object_key', 'guestbook_csv_bytes', 'guestbook_csv_sha256', 'guestbook_entry_count',
     'guestbook_shared_count', 'guestbook_event_name', 'guestbook_event_date', 'guestbook_event_timezone',
     'guestbook_prompt', 'guestbook_gallery_visible',
+    // 0018, appended so every earlier ordinal is unmoved.
+    'kind', 'album_entries_json',
   ],
   export_media_entries: [
     'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
     'mime_type', 'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption',
     'publication_status', 'created_at', 'published_at',
+    // 0018, appended so every earlier ordinal is unmoved.
+    'album_tail_position',
   ],
   guest_message_purge_receipts: [
     'event_id', 'guest_session_id', 'idempotency_key', 'request_hmac', 'purged_at',
@@ -452,6 +535,7 @@ const EXPECTED_GUESTBOOK_INDEXES = [
   'export_jobs.export_jobs_expiry unique=0 partial=0',
   'export_jobs.export_jobs_one_active_per_event unique=1 partial=1',
   'export_jobs.sqlite_autoindex_export_jobs_1 unique=1 partial=0',
+  'export_media_entries.export_album_media_position unique=1 partial=1',
   'export_media_entries.export_media_entries_order unique=0 partial=0',
   'export_media_entries.sqlite_autoindex_export_media_entries_1 unique=1 partial=0',
   'guest_message_purge_receipts.sqlite_autoindex_guest_message_purge_receipts_1 unique=1 partial=0',
@@ -476,8 +560,8 @@ const EXPECTED_GUESTBOOK_INDEXES = [
 const EXPECTED_GUESTBOOK_CHECKS: Record<string, string> = {
   events: '1',
   export_guestbook_entries: '1|1|1|1|1|1|1|1',
-  export_jobs: '1|1|1|1|1|1',
-  export_media_entries: '1|1|1|1|1|1',
+  export_jobs: '1|1|1|1|1|1|1|1|1|1|1',
+  export_media_entries: '1|1|1|1|1|1|1',
   guest_message_purge_receipts: '1',
   guest_message_rate_events: '',
   legacy_media_scan_quarantine: '1|1',
@@ -485,6 +569,63 @@ const EXPECTED_GUESTBOOK_CHECKS: Record<string, string> = {
   media: '1',
   media_object_promotions: '1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1',
   media_object_write_tombstones: '1|1|1|1|1|1|1',
+};
+
+const EXPECTED_ALBUM_TABLES = [...ALBUM_SCHEMA_TABLES];
+
+const EXPECTED_ALBUM_COLUMNS = [
+  'event_album_share_sessions.0 id TEXT notnull=0 default=NULL pk=1',
+  'event_album_share_sessions.1 share_id TEXT notnull=1 default=NULL pk=0',
+  'event_album_share_sessions.2 event_id TEXT notnull=1 default=NULL pk=0',
+  'event_album_share_sessions.3 secret_digest TEXT notnull=1 default=NULL pk=0',
+  'event_album_share_sessions.4 expires_at TEXT notnull=1 default=NULL pk=0',
+  'event_album_share_sessions.5 created_at TEXT notnull=1 default=NULL pk=0',
+  'event_album_shares.0 id TEXT notnull=0 default=NULL pk=1',
+  'event_album_shares.1 event_id TEXT notnull=1 default=NULL pk=0',
+  'event_album_shares.2 secret_digest TEXT notnull=1 default=NULL pk=0',
+  'event_album_shares.3 secret_ciphertext TEXT notnull=1 default=NULL pk=0',
+  'event_album_shares.4 shared_at TEXT notnull=1 default=NULL pk=0',
+  'event_album_shares.5 created_at TEXT notnull=1 default=NULL pk=0',
+  'event_albums.0 event_id TEXT notnull=0 default=NULL pk=1',
+  "event_albums.1 entries TEXT notnull=1 default='[]' pk=0",
+  'event_albums.2 saved_at TEXT notnull=0 default=NULL pk=0',
+  'event_albums.3 revision INTEGER notnull=1 default=0 pk=0',
+  'event_albums.4 created_at TEXT notnull=1 default=NULL pk=0',
+  'event_albums.5 updated_at TEXT notnull=1 default=NULL pk=0',
+  "event_albums.6 title TEXT notnull=1 default='Album' pk=0",
+  "event_albums.7 description TEXT notnull=1 default='' pk=0",
+  'event_albums.8 cover_media_id TEXT notnull=0 default=NULL pk=0',
+  "export_jobs.28 kind TEXT notnull=1 default='complete' pk=0",
+  'export_jobs.29 album_entries_json TEXT notnull=0 default=NULL pk=0',
+  'export_media_entries.15 album_tail_position INTEGER notnull=0 default=NULL pk=0',
+];
+
+const EXPECTED_ALBUM_FOREIGN_KEYS = [
+  'event_album_share_sessions.event_id -> events CASCADE',
+  'event_album_share_sessions.share_id -> event_album_shares CASCADE',
+  'event_album_shares.event_id -> events CASCADE',
+  'event_albums.event_id -> events CASCADE',
+];
+
+const EXPECTED_ALBUM_INDEXES = [
+  'event_album_share_sessions.event_album_share_sessions_lookup unique=0 partial=0'
+    + ' sql=CREATE INDEX event_album_share_sessions_lookup'
+    + ' ON event_album_share_sessions(id, share_id, event_id)',
+  'event_album_share_sessions.sqlite_autoindex_event_album_share_sessions_1'
+    + ' unique=1 partial=0 sql=NULL',
+  'event_album_shares.sqlite_autoindex_event_album_shares_1 unique=1 partial=0 sql=NULL',
+  'event_album_shares.sqlite_autoindex_event_album_shares_2 unique=1 partial=0 sql=NULL',
+  'event_albums.sqlite_autoindex_event_albums_1 unique=1 partial=0 sql=NULL',
+  'export_media_entries.export_album_media_position unique=1 partial=1'
+    + ' sql=CREATE UNIQUE INDEX export_album_media_position'
+    + ' ON export_media_entries(export_job_id, album_tail_position)'
+    + ' WHERE album_tail_position IS NOT NULL',
+];
+
+const EXPECTED_ALBUM_CHECKS: Record<string, string> = {
+  event_albums: '1|1',
+  export_jobs: '1|1|1|1|1',
+  export_media_entries: '1',
 };
 
 const EXPECTED_MEDIA_OBJECT_PROMOTIONS_SQL = `
@@ -1088,6 +1229,79 @@ function assertMediaObjectPromotionsSql(values: unknown[]): void {
   }
 }
 
+function assertAlbumTables(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => textField(value, ['name'], `Album table ${index + 1}`).name!),
+    EXPECTED_ALBUM_TABLES,
+    'Album table set',
+  );
+}
+
+function assertAlbumColumns(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(
+        value,
+        ['tbl', 'cid', 'col', 'type', 'notnull', 'dflt_value', 'pk'],
+        `Album column ${index + 1}`,
+      );
+      if (typeof row.tbl !== 'string' || typeof row.col !== 'string'
+        || typeof row.type !== 'string'
+        || !Number.isSafeInteger(row.cid) || (row.cid as number) < 0
+        || (row.notnull !== 0 && row.notnull !== 1)
+        || (row.dflt_value !== null && typeof row.dflt_value !== 'string')
+        || !Number.isSafeInteger(row.pk) || (row.pk as number) < 0) {
+        throw new TypeError(`Album column ${index + 1} contains an invalid value.`);
+      }
+      return `${row.tbl}.${row.cid} ${row.col} ${row.type} notnull=${row.notnull}`
+        + ` default=${row.dflt_value ?? 'NULL'} pk=${row.pk}`;
+    }),
+    EXPECTED_ALBUM_COLUMNS,
+    'Album column definitions',
+  );
+}
+
+function assertAlbumForeignKeys(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = textField(value, ['tbl', 'parent', 'col', 'on_delete'], `Album foreign key ${index + 1}`);
+      return `${row.tbl}.${row.col} -> ${row.parent} ${row.on_delete}`;
+    }),
+    EXPECTED_ALBUM_FOREIGN_KEYS,
+    'Album foreign-key set',
+  );
+}
+
+function assertAlbumIndexes(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(value, ['tbl', 'idx', 'uniq', 'partial', 'sql'], `Album index ${index + 1}`);
+      if (typeof row.tbl !== 'string' || typeof row.idx !== 'string'
+        || (row.uniq !== 0 && row.uniq !== 1) || (row.partial !== 0 && row.partial !== 1)
+        || (row.sql !== null && typeof row.sql !== 'string')) {
+        throw new TypeError(`Album index ${index + 1} contains an invalid value.`);
+      }
+      const normalizedSql = typeof row.sql === 'string'
+        ? row.sql.replace(/\s+/gu, ' ').trim()
+        : 'NULL';
+      return `${row.tbl}.${row.idx} unique=${row.uniq} partial=${row.partial} sql=${normalizedSql}`;
+    }),
+    EXPECTED_ALBUM_INDEXES,
+    'Album index set',
+  );
+}
+
+function assertAlbumChecks(values: unknown[]): void {
+  const expectedNames = Object.keys(EXPECTED_ALBUM_CHECKS).sort();
+  const rows = values.map((value, index) => textField(value, ['name', 'checks'], `Album checks ${index + 1}`));
+  assertExactList(rows.map((row) => row.name!), expectedNames, 'Album check table set');
+  for (const row of rows) {
+    if (row.checks !== EXPECTED_ALBUM_CHECKS[row.name!]) {
+      throw new Error(`${row.name} album CHECK inventory has drifted.`);
+    }
+  }
+}
+
 function assertTriggers(values: unknown[]): void {
   const rows = values.map((value, index) => textField(value, ['name', 'sql'], `Trigger ${index + 1}`));
   assertExactList(rows.map((row) => row.name!), Object.keys(EXPECTED_TRIGGER_SQL_SHA256), 'Trigger set');
@@ -1147,6 +1361,11 @@ export function parseWranglerInvariantOutput(
   assertGuestbookIndexes(results[15]!);
   assertGuestbookChecks(results[16]!);
   assertMediaObjectPromotionsSql(results[17]!);
+  assertAlbumTables(results[18]!);
+  assertAlbumColumns(results[19]!);
+  assertAlbumForeignKeys(results[20]!);
+  assertAlbumIndexes(results[21]!);
+  assertAlbumChecks(results[22]!);
 
   // `terminalSchema` deliberately keeps its three keys. `exactRecord` rejects
   // unknown fields, the literal recurs in four test files, and

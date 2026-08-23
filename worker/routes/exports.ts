@@ -104,18 +104,18 @@ async function ensureRetryWorkflow(
 async function ensureInitialWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
-): Promise<'dispatched' | 'terminal'> {
+): Promise<'dispatched' | 'failed'> {
   const input = [{ id: job.id, params: { jobId: job.id } }];
   try {
     await workflow.createBatch(input);
     return 'dispatched';
-  } catch (error) {
+  } catch {
     try {
       const observed = await (await workflow.get(job.id)).status();
       if (observed.status === 'errored'
         || observed.status === 'terminated'
         || observed.status === 'complete') {
-        return 'terminal';
+        return 'failed';
       }
       // A successful lookup is evidence that the deterministic instance ID is
       // retained, even when status propagation still reports `unknown`.
@@ -129,7 +129,11 @@ async function ensureInitialWorkflow(
       await workflow.createBatch(input);
       return 'dispatched';
     } catch {
-      throw error;
+      // Creation is still ambiguous, but leaving the D1 row queued would block every
+      // future export and attempt-1 is not eligible for retry redrive. The caller
+      // fences a pristine row to failed; if the Workflow concurrently claims it, that
+      // transition loses and the observed running row remains authoritative.
+      return 'failed';
     }
   }
 }
@@ -322,7 +326,7 @@ exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
     ? await repository.createAlbumActive(input)
     : await repository.createActive(input);
   const dispatch = await ensureInitialWorkflow(context.env.EXPORT_WORKFLOW, job);
-  if (dispatch === 'terminal') {
+  if (dispatch === 'failed') {
     const recovered = await repository.markInitialDispatchFailed(
       job.id,
       'EXPORT_WORKFLOW_DISPATCH_FAILED',

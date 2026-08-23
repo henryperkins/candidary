@@ -773,6 +773,51 @@ describe('manager exports', () => {
     },
   );
 
+  it('fails a still-unobservable initial dispatch after replay so its snapshot can be retried', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-unobservable-replay', null);
+    const createdIds: string[] = [];
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async (batch: Array<{ id: string }>) => {
+            createdIds.push(batch[0]!.id);
+            throw new Error('simulated unobservable Workflow creation');
+          };
+        }
+        if (property === 'get') {
+          return async () => { throw new Error('simulated unavailable Workflow lookup'); };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+    expect(response.status).toBe(202);
+    const failed = (await response.json<any>()).data.export;
+    expect(failed).toMatchObject({ state: 'failed', attempt: 1 });
+    expect(await new ExportsRepository(testEnv.DB).getById(failed.id)).toMatchObject({
+      state: 'failed', attempt: 1, errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    });
+    expect(createdIds).toEqual([failed.id, failed.id]);
+
+    const retried = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${failed.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(retried.status).toBe(202);
+    expect((await retried.json<any>()).data.export).toMatchObject({
+      state: 'queued', attempt: 2,
+    });
+    expect((await new ExportsRepository(testEnv.DB).listForEvent(access.event.id))).toHaveLength(1);
+  });
+
   it('retries a terminal-before-claim initial job without duplicating its frozen snapshot', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'initial-workflow-terminal-retry', null);
