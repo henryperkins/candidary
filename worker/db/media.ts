@@ -4,6 +4,7 @@ import type {
   PublicationStatus,
 } from '../../shared/contracts';
 import {
+  ALBUM_MAX_ENTRIES,
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
@@ -23,7 +24,7 @@ import {
   assertWorkerIngressEnabled,
 } from '../media-upload-release';
 
-interface MediaRow {
+export interface MediaRow {
   id: string;
   event_id: string;
   uploader_session_id: string;
@@ -495,6 +496,79 @@ export class MediaRepository {
       throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
     }
     throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
+  }
+
+  /**
+   * Album picks in bulk — the tray's `Add n to album` / `Remove n from album`, the undo
+   * that reverses either, and the restore behind `Start empty`.
+   *
+   * The predicate selects only rows that actually change, so `RETURNING` is exactly the
+   * set an undo has to reverse. Re-picking an already-picked photo is not an error and
+   * not a change; it simply does not come back. That is what lets `Select all` over a
+   * mixed page do the obvious thing, and it is why undoing `Add 12 to album` over a page
+   * where four were already picked leaves those four picked.
+   *
+   * Chunked rather than refused past D1's 100-value statement bound, because the callers
+   * have two different natural sizes — the tray is bounded by the selection cap, while
+   * restoring a cleared album is bounded by the album itself. One batch keeps both from
+   * committing halfway.
+   */
+  async setFavoriteBulk(
+    eventId: string,
+    mediaIds: readonly string[],
+    favoritedAt: string | null,
+  ): Promise<ManagerGalleryMediaView[]> {
+    if (mediaIds.length === 0) return [];
+    if (mediaIds.length > ALBUM_MAX_ENTRIES) {
+      throw new ApiError(
+        'VALIDATION_FAILED',
+        `Choose up to ${ALBUM_MAX_ENTRIES} photos at a time.`,
+        422,
+      );
+    }
+    const unique = [...new Set(mediaIds)];
+    const changing = favoritedAt === null ? 'favorited_at IS NOT NULL' : 'favorited_at IS NULL';
+    // Two bound values are spent on the event and the stamp before any id, so the chunk
+    // sits under the 100-value bound with room rather than exactly at it.
+    const chunkSize = 90;
+    const statements = [];
+    for (let offset = 0; offset < unique.length; offset += chunkSize) {
+      const chunk = unique.slice(offset, offset + chunkSize);
+      statements.push(this.db.prepare(`
+        UPDATE media
+        SET favorited_at = ?
+        WHERE event_id = ?
+          AND upload_state = 'stored'
+          AND deleted_at IS NULL
+          AND ${changing}
+          AND id IN (${chunk.map(() => '?').join(', ')})
+        RETURNING
+          id, original_filename, guest_name, caption, publication_status,
+          upload_state, preview_object_key, width, height, created_at, stored_at,
+          captured_at, timeline_at, favorited_at
+      `).bind(favoritedAt, eventId, ...chunk));
+    }
+    const batch = await this.db.batch<MediaRow>(statements);
+    return batch.flatMap((result) => result.results.map(mapGalleryMediaRow));
+  }
+
+  /**
+   * Empties the album's membership in one statement — the `Start empty` half of the
+   * reconciliation prompt. Returns what it cleared so the choice is undoable through
+   * `setFavoriteBulk`, which is bounded by the album cap and therefore always able to
+   * take the whole list back.
+   */
+  async clearAllFavorites(eventId: string): Promise<string[]> {
+    const result = await this.db.prepare(`
+      UPDATE media
+      SET favorited_at = NULL
+      WHERE event_id = ?
+        AND upload_state = 'stored'
+        AND deleted_at IS NULL
+        AND favorited_at IS NOT NULL
+      RETURNING id
+    `).bind(eventId).all<{ id: string }>();
+    return result.results.map((row) => row.id);
   }
 
   async countStoredTimelineSentinels(eventId?: string): Promise<number> {

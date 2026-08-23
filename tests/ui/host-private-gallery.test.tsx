@@ -118,6 +118,18 @@ function managerFetch(overrides: {
       if (favorites) result = result.filter((item) => item.isFavorite);
       return success({ media: result, nextCursor: overrides.nextCursor ?? null });
     }
+    if (url.pathname === '/api/manage/events/event-a/album' && method === 'GET') {
+      const picked = galleryRows.filter((item) => item.isFavorite);
+      return success({
+        album: {
+          revision: 0,
+          saved: picked.length === 0,
+          entries: picked.map((photo) => ({ kind: 'photo', photo })),
+          photoCount: picked.length,
+          sectionCount: 0,
+        },
+      });
+    }
     if (url.pathname.endsWith('/favorite') && method === 'PUT') {
       if (overrides.favoriteFails) return failure();
       const id = url.pathname.split('/').at(-2);
@@ -402,15 +414,15 @@ describe('host private gallery', () => {
       });
     const before = galleryGets().length;
 
-    const favoriteTile = await screen.findByRole('button', { name: /favorite first dance/i });
+    const favoriteTile = await screen.findByRole('button', { name: /the album: First dance/i });
     await user.click(favoriteTile);
-    await waitFor(() => expect(screen.getByRole('button', { name: /favorite first dance/i })).toHaveAttribute('aria-pressed', 'true'));
-    expect(await screen.findByText('First dance added to favorites.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: /the album: First dance/i })).toHaveAttribute('aria-pressed', 'true'));
+    expect(await screen.findByText('First dance added to the album. This does not publish it.')).toBeInTheDocument();
     expect(galleryGets().length).toBe(before);
 
-    await user.click(screen.getByRole('button', { name: 'Favorites' }));
+    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
     expect(await screen.findByText('First dance')).toBeVisible();
-    expect(screen.getByText(/p4\.jpg/)).toBeVisible();
+    expect(screen.getByTitle('p4.jpg')).toBeVisible();
   });
 
   it('restores the confirmed favorite state and shows a notice when a favorite write fails', async () => {
@@ -418,9 +430,9 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Gallery' });
 
-    await user.click(await screen.findByRole('button', { name: /favorite first dance/i }));
+    await user.click(await screen.findByRole('button', { name: /the album: First dance/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('manager action');
-    await waitFor(() => expect(screen.getByRole('button', { name: /favorite first dance/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /the album: First dance/i }))
       .toHaveAttribute('aria-pressed', 'false'));
   });
 
@@ -472,16 +484,16 @@ describe('host private gallery', () => {
       return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
     }).length;
 
-    await user.click(screen.getByRole('button', { name: 'Shared gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Shared' }));
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Shared gallery' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Shared' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /publish selected/i })).toBeVisible();
     expect(onStatusChange).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'Favorites' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Album picks/ })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Private gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Library' }));
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Private gallery' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByLabelText('Find photos')).toHaveValue('Maya');
     expect(screen.getByText('From Maya')).toBeVisible();
     expect(screen.queryByText('From Jose')).not.toBeInTheDocument();
@@ -517,12 +529,12 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
 
     await screen.findByText('First dance');
-    await user.click(screen.getByRole('button', { name: 'Favorites' }));
+    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
     await screen.findByRole('button', { name: 'Load more photos' });
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
     await user.click(screen.getByRole('button', { name: /open p2/i }));
     const dialog = await screen.findByRole('dialog', { name: 'p2.jpg' });
-    const viewerFavorite = within(dialog).getByRole('button', { name: /favorite p2/i });
+    const viewerFavorite = within(dialog).getByRole('button', { name: /^(Add to album|In the album)$/ });
     await user.click(viewerFavorite);
     expect(viewerFavorite).toBeDisabled();
 
@@ -685,7 +697,7 @@ describe('host private gallery', () => {
       exports={{ onPrepare: noop, onDownload: noop, onRetry: noop }}
     />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
 
     const filters = screen.getByRole('group', { name: 'Publication status' });
     expect(within(filters).getByRole('button', { name: 'Unpublished' })).toHaveAttribute('aria-pressed', 'true');
@@ -702,26 +714,26 @@ describe('host private gallery', () => {
   it('explains an empty published filter without promising new deliveries', async () => {
     renderGallery({ status: 'published' });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
 
     expect(screen.getByRole('heading', { name: 'No published photos.' })).toBeVisible();
     expect(screen.getByText('Publish a photo to share a preview with guests.')).toBeVisible();
     expect(screen.queryByText(/new private deliveries/i)).not.toBeInTheDocument();
   });
 
-  it('explains that Favorites are event-shared and not publication', async () => {
+  it('explains that album picks are event-shared and not publication', async () => {
     renderGallery({ galleryRows: [] });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Favorites' }));
+    await user.click(await screen.findByRole('button', { name: /^Album picks/ }));
 
-    expect(await screen.findByRole('heading', { name: 'No favorites yet.' })).toBeVisible();
-    expect(screen.getByText('The heart on a photo adds it to Favorites for every host on this event. It does not publish it.')).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Nothing is in the album yet.' })).toBeVisible();
+    expect(screen.getByText(/adds it for every host on this event/)).toBeVisible();
   });
 
   it('explains an empty hidden filter as hide, not as unpublished privacy', async () => {
     renderGallery({ status: 'hidden' });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
 
     expect(screen.getByRole('heading', { name: 'No hidden photos.' })).toBeVisible();
     expect(screen.getByText('Photos you hide from guests will appear here.')).toBeVisible();
@@ -731,7 +743,7 @@ describe('host private gallery', () => {
   it('does not describe an unfiltered empty shared list as unpublished', async () => {
     renderGallery({ status: 'all' });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
 
     expect(screen.getByRole('heading', { name: 'No photos.' })).toBeVisible();
     expect(screen.getByText('New private deliveries appear here.')).toBeVisible();
@@ -784,7 +796,7 @@ describe('host private gallery', () => {
       exports={{ onPrepare: noop, onDownload: noop, onRetry: noop }}
     />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
 
     const escape = screen.getByRole('button', { name: 'Open settings' });
     expect(escape).toBeDisabled();

@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Heart, X } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -133,6 +133,13 @@ export function GalleryViewer({
     aria-labelledby={titleId}
     ref={dialogRef}
   >
+    {/* One region, mounted outside every branch below. Stepping through the gallery changes
+        only the photograph, so a region rendered beside its own first text is never announced
+        and the host navigates in silence. It carries position, title and contributor together
+        because those are the three things that tell them where they are. */}
+    <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {`${positionLabel(index, photos.length, hasMore)}. ${title}, from ${photo.guestName}.`}
+    </p>
     <button type="button" className="gallery-viewer__close" ref={closeRef} aria-label="Close viewer" onClick={onClose}>
       <X aria-hidden="true" />
     </button>
@@ -184,11 +191,12 @@ export function GalleryViewer({
         type="button"
         className="gallery-viewer__favorite"
         aria-pressed={photo.isFavorite}
-        aria-label={`Favorite ${title}`}
         disabled={favoritePendingIds.has(photo.id)}
         onClick={() => onFavorite(photo)}
       >
-        <Heart aria-hidden="true" fill={photo.isFavorite ? 'currentColor' : 'none'} /> Favorite
+        {photo.isFavorite
+          ? <><Check aria-hidden="true" /> In the album</>
+          : <><Plus aria-hidden="true" /> Add to album</>}
       </button>
     </div>
   </div>, host);

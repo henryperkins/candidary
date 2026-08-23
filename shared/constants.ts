@@ -30,6 +30,17 @@ export const PRIVATE_GALLERY_PAGE_SIZE = 48;
 export const GALLERY_TIMELINE_ORDERS = ['newest', 'earliest'] as const;
 export type GalleryTimelineOrder = (typeof GALLERY_TIMELINE_ORDERS)[number];
 export const DEFAULT_GALLERY_TIMELINE_ORDER: GalleryTimelineOrder = 'newest';
+
+/**
+ * Album workspace. Membership is the event-shared favorite bit from 0016, renamed in
+ * the interface — so what is bounded here is the curated artifact, not what a host may
+ * mark. Five hundred is past any real wedding album and still keeps the stored order a
+ * small JSON document that one guarded write replaces whole.
+ */
+export const ALBUM_MAX_ENTRIES = 500;
+export const ALBUM_SECTION_HEADING_MAX_LENGTH = 80;
+/** Sections are dividers, not a hierarchy; a host who needs forty has an outline, not an album. */
+export const ALBUM_MAX_SECTIONS = 40;
 export const GUEST_MESSAGE_PAGE_SIZE = 50;
 export const DEFAULT_GUESTBOOK_PROMPT = 'Share a wish, memory, or moment from the day.';
 export const MAX_EVENT_GUEST_NOTES = 1_000;

@@ -10,9 +10,13 @@ interface GalleryTimelineProps {
   hasMore: boolean;
   loadingMore: boolean;
   favoritePendingIds: ReadonlySet<string>;
+  selecting: boolean;
+  selectedIds: ReadonlySet<string>;
   onLoadMore(): void;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
   onFavorite(photo: ManagerGalleryMediaView): void;
+  onToggleSelected(photo: ManagerGalleryMediaView): void;
+  onSelectMoment(photos: readonly ManagerGalleryMediaView[]): void;
 }
 
 export function GalleryTimeline({
@@ -21,9 +25,13 @@ export function GalleryTimeline({
   hasMore,
   loadingMore,
   favoritePendingIds,
+  selecting,
+  selectedIds,
   onLoadMore,
   onOpen,
   onFavorite,
+  onToggleSelected,
+  onSelectMoment,
 }: GalleryTimelineProps) {
   const moments = useMemo(() => buildMoments(photos), [photos]);
   return <div className="gallery-timeline">
@@ -34,8 +42,12 @@ export function GalleryTimeline({
         timeZone={timeZone}
         eager={index === 0}
         favoritePendingIds={favoritePendingIds}
+        selecting={selecting}
+        selectedIds={selectedIds}
         onOpen={onOpen}
         onFavorite={onFavorite}
+        onToggleSelected={onToggleSelected}
+        onSelectMoment={onSelectMoment}
       />
     ))}
     {hasMore && <div className="media-more">

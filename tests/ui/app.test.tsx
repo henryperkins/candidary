@@ -891,7 +891,7 @@ describe('manager experience', () => {
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
 
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     await user.click(await screen.findByRole('button', { name: /^Publish / }));
     await waitFor(() => expect(reads).toBe(2));
 
@@ -1405,7 +1405,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /gallery/i }));
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid article')).toHaveLength(2));
 
     async function expectRecoverableFailure(label: string, act_: () => Promise<void>, heading: string) {
@@ -1426,7 +1426,7 @@ describe('manager experience', () => {
       () => user.click(screen.getByRole('button', { name: 'Hide selected' })),
       'Gallery',
     );
-    await user.click(screen.getByRole('button', { name: 'Private gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Library' }));
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
     expect(screen.getByRole('heading', { name: 'Gallery' }), 'export').toBeVisible();
@@ -1533,7 +1533,7 @@ describe('manager experience', () => {
     await screen.findByRole('heading', { name: 'Live intake' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    await user.click(await screen.findByRole('button', { name: 'Private gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Library' }));
 
     const poll = await waitFor(() => {
       const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
@@ -1583,7 +1583,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
     const choices = await screen.findAllByRole('checkbox', { name: /^Select /u });
@@ -2128,7 +2128,7 @@ describe('manager experience', () => {
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     await user.click(screen.getByRole('checkbox', { name: /toast.png/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(

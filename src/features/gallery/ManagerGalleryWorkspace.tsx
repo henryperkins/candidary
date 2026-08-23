@@ -1,11 +1,36 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { ExportDownloadView, ExportView, MediaView } from '../../app/types';
 import type { EventView } from '../../../shared/contracts';
+import { fetchAlbum } from './album-api';
 import { GalleryExportControl } from './GalleryExportControl';
+import { ManagerAlbum } from './ManagerAlbum';
 import { ManagerPrivateGallery } from './ManagerPrivateGallery';
 import { ManagerSharedGallery, type GallerySharedStatus } from './ManagerSharedGallery';
 import type { Dispatch, SetStateAction } from 'react';
+
+type GalleryMode = 'library' | 'album' | 'shared';
+
+/**
+ * Keyed by the mode union rather than matched with a fallback, so a fourth mode is a
+ * compile error here instead of an unlabelled tab.
+ */
+const MODE_LABELS: Record<GalleryMode, string> = {
+  library: 'Library',
+  album: 'Album',
+  shared: 'Shared',
+};
+
+/**
+ * What each mode holds, said once, where a host chooses between them. Three modes is one
+ * more than most people will read a label for, and the difference that matters — which of
+ * these is visible to guests — is not inferable from the names.
+ */
+const MODE_NOTES: Record<GalleryMode, string> = {
+  library: 'Every photo guests have delivered. Private to hosts.',
+  album: 'Your curated album. Private to hosts — picking a photo never publishes it.',
+  shared: 'What guests can see right now. Only this mode publishes.',
+};
 
 interface ManagerGalleryWorkspaceProps {
   event: EventView;
@@ -35,31 +60,51 @@ interface ManagerGalleryWorkspaceProps {
 }
 
 /**
- * The one Gallery destination: private timeline by default, the extracted
- * publication workspace as the secondary mode, and a single complete-export
- * entry point on the private side.
+ * The one Gallery destination. Library is every private submission, Album is the host's
+ * curated artifact, Shared is the publication workspace — and the complete export stays on
+ * Library, because `Download all` is whole-event and independent of search, picks and
+ * arrangement.
+ *
+ * The album's photo count is owned here rather than in either mode, because both need it
+ * and they must not disagree: Library labels its filter with it while Album is unmounted,
+ * and Album changes it while Library is unmounted.
  */
 export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: ManagerGalleryWorkspaceProps) {
-  const [mode, setMode] = useState<'private' | 'shared'>('private');
+  const [mode, setMode] = useState<GalleryMode>('library');
+  const [pickCount, setPickCount] = useState(0);
+  const pickGeneration = useRef(0);
+
+  const refreshPickCount = useCallback(() => {
+    const generation = ++pickGeneration.current;
+    // A count is decoration on every surface that shows it: a failed read leaves the last
+    // good number rather than replacing the filter's label with an error.
+    fetchAlbum(eventId)
+      .then((result) => {
+        if (generation === pickGeneration.current) setPickCount(result.album.photoCount);
+      })
+      .catch(() => {});
+  }, [eventId]);
+
+  useEffect(refreshPickCount, [refreshPickCount]);
+
   return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">Gallery</h2>
-      <div className="gallery-mode-switch" role="group" aria-label="Gallery mode">
-        <button
-          type="button"
-          aria-pressed={mode === 'private'}
-          className={mode === 'private' ? 'active' : ''}
-          onClick={() => setMode('private')}
-        >Private gallery</button>
-        <button
-          type="button"
-          aria-pressed={mode === 'shared'}
-          className={mode === 'shared' ? 'active' : ''}
-          onClick={() => setMode('shared')}
-        >Shared gallery</button>
+      <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
+        {(['library', 'album', 'shared'] as const).map((value) => (
+          <button
+            type="button"
+            key={value}
+            aria-pressed={mode === value}
+            className={mode === value ? 'active' : ''}
+            onClick={() => setMode(value)}
+          >{MODE_LABELS[value]}{value === 'album' && pickCount > 0 ? ` (${pickCount})` : ''}</button>
+        ))}
       </div>
+      <p className="gallery-mode-note">{MODE_NOTES[mode]}</p>
     </div>
-    <div className="gallery-private-mode" hidden={mode !== 'private'}>
+
+    <div className="gallery-private-mode" hidden={mode !== 'library'}>
       <div className="gallery-header">
         <p className="gallery-total">{event.storedMediaCount.toLocaleString()} photos</p>
         <GalleryExportControl
@@ -70,8 +115,27 @@ export function ManagerGalleryWorkspace({ event, eventId, shared, exports }: Man
           onRetry={exports.onRetry}
         />
       </div>
-      <ManagerPrivateGallery event={event} eventId={eventId} active={mode === 'private'} />
+      <ManagerPrivateGallery
+        event={event}
+        eventId={eventId}
+        active={mode === 'library'}
+        pickCount={pickCount}
+        onPicksChanged={refreshPickCount}
+      />
     </div>
+
+    {/* Mounted only while chosen, unlike the other two. Album holds an unsaved arrangement
+        and a live undo offer; keeping it alive behind `hidden` would let a nine-second undo
+        expire on a surface the host cannot see it on. */}
+    {mode === 'album' && <div className="gallery-album-mode">
+      <ManagerAlbum
+        event={event}
+        eventId={eventId}
+        active={mode === 'album'}
+        onPicksChanged={refreshPickCount}
+      />
+    </div>}
+
     <div className="gallery-shared-mode" hidden={mode !== 'shared'}>
       <ManagerSharedGallery event={event} {...shared} />
     </div>

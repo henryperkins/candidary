@@ -301,7 +301,7 @@ describe('manager settings autosave guards', () => {
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
     expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Shared gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Shared' }));
     expect(within(screen.getByRole('group', { name: 'Publication status' }))
       .getByRole('button', { name: 'Unpublished' })).toHaveClass('active');
   });
