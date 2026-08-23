@@ -14,7 +14,9 @@
 
 - The canonical visual source is `Candidary Design System-handoff.zip:candidary-design-system/project/templates/album-workspace/AlbumWorkspace.dc.html`; its handoff README and 924×540 captures are acceptance evidence.
 - Preserve the four independent axes exactly: delivered Library media, `media.favorited_at` album membership, Shared-gallery publication, and active album-share authorization. No album write may alter `publication_status` or `gallery_visible`.
-- Add exactly one migration, `migrations/0018_album_end_to_end.sql`; never edit migration 0017.
+- Use two ordered additive migrations: `migrations/0017_event_album.sql` creates the album/order
+  foundation and `migrations/0018_album_end_to_end.sql` adds metadata, sharing, sessions, and
+  album-export snapshot fields. Never rewrite either migration after application.
 - Keep one event album, one active album share, and at most one queued/running export across both export kinds.
 - Album metadata and entries save atomically under the existing revision compare-and-set; the client debounce is 600 ms and serializes/coalesces writes.
 - Album-share links use `/album#id.secret`; raw credentials never enter request URLs, logs, DOM, history after exchange, or preview URLs. Public access is preview-only and never authorizes an original.
@@ -29,6 +31,7 @@
 
 ## File map
 
+- `migrations/0017_event_album.sql`: the revisioned album/order foundation.
 - `migrations/0018_album_end_to_end.sql`: album metadata, share credentials/sessions, and album export discriminator/snapshot columns.
 - `worker/db/album.ts`: canonical album read, cover fallback, byte total, and atomic metadata/order replacement.
 - `worker/db/album-shares.ts` and `worker/services/album-share.ts`: recoverable link lifecycle and narrow session verification.
@@ -44,6 +47,7 @@
 ### Task 1: Additive schema, contracts, and atomic album metadata
 
 **Files:**
+- Create: `migrations/0017_event_album.sql`
 - Create: `migrations/0018_album_end_to_end.sql`
 - Modify: `shared/constants.ts`
 - Modify: `shared/contracts.ts`
@@ -61,11 +65,27 @@
 
 - [ ] **Step 1: Write migration and album API tests that require every 0018 field**
 
-  In `tests/worker/migration-0018.test.ts`, migrate a populated 0017 database and assert metadata defaults, the share-table uniqueness/cascades, old export jobs defaulting to `complete`, valid album JSON constraints, and unique 1-based tail positions. Extend `tests/worker/album-api.test.ts` with metadata persistence, one revision increment, stale-write 409, omitted-metadata compatibility, invalid blank/overlong values, cover fallback after unpick/delete, and unchanged publication state.
+  In `tests/worker/migration-0018.test.ts`, apply the 0017 album/order foundation, migrate that
+  populated database through 0018, and assert metadata defaults, the share-table uniqueness/cascades,
+  both session indexes, old export jobs defaulting to `complete`, valid album JSON constraints, and
+  unique 1-based tail positions. Extend `tests/worker/album-api.test.ts` with metadata persistence, one
+  revision increment, stale-write 409, omitted-metadata compatibility, invalid blank/overlong values,
+  cover fallback after unpick/delete, and unchanged publication state.
 
   The migration DDL under test is:
 
   ```sql
+  -- 0017_event_album.sql
+  CREATE TABLE event_albums (
+    event_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    entries TEXT NOT NULL DEFAULT '[]',
+    saved_at TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  -- 0018_album_end_to_end.sql
   ALTER TABLE event_albums ADD COLUMN title TEXT NOT NULL DEFAULT 'Album'
     CHECK (length(trim(title)) BETWEEN 1 AND 120);
   ALTER TABLE event_albums ADD COLUMN description TEXT NOT NULL DEFAULT ''
@@ -88,8 +108,10 @@
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
-  CREATE INDEX event_album_share_sessions_lookup
-    ON event_album_share_sessions(id, share_id, event_id);
+  CREATE INDEX event_album_share_sessions_expiry
+    ON event_album_share_sessions(expires_at, id);
+  CREATE INDEX event_album_share_sessions_share_expiry
+    ON event_album_share_sessions(share_id, expires_at, id);
 
   ALTER TABLE export_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'complete'
     CHECK (kind IN ('complete', 'album'));
@@ -115,7 +137,7 @@
   npx vitest run --config vitest.config.ts tests/unit/album-order.test.ts
   ```
 
-  Expected: migration tests fail because 0018 is absent; API/unit tests fail because metadata fields, `replace`, and `moveEntryTo` do not exist.
+  Expected: migration tests fail because the ordered 0017/0018 schema is absent; API/unit tests fail because metadata fields, `replace`, and `moveEntryTo` do not exist.
 
 - [ ] **Step 3: Add the shared contracts and constants**
 
@@ -192,7 +214,7 @@
 - [ ] **Step 6: Commit the foundation**
 
   ```bash
-  git add migrations/0018_album_end_to_end.sql shared/constants.ts shared/contracts.ts worker/db/album.ts worker/routes/manage.ts src/features/gallery/album-api.ts tests/worker/migration-0018.test.ts tests/worker/album-api.test.ts tests/unit/album-order.test.ts
+  git add migrations/0017_event_album.sql migrations/0018_album_end_to_end.sql shared/constants.ts shared/contracts.ts worker/db/album.ts worker/routes/manage.ts src/features/gallery/album-api.ts tests/worker/migration-0018.test.ts tests/worker/album-api.test.ts tests/unit/album-order.test.ts
   git commit -m "feat: persist album metadata and cover"
   ```
 
@@ -228,7 +250,14 @@
 
 - [ ] **Step 1: Write security-first share tests**
 
-  Cover manager/CSRF/event ownership; refusal of unsaved/empty albums; idempotent enable; stable recoverable fragment link; ciphertext/digest storage with no raw secret; stop-and-reshare rotation; immediate session invalidation; indistinguishable malformed/wrong/revoked/purged responses; seven-day-or-purge session expiry; unpublished picked photos visible without changing Shared; unpick/delete revoking public view and preview; foreign/unpicked preview refusal; original refusal; allowlisted JSON; `no-store`; and bounded expired-session cleanup.
+  Cover manager/CSRF/event ownership; refusal of unsaved/empty albums; idempotent enable and concurrent
+  enable/stop linearization; stable recoverable fragment link; ciphertext/digest storage with no raw
+  secret; stop-and-reshare rotation; immediate session invalidation; indistinguishable
+  malformed/wrong/revoked/purged responses; seven-day-or-purge session expiry; atomic admission capped
+  at 2,000 active sessions per share with expired rows excluded and an accurate 429 `Retry-After`;
+  unpublished picked photos visible without changing Shared; unpick/delete revoking public view and
+  preview; foreign/unpicked preview refusal; original refusal; allowlisted JSON; `no-store`; and
+  expired-session cleanup in 100-row batches capped at 50 batches per invocation.
 
   Define the public projection exactly:
 
@@ -266,7 +295,13 @@
 
 - [ ] **Step 3: Implement the repository and service lifecycle**
 
-  `AlbumSharesRepository` exposes `getForEvent`, `getById`, `create`, `deleteForEvent`, `createSession`, `getSession`, and `deleteExpiredSessions(now, limit)`. `AlbumShareService` uses `createSecretToken`, `digestSecret`, `constantTimeEqual`, `encryptSecret`, and `decryptSecret` with the dedicated share keys. Session secrets use `SESSION_HMAC_KEY`.
+  `AlbumSharesRepository` exposes `getForEvent`, `getById`, `create`, `deleteForEvent`, atomic
+  `admitSession`, `getSession`, and `deleteExpiredSessions(now, limit)`. `admitSession` inserts only
+  while the share still exists and fewer than 2,000 unexpired sessions are active; its same-transaction
+  diagnostic distinguishes revocation from capacity and returns the earliest active expiry for
+  `Retry-After`. `AlbumShareService` uses `createSecretToken`, `digestSecret`, `constantTimeEqual`,
+  `encryptSecret`, and `decryptSecret` with the dedicated share keys. Session secrets use
+  `SESSION_HMAC_KEY`.
 
   Manager enable returns:
 
@@ -274,7 +309,10 @@
   { active: true, url: `${canonicalOrigin(env)}/album#${shareToken.token}`, sharedAt }
   ```
 
-  Stop deletes the event's share row so the foreign-key cascade removes all sessions. A later enable creates a new ID and secret. Neither operation updates media or event visibility.
+  Stop deletes the event's share row so the foreign-key cascade removes all sessions. A later enable
+  creates a new ID and secret. An enable that read an existing share before a concurrent stop may
+  return that observed link, but cannot recreate the deleted share or authorize access. Neither
+  operation updates media or event visibility.
 
 - [ ] **Step 4: Add narrow cookie, routes, and public preview authorization**
 
@@ -294,7 +332,16 @@
 
 - [ ] **Step 5: Add the `/album` client without retaining the fragment**
 
-  In the first effect, copy `location.hash.slice(1)` to a local variable, immediately call `history.replaceState(null, '', '/album')`, exchange it when present, and otherwise reuse the narrow cookie on reload. Render loading, unavailable, and `PublicAlbum` states. Image URLs are only `/api/album-share/media/{id}/preview`.
+  In the first effect, copy `location.hash.slice(1)` to a local variable and, only when it contains a
+  token, immediately call:
+
+  ```ts
+  history.replaceState(history.state, '', `${location.pathname}${location.search}`);
+  ```
+
+  Exchange the copied token when present and otherwise reuse the narrow cookie on reload. Render
+  loading, unavailable, and `PublicAlbum` states. Image URLs are only
+  `/api/album-share/media/{id}/preview`.
 
   Add `/album` to the React router and Worker-first asset routes. Add both secrets to production and preview `secrets.required`, generated bindings, `.dev.vars.example`, deploy validation, and test bindings. Do not edit `.dev.vars`.
 
@@ -608,7 +655,10 @@
   final result: passed
   ```
 
-  Document provisioning/rotation of `ALBUM_SHARE_HMAC_KEY` and `ALBUM_SHARE_ENCRYPTION_KEY`, Stop-sharing invalidation, share-session cleanup, album-vs-complete export behavior, and the 24-hour artifact window in operations/security docs and `CLAUDE.md`.
+  Document independent preview/production provisioning and rotation of `ALBUM_SHARE_HMAC_KEY` and
+  `ALBUM_SHARE_ENCRYPTION_KEY`, the ten-secret inventory, Stop-sharing invalidation, the 2,000-active
+  session admission ceiling, 100×50 cleanup bound, album-vs-complete export behavior, migration-before-
+  deploy ordering, and the 24-hour artifact window in operations/security docs and `CLAUDE.md`.
 
 - [ ] **Step 5: Run fresh full verification**
 

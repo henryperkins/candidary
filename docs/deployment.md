@@ -63,6 +63,13 @@ Production bindings are:
 - Workflows: `candidary-export`, `candidary-cover-render`, and `candidary-cover-backfill`
 - Origins: `https://candidary.app` and `https://candidary.online`
 
+Wrangler 4.123.0 may emit a false non-inheritance diagnostic that names an `undefined` email binding
+while resolving the preview environment. The pinned schema requires the email binding's `name`, and
+the release invariant is the generated topology: production must contain
+`send_email: [{ name: 'EMAIL' }]`; preview must contain `send_email: []`. Config and deploy tests pin
+both shapes. Do not add a fake preview binding or rename the schema-valid production field to silence
+the diagnostic.
+
 ## Branch previews
 
 Every non-`main` branch uploads a version of `candidary-preview` with a sanitized Workers preview
@@ -79,7 +86,7 @@ The preview environment has independent resources:
 - Alias family: `https://<branch-alias>-candidary-preview.lfd.workers.dev`
 
 Preview secrets must be generated independently. Never copy persisted-data keys from production.
-The required secret names are:
+Both environments require these ten secret names:
 
 - `TOKEN_HMAC_KEY`
 - `SESSION_HMAC_KEY`
@@ -89,6 +96,17 @@ The required secret names are:
 - `ENTRY_ENCRYPTION_KEY`
 - `RSVP_LOOKUP_HMAC_KEY`
 - `GUEST_MESSAGE_HMAC_KEY`
+- `ALBUM_SHARE_HMAC_KEY`
+- `ALBUM_SHARE_ENCRYPTION_KEY`
+
+For the album keys, generate a new pair for preview and pipe each value directly to Wrangler without
+printing it. The HMAC key must contain at least 32 random bytes; the AES-256-GCM key must decode from
+unpadded base64url to exactly 32 bytes:
+
+```bash
+node -e "process.stdout.write(require('node:crypto').randomBytes(48).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_HMAC_KEY --env preview --config wrangler.jsonc
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_ENCRYPTION_KEY --env preview --config wrangler.jsonc
+```
 
 The preview config deliberately has no `EMAIL` binding and an empty Cron list. `EmailService` returns
 `E_DISABLED` in that environment rather than attempting delivery.
@@ -111,20 +129,45 @@ block a simple source or CSS change.
 
 ## Database migrations
 
-An ordinary release never runs a D1 migration command. When a pull request changes `migrations/`, the
-required migration-safety job applies the complete checked-in sequence to a disposable local D1 and
-checks its terminal invariants.
+An ordinary release with no schema change never runs a D1 migration command. When a pull request
+changes `migrations/`, the required migration-safety job applies the complete checked-in sequence to a
+disposable local D1 and checks its terminal invariants. Cloudflare Workers Builds does **not** apply
+remote D1 migrations; a successful automatic build is not schema provisioning.
 
-Remote production migration is a separate, explicit operation because it changes durable data:
+For a migration-bearing release, preserve this order so new Worker code never runs against old
+schema:
 
-```powershell
-npx wrangler d1 migrations list candidary-core --remote
-npx wrangler d1 migrations apply candidary-core --remote
+1. Inspect the preview pending ledger and stop if it contains an unexpected file.
+2. Provision every required preview secret, including an independently generated album-share pair.
+3. Apply the additive preview migrations and verify that no migration remains pending.
+4. Publish and verify the exact reviewed branch preview.
+5. Capture the current production Worker version, inspect the production pending ledger, provision
+   the independently generated production album-share pair, apply the additive production migrations,
+   and verify the ledger is empty. The old Worker must remain compatible with these additions.
+6. Recheck the immutable PR head and hosted gates, then merge so the connected `main` build performs
+   the one production code deployment.
+
+Preview ledger commands:
+
+```bash
+npx wrangler d1 migrations list candidary-preview-core --remote --env preview --config wrangler.jsonc
+npx wrangler d1 migrations apply candidary-preview-core --remote --env preview --config wrangler.jsonc
+npx wrangler d1 migrations list candidary-preview-core --remote --env preview --config wrangler.jsonc
 ```
 
-Review the exact pending filenames before applying them. Do not rotate persisted-data HMAC or
-encryption keys as part of an ordinary release. The preview database uses `--env preview` and must be
-migrated independently.
+Production provisioning and ledger commands use newly generated values, never the preview pair:
+
+```bash
+node -e "process.stdout.write(require('node:crypto').randomBytes(48).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_HMAC_KEY --config wrangler.jsonc
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))" | npx wrangler secret put ALBUM_SHARE_ENCRYPTION_KEY --config wrangler.jsonc
+npx wrangler d1 migrations list candidary-core --remote --config wrangler.jsonc
+npx wrangler d1 migrations apply candidary-core --remote --config wrangler.jsonc
+npx wrangler d1 migrations list candidary-core --remote --config wrangler.jsonc
+```
+
+Review the exact pending filenames before every apply. Do not rotate existing persisted-data HMAC or
+encryption keys merely to release application code. `npm run verify:bindings` proves required names in
+the checked-in/generated configuration; it cannot prove that a remote secret contains usable material.
 
 ## Rollback
 

@@ -38,13 +38,15 @@ npx vitest run --config vitest.worker.config.ts tests/worker/upload-api.test.ts 
 npx playwright test tests/e2e/core-journey.spec.ts --project=mobile
 ```
 
-Local secrets go in `.dev.vars` (copy `.dev.vars.example`). `TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`,
-`LOGIN_HMAC_KEY`, `ENTRY_HMAC_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_MESSAGE_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, and
-`ENTRY_ENCRYPTION_KEY` must be independent values; the two encryption keys must each be exactly
-32 bytes encoded as base64url. `ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, `RSVP_LOOKUP_HMAC_KEY`, and
-`GUEST_MESSAGE_HMAC_KEY` are persisted-data keys: rotating one without a coordinated re-encryption,
-re-digest, re-HMAC, or invalidation migration breaks persisted behavior. Ordinary guest-grant and
-session rotation must leave them alone.
+Local secrets go in `.dev.vars` (copy `.dev.vars.example`). The ten independent values are
+`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, `LOGIN_HMAC_KEY`,
+`ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_MESSAGE_HMAC_KEY`,
+`ALBUM_SHARE_HMAC_KEY`, and `ALBUM_SHARE_ENCRYPTION_KEY`. Every encryption key decodes from unpadded
+base64url to exactly 32 bytes; `ALBUM_SHARE_HMAC_KEY` contains at least 32 random bytes. The entry,
+RSVP, Guestbook, and album-share key material protects persisted data: rotating one without a
+coordinated re-encryption, re-digest, re-HMAC, or invalidation migration breaks persisted behavior.
+Ordinary guest-grant and session rotation must leave them alone. Preview and production album-share
+pairs are independently generated; `verify:bindings` proves names, not remote material.
 Local `vite dev` reads this file, while production builds explicitly omit it from generated output.
 
 ## Architecture
@@ -214,7 +216,8 @@ reader, legacy-object response, lazy Images transform, or normalized-master fall
 `0014_event_cover_invariants.sql` triggers make those semantic, receipt, active-set, and ordered-purge
 relationships database invariants; Phase 2 ends one file earlier at
 `0013_guest_message_hardening.sql`. Those 13/14-migration boundaries remain immutable historical
-release evidence; the active post-cutover schema ends at `0018_album_end_to_end.sql`.
+release evidence. The album scope is also ordered: `0017_event_album.sql` creates the album/order
+foundation and `0018_album_end_to_end.sql` adds metadata, sharing, sessions, and export fields.
 
 ### Exports
 
@@ -241,10 +244,14 @@ HttpOnly/Secure/SameSite=Strict cookie scoped to `/api/album-share`; its digest 
 current album picks. It cannot read originals, Manager APIs, guest delivery, or the Shared gallery.
 
 Stopping sharing deletes the parent row and cascades all album-share sessions, so both the old link
-and existing cookies immediately receive `ALBUM_SHARE_UNAVAILABLE`. Scheduled cleanup deletes at
-most 100 naturally expired album-share sessions per daily pass. Both album-share keys protect
-persisted data, rather than routine sessions: rotate them only after revoking all shares or with a
-reviewed forward migration that re-HMACs and re-encrypts every active secret under the new pair.
+and existing cookies immediately receive `ALBUM_SHARE_UNAVAILABLE`. One share atomically admits at
+most 2,000 unexpired sessions; expired rows do not count, and capacity returns HTTP 429 with
+`Retry-After` derived from the earliest active expiry. An enable response that observed a share before
+a concurrent stop cannot recreate the deleted row or authorize access. Scheduled cleanup uses
+100-row statements capped at 50 statements/5,000 deletions per daily invocation. Both album-share
+keys protect persisted data, rather than routine sessions: rotate them only after revoking all shares
+or with a reviewed forward migration that re-HMACs and re-encrypts every active secret under the new
+pair.
 
 The daily cron (`workflows/cleanup.ts`) sweeps bounded auth and RSVP scratch, releases expired
 reservations, deletes expired export objects, and purges retention-due events. Both the daily pass and

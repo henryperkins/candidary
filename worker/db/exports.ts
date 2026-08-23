@@ -101,6 +101,16 @@ export type ExportRunClaim =
   | { owned: true; resumed: boolean; job: ExportRecord }
   | { owned: false; job: ExportRecord | null };
 
+/**
+ * Result of a guarded dispatch-failure write. `changed` is true only when the
+ * exact pristine attempt lost its Workflow dispatch; `job` is the post-fence
+ * row used to reconcile a concurrent claim, retry, artifact write, or delete.
+ */
+export interface ExportDispatchFailureFence {
+  changed: boolean;
+  job: ExportRecord | null;
+}
+
 function mapExport(row: ExportRow): ExportRecord {
   return {
     id: row.id,
@@ -727,10 +737,10 @@ export class ExportsRepository {
     return (await this.getById(id))!;
   }
 
-  async markInitialDispatchFailed(id: string, errorCode: string): Promise<{
-    changed: boolean;
-    job: ExportRecord | null;
-  }> {
+  async markInitialDispatchFailed(
+    id: string,
+    errorCode: string,
+  ): Promise<ExportDispatchFailureFence> {
     const result = await this.db.prepare(`
       UPDATE export_jobs SET state = 'failed', error_code = ?2
       WHERE id = ?1 AND state = 'queued' AND attempt = 1 AND error_code IS NULL
@@ -755,7 +765,7 @@ export class ExportsRepository {
     id: string,
     attempt: number,
     errorCode: string,
-  ): Promise<{ changed: boolean; job: ExportRecord | null }> {
+  ): Promise<ExportDispatchFailureFence> {
     const result = await this.db.prepare(`
       UPDATE export_jobs SET state = 'failed', error_code = ?3
       WHERE id = ?1 AND state = 'queued' AND attempt = ?2 AND attempt > 1

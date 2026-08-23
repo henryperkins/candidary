@@ -225,7 +225,12 @@ describe('built-artifact deployment', () => {
   });
 
   it('accepts the generated isolated preview topology', () => {
-    expect(() => assertGeneratedDeploymentTarget(previewTopology(), 'preview')).not.toThrow();
+    const preview = previewTopology();
+    expect(() => assertGeneratedDeploymentTarget(preview, 'preview')).not.toThrow();
+    expect(() => assertGeneratedDeploymentTarget({
+      ...preview,
+      send_email: [{ name: 'EMAIL' }],
+    }, 'preview')).toThrow(/does not match the requested preview target/iu);
   });
 
   it('accepts the complete production topology and rejects safety-relevant drift', () => {
@@ -236,6 +241,7 @@ describe('built-artifact deployment', () => {
       { ...production, targetEnvironment: 'staging' },
       { ...production, images: { binding: 'WRONG_IMAGES' } },
       { ...production, triggers: { crons: [] } },
+      { ...production, send_email: [] },
       { ...production, workflows: previewTopology().workflows },
       { ...production, vars: previewTopology().vars },
       { ...production, ratelimits: previewTopology().ratelimits },

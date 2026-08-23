@@ -251,11 +251,14 @@ The existing Unpublished, Published, and Hidden workflow remains. These defects 
 
 ## 4. Data and API contracts
 
-### 4.1 One additive migration
+### 4.1 Two ordered additive migrations
 
-`migrations/0018_album_end_to_end.sql` is the only migration for this scope. It follows 0017 and contains album metadata, album-share, and album-export schema so parallel work cannot collide on migration numbers.
+This scope uses two immutable migrations in order. `migrations/0017_event_album.sql` creates the
+revisioned `event_albums` order document. `migrations/0018_album_end_to_end.sql` then adds album
+metadata, album-share credentials and sessions, and album-export snapshot fields. A fresh database
+must apply both; neither applied migration may be rewritten to collapse the history.
 
-It adds to `event_albums`:
+Migration 0018 adds to `event_albums`:
 
 ```sql
 title TEXT NOT NULL DEFAULT 'Album'
@@ -288,8 +291,11 @@ CREATE TABLE event_album_share_sessions (
   created_at TEXT NOT NULL
 );
 
-CREATE INDEX event_album_share_sessions_lookup
-ON event_album_share_sessions(id, share_id, event_id);
+CREATE INDEX event_album_share_sessions_expiry
+ON event_album_share_sessions(expires_at, id);
+
+CREATE INDEX event_album_share_sessions_share_expiry
+ON event_album_share_sessions(share_id, expires_at, id);
 ```
 
 It adds to export storage:
@@ -473,11 +479,13 @@ The implementation targets WCAG 2.2 AA and retains all earlier Gallery requireme
 - Preview screens fetch preview URLs only. Original objects are read only by the authorized export Workflow.
 - Public album reads return only current live entries, and image authorization is rechecked per request.
 - Share credentials and sessions cascade with event deletion. Lifecycle checks stop access at `purge_after` even before cleanup removes rows.
-- Expired album-share sessions may be deleted by bounded expiry cleanup; no revoked-session audit row is retained. Stopping share deletes the parent credential and cascades every session immediately.
+- One share admits at most 2,000 sessions whose `expires_at` is still in the future. Admission and its capacity diagnostic execute atomically; a full share returns 429 with `Retry-After` derived from the earliest active expiry. Expired rows do not consume capacity.
+- Expired album-share sessions are deleted in 100-row statements, with at most 50 statements (5,000 rows) per daily invocation; no revoked-session audit row is retained. Stopping share deletes the parent credential and cascades every session immediately.
+- Enable and stop have an explicit linearization rule: an enable that observed the old share may return its link after a concurrent stop, but the response cannot resurrect the deleted row or any session and the link remains unavailable.
 - Event purge and export-expiry cleanup discover both complete and album artifacts through existing export jobs, parts, and permanent write tombstones.
 - Album export retains the source-byte partition limit `MAX_EXPORT_PART_SOURCE_BYTES = 2 * 1024 * 1024 * 1024` and ready-link lifetime 86,400,000 milliseconds.
 - No new dependency, UI library, CSS-in-JS system, token file, R2 bucket, or Workflow binding is introduced. Use React 19, TypeScript, Hono, D1, the existing Export Workflow, `lucide-react`, DM Sans, Manrope, and `src/styles.css`.
-- Add exactly two required secret bindings: `ALBUM_SHARE_HMAC_KEY` and `ALBUM_SHARE_ENCRYPTION_KEY`. Add them to `wrangler.jsonc`, generated binding checks, `.dev.vars.example`, and Worker test bindings. Album sessions continue to use the existing `SESSION_HMAC_KEY`.
+- Add exactly two required secret bindings, raising the application inventory from eight to ten: `ALBUM_SHARE_HMAC_KEY` and `ALBUM_SHARE_ENCRYPTION_KEY`. The HMAC key is at least 32 random bytes; the encryption key decodes from unpadded base64url to exactly 32 bytes for AES-256-GCM. Preview and production use independently generated values. Add the names to `wrangler.jsonc`, generated binding checks, `.dev.vars.example`, and Worker test bindings; name checks do not prove remote material exists. Album sessions continue to use the existing `SESSION_HMAC_KEY`.
 - The supplied ZIP and unrelated untracked `src/features/print/` work remain untouched.
 
 ## 7. Acceptance criteria

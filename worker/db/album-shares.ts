@@ -16,6 +16,11 @@ export interface AlbumShareSessionRecord {
   createdAt: string;
 }
 
+/**
+ * Result of the atomic per-share session admission batch. `created` is false
+ * when revocation or the live-session ceiling wins; the in-transaction
+ * diagnostic fields distinguish those outcomes without a racy follow-up read.
+ */
 export interface AlbumShareSessionAdmission {
   created: boolean;
   shareExists: boolean;

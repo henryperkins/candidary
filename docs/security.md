@@ -142,10 +142,18 @@ cannot authorize an original-media or Manager request. Public album JSON and pre
 `private, no-store`, and every preview read rechecks that the photo still belongs to the album.
 
 `ALBUM_SHARE_HMAC_KEY` and `ALBUM_SHARE_ENCRYPTION_KEY` must be independent from each other and from
-all event-entry, session, RSVP, and Guestbook keys. Stopping sharing deletes the parent share row, so
+all event-entry, session, RSVP, and Guestbook keys, and preview and production must use independently
+generated pairs. The HMAC key contains at least 32 random bytes; the AES-256-GCM key decodes from
+unpadded base64url to exactly 32 bytes. These two bindings raise the application-secret inventory
+from eight to ten; binding verification proves names, not remote key material.
+
+Session admission atomically requires the still-active share and fewer than 2,000 sessions with a
+future expiry. Expired rows do not consume capacity. A full share returns HTTP 429 with
+`Retry-After` reaching the earliest active expiry. Stopping sharing deletes the parent share row, so
 foreign-key cascade revokes every derived album session immediately. Both the old fragment and an
-already-issued cookie then fail with the same `ALBUM_SHARE_UNAVAILABLE` response. Expired sessions
-are also removed in bounded daily cleanup.
+already-issued cookie then fail with the same `ALBUM_SHARE_UNAVAILABLE` response. An enable response
+that raced after stop cannot recreate access. Expired sessions are removed in 100-row cleanup
+statements, capped at 50 statements (5,000 rows) per daily invocation.
 
 ## Export safety
 
