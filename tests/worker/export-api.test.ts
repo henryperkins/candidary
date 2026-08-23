@@ -657,13 +657,18 @@ describe('manager exports', () => {
     expect((await retry.json<any>()).data.export.attempt).toBe(2);
   });
 
-  it('durably fails a pristine initial job when Workflow dispatch is observably absent', async () => {
+  it('keeps a found initial Workflow with unknown status on its one deterministic instance ID', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'initial-workflow-failure', null);
+    const createdIds: string[] = [];
     const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
       get(target, property, receiver) {
-        if (property === 'create') {
-          return async () => { throw new Error('simulated initial Workflow creation failure'); };
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async (batch: Array<{ id: string }>) => {
+            createdIds.push(batch[0]!.id);
+            throw new Error('simulated lost initial Workflow creation response');
+          };
         }
         if (property === 'get') {
           return async (id: string) => ({ id, status: async () => ({ status: 'unknown' }) });
@@ -677,19 +682,132 @@ describe('manager exports', () => {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, { ...testEnv, EXPORT_WORKFLOW: workflow });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(202);
     const [job] = await new ExportsRepository(testEnv.DB).listForEvent(access.event.id);
-    expect(job).toMatchObject({
-      state: 'failed', attempt: 1, errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    expect(job).toMatchObject({ state: 'queued', attempt: 1, errorCode: null });
+    expect(createdIds).toEqual([job!.id]);
+  });
+
+  it.each(['errored', 'terminated'] as const)(
+    'durably fails a pristine initial job whose only Workflow instance is %s before claim',
+    async (terminal) => {
+      const access = await eventAccess();
+      await uploadPending(access, `initial-workflow-${terminal}`, null);
+      const createdIds: string[] = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+          if (property === 'createBatch') {
+            return async (batch: Array<{ id: string }>) => {
+              createdIds.push(batch[0]!.id);
+              throw new Error('simulated lost terminal Workflow response');
+            };
+          }
+          if (property === 'get') {
+            return async (id: string) => ({ id, status: async () => ({ status: terminal }) });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+      expect(response.status).toBe(202);
+      const body = await response.json<any>();
+      expect(body.data.export).toMatchObject({ state: 'failed', attempt: 1 });
+      const job = await new ExportsRepository(testEnv.DB).getById(body.data.export.id);
+      expect(job).toMatchObject({
+        state: 'failed', attempt: 1, errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+      });
+      expect(createdIds).toEqual([job!.id]);
+      expect((await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
+      `).bind(job!.id).first<number>('count'))).toBe(0);
+    },
+  );
+
+  it.each(['get', 'status'] as const)(
+    'replays idempotent creation on the same initial ID after an unobservable %s outcome',
+    async (unobservable) => {
+      const access = await eventAccess();
+      await uploadPending(access, `initial-workflow-unobservable-${unobservable}`, null);
+      const createdIds: string[] = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+          if (property === 'createBatch') {
+            return async (batch: Array<{ id: string }>) => {
+              createdIds.push(batch[0]!.id);
+              if (createdIds.length === 1) throw new Error('simulated unobservable createBatch result');
+            };
+          }
+          if (property === 'get') {
+            if (unobservable === 'get') {
+              return async () => { throw new Error('simulated unobservable Workflow lookup'); };
+            }
+            return async (id: string) => ({
+              id,
+              status: async () => { throw new Error('simulated unobservable Workflow status'); },
+            });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+      expect(response.status).toBe(202);
+      const job = (await response.json<any>()).data.export;
+      expect(job).toMatchObject({ state: 'queued', attempt: 1 });
+      expect(createdIds).toEqual([job.id, job.id]);
+      expect((await new ExportsRepository(testEnv.DB).listForEvent(access.event.id))).toHaveLength(1);
+      expect((await testEnv.DB.prepare(`
+        SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
+      `).bind(job.id).first<number>('count'))).toBe(0);
+    },
+  );
+
+  it('retries a terminal-before-claim initial job without duplicating its frozen snapshot', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'initial-workflow-terminal-retry', null);
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async () => { throw new Error('simulated terminal initial Workflow'); };
+        }
+        if (property === 'get') {
+          return async (id: string) => ({ id, status: async () => ({ status: 'errored' }) });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
     });
+    const initial = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+    const failed = (await initial.json<any>()).data.export;
+    const frozenBefore = await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(failed.id).first<number>('count');
 
     const retry = await createApp().request(
-      `/api/manage/events/${access.event.id}/exports/${job!.id}/retry`,
+      `/api/manage/events/${access.event.id}/exports/${failed.id}/retry`,
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
       testEnv,
     );
+
     expect(retry.status).toBe(202);
     expect((await retry.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(failed.id).first<number>('count')).toBe(frozenBefore);
   });
 
   it('adopts an initial Workflow whose creation response was lost', async () => {
@@ -697,7 +815,8 @@ describe('manager exports', () => {
     await uploadPending(access, 'initial-workflow-response-loss', null);
     const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
       get(target, property, receiver) {
-        if (property === 'create') {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
           return async () => { throw new Error('simulated lost initial Workflow response'); };
         }
         if (property === 'get') {
@@ -721,8 +840,10 @@ describe('manager exports', () => {
     await uploadPending(access, 'initial-workflow-running-race', null);
     const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
       get(target, property, receiver) {
-        if (property === 'create') {
-          return async ({ id }: { id: string }) => {
+        if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+        if (property === 'createBatch') {
+          return async (batch: Array<{ id: string }>) => {
+            const id = batch[0]!.id;
             await testEnv.DB.prepare(`
               UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
             `).bind('2026-08-23T12:00:01.000Z', id).run();

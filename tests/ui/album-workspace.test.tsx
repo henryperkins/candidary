@@ -17,6 +17,15 @@ function success(data: unknown) {
   }));
 }
 
+function failure(message: string, status = 500) {
+  return Promise.resolve(new Response(JSON.stringify({
+    code: 'INTERNAL_ERROR', message, requestId: 'request-a',
+  }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  }));
+}
+
 const event: EventView = {
   id: 'event-a',
   slug: 'maya-theo',
@@ -84,8 +93,12 @@ interface AlbumState {
 interface Harness {
   galleryRows: ManagerGalleryMediaView[];
   album: AlbumState;
+  albumReads: number;
+  albumReadGates: Array<Promise<void> | undefined>;
+  albumReadErrors: Array<string | undefined>;
   orderWrites: AlbumEntryView[][];
   orderGates: Promise<void>[];
+  orderErrors: Array<string | undefined>;
   bytesById: Record<string, number>;
   pickWrites: { mediaIds: string[]; picked: boolean }[];
   startWrites: string[];
@@ -110,8 +123,12 @@ function harness(overrides: Partial<Harness> = {}) {
       photo('p3', '2026-08-16T04:48:00.000Z', { guestName: 'Maya' }),
     ],
     album: overrides.album ?? { revision: 0, saved: true, entries: [] },
+    albumReads: 0,
+    albumReadGates: overrides.albumReadGates ?? [],
+    albumReadErrors: overrides.albumReadErrors ?? [],
     orderWrites: [],
     orderGates: overrides.orderGates ?? [],
+    orderErrors: overrides.orderErrors ?? [],
     bytesById: overrides.bytesById ?? {},
     pickWrites: [],
     startWrites: [],
@@ -156,6 +173,10 @@ function harness(overrides: Partial<Harness> = {}) {
       return success({ media: result, nextCursor: null });
     }
     if (url.pathname.endsWith('/album') && method === 'GET') {
+      const read = state.albumReads++;
+      await state.albumReadGates[read];
+      const readError = state.albumReadErrors[read];
+      if (readError) return failure(readError);
       return success({ album: resolvedAlbum() });
     }
     if (url.pathname.endsWith('/album') && method === 'PUT') {
@@ -164,7 +185,10 @@ function harness(overrides: Partial<Harness> = {}) {
           ? { kind: 'section', id: entry.id!, heading: entry.heading! }
           : { kind: 'photo', photo: state.galleryRows.find((item) => item.id === entry.mediaId)! }));
       state.orderWrites.push(entries);
-      await state.orderGates[state.orderWrites.length - 1];
+      const write = state.orderWrites.length - 1;
+      await state.orderGates[write];
+      const writeError = state.orderErrors[write];
+      if (writeError) return failure(writeError, 409);
       state.album = { revision: state.album.revision + 1, saved: true, entries };
       return success({ album: resolvedAlbum() });
     }
@@ -355,6 +379,88 @@ describe('the album', () => {
     ))).toEqual(['p2', 'p3', 'p1']);
   });
 
+  it('keeps export preparation behind the canonical reload after an order save fails', async () => {
+    const save = deferred();
+    const reload = deferred();
+    const controlled = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true }),
+        photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+      ],
+      orderGates: [save.promise],
+      orderErrors: ['That album changed before this order was saved.'],
+    });
+    const onPrepare = vi.fn(noop);
+    renderWorkspace(controlled.fetchMock, { onPrepare });
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await screen.findByRole('button', { name: /^Move First dance down/ });
+    const recoveryRead = controlled.state.albumReads;
+    controlled.state.albumReadGates[recoveryRead] = reload.promise;
+    await user.click(screen.getByRole('button', { name: /^Move First dance down/ }));
+    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    await act(async () => { save.resolve(); });
+    await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 1));
+
+    const prepare = screen.getByRole('button', { name: 'Preparing album download…' });
+    expect(prepare).toBeDisabled();
+    await user.click(prepare);
+    expect(onPrepare).not.toHaveBeenCalled();
+
+    await act(async () => { reload.resolve(); });
+    await waitFor(() => expect(prepare).toBeEnabled());
+    expect(onPrepare).not.toHaveBeenCalled();
+    await user.click(prepare);
+    expect(onPrepare).toHaveBeenCalledOnce();
+  });
+
+  it('does not prepare from an untrusted order when canonical reload fails and retries the reload', async () => {
+    const save = deferred();
+    const failedReload = deferred();
+    const retryReload = deferred();
+    const controlled = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true }),
+        photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+      ],
+      orderGates: [save.promise],
+      orderErrors: ['That album changed before this order was saved.'],
+    });
+    const onPrepare = vi.fn(noop);
+    renderWorkspace(controlled.fetchMock, { onPrepare });
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await screen.findByRole('button', { name: /^Move First dance down/ });
+    const recoveryRead = controlled.state.albumReads;
+    controlled.state.albumReadGates[recoveryRead] = failedReload.promise;
+    controlled.state.albumReadErrors[recoveryRead] = 'The canonical album could not be reloaded.';
+    controlled.state.albumReadGates[recoveryRead + 1] = retryReload.promise;
+    await user.click(screen.getByRole('button', { name: /^Move First dance down/ }));
+    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    await act(async () => { save.resolve(); });
+    await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 1));
+    expect(screen.getByRole('button', { name: 'Preparing album download…' })).toBeDisabled();
+    expect(onPrepare).not.toHaveBeenCalled();
+    await act(async () => { failedReload.resolve(); });
+
+    expect(await screen.findByText('The canonical album could not be reloaded.')).toBeVisible();
+    expect(onPrepare).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 2));
+    expect(onPrepare).not.toHaveBeenCalled();
+
+    await act(async () => { retryReload.resolve(); });
+    await screen.findByRole('button', { name: 'Download album photos' });
+    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    expect(onPrepare).toHaveBeenCalledOnce();
+  });
+
   it('disables complete prepare and retry for an active album while keeping ready downloads usable', async () => {
     const activeAlbum: ExportView = {
       id: 'album-active', kind: 'album', state: 'running', attempt: 1,
@@ -503,6 +609,54 @@ describe('the album', () => {
     await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the album' }));
 
     expect(await screen.findByText(/1 photos · 1 KB/)).toBeVisible();
+  });
+
+  it('keeps successful removal undoable when the authoritative refresh fails', async () => {
+    const { state, fetchMock } = harness({
+      galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
+    });
+    renderWorkspace(fetchMock);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await screen.findByRole('button', { name: 'Remove p1.jpg from the album' });
+    state.albumReadErrors[state.albumReads] = 'The updated album could not be refreshed.';
+    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from the album' }));
+
+    expect(state.pickWrites).toEqual([{ mediaIds: ['p1'], picked: false }]);
+    expect(await screen.findByRole('button', { name: 'Undo' })).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('removed');
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be refreshed');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('could not be removed');
+  });
+
+  it('adopts a concurrent repick from the authoritative removal refresh with exact totals', async () => {
+    const refresh = deferred();
+    const controlled = harness({
+      galleryRows: [
+        photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true }),
+        photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+      ],
+      bytesById: { p1: 1024, p2: 2048 },
+    });
+    renderWorkspace(controlled.fetchMock);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Gallery' });
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+
+    await screen.findByRole('button', { name: 'Remove p2.jpg from the album' });
+    const authoritativeRead = controlled.state.albumReads;
+    controlled.state.albumReadGates[authoritativeRead] = refresh.promise;
+    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the album' }));
+    await waitFor(() => expect(controlled.state.albumReads).toBe(authoritativeRead + 1));
+    controlled.state.galleryRows.find(({ id }) => id === 'p2')!.isFavorite = true;
+    await act(async () => { refresh.resolve(); });
+
+    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the album' })).toBeEnabled();
+    expect(screen.getByText(/2 photos · 3 KB/)).toBeVisible();
   });
 
   it('explains an empty album without promising publication', async () => {

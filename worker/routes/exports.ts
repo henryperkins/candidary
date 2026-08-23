@@ -104,18 +104,33 @@ async function ensureRetryWorkflow(
 async function ensureInitialWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
-): Promise<void> {
+): Promise<'dispatched' | 'terminal'> {
+  const input = [{ id: job.id, params: { jobId: job.id } }];
   try {
-    await workflow.create({ id: job.id, params: { jobId: job.id } });
+    await workflow.createBatch(input);
+    return 'dispatched';
   } catch (error) {
     try {
       const observed = await (await workflow.get(job.id)).status();
-      if (observed.status !== 'unknown') return;
+      if (observed.status === 'errored'
+        || observed.status === 'terminated'
+        || observed.status === 'complete') {
+        return 'terminal';
+      }
+      // A successful lookup is evidence that the deterministic instance ID is
+      // retained, even when status propagation still reports `unknown`.
+      return 'dispatched';
     } catch {
-      // The creation error remains authoritative if its deterministic ID cannot
-      // be observed. The pristine queued row is made retryable below.
+      // Neither a failed create response nor an unobservable lookup proves that
+      // the deterministic instance is absent. createBatch is idempotent for a
+      // retained ID, so replay exactly that ID instead of inventing a successor.
     }
-    throw error;
+    try {
+      await workflow.createBatch(input);
+      return 'dispatched';
+    } catch {
+      throw error;
+    }
   }
 }
 
@@ -306,16 +321,17 @@ exportRoutes.post('/manage/events/:eventId/exports', async (context) => {
   let job = parsed.data.kind === 'album'
     ? await repository.createAlbumActive(input)
     : await repository.createActive(input);
-  try {
-    await ensureInitialWorkflow(context.env.EXPORT_WORKFLOW, job);
-  } catch (error) {
+  const dispatch = await ensureInitialWorkflow(context.env.EXPORT_WORKFLOW, job);
+  if (dispatch === 'terminal') {
     const recovered = await repository.markInitialDispatchFailed(
       job.id,
       'EXPORT_WORKFLOW_DISPATCH_FAILED',
     );
-    if (recovered.changed) throw error;
-    if (!recovered.job || recovered.job.state === 'queued') throw error;
-    job = recovered.job;
+    if (recovered.job) job = recovered.job;
+  } else {
+    // A Workflow may claim the row before its create response reaches us. Return
+    // the claimed state without weakening the repository's queued->running fence.
+    job = await repository.getById(job.id) ?? job;
   }
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });

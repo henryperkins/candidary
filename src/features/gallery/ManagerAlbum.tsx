@@ -75,6 +75,8 @@ export function ManagerAlbum({
   const savingRef = useRef(false);
   const pendingOrder = useRef<AlbumEntryView[] | null>(null);
   const saveCycle = useRef<Promise<void> | null>(null);
+  const canonicalLoad = useRef<Promise<void> | null>(null);
+  const canonicalOrderTrusted = useRef(false);
   const listRef = useRef<HTMLOListElement>(null);
   const refocusKey = useRef<string | null>(null);
   const previewOrigin = useRef<HTMLElement | null>(null);
@@ -88,29 +90,44 @@ export function ManagerAlbum({
     if (pendingOrder.current === null && !savingRef.current) setEntries(next.entries);
   }, []);
 
-  const load = useCallback(() => {
+  const loadCanonical = useCallback((signal?: AbortSignal) => {
     const generation = ++loadGeneration.current;
-    const controller = new AbortController();
+    canonicalOrderTrusted.current = false;
     setLoading(true);
     setLoadFailure(null);
-    fetchAlbum(eventId, controller.signal)
-      .then((result) => {
+    const cycle = (async () => {
+      try {
+        const result = await fetchAlbum(eventId, signal);
         if (generation !== loadGeneration.current) return;
         hasLoaded.current = true;
         setAlbum(result.album);
         setRevision(result.album.revision);
         setEntries(result.album.entries);
-      })
-      .catch((caught) => {
+        canonicalOrderTrusted.current = true;
+      } catch (caught) {
         if (generation !== loadGeneration.current) return;
-        if (caught instanceof DOMException && caught.name === 'AbortError') return;
-        setLoadFailure(errorMessage(caught, 'The album could not be loaded.'));
-      })
-      .finally(() => {
+        if (!(caught instanceof DOMException && caught.name === 'AbortError')) {
+          setLoadFailure(errorMessage(caught, 'The album could not be loaded.'));
+        }
+        throw caught;
+      } finally {
         if (generation === loadGeneration.current) setLoading(false);
-      });
-    return () => controller.abort();
+      }
+    })();
+    canonicalLoad.current = cycle;
+    void cycle.then(() => {
+      if (canonicalLoad.current === cycle) canonicalLoad.current = null;
+    }, () => {
+      if (canonicalLoad.current === cycle) canonicalLoad.current = null;
+    });
+    return cycle;
   }, [eventId]);
+
+  const load = useCallback(() => {
+    const controller = new AbortController();
+    void loadCanonical(controller.signal).catch(() => {});
+    return () => controller.abort();
+  }, [loadCanonical]);
 
   useEffect(() => {
     if (!active) return;
@@ -127,6 +144,7 @@ export function ManagerAlbum({
       pendingOrder.current = next;
       return;
     }
+    canonicalOrderTrusted.current = false;
     savingRef.current = true;
     setSaving(true);
     const run = async () => {
@@ -140,6 +158,7 @@ export function ManagerAlbum({
           const queued = pendingOrder.current;
           if (!queued) {
             setEntries(result.album.entries);
+            canonicalOrderTrusted.current = true;
             return;
           }
           pendingOrder.current = null;
@@ -149,7 +168,14 @@ export function ManagerAlbum({
       } catch (caught) {
         pendingOrder.current = null;
         setNotice(errorMessage(caught, 'The album order could not be saved.'));
-        load();
+        try {
+          // Keep the save drain pending until stored canonical order is known.
+          // A failed reload leaves the surface untrusted and its retry joins the
+          // same preparation barrier below.
+          await loadCanonical();
+        } catch {
+          // loadCanonical owns the recovery UI; the original save still rejects.
+        }
         throw caught;
       } finally {
         savingRef.current = false;
@@ -162,7 +188,7 @@ export function ManagerAlbum({
     // The control consumes a rejection from `drainOrderSaves`; this fallback also
     // handles a save failure when no export is waiting without an unhandled promise.
     void cycle.catch(() => {});
-  }, [eventId, load, revision]);
+  }, [eventId, loadCanonical, revision]);
 
   const drainOrderSaves = useCallback(async () => {
     for (;;) {
@@ -175,13 +201,16 @@ export function ManagerAlbum({
   const prepareAlbumExport = useCallback(async () => {
     try {
       await drainOrderSaves();
+      const loadingCanonical = canonicalLoad.current;
+      if (loadingCanonical) await loadingCanonical;
+      if (!canonicalOrderTrusted.current) await loadCanonical();
     } catch {
-      // The save path has already surfaced the failure and reloaded canonical state.
-      // Do not snapshot the older stored order while that recovery is in progress.
+      // Save and load paths have already surfaced the failure. Never snapshot an
+      // order until the canonical reload barrier has completed successfully.
       return;
     }
     await onPrepareExport();
-  }, [drainOrderSaves, onPrepareExport]);
+  }, [drainOrderSaves, loadCanonical, onPrepareExport]);
 
   function rearrange(next: AlbumEntryView[], message: string) {
     setEntries(next);
@@ -274,13 +303,15 @@ export function ManagerAlbum({
     setPendingPickIds((current) => new Set(current).add(photoId));
     const title = galleryPhotoTitle(entry.photo);
     try {
-      await setAlbumPicks(eventId, [photoId], false);
-      const refreshed = await fetchAlbum(eventId);
-      adopt(refreshed.album);
+      try {
+        await setAlbumPicks(eventId, [photoId], false);
+      } catch (caught) {
+        setNotice(errorMessage(caught, 'That photo could not be removed from the album.'));
+        return;
+      }
       setEntries((current) => current.filter((item) => (
         item.kind !== 'photo' || item.photo.id !== photoId
       )));
-      onPicksChanged();
       setAnnouncement(`${title} removed from the album. The original is still delivered.`);
       undo.present({
         message: '1 photo removed from the album. The original is still delivered.',
@@ -291,8 +322,15 @@ export function ManagerAlbum({
           load();
         },
       });
-    } catch (caught) {
-      setNotice(errorMessage(caught, 'That photo could not be removed from the album.'));
+      try {
+        const refreshed = await fetchAlbum(eventId);
+        // The response is authoritative: another manager may already have
+        // repicked the photo while this refresh was in flight.
+        adopt(refreshed.album);
+      } catch {
+        setNotice('The photo was removed, but the album could not be refreshed. Use Undo or try again in a moment.');
+      }
+      onPicksChanged();
     } finally {
       setPendingPickIds((current) => {
         const next = new Set(current);
