@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  ALBUM_MAX_ENTRIES,
   DEFAULT_GUESTBOOK_PROMPT,
   MANAGER_BULK_SELECTION_MAX,
   MAX_GUESTBOOK_PROMPT_LENGTH,
@@ -653,6 +654,25 @@ describe('manager settings and private photo intake', () => {
       MANAGER_BULK_SELECTION_MAX,
     );
     expect(states.get(untouched.id)).toBe('unpublished');
+  });
+
+  it('uses unique IDs for duplicate album pick validation at the repository boundary', async () => {
+    const access = await eventAccess();
+    const [seeded] = await seedStoredMedia(access, [77]);
+    if (!seeded) throw new Error('Expected an album-pick fixture.');
+    const repository = new MediaRepository(env.DB);
+
+    const changed = await repository.setFavoriteBulk(
+      access.event.id,
+      Array.from({ length: ALBUM_MAX_ENTRIES + 1 }, () => seeded.id),
+      '2026-08-23T12:00:00.000Z',
+    );
+
+    expect(changed.map(({ id }) => id)).toEqual([seeded.id]);
+    expect(await repository.getById(seeded.id)).toMatchObject({
+      id: seeded.id,
+      favoritedAt: '2026-08-23T12:00:00.000Z',
+    });
   });
 
   it('leaves every selected row unchanged when a later bulk id conflicts', async () => {

@@ -398,6 +398,31 @@ describe('album picks', () => {
     expect(body.data.changed.map((item) => item.id)).toEqual([fresh]);
   });
 
+  it('deduplicates duplicate album pick IDs while retaining the raw request ceiling', async () => {
+    const access = await eventAccess();
+    const id = await seedStored(access, 3);
+
+    const response = await write(access, '/picks', {
+      mediaIds: [id, id, id],
+      picked: true,
+    });
+
+    expect(response.status).toBe(200);
+    expect((await response.json() as { data: { changed: { id: string }[] } }).data.changed)
+      .toEqual([expect.objectContaining({ id })]);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM media
+      WHERE event_id = ? AND id = ? AND favorited_at IS NOT NULL
+    `).bind(access.event.id, id).first<number>('count')).toBe(1);
+
+    const oversized = await write(access, '/picks', {
+      mediaIds: Array.from({ length: ALBUM_MAX_ENTRIES + 1 }, () => id),
+      picked: true,
+    });
+    expect(oversized.status).toBe(422);
+    expect((await oversized.json() as { code: string }).code).toBe('VALIDATION_FAILED');
+  });
+
   it('leaves an unrelated event alone', async () => {
     const access = await eventAccess();
     const other = await eventAccess();
@@ -596,28 +621,48 @@ describe('album picks', () => {
 });
 
 describe('album start', () => {
-  it.each(['from-picks', 'empty'] as const)(
-    'refuses %s without changing an unsaved legacy set above the album cap',
-    async (start) => {
-      const access = await eventAccess();
-      await seedLegacyFavorites(access, ALBUM_MAX_ENTRIES + 1);
+  it('refuses from-picks without changing an unsaved legacy set above the album cap', async () => {
+    const access = await eventAccess();
+    await seedLegacyFavorites(access, ALBUM_MAX_ENTRIES + 1);
 
-      const response = await write(access, '/start', { start });
+    const response = await write(access, '/start', { start: 'from-picks' });
 
-      expect(response.status).toBe(409);
-      expect(await response.json() as { code: string; message: string }).toMatchObject({
-        code: 'ALBUM_FULL',
-        message: expect.stringMatching(/remove picks in Library/iu),
-      });
-      expect(await env.DB.prepare(`
-        SELECT COUNT(*) AS count FROM media
-        WHERE event_id = ? AND favorited_at IS NOT NULL
-      `).bind(access.event.id).first<number>('count')).toBe(ALBUM_MAX_ENTRIES + 1);
-      expect(await env.DB.prepare(`
-        SELECT entries, saved_at FROM event_albums WHERE event_id = ?
-      `).bind(access.event.id).first()).toEqual({ entries: '[]', saved_at: null });
-    },
-  );
+    expect(response.status).toBe(409);
+    expect(await response.json() as { code: string; message: string }).toMatchObject({
+      code: 'ALBUM_FULL',
+      message: expect.stringMatching(/remove picks in Library/iu),
+    });
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM media
+      WHERE event_id = ? AND favorited_at IS NOT NULL
+    `).bind(access.event.id).first<number>('count')).toBe(ALBUM_MAX_ENTRIES + 1);
+    expect(await env.DB.prepare(`
+      SELECT entries, saved_at FROM event_albums WHERE event_id = ?
+    `).bind(access.event.id).first()).toEqual({ entries: '[]', saved_at: null });
+  });
+
+  it('lets Start empty clear and save an unsaved legacy set above the album cap', async () => {
+    const access = await eventAccess();
+    await seedLegacyFavorites(access, ALBUM_MAX_ENTRIES + 1);
+    const expected = Array.from(
+      { length: ALBUM_MAX_ENTRIES + 1 },
+      (_, offset) => mediaId(1_000 + offset),
+    );
+
+    const response = await write(access, '/start', { start: 'empty' });
+
+    expect(response.status).toBe(200);
+    const result = (await response.json() as {
+      data: { started: boolean; cleared: string[]; album: AlbumView };
+    }).data;
+    expect(result.started).toBe(true);
+    expect([...result.cleared].sort()).toEqual(expected.sort());
+    expect(result.album).toMatchObject({ saved: true, entries: [], photoCount: 0 });
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM media
+      WHERE event_id = ? AND favorited_at IS NOT NULL
+    `).bind(access.event.id).first<number>('count')).toBe(0);
+  });
 
   it('keeps earlier favorites and marks the album saved', async () => {
     const access = await eventAccess();

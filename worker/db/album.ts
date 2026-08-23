@@ -419,24 +419,14 @@ export class AlbumRepository {
             SELECT 1 FROM event_albums
             WHERE event_id = ?1 AND saved_at IS NULL
           )
-          AND (SELECT COUNT(*) FROM media AS picked
-            WHERE picked.event_id = ?1
-              AND picked.upload_state = 'stored'
-              AND picked.deleted_at IS NULL
-              AND picked.favorited_at IS NOT NULL) <= ?2
         RETURNING id
-      `).bind(eventId, ALBUM_MAX_ENTRIES));
+      `).bind(eventId));
       startedResultIndex = statements.length;
       statements.push(this.db.prepare(`
         UPDATE event_albums
         SET entries = '[]', saved_at = ?2, updated_at = ?2
         WHERE event_id = ?1 AND saved_at IS NULL
-          AND (SELECT COUNT(*) FROM media
-            WHERE media.event_id = ?1
-              AND media.upload_state = 'stored'
-              AND media.deleted_at IS NULL
-              AND media.favorited_at IS NOT NULL) <= ?3
-      `).bind(eventId, now, ALBUM_MAX_ENTRIES));
+      `).bind(eventId, now));
     }
 
     const diagnosticResultIndex = statements.length;
@@ -456,7 +446,7 @@ export class AlbumRepository {
       saved_at: string | null;
       pick_count: number;
     } | undefined;
-    if (!started && diagnostic?.saved_at === null
+    if (choice === 'from-picks' && !started && diagnostic?.saved_at === null
       && diagnostic.pick_count > ALBUM_MAX_ENTRIES) {
       throw new ApiError(
         'ALBUM_FULL',

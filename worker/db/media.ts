@@ -632,19 +632,19 @@ export class MediaRepository {
     mediaIds: readonly string[],
     favoritedAt: string | null,
   ): Promise<ManagerGalleryMediaView[]> {
-    if (mediaIds.length === 0) return [];
-    if (mediaIds.length > ALBUM_MAX_ENTRIES) {
+    const unique = [...new Set(mediaIds)];
+    if (unique.length === 0) return [];
+    if (unique.length > ALBUM_MAX_ENTRIES) {
       throw new ApiError(
         'VALIDATION_FAILED',
         `Choose up to ${ALBUM_MAX_ENTRIES} photos at a time.`,
         422,
       );
     }
-    const unique = [...new Set(mediaIds)];
     if (favoritedAt !== null) {
       return this.addFavoritesWithinAlbumCapacity(eventId, unique, favoritedAt);
     }
-    const changing = favoritedAt === null ? 'favorited_at IS NOT NULL' : 'favorited_at IS NULL';
+    const changing = 'favorited_at IS NOT NULL';
     // Two bound values are spent on the event and the stamp before any id, so the chunk
     // sits under the 100-value bound with room rather than exactly at it.
     const chunkSize = 90;
