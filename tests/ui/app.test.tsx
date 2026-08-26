@@ -1118,7 +1118,8 @@ describe('canonical Manager location ownership', () => {
 
     await navigation;
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
-    expect(screen.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Library' }))
+      .toHaveAttribute('aria-pressed', 'true'));
   });
 });
 
@@ -1228,12 +1229,12 @@ describe('manager experience', () => {
     await user.type(name, 'Maya & Theo — Reception');
 
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
     // Mounted but out of the way. `getByLabelText` deliberately still finds a
     // hidden control, so this has to assert visibility rather than presence.
-    expect(screen.getByLabelText('Event name')).not.toBeVisible();
+    await waitFor(() => expect(screen.getByLabelText('Event name')).not.toBeVisible());
     expect(document.querySelector('.manager-panel[hidden]')).toHaveAttribute('inert');
-
-    await user.click(within(navigation).getByRole('button', { name: /settings/i }));
     expect(screen.getByLabelText('Event name')).toHaveValue('Maya & Theo — Reception');
   });
 
@@ -1305,6 +1306,8 @@ describe('manager experience', () => {
     await waitFor(() => expect(settingsStarted).toBe(true));
 
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
     expect(await screen.findByText(
       'Album: 0 photos · Link: Off · Guest gallery: On, 0 published',
     )).toBeVisible();
@@ -1353,6 +1356,8 @@ describe('manager experience', () => {
     await waitFor(() => expect(settingsStarted).toBe(true));
 
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
     await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published');
     releaseSettings();
     await screen.findByRole('heading', { level: 1, name: 'Renamed' });

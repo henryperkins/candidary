@@ -446,23 +446,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const authorizedAlbumTarget = useRef<string | null>(null);
   const pendingManagerAdoption = useRef<PendingManagerAdoption | null>(null);
   const blocker = useBlocker(({ currentLocation, nextLocation }) => {
-    const currentTarget = locationTarget(currentLocation);
-    const nextTarget = locationTarget(nextLocation);
+    if (shouldBlockNavigation) return true;
     const currentManagerLocation = parseManagerLocation(currentLocation.search);
     const currentIsCanonicalAlbum = currentLocation.pathname === `/manage/event/${eventId}`
       && !currentManagerLocation.needsReplace
       && currentManagerLocation.location.section === 'gallery'
       && currentManagerLocation.location.mode === 'album';
-    const isExactPendingManagerAdoption = !currentIsCanonicalAlbum
-      && currentLocation.pathname === `/manage/event/${eventId}`
-      && nextLocation.pathname === currentLocation.pathname
-      && pendingManagerAdoption.current?.target === nextTarget;
-    // Retained Manager subtrees may finish their autosaves behind another
-    // Manager section, as they did before sections became URL-owned. Only the
-    // exact in-app destination we just requested gets that treatment: browser
-    // traversal and every route exit still enter the ordinary work guard.
-    if (shouldBlockNavigation && !isExactPendingManagerAdoption) return true;
     if (!currentIsCanonicalAlbum) return false;
+    const currentTarget = locationTarget(currentLocation);
+    const nextTarget = locationTarget(nextLocation);
     if (nextTarget === currentTarget) return false;
     return authorizedAlbumTarget.current !== nextTarget;
   });
@@ -2310,6 +2302,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           ? stayWithAlbum
           : stuckDomains.length > 0
           ? () => {
+              const pending = pendingManagerAdoption.current;
+              if (
+                blocker.state === 'blocked'
+                && pending?.destination.kind === 'settings-repair'
+                && pending.target === blockedNavigationTarget
+              ) {
+                blocker.proceed();
+                return;
+              }
               if (blocker.state === 'blocked') cancelBlockedNavigation();
               openSettingsForRepair();
             }
