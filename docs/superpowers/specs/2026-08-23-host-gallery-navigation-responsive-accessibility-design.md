@@ -12,7 +12,7 @@ Make every Manager and Gallery location addressable, preserve the host's task ac
 
 ## Existing systems retained
 
-- The route remains `/manage/event/:eventId`; React Router and `useSearchParams` own navigation.
+- The route remains `/manage/event/:eventId`; React Router owns navigation.
 - The six existing Manager destinations and three Gallery modes remain.
 - The current viewer remains the dialog reference implementation.
 - Current CSS tokens, breakpoint strategy, Gallery cards, and controls remain.
@@ -25,18 +25,59 @@ The canonical query keys are:
 - `section=intake|rsvp|gallery|guestbook|share|settings`
 - `mode=library|album|guest-gallery`, valid only when `section=gallery`
 
-One `manager-location.ts` parser/serializer is shared by Manager navigation and recovery validation. Canonical serialization is: Intake has no query; RSVP, Guestbook, Share, and Settings carry only `section`; Gallery Library is `?section=gallery`; Album and Guest gallery add `mode=album|guest-gallery`. The parser accepts redundant `section=intake` and `mode=library` as aliases, maps obsolete `mode=shared` to Guest gallery, removes `mode` outside Gallery and unknown keys, and normalizes with `replace`. Invalid/duplicate section falls back to Intake; invalid/duplicate Gallery mode falls back to Library. Existing `?section=rsvp` links remain valid. User state changes push history entries so Back traverses host work before leaving the application.
+One `manager-location.ts` parser/serializer is shared by Manager navigation and recovery validation. Parameter names and decoded values are case-sensitive. The parser inspects every query pair rather than using first-value lookup, so duplicate known keys cannot be hidden. It returns `{ location, canonicalSearch, needsReplace }` and never mutates Router state itself.
+
+| Input query | Parsed location | Canonical query |
+| --- | --- | --- |
+| empty | Intake | empty |
+| `section=intake` | Intake alias | empty |
+| `section=rsvp` | RSVP | `section=rsvp` |
+| `section=guestbook` | Guestbook | `section=guestbook` |
+| `section=share` | Share | `section=share` |
+| `section=settings` | Settings | `section=settings` |
+| `section=gallery` | Gallery Library | `section=gallery` |
+| `section=gallery&mode=library` | Gallery Library alias | `section=gallery` |
+| `section=gallery&mode=album` | Gallery Album | `section=gallery&mode=album` |
+| `section=gallery&mode=guest-gallery` | Guest gallery | `section=gallery&mode=guest-gallery` |
+| `section=gallery&mode=shared` | obsolete Guest-gallery alias | `section=gallery&mode=guest-gallery` |
+| absent `section` plus any `mode` | Intake | empty |
+| valid non-Gallery `section` plus any `mode` | named section | `section=<section>` |
+| missing, blank, invalid, or duplicate `section` | Intake | empty |
+| Gallery with missing, blank, invalid, or duplicate `mode` | Gallery Library | `section=gallery` |
+| unknown keys, including duplicate unknown keys | ignored | removed |
+
+A malformed or duplicate `section` wins over any otherwise-valid `mode` and falls back to Intake. An invalid or duplicate `mode` only falls back to Library when the parsed section is Gallery. On initial load and external, Back, or Forward navigation, Manager replaces a noncanonical search while preserving pathname, hash, and Router state. The Manager parser ignores the hash; recovery return URLs reject fragments at their existing security boundary. Host-initiated destination changes push history entries. No requested section or mode renders until the existing settlement boundary authorizes Router adoption, so Back traverses host work without bypassing Album preparation.
 
 Recovery helpers use the same contract. `safeReturnTo` accepts only origin-relative `/host/events` or `/manage/event/<uuid>`, rejects credentials, another origin, protocol-relative input, fragments, unknown/duplicate keys, and any query on `/host/events`, then returns the shared serializer's canonical URL. `adoptTargetFor` compares the parsed Manager pathname/event ID rather than applying a path-only regular expression to the whole string. Thus query-bearing Manager returns survive sign-in/recovery without widening the open-redirect allowlist.
 
-`ManagerPage` derives rendered section exclusively from the parsed URL instead of maintaining an independent destination source. `ManagerGalleryWorkspace` is controlled by that mode. Click, Back, Forward, and programmatic transitions leaving Album all pass through the same settlement/blocker boundary before the new URL is adopted.
+`ManagerPage` derives rendered section exclusively from the parsed URL instead of maintaining an independent destination source. `ManagerGalleryWorkspace` receives the canonical mode and requests mode changes rather than committing its own mode state. Click, Back, Forward, and programmatic transitions leaving Album all pass through the same settlement/blocker boundary before the new URL is adopted.
 
 ## Transient return intent
 
 Internal controls may attach one-use Router state:
 
 ```ts
+type ManagerSection = 'intake' | 'rsvp' | 'gallery' | 'guestbook' | 'share' | 'settings';
+type GalleryMode = 'library' | 'album' | 'guest-gallery';
 type PublicationFilter = 'all' | 'unpublished' | 'published' | 'hidden';
+
+type GalleryAnchor =
+  | {
+      kind: 'media';
+      mediaId: string;
+      viewportOffset: number;
+      fallbackScrollY: number;
+      before: string[];
+      after: string[];
+    }
+  | {
+      kind: 'album-entry';
+      entryId: string;
+      viewportOffset: number;
+      fallbackScrollY: number;
+      before: string[];
+      after: string[];
+    };
 
 type ManagerNavigationIntent =
   | { kind: 'focus-complete-export' }
@@ -50,9 +91,22 @@ type ManagerNavigationIntent =
         publicationFilter: PublicationFilter;
       };
     };
+
+type ManagerHistoryStateV1 = {
+  version: 1;
+  eventId: string;
+  anchors?: Partial<Record<GalleryMode, GalleryAnchor>>;
+  intent?: ManagerNavigationIntent;
+};
+
+type RouterHistoryState = Record<string, unknown> & {
+  __candidaryManager?: ManagerHistoryStateV1;
+};
 ```
 
-Share-to-export and Guest-gallery-to-Settings use this state. The compatible destination captures a valid intent, removes only the intent field with `replace`, preserves the same entry's Gallery-anchor state, then performs focus/return work; malformed or destination-incompatible intent is ignored and removed on the same terms. The complete-export region gains a stable labelled heading/status wrapper with `tabIndex={-1}`. Share-to-export focuses that wrapper while its resource loads or fails, then moves to the complete-export action only when it exists and is enabled; zero-photo and active-job-disabled states retain focus on the wrapper instead of targeting an unfocusable native disabled button.
+Only a plain-object `__candidaryManager` with `version === 1` and an exact matching `eventId` is read. Every non-Candidary Router-state key is preserved. A valid anchors map survives intent consumption; invalid, incompatible, or cross-event intent is removed with `replace` and never executes. Compatibility is exact: `focus-complete-export` belongs to Gallery Library; `focus-intake-heading` and `open-recently-deleted` belong to Intake; `edit-guest-gallery-availability` is captured by Settings and its return intent belongs to Guest gallery. Consumption removes `intent` before focus work starts. If no anchors remain, the Candidary envelope is removed entirely. Before a push or blocker-mediated navigation, the current entry's anchor is written with `replace`; the target receives a cloned valid envelope plus any new intent. Reload may lose transient state and always falls back to the canonical durable URL.
+
+Share-to-export and Guest-gallery-to-Settings use this state. The complete-export region gains a stable labelled heading/status wrapper with `tabIndex={-1}`. Share-to-export focuses that wrapper while its resource loads or fails, then moves to the complete-export action only when it exists and is enabled; zero-photo and active-job-disabled states retain focus on the wrapper instead of targeting an unfocusable native disabled button.
 
 Slice 1's opaque Album marker pushes canonical Intake with `open-recently-deleted`. Intake consumes it once, selects its Recently deleted resource, and after the first bounded page settles focuses that media row's Restore control when present or the Recently deleted heading otherwise; the heading fallback announces that the retained photo may be under Load more. It never performs an unbounded page scan. Back returns to the Album entry. Reload intentionally loses the transient filter task and shows canonical Intake, while malformed/cross-event IDs are discarded and focus the Intake heading without disclosing whether a row exists.
 
@@ -60,7 +114,9 @@ For Guest-gallery-to-Settings, Settings captures the valid `edit-guest-gallery-a
 
 ## Per-mode scroll and focus
 
-Gallery stores an anchor per event and mode in the current history entry: the first visible media/entry ID plus its offset, with scrollY as a fallback. Before leaving a mode it records the anchor. After the returning mode has laid out, it restores the same item and offset; if the item disappeared, it restores the nearest surviving neighbor or bounded scroll value.
+Library and Guest gallery store media anchors; Album stores Album-entry anchors. The anchor is the first rendered item whose bottom is below the effective visible top (viewport top plus sticky-header obstruction). `viewportOffset` is the item's top minus that effective visible top, rounded to an integer CSS pixel. Capture at most 20 ordered IDs before and 20 after the anchor plus `fallbackScrollY`.
+
+Before leaving a mode, Manager replaces the current history entry with that anchor. After the returning mode's initial resource settles and one animation frame lays it out, restoration chooses the exact ID, then alternates through `after[0]`, `before[0]`, `after[1]`, `before[1]`, and so on. It scrolls the chosen item back to the recorded viewport offset. When no recorded item survives, it clamps `fallbackScrollY` to document bounds. Restoration never fetches a page, changes a filter, or scans beyond rendered rows; a newer location/adoption generation cancels queued restoration.
 
 Mode transitions that clear selection announce the reset. Closing the viewer, Cover Studio, a confirmation, or a failed navigation prompt restores the invoking control when it still exists; otherwise it follows the documented card/heading fallback.
 
@@ -76,11 +132,29 @@ Mode transitions that clear selection announce the reset. Closing the viewer, Co
 
 No separate viewer cache or pagination store is introduced.
 
+The bridge is identity-based and returns an explicit result:
+
+```ts
+type ViewerContinuationOutcome =
+  | { status: 'advanced'; nextPhotoId: string }
+  | { status: 'exhausted' }
+  | { status: 'failed' };
+
+interface ViewerContinuationProps {
+  photoId: string;
+  onPhotoChange(photoId: string): void;
+  hasMore: boolean;
+  loadNextAfter(photoId: string): Promise<ViewerContinuationOutcome>;
+}
+```
+
+At the last loaded photo, Next remains enabled and is named **Load next photo** while `hasMore` is true. Click or ArrowRight starts at most one continuation and retains the current photo and focus. The Gallery owner appends unique rows and returns `advanced` only when the immediate successor now exists, `exhausted` when no later page remains, and `failed` for a recoverable append failure. Failure retains the photo, exposes an in-dialog alert and **Try again**, and focuses that action. Exhaustion disables the normal **Next photo** control without an error. Closing does not remove successfully appended rows and keeps the existing invoker-focus contract.
+
 ## Responsive layout
 
-At 390 px, secondary Gallery explanation and export detail collapse behind existing disclosure patterns while the mode switch, audience summary, search/order, selection state, and first photo remain directly reachable. A Library photo must begin within the first 844 px viewport in the standard fixture.
+At 390 by 844 px, the standard fixture has six delivered photos, a fresh audience summary, no active or terminal export, default Library mode, and no selection. Secondary Gallery explanation and export detail collapse behind existing disclosure patterns while the mode switch, audience summary, search/order, selection state, and first photo remain directly reachable. The first Library photo's bounding box starts before CSS pixel 844 and intersects the initial viewport without scrolling.
 
-At 320 px, Manager navigation permits label wrapping and increases its row height rather than shrinking targets or type. Adjacent label bounding boxes must not intersect. Gallery modes retain full-width stacked 44 px controls when necessary.
+At 320 by 844 px, all six Manager navigation controls remain at least 44 by 44 CSS pixels, labels may wrap without reducing type size, and every pair of visible label bounding boxes has an empty intersection. Gallery modes retain full-width stacked 44 px controls when necessary.
 
 All reviewed destinations retain:
 
@@ -95,7 +169,7 @@ The already-tested viewer pattern remains the modal standard. Cover Studio and d
 
 Album reorder preserves focus on the invoked directional control and announces item name plus new position. Undo remains reachable in the persistent recovery region. Visible action text is included in accessible names; icon-only controls retain literal complete labels.
 
-Axe coverage in this slice includes Intake, RSVP, Library, selection mode/tray, Album editor, Preview, sharing, Guest gallery filters and writes, Guestbook, Share, Settings, confirmation dialogs, Recently deleted, and the public Album. Slice 5 adds its host-upload state to the same matrix when that state exists.
+Axe coverage in this slice uses named fixtures for Intake default, filtered, and Recently deleted; RSVP; Library default, selection, tray, and viewer; Album editor, Preview, create-link dialog, live-link state, and stop-link alertdialog; Guest gallery all/unpublished/published/hidden filters plus single and bulk write states; Guestbook; Share; Settings; the Album-leave prompt; the RSVP/settings pending-work prompt; move-to-Recently-deleted dialog; entry rotation and disable confirmations; and public Album nonempty and empty. Slice 5 adds its host-upload state to the same matrix when that state exists.
 
 ## Public Album URL/image regressions
 
