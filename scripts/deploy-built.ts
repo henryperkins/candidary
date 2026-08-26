@@ -23,6 +23,7 @@ export interface DeploymentCommandPlanInput {
   repositoryRoot: string;
   target: DeploymentTarget;
   uploadOnly?: boolean;
+  cutover?: boolean;
   sha: string;
   branch?: string;
   nodeExecPath: string;
@@ -65,13 +66,17 @@ export function resolveDeploymentSha(
   return configured || head;
 }
 
-export function assertProductionDeploymentTreeClean(
+export function assertDeploymentTreeClean(
   target: DeploymentTarget,
   branch: string,
   status: string,
+  cutover = false,
 ): void {
   if (target === 'production' && branch === 'main' && status.trim()) {
     throw new Error('A production deployment requires a clean working tree.');
+  }
+  if (cutover && status.trim()) {
+    throw new Error(`A ${target} cutover requires a clean working tree.`);
   }
 }
 
@@ -260,13 +265,21 @@ export function buildCronOnlyWranglerConfig(
   return productionControlPlaneIdentity(value);
 }
 
-export function buildWorkflowOnlyWranglerConfig(
+export function buildProductionCutoverWranglerConfig(
   value: unknown,
-): ControlPlaneWranglerIdentity & { workflows: unknown } {
-  const identity = productionControlPlaneIdentity(value);
+): Record<string, unknown> {
+  productionControlPlaneIdentity(value);
+  const config = value as Record<string, unknown>;
+  const triggers = config.triggers;
+  if (!isRecord(triggers)) {
+    throw new Error('Built Wrangler config does not match the requested production target.');
+  }
   return {
-    ...identity,
-    workflows: (value as Record<string, unknown>).workflows,
+    ...config,
+    triggers: {
+      ...triggers,
+      crons: [],
+    },
   };
 }
 
@@ -306,16 +319,21 @@ export function buildDeploymentCommandPlan(input: DeploymentCommandPlanInput): [
   if (input.uploadOnly && input.target !== 'production') {
     throw new Error('Upload-only mode is restricted to the production target.');
   }
-  const config = 'dist/candidary/wrangler.json';
-  const operation = input.target === 'production' && !input.uploadOnly
+  if (input.uploadOnly && input.cutover) {
+    throw new Error('Upload-only and cutover modes cannot be combined.');
+  }
+  const config = input.target === 'production' && input.cutover
+    ? 'dist/candidary/wrangler.cutover.json'
+    : 'dist/candidary/wrangler.json';
+  const operation = (input.target === 'production' && !input.uploadOnly) || input.cutover
     ? ['deploy']
     : ['versions', 'upload'];
-  const previewArguments = input.target === 'preview'
+  const previewArguments = input.target === 'preview' && !input.cutover
     ? ['--preview-alias', previewAlias(branch, sha)]
     : [];
 
   return [{
-    id: input.uploadOnly ? 'upload' : 'deploy',
+    id: operation[0] === 'deploy' ? 'deploy' : 'upload',
     executable: input.nodeExecPath,
     args: [
       input.wranglerCliPath,
@@ -365,7 +383,7 @@ function writeGeneratedConfig(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-export function prepareProductionControlPlaneConfigs(
+export function prepareProductionCutoverConfigs(
   repositoryRoot = process.cwd(),
   environment: NodeJS.ProcessEnv = process.env,
 ): void {
@@ -374,10 +392,10 @@ export function prepareProductionControlPlaneConfigs(
     gitOutput(repositoryRoot, ['branch', '--show-current']),
   );
   if (branch !== 'main') {
-    throw new Error('Production control-plane config generation requires the main branch.');
+    throw new Error('Production cutover config generation requires the main branch.');
   }
   const status = gitOutput(repositoryRoot, ['status', '--porcelain', '--untracked-files=all']);
-  assertProductionDeploymentTreeClean('production', branch, status);
+  assertDeploymentTreeClean('production', branch, status, true);
   resolveDeploymentSha(
     environment,
     gitOutput(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']),
@@ -388,8 +406,8 @@ export function prepareProductionControlPlaneConfigs(
     buildCronOnlyWranglerConfig(fullConfig),
   );
   writeGeneratedConfig(
-    resolve(repositoryRoot, 'dist/candidary/wrangler.workflows-only.json'),
-    buildWorkflowOnlyWranglerConfig(fullConfig),
+    resolve(repositoryRoot, 'dist/candidary/wrangler.cutover.json'),
+    buildProductionCutoverWranglerConfig(fullConfig),
   );
 }
 
@@ -406,6 +424,7 @@ export function runBuiltDeployment(
   repositoryRoot = process.cwd(),
   environment: NodeJS.ProcessEnv = process.env,
   uploadOnly = false,
+  cutover = false,
 ): void {
   const branch = resolveDeploymentBranch(
     environment,
@@ -415,10 +434,10 @@ export function runBuiltDeployment(
     environment,
     gitOutput(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']),
   );
-  const status = target === 'production'
+  const status = target === 'production' || cutover
     ? gitOutput(repositoryRoot, ['status', '--porcelain', '--untracked-files=all'])
     : '';
-  assertProductionDeploymentTreeClean(target, branch, status);
+  assertDeploymentTreeClean(target, branch, status, cutover);
   const wranglerCliPath = resolve(repositoryRoot, 'node_modules/wrangler/bin/wrangler.js');
   const deployEnvironment = {
     ...environment,
@@ -428,13 +447,20 @@ export function runBuiltDeployment(
     repositoryRoot,
     target,
     uploadOnly,
+    cutover,
     sha,
     branch,
     nodeExecPath: process.execPath,
     wranglerCliPath,
     environment: deployEnvironment,
   });
-  assertBuiltConfig(repositoryRoot, target);
+  const fullConfig = assertBuiltConfig(repositoryRoot, target);
+  if (target === 'production' && cutover) {
+    writeGeneratedConfig(
+      resolve(repositoryRoot, 'dist/candidary/wrangler.cutover.json'),
+      buildProductionCutoverWranglerConfig(fullConfig),
+    );
+  }
   const result = spawnSync(command.executable, command.args, {
     cwd: command.cwd,
     env: command.env,
@@ -451,19 +477,30 @@ export function runBuiltDeployment(
 interface DeploymentInvocation {
   target: DeploymentTarget;
   uploadOnly: boolean;
+  cutover: boolean;
 }
 
 function parseInvocation(value: string | undefined): DeploymentInvocation {
-  if (value === 'production') return { target: 'production', uploadOnly: false };
-  if (value === 'preview') return { target: 'preview', uploadOnly: false };
-  if (value === 'production-upload') return { target: 'production', uploadOnly: true };
-  throw new Error('Usage: deploy-built.ts <production|preview|production-upload>');
+  if (value === 'production') return { target: 'production', uploadOnly: false, cutover: false };
+  if (value === 'preview') return { target: 'preview', uploadOnly: false, cutover: false };
+  if (value === 'production-upload') {
+    return { target: 'production', uploadOnly: true, cutover: false };
+  }
+  if (value === 'production-cutover') {
+    return { target: 'production', uploadOnly: false, cutover: true };
+  }
+  if (value === 'preview-cutover') {
+    return { target: 'preview', uploadOnly: false, cutover: true };
+  }
+  throw new Error(
+    'Usage: deploy-built.ts <production|preview|production-upload|production-cutover|preview-cutover>',
+  );
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  if (process.argv[2] === 'production-control-plane-configs') {
-    prepareProductionControlPlaneConfigs();
+  if (process.argv[2] === 'production-cutover-configs') {
+    prepareProductionCutoverConfigs();
   } else {
     const invocation = parseInvocation(process.argv[2]);
     runBuiltDeployment(
@@ -471,6 +508,7 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
       process.cwd(),
       process.env,
       invocation.uploadOnly,
+      invocation.cutover,
     );
   }
 }

@@ -19,8 +19,8 @@ The first release that admits migration 0020 trash or `attempt-v2` writes is the
 steps 3–5. Migration 0020 starts in `legacy-open`; its D1 triggers keep the old protocol usable until
 the release owner deliberately closes it. The procedure under **0020 admission exception** cuts over
 preview first, then proves the frozen production Worker, drains the old daily Cron and active legacy
-exports, atomically closes legacy admission, promotes one exact Worker version, updates the Workflow
-definitions, and only then opens v2 admission once.
+exports, atomically closes legacy admission, deploys one new exact-SHA Worker version and all three
+Workflow implementations together, and only then opens v2 admission once.
 
 The GitHub workflow is pull-request-only. Merging does not rerun its six jobs or create a duplicate
 post-merge build; the Cloudflare `main` trigger owns the one production build and deployment.
@@ -156,8 +156,9 @@ schema:
 
 For the first 0020-aware release, replace step 4 with the preview cutover below. Step 6 does not
 deploy: the connected production Build must be upload-only before the exact merge, and the resulting
-inert version is promoted only after the daily Cron and active legacy exports have drained and D1 has
-atomically closed legacy admission.
+inert version is preflight evidence only. After the daily Cron and active legacy exports drain and D1
+atomically closes legacy admission, the same clean exact-SHA artifact is deployed through the cutover
+helper so Worker code and all three Workflow implementations advance together.
 
 Preview ledger commands:
 
@@ -190,10 +191,12 @@ that row as `legacy`, installs the v2 fence, and creates `export_protocol_admiss
 its protocol matches the singleton: `legacy-open` admits `legacy`, `closed` admits neither protocol,
 and `open` admits only `attempt-v2`. Existing admitted executions may still run to a terminal state.
 
-The gate is necessary because Worker HTTP traffic and Workflow definitions are separate control-plane
-changes. Promoting the new Worker before updating `candidary-export` would otherwise let new HTTP create
-an `attempt-v2` payload for the old Workflow. Updating the Workflow first would let the new Workflow
-receive a legacy payload from old HTTP. A single D1 statement may move `legacy-open` to `closed` only
+The gate is necessary because an inert uploaded Worker version does not prove that the corresponding
+Workflow implementations are active. A separate version promotion followed by `triggers deploy` cannot
+establish that fact: `triggers deploy` applies routes/domains and Cron Triggers, not Workflow code. The
+cutover therefore uses pinned `wrangler deploy` only after admission closes, so Worker code and all three
+Workflow implementations advance from one verified generated config while neither protocol may start.
+A single D1 statement may move `legacy-open` to `closed` only
 when no legacy row is queued or running; serialization makes a racing old INSERT or Retry lose, or makes
 the close lose and be retried after that visible job drains. Closing is one-way and is therefore the
 export-availability point of no return. The candidate Worker returns safe 503 for complete creation,
@@ -225,8 +228,9 @@ npx wrangler d1 execute candidary-preview-core --remote --env preview --config w
 3. Build and upload that exact branch/SHA with the existing preview helper while the candidate is still
    inert and legacy remains admitted. `deploy:preview:built` creates a version and preview alias; it
    does **not** promote the shared `candidary-preview` Worker or update its Workflow definitions. Capture
-   the printed version ID only after the upload succeeds, validate it as a lowercase UUID, and verify
-   that exact version's full-SHA tag before closing admission.
+   the printed preflight version ID only after the upload succeeds, validate it as a lowercase UUID,
+   and verify that exact version's full-SHA tag before closing admission. Also describe all three
+   preview Workflows and record each `Latest Version` ID as the pre-cutover baseline.
 
 ```bash
 CANDIDARY_PREVIEW_RELEASE_SHA=<full-reviewed-git-sha>
@@ -239,10 +243,13 @@ WORKERS_CI_COMMIT_SHA="$CANDIDARY_PREVIEW_RELEASE_SHA" npm run build:cloudflare
 npm run verify:pwa-build
 WORKERS_CI_BRANCH="$CANDIDARY_PREVIEW_BRANCH" \
 WORKERS_CI_COMMIT_SHA="$CANDIDARY_PREVIEW_RELEASE_SHA" npm run deploy:preview:built
-CANDIDARY_PREVIEW_VERSION_ID=<version-id-printed-by-preview-upload>
-[[ "$CANDIDARY_PREVIEW_VERSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 1
-npx wrangler versions view "$CANDIDARY_PREVIEW_VERSION_ID" \
+CANDIDARY_PREVIEW_PREFLIGHT_VERSION_ID=<version-id-printed-by-preview-upload>
+[[ "$CANDIDARY_PREVIEW_PREFLIGHT_VERSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 1
+npx wrangler versions view "$CANDIDARY_PREVIEW_PREFLIGHT_VERSION_ID" \
   --config dist/candidary/wrangler.json --name candidary-preview --json
+npx wrangler workflows describe candidary-preview-export --config dist/candidary/wrangler.json
+npx wrangler workflows describe candidary-preview-cover-render --config dist/candidary/wrangler.json
+npx wrangler workflows describe candidary-preview-cover-backfill --config dist/candidary/wrangler.json
 ```
 
 `HEAD` must equal `CANDIDARY_PREVIEW_RELEASE_SHA`, Git status must be empty, and the viewed version tag
@@ -265,37 +272,47 @@ npx wrangler d1 execute candidary-preview-core --remote --env preview --config w
 
 5. Prove the full generated preview config has exactly the intended preview Worker identity and three
    Workflows, with no `route`/`routes`, Cron, queue producer/consumer, event trigger, or address side
-   effect. Only after that executable proof, promote the captured preview version alone at 100%, apply
-   the preview Workflow definitions with that config, and inspect all three. Require sole 100% status
-   and the expected `candidary-preview` script/class mappings. While admission is closed, verify the
-   promoted preview returns safe 503 for a complete/Album create or terminal Retry rather than mutating
-   a job or dispatching work.
+   effect. Only after that executable proof, run the existing helper's preview cutover mode from the
+   same clean checkout and exact SHA. It uses pinned `wrangler deploy` with the full verified no-Cron
+   preview config, creating a new active Worker version and advancing all three Workflow implementations
+   together. Capture the new deployed version ID, then require one sole 100% active version with that ID
+   and exact-SHA tag. Re-describe all three Workflows; every latest version ID must differ from its
+   recorded pre-cutover ID, and the expected `candidary-preview` script/class mappings must remain.
+   While admission is closed, verify the deployed preview returns safe 503 for a complete/Album create
+   or terminal Retry rather than mutating a job or dispatching work.
 
 ```bash
 node -e "const c=require('./dist/candidary/wrangler.json'); const q=c.queues??{}; const t=c.triggers??{}; const empty=(v)=>v===undefined||(Array.isArray(v)&&v.length===0); const ok=c.name==='candidary-preview'&&c.workers_dev===true&&c.preview_urls===true&&Array.isArray(c.workflows)&&c.workflows.length===3&&empty(c.route)&&empty(c.routes)&&empty(t.crons)&&empty(t.events)&&empty(q.producers)&&empty(q.consumers)&&empty(c.addresses); if(!ok) throw new Error('preview control-plane config has an unsafe side effect'); console.log({name:c.name,workers_dev:c.workers_dev,preview_urls:c.preview_urls,workflows:c.workflows,route:c.route,routes:c.routes,crons:t.crons,events:t.events,queues:q,addresses:c.addresses});"
-npx wrangler versions deploy "$CANDIDARY_PREVIEW_VERSION_ID@100%" \
-  --config dist/candidary/wrangler.json --name candidary-preview --yes
+WORKERS_CI_BRANCH="$CANDIDARY_PREVIEW_BRANCH" \
+WORKERS_CI_COMMIT_SHA="$CANDIDARY_PREVIEW_RELEASE_SHA" npm run deploy:preview-cutover:built
+CANDIDARY_PREVIEW_WORKER_VERSION_ID=<new-version-id-printed-by-preview-cutover-deploy>
+[[ "$CANDIDARY_PREVIEW_WORKER_VERSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 1
 npx wrangler deployments status --config dist/candidary/wrangler.json \
   --name candidary-preview --json
-npx wrangler triggers deploy --config dist/candidary/wrangler.json --name candidary-preview
+npx wrangler versions view "$CANDIDARY_PREVIEW_WORKER_VERSION_ID" \
+  --config dist/candidary/wrangler.json --name candidary-preview --json
 npx wrangler workflows describe candidary-preview-export --config dist/candidary/wrangler.json
 npx wrangler workflows describe candidary-preview-cover-render --config dist/candidary/wrangler.json
 npx wrangler workflows describe candidary-preview-cover-backfill --config dist/candidary/wrangler.json
 ```
 
-6. Validate that ID as a lowercase UUID, choose a canonical UTC millisecond timestamp, open the row
-   once without changing `closed_at`, and read it back. Require exactly one changed row and the exact
+The active ID must also differ from `CANDIDARY_PREVIEW_PREFLIGHT_VERSION_ID`; the upload remains
+preflight evidence and is never the admitted version. Stop with admission closed unless the status,
+tag, all three changed Workflow version IDs, mappings, and safe-503 checks agree.
+
+6. Choose a canonical UTC millisecond timestamp, open the row once without changing `closed_at`, and
+   read it back. Require exactly one changed row and the exact
    version/timestamps before unfreezing preview uploads.
 
 ```bash
 CANDIDARY_PREVIEW_ADMITTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
 npx wrangler d1 execute candidary-preview-core --remote --env preview --config wrangler.jsonc --json \
-  --command "UPDATE export_protocol_admission SET state = 'open', worker_version_id = '$CANDIDARY_PREVIEW_VERSION_ID', admitted_at = '$CANDIDARY_PREVIEW_ADMITTED_AT' WHERE singleton = 1 AND state = 'closed'"
+  --command "UPDATE export_protocol_admission SET state = 'open', worker_version_id = '$CANDIDARY_PREVIEW_WORKER_VERSION_ID', admitted_at = '$CANDIDARY_PREVIEW_ADMITTED_AT' WHERE singleton = 1 AND state = 'closed'"
 npx wrangler d1 execute candidary-preview-core --remote --env preview --config wrangler.jsonc --json \
   --command "SELECT singleton, state, closed_at, worker_version_id, admitted_at FROM export_protocol_admission"
 ```
 
-If the control-plane emptiness proof cannot be made, do not run `triggers deploy`: keep admission
+If the control-plane emptiness proof cannot be made, do not run the cutover deployment: keep admission
 non-open and record hosted export conformance as unavailable. If any other post-close preview check
 fails, keep admission closed and upload only an independently reviewed current forward fix through the
 same frozen sequence. Never attempt to restore `legacy-open` or route an old preview Worker back onto
@@ -338,31 +355,37 @@ npx wrangler d1 execute candidary-core --remote --config wrangler.jsonc --json \
 
 5. From a clean `main` checkout whose `HEAD` and freshly fetched `origin/main` both equal the captured
    SHA, generate and verify the normal production artifact locally, then use the existing deploy helper
-   to project two control-plane configs. The Cron-only file contains only Worker identity fields; the
-   Workflow-only file contains only identity fields and the exact three production Workflow definitions.
-   Neither may contain routes, queues, event triggers, or the other control-plane class.
+   to project the Cron-only and cutover configs. The Cron-only file contains only Worker identity fields.
+   The cutover file must equal the complete verified production config except for exactly
+   `triggers.crons: []`; it retains Worker code, routes, bindings, and all three Workflow definitions so
+   a later full deploy advances them together without reattaching Cron. Capture each production
+   Workflow's current `Latest Version` ID before detaching Cron.
 
 ```bash
 CANDIDARY_RELEASE_SHA=<full-reviewed-git-sha>
-CANDIDARY_WORKER_VERSION_ID=<version-id-printed-by-upload-only-build>
+CANDIDARY_PREFLIGHT_VERSION_ID=<version-id-printed-by-upload-only-build>
 git fetch --prune origin
 git rev-parse HEAD
 git rev-parse origin/main
 git status --porcelain --untracked-files=all
 npm run build:cloudflare
 npm run verify:pwa-build
-npm run prepare:production-control-plane-configs:built
-node -e "for (const p of ['dist/candidary/wrangler.cron-only.json','dist/candidary/wrangler.workflows-only.json']) { const c=require('./'+p); console.log(p, Object.keys(c).sort()); }"
-npx wrangler versions view "$CANDIDARY_WORKER_VERSION_ID" \
+npm run prepare:production-cutover-configs:built
+node -e "const a=require('node:assert/strict'); const f=require('./dist/candidary/wrangler.json'); const c=require('./dist/candidary/wrangler.cutover.json'); a.deepStrictEqual(c,{...f,triggers:{...f.triggers,crons:[]}}); console.log({cutover:c.name,workflows:c.workflows,crons:c.triggers.crons});"
+node -e "const c=require('./dist/candidary/wrangler.cron-only.json'); console.log(Object.keys(c).sort());"
+npx wrangler versions view "$CANDIDARY_PREFLIGHT_VERSION_ID" \
   --config dist/candidary/wrangler.json --name candidary --json
+npx wrangler workflows describe candidary-export --config dist/candidary/wrangler.json
+npx wrangler workflows describe candidary-cover-render --config dist/candidary/wrangler.json
+npx wrangler workflows describe candidary-cover-backfill --config dist/candidary/wrangler.json
 npx wrangler triggers deploy --config dist/candidary/wrangler.cron-only.json --name candidary \
   --triggers '47 * * * *'
 ```
 
 Both revisions must exactly equal `CANDIDARY_RELEASE_SHA`; status must be empty; the viewed version tag
 must be that SHA. The printed Cron-only keys must be `name`, `compatibility_date`, `workers_dev`,
-`preview_urls`, and optional `account_id`; both booleans must be false. The Workflow-only keys add only
-`workflows`. Stop on any mismatch. Record the successful
+`preview_urls`, and optional `account_id`; both booleans must be false. The deep comparison must pass,
+and every pre-cutover Workflow latest-version ID must be recorded. Stop on any mismatch. Record the successful
 daily-Cron detach time, wait at least 30 minutes, and extend the drain through any old daily invocation
 observed to finish later. This covers trigger propagation plus one possible invocation; an ordinary
 Workflow drain or an assumed timer boundary does not.
@@ -372,7 +395,7 @@ Workflow drain or an assumed timer boundary does not.
    trigger performs the same zero-active proof inside the statement, so a racing old INSERT or Retry
    either commits first and blocks the close or loses after it. Require exactly one changed row and the
    exact canonical `closed_at`. This close is one-way: export availability is now forward-fix-only, and
-   old HTTP writes lose until the candidate is promoted and v2 admission is opened.
+   old HTTP writes lose until the cutover deployment succeeds and v2 admission is opened.
 
 ```bash
 npx wrangler d1 execute candidary-core --remote --config dist/candidary/wrangler.json --json \
@@ -384,36 +407,39 @@ npx wrangler d1 execute candidary-core --remote --config dist/candidary/wrangler
   --command "SELECT singleton, state, closed_at, worker_version_id, admitted_at FROM export_protocol_admission"
 ```
 
-7. Immediately promote only the captured version at 100% and prove it is the sole active version. The
-   candidate returns safe 503 for new export creation/Retry while closed. Promotion remains the separate
-   trash/data rollback point: possible trash writes now make a pre-0020 Worker forbidden even though v2
-   export admission is still closed.
+7. Immediately run the existing helper's production cutover mode from the same clean `main` checkout,
+   exact SHA, and full verified artifact. The helper regenerates
+   `dist/candidary/wrangler.cutover.json`, proves the full production topology, and runs pinned
+   `wrangler deploy --strict --tag <sha>` against it. This creates one new active Worker version and
+   advances all three Workflow implementations together while leaving Cron detached. Capture the new
+   Worker version ID, then prove it is the sole active version at 100%, has the exact release-SHA tag,
+   and differs from the inert preflight version. Re-describe all three Workflows; each latest-version ID
+   must differ from its recorded pre-cutover ID and retain the expected production script/class mapping.
+   The new Worker must return safe 503 for creation/Retry while closed. This deployment remains the
+   separate trash/data rollback point: possible trash writes now make a pre-0020 Worker forbidden even
+   though v2 export admission is still closed.
 
 ```bash
-npx wrangler versions deploy "$CANDIDARY_WORKER_VERSION_ID@100%" \
-  --config dist/candidary/wrangler.json --name candidary --yes
+WORKERS_CI_BRANCH=main WORKERS_CI_COMMIT_SHA="$CANDIDARY_RELEASE_SHA" \
+  npm run deploy:production-cutover:built
+CANDIDARY_WORKER_VERSION_ID=<new-version-id-printed-by-production-cutover-deploy>
+[[ "$CANDIDARY_WORKER_VERSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 1
 npx wrangler deployments status --config dist/candidary/wrangler.json \
   --name candidary --json
+npx wrangler versions view "$CANDIDARY_WORKER_VERSION_ID" \
+  --config dist/candidary/wrangler.cutover.json --name candidary --json
+npx wrangler workflows describe candidary-export --config dist/candidary/wrangler.cutover.json
+npx wrangler workflows describe candidary-cover-render --config dist/candidary/wrangler.cutover.json
+npx wrangler workflows describe candidary-cover-backfill --config dist/candidary/wrangler.cutover.json
 ```
 
-The status JSON must name one active version, exactly `CANDIDARY_WORKER_VERSION_ID`, at 100%.
-Otherwise keep admission closed and ship only a reviewed forward fix.
+The status JSON must name one active version, exactly `CANDIDARY_WORKER_VERSION_ID`, at 100%; its tag
+must equal `CANDIDARY_RELEASE_SHA`; it must differ from `CANDIDARY_PREFLIGHT_VERSION_ID`; and every
+Workflow latest-version ID must be new. Otherwise keep admission closed and ship only a reviewed
+forward fix.
 
-8. Update only the three Workflow definitions with the Workflow-only config, then inspect all three
-   definitions. Do not pass `--triggers` to this command.
-
-```bash
-npx wrangler triggers deploy --config dist/candidary/wrangler.workflows-only.json --name candidary
-npx wrangler workflows describe candidary-export --config dist/candidary/wrangler.workflows-only.json
-npx wrangler workflows describe candidary-cover-render --config dist/candidary/wrangler.workflows-only.json
-npx wrangler workflows describe candidary-cover-backfill --config dist/candidary/wrangler.workflows-only.json
-```
-
-Each Workflow description must name the expected production Workflow, `candidary` script, and expected
-class. Otherwise keep admission closed and ship only a reviewed forward fix.
-
-9. Validate the captured version ID as a lowercase UUID, choose the exact current UTC millisecond
-   timestamp, and open the D1 row once without changing the canonical `closed_at`. The trigger also
+8. Choose the exact current UTC millisecond timestamp, and open the D1 row once without changing the
+   canonical `closed_at`. The trigger also
    refuses to open while any legacy row is queued or running and rejects every later update.
    Immediately read it back and require the exact version ID and both timestamps before restoring
    either Cron.
@@ -427,8 +453,8 @@ npx wrangler d1 execute candidary-core --remote --config dist/candidary/wrangler
   --command "SELECT singleton, state, closed_at, worker_version_id, admitted_at FROM export_protocol_admission"
 ```
 
-10. Restore both Crons with the Cron-only config only after the open row is proved, then wait for the
-    version-attributed daily cleanup proof.
+9. Restore both Crons with the Cron-only config only after the open row is proved, then wait for the
+   version-attributed daily cleanup proof.
 
 ```bash
 npx wrangler triggers deploy --config dist/candidary/wrangler.cron-only.json --name candidary \
@@ -449,8 +475,9 @@ Cloudflare references: [Workers Builds](https://developers.cloudflare.com/worker
 [build branches](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/),
 [GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/),
 [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/),
-[Worker limits](https://developers.cloudflare.com/workers/platform/limits/), and
-[versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/).
+[Worker limits](https://developers.cloudflare.com/workers/platform/limits/),
+[versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/), and
+[Workflows deployment](https://developers.cloudflare.com/workflows/get-started/guide/).
 
 ## Rollback
 
@@ -460,15 +487,16 @@ to restore that previous version, then verify both production origins. A rollbac
 it does not reverse a D1 migration or delete data.
 
 For the 0020 admission, closing `legacy-open` is already a one-way export-availability cutover: it
-cannot be undone to make old export creation/Retry legal again. Promotion remains the broader
+cannot be undone to make old export creation/Retry legal again. The cutover deployment remains the broader
 trash/data rollback point because trash can be admitted immediately even while v2 export admission is
-closed. After promotion, a pre-0020 Worker is forbidden: keep the upload-only Build and release freeze,
-merge only an independently reviewed current forward fix, verify its new inert version/tag, deploy it
-alone at 100%, and keep its Worker/Workflow protocol compatible with the current gate state. If the row
-is still closed, update/inspect the compatible Workflows and continue the original one-time open and
-Cron restoration. If the row is already open, preserve it: deploy only `attempt-v2`-compatible
-Worker/Workflow changes, never reclose or rerun admission, and repeat the applicable version,
-Workflow, and daily-Cron evidence.
+closed. After that deployment, a pre-0020 Worker is forbidden: keep the upload-only Build and release
+freeze, merge only an independently reviewed current forward fix, verify its inert preflight
+version/tag, then use the matching clean built artifact and gate-appropriate full config with
+`wrangler deploy`. Require one new sole active exact-SHA Worker version and three changed latest
+Workflow version IDs before proceeding. If the row is still closed, continue the original one-time
+open and Cron restoration. If the row is already open, preserve it: deploy only
+`attempt-v2`-compatible Worker/Workflow changes, never reclose or rerun admission, and repeat the
+applicable version, Workflow, and daily-Cron evidence.
 
 Do not manufacture local evidence to justify a rollback or a deployment. The authoritative facts are
 the merged Git commit, required GitHub checks, Cloudflare build result, deployed version/tag, remote

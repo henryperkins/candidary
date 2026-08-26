@@ -20,7 +20,7 @@
   `legacy` rows after migration 0020 while admission remains `legacy-open`; the one-way close then
   blocks its active INSERT/Retry writes. Frozen old Workflow callback DML must fail closed against
   `attempt-v2` rows; this is not a claim that the full old scheduled-cleanup control flow is safe.
-- The old cleanup deletes Ready artifacts before its D1 transition, and Worker traffic and Workflow definitions cannot be changed atomically. Migration 0020 therefore installs one immutable three-state export-protocol admission row in `legacy-open`. D1 admits active INSERT/Retry only for `legacy` while legacy-open, neither protocol while closed, and `attempt-v2` while open. The isolated preview cutover freezes uploads, applies 0020, uploads and verifies one inert candidate, drains active legacy work, closes atomically, proves the full preview config has no unrelated trigger side effects, promotes/inspects that exact version and its Workflows, verifies safe 503, and opens with its exact lowercase UUID. Production must prove the exact frozen old revision `df2b66510ccee6893ca91ab752337df8e52c6207`, use the existing helper's upload-only mode and Cron-only/Workflow-only configs, detach and drain old daily Cron, drain all queued/running legacy exports, atomically close, immediately promote one reviewed version at 100%, update/inspect only Workflow definitions, open once with exact canonical audit values, and restore Crons. Closing is the forward-only export-availability point; promotion remains the trash/data rollback point. Never call `triggers deploy` with the full production config during the production cutover. Keep the exclusive freeze through the later matching daily cleanup proof; canonical commands live only in `docs/deployment.md`.
+- The old cleanup deletes Ready artifacts before its D1 transition, and an inert Worker upload does not activate its Workflow implementations. Migration 0020 therefore installs one immutable three-state export-protocol admission row in `legacy-open`. D1 admits active INSERT/Retry only for `legacy` while legacy-open, neither protocol while closed, and `attempt-v2` while open. The isolated preview cutover freezes uploads, applies 0020, uploads and verifies one inert preflight candidate, records all three Workflow version IDs, drains active legacy work, closes atomically, proves the full preview config has no unrelated trigger side effects, then uses pinned `wrangler deploy` from that same clean exact-SHA artifact. Production must prove the exact frozen old revision `df2b66510ccee6893ca91ab752337df8e52c6207`, retain the helper's upload-only preflight, generate Cron-only and full no-Cron cutover configs, detach and drain old daily Cron, record and drain all queued/running legacy exports, atomically close, and use pinned `wrangler deploy` from that same clean exact-SHA artifact. Before either row opens, require one new sole 100% active exact-SHA Worker version and all three latest Workflow version IDs changed from their pre-cutover baselines. Open once with the new active lowercase UUID and exact canonical audit values, then restore Crons. Closing is the forward-only export-availability point; the cutover deployment remains the trash/data rollback point. Keep the exclusive freeze through the later matching daily cleanup proof; canonical commands live only in `docs/deployment.md`.
 - `ExportsRepository`, `ExportWorkflow`, `GalleryExportControl`, `AlbumExportControl`, `export-control-status.tsx`, `createAutosaveQueue`, `useBlocker`, `UnsavedSettingsPrompt`, `useUndo`/`UndoBar`, and the Cover session's existing preview maps/controllers are reuse boundaries.
 - C-13's blocked-to-blocked Router destination generation is already implemented and regressed in `tests/ui/app.test.tsx`; retain it and mark it `verified-existing` unless a new RED proves otherwise.
 - C-25 already has Loading/Retry presentation. Extend preview ownership, bounded visible-step prefetch, and last-usable-image retention; do not rebuild the picker or loader.
@@ -300,8 +300,8 @@ mechanism; do not add a second migration runner.
 - [ ] **Step 5: Record the operational boundary**
 
 Document migration-before-deploy, legacy compatibility, the frozen preview and production candidates,
-protocol-gated active writes, atomic zero-legacy close, Cron-only detach/drain, one-version promotion,
-Workflow-only definition update, one-way D1 open, Cron restoration, and gate-state-aware forward fixes.
+protocol-gated active writes, atomic zero-legacy close, Cron-only detach/drain, full no-Cron cutover
+deployment, Worker/Workflow version evidence, one-way D1 open, Cron restoration, and gate-state-aware forward fixes.
 `docs/deployment.md` is the sole command source; the design and operations docs explain the invariant
 without duplicating a second procedure.
 
@@ -480,9 +480,9 @@ Require focused review of every state/attempt transition and exact zero-row beha
 - Modify: `tests/worker/notifications.test.ts` for version-attributed `cleanup_completed` telemetry.
 - Modify: `tests/worker/migration-0020.test.ts` for verbatim old-SQL fixtures.
 - Create: `tests/worker/fixtures/export-worker-0019.ts` as a test-only frozen ownership/control-flow prelude, not production compatibility code.
-- Modify: `scripts/deploy-built.ts` to add a production upload-only mode that reuses every existing production provenance/topology check.
-- Modify: `tests/unit/deploy-built.test.ts` for the upload-only command, narrow control-plane projections, and refusal matrix.
-- Modify: `package.json` to expose `upload:production-version:built` and `prepare:production-control-plane-configs:built`; leave the routine deploy scripts unchanged.
+- Modify: `scripts/deploy-built.ts` to add production upload-only plus preview/production cutover modes that reuse the existing provenance/topology checks.
+- Modify: `tests/unit/deploy-built.test.ts` for upload, Cron-only/full-cutover projections, cutover commands, and the refusal matrix.
+- Modify: `package.json` to expose `upload:production-version:built`, `prepare:production-cutover-configs:built`, `deploy:preview-cutover:built`, and `deploy:production-cutover:built`; leave the routine deploy scripts unchanged.
 - Modify: `docs/operations.md` to replace every old delete-before-Expired description and record the exact exceptional release commands.
 - Modify: `docs/deployment.md` to make the exclusive no-deploy window, native version release, and post-admission forward-fix rule canonical.
 
@@ -516,20 +516,23 @@ Add a small test-only frozen pre-0020 Workflow callback prelude that executes th
 Separately freeze the old `cleanupExpiredExports()` ordering and prove an expired v2 Ready fixture reaches R2 deletion before its old `markExpired()` loses. That is an expected RED safety demonstration, not a compatibility success. Add a production upload-only mode to the existing `scripts/deploy-built.ts`: it runs the same `main` branch, exact `WORKERS_CI_COMMIT_SHA`, clean-tree, regular generated-config, and full production-topology checks as `deploy:built`; its sole command-plan difference is native `wrangler versions upload --config dist/candidary/wrangler.json --strict --tag <full-sha>`. Unit tests prove every existing production refusal also blocks upload-only mode and that no upload-only command contains `deploy`, trigger mutation, or a preview alias. Do not add a second release script.
 
 Extend the existing `deploy-built.ts` rather than adding a release script. Besides upload-only mode, it
-projects `wrangler.cron-only.json` and `wrangler.workflows-only.json` only after validating the full
+projects `wrangler.cron-only.json` and a full `wrangler.cutover.json` only after validating the full
 production artifact. Unit tests prove the Cron projection cannot contain Workflows, routes, queues, or
-event triggers and the Workflow projection cannot contain Cron, routes, queues, or event triggers.
-Pinned Wrangler 4.123.0 source is the reason for these projections: `triggers deploy` applies every
-present control-plane section.
+event triggers and that the cutover projection's only delta is `triggers.crons: []`. Preview cutover
+uses the full verified no-Cron preview config. Both cutover modes require clean trees and use pinned
+`wrangler deploy --strict --tag <full-sha>`; production also requires `main` and regenerates the cutover
+file from the full artifact. `triggers deploy` remains limited to Cron detach/restore and is never
+treated as a Workflow implementation deployment.
 
 The separately authorized rollout follows only the canonical commands in `docs/deployment.md`: first
 cut over preview with an inert exact candidate and its three-state gate; then prove the exact frozen old
 production version/tag, install 0020 in `legacy-open`, upload the immutable candidate, generate the two
-narrow configs, drain old daily Cron and all active legacy exports, atomically close, promote the
-candidate alone, update/inspect Workflow definitions, open admission once with exact audit values,
+cutover configs, record Workflow version baselines, drain old daily Cron and all active legacy exports,
+atomically close, deploy Worker code and all three Workflows together, require one new sole active
+exact-SHA Worker version and three changed latest Workflow version IDs, open admission once with exact audit values,
 restore Crons, and retain the freeze through matching daily cleanup evidence. `worker/index.ts` adds `workerVersionId`,
 `cleanupKind: 'hourly-maintenance'|'daily-lifecycle'`, and exact `cron` to cleanup-success logs. If any
-post-promotion gate fails, recovery is a reviewed current forward fix. A closed gate continues toward
+post-cutover gate fails, recovery is a reviewed current forward fix. A closed gate continues toward
 its original one-time open; an already-open gate stays open and accepts only `attempt-v2`-compatible
 Worker/Workflow changes. Remote Build, merge, D1, trigger, and deployment mutations remain outside
 this implementation plan.

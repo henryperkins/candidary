@@ -445,15 +445,18 @@ That protection does **not** make the old scheduled cleanup safe. The old daily 
 artifacts before its `Ready -> Expired` D1 update, so it can destroy a v2 winner's bytes and only then
 discover that its update lost.
 
-Worker HTTP traffic and Workflow definitions change separately. Treat the first v2/trash-capable
-production release as an exclusive admission, not as the routine automatic-deploy path:
+An inert Worker upload does not activate its Workflow implementations, and `triggers deploy` is not a
+Workflow-code deployment operation. Treat the first v2/trash-capable production release as an
+exclusive admission, not as the routine automatic-deploy path:
 
 First cut over the isolated preview environment. Freeze all preview uploads, apply 0020 and verify
 `legacy-open`, then upload and inspect one exact reviewed version while it is inert. Drain active legacy
 work and atomically close. Prove the full preview config has the expected Workers.dev identity and no
-route, Cron, queue, event-trigger, or address side effects; promote the captured version alone, update
-and inspect its three Workflow definitions, verify safe 503 while closed, then open with that exact
-lowercase UUID and canonical timestamps. If the control-plane proof or any later check fails, keep
+route, Cron, queue, event-trigger, or address side effects; then use pinned `wrangler deploy` from that
+same clean exact-SHA artifact to advance Worker code and all three Workflow implementations together.
+Require one new sole 100% active exact-SHA Worker version and three new latest Workflow version IDs,
+verify safe 503 while closed, then open with that new active lowercase UUID and canonical timestamps.
+If the control-plane proof or any later check fails, keep
 admission non-open, record hosted export conformance as unavailable, and ship only a reviewed forward
 fix. The canonical preview commands are in [deployment.md](deployment.md).
 
@@ -470,8 +473,8 @@ fix. The canonical preview commands are in [deployment.md](deployment.md).
    audit fields; old create/Retry remains legal at this stage.
 5. Merge only the reviewed SHA under the recorded exception. Capture the inert Build version ID and
    prove its tag equals the merged SHA. From that clean `main`, use the existing deploy helper to emit
-   `wrangler.cron-only.json` and `wrangler.workflows-only.json`; never run `triggers deploy` against the
-   full production config during this cutover.
+   `wrangler.cron-only.json` plus a full `wrangler.cutover.json` whose only delta from the verified
+   production config is `triggers.crons: []`. Record all three pre-cutover Workflow latest-version IDs.
 6. With the Cron-only config, detach daily `17 3 * * *` while retaining hourly `47 * * * *`. Record the
    successful detach time and wait at least 30 minutes; extend the drain through any old daily invocation
    observed to finish later. A Workflow drain or timing guess is not proof that old scheduled cleanup is
@@ -479,27 +482,25 @@ fix. The canonical preview commands are in [deployment.md](deployment.md).
 7. After that daily drain, wait for every legacy queued/running export to become terminal and atomically
    close only while that count remains zero. A racing old active INSERT/Retry either blocks the close or
    loses after it. Closing is the one-way export-availability cutover: old writes cannot be re-enabled.
-8. Immediately promote the one verified inert Worker version alone at 100% and prove it is sole. The
-   candidate returns safe 503 while closed. Promotion remains the separate trash/data rollback point:
-   from here a pre-0020 Worker is forbidden.
-9. With the Workflow-only config and no `--triggers` flag, update the exact three production Workflow
-   definitions and inspect each expected script/class mapping. New export HTTP remains paused, so there
-   is no old-HTTP/new-Workflow or new-HTTP/old-Workflow payload window.
-10. Open `export_protocol_admission` exactly once with that active lowercase UUID Worker version ID,
-    preserved canonical close time, and an exact canonical UTC admission time. The trigger rechecks zero
-    active legacy rows. Require one changed row and read back the exact open row.
-11. Restore both Crons with the Cron-only config only after that proof. Keep the merge/deploy freeze
+8. Immediately use the existing helper's cutover mode to run pinned `wrangler deploy` from the same
+   clean exact-SHA artifact and full no-Cron cutover config. Prove one new sole active Worker version at
+   100%, an exact-SHA tag, all three latest Workflow version IDs changed from their baselines, and every
+   expected script/class mapping retained. The new Worker returns safe 503 while closed. This deployment
+   remains the separate trash/data rollback point: from here a pre-0020 Worker is forbidden.
+9. Open `export_protocol_admission` exactly once with that new active lowercase UUID Worker version ID,
+   preserved canonical close time, and an exact canonical UTC admission time. The trigger rechecks zero
+   active legacy rows. Require one changed row and read back the exact open row.
+10. Restore both Crons with the Cron-only config only after that proof. Keep the merge/deploy freeze
    until a later `cleanup_completed` record from the daily Cron has
    `cleanupKind = 'daily-lifecycle'`, exact cron `17 3 * * *`, and the active Worker version ID. An
    hourly maintenance record is not substitute evidence. Restore the connected Build command only after
    this proof and verify the settings change itself started no build or deployment.
 
-The old unsafe ordering is why steps 6–11 are hard gates:
+The old unsafe ordering is why steps 6–10 are hard gates:
 
-- Detaching Cron with the full production config would also PUT every Workflow definition in pinned
-  Wrangler 4.123.0.
-- Updating Workflows before the new Worker is sole would expose incompatible legacy payloads.
-- Promoting the new Worker before Workflow update is safe only because D1 admission is still closed.
+- Detaching Cron with the Cron-only config must happen before the full cutover deployment.
+- `wrangler versions deploy` plus `wrangler triggers deploy` does not prove that Workflow code advanced.
+- The full no-Cron cutover deployment is safe only because D1 admission is still closed.
 - The admission row cannot be deleted, replaced, returned to `legacy-open`, reclosed, or retargeted.
 
 The exact commands and expected control-plane config keys are canonical in
@@ -507,21 +508,24 @@ The exact commands and expected control-plane config keys are canonical in
 
 Closing is already a forward-only export-availability decision because legacy admission cannot be
 restored. The ordinary previous-version code rollback remains permitted only before the new Worker is
-promoted and before the first admitted trash or v2 write. Promotion is the broader trash/data rollback
-point. After promotion, never promote a pre-0020 Worker. Keep Build upload-only and the freeze in place,
-independently review a current forward fix, verify its inert version/tag, promote only that version, and
-match its Worker/Workflow protocol to the existing gate state. If admission is still closed, continue
+deployed and before the first admitted trash or v2 write. The cutover deployment is the broader
+trash/data rollback point. After it, never deploy a pre-0020 Worker. Keep Build upload-only and the
+freeze in place, independently review a current forward fix, verify its inert preflight version/tag,
+then deploy its matching clean built artifact and require a new active exact-SHA Worker version plus
+three changed Workflow latest-version IDs. Match its Worker/Workflow protocol to the existing gate
+state. If admission is still closed, continue
 the original one-time open after the fix passes. If admission is already open, preserve it and deploy
 only `attempt-v2`-compatible forward changes; never reclose or rerun admission. Repeat the applicable
 Workflow/version/Cron proof. Remote Build settings, migration application, Cron changes, merge,
-admission, and version promotion require a
+admission, and cutover deployment require a
 separately authorized production operation; this repository work does none of them.
 
 Platform behavior references: [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/),
 [build branches](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/),
 [GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/),
-[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/), and
-[versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/).
+[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/),
+[versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/), and
+[Workflows deployment](https://developers.cloudflare.com/workflows/get-started/guide/).
 
 Production secret provisioning and remote D1 migration are explicit durable-state operations, not
 steps hidden inside routine code deployment. Follow [deployment.md](deployment.md), and never rotate
