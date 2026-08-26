@@ -190,6 +190,25 @@ describe('the event retention deadline', () => {
   });
 });
 
+describe('manager access recovery destinations', () => {
+  it('preserves the Manager destination in recovery from canonical Album', async () => {
+    const eventId = '11111111-2222-4333-8444-555555555555';
+    vi.stubGlobal('fetch', vi.fn(() => apiError(
+      'SESSION_EXPIRED',
+      'This management session has expired.',
+      401,
+    )));
+    render(<RouterProvider router={createAppRouter([
+      `/manage/event/${eventId}?section=gallery&mode=album`,
+    ])} />);
+
+    const signIn = await screen.findByRole('link', { name: 'Sign in' });
+    const signInUrl = new URL(signIn.getAttribute('href')!, window.location.origin);
+    expect(signInUrl.searchParams.get('returnTo'))
+      .toBe(`/manage/event/${eventId}?section=gallery&mode=album`);
+  });
+});
+
 describe('moving a photo to Recently deleted', () => {
   it('sends no request until the confirmation is explicitly activated', async () => {
     const user = userEvent.setup();

@@ -2,10 +2,15 @@ import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon,
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
+import { useBlocker, useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
-import type { GalleryMode } from '../app/manager-location';
+import {
+  managerHref,
+  parseManagerLocation,
+  type GalleryMode,
+  type ManagerLocation,
+} from '../app/manager-location';
 import { eventDateTimeDisplay, formatRetentionDate, TIME_UNAVAILABLE } from '../app/event-date-time';
 import { useDeadlineClock } from '../app/use-deadline-clock';
 import { formatBytes } from '../app/format';
@@ -95,6 +100,11 @@ type ManagerLeaveAttempt = {
   outcome: AlbumLeavePreparation;
 };
 
+type PendingManagerAdoption = {
+  destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>;
+  target: string;
+};
+
 function sameManagerDestination(
   left: ManagerLeaveDestination,
   right: ManagerLeaveDestination,
@@ -112,10 +122,8 @@ function sameManagerDestination(
   return true;
 }
 
-// The only destination a link may open directly. The create receipt sends a brand
-// new event here, because a paused event's next real step is its guest list.
-function initialSection(requested: string | null): Section {
-  return requested === 'rsvp' ? 'rsvp' : 'intake';
+function locationTarget(location: { pathname: string; search: string; hash: string }) {
+  return `${location.pathname}${location.search}${location.hash}`;
 }
 
 function managerLifecycleKey(event: EventView): string {
@@ -184,14 +192,16 @@ function offersAccessRecovery(failure: LoadFailure) {
 function ManagerAccessRecovery({
   failure,
   eventId,
+  returnTo,
 }: {
   failure: LoadFailure;
   eventId: string;
+  returnTo: string;
 }) {
   if (!offersAccessRecovery(failure)) return null;
   return <section className="manager-access-recovery" aria-label="Recover manager access">
     {failure.offerSignIn && (
-      <a className="button button--secondary" href={hostSignInHref(eventId)}>Sign in</a>
+      <a className="button button--secondary" href={hostSignInHref(eventId, returnTo)}>Sign in</a>
     )}
     <ManagementLinkRecovery />
   </section>;
@@ -221,7 +231,33 @@ export function ManagerPage() {
 }
 
 function ManagerEventPage({ eventId }: { eventId: string }) {
-  const [searchParams] = useSearchParams();
+  const routerLocation = useLocation();
+  const navigate = useNavigate();
+  const parsedLocation = parseManagerLocation(routerLocation.search);
+  const section = parsedLocation.location.section;
+  const galleryMode = parsedLocation.location.section === 'gallery'
+    ? parsedLocation.location.mode
+    : 'library';
+  const canonicalManagerHref = managerHref(eventId, parsedLocation.location);
+  const recoveryReturnTo = routerLocation.pathname + parsedLocation.canonicalSearch;
+  useLayoutEffect(() => {
+    if (!parsedLocation.needsReplace) return;
+    void navigate({
+      pathname: routerLocation.pathname,
+      search: parsedLocation.canonicalSearch,
+      hash: routerLocation.hash,
+    }, {
+      replace: true,
+      state: routerLocation.state,
+    });
+  }, [
+    navigate,
+    parsedLocation.canonicalSearch,
+    parsedLocation.needsReplace,
+    routerLocation.hash,
+    routerLocation.pathname,
+    routerLocation.state,
+  ]);
   // A route can change while a confirmation, Undo, or write from the previous
   // event is still settling.  Resource controllers reject that stale work; this
   // scope does the same for Manager-local UI state and imperative workspace refs.
@@ -270,11 +306,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const photoIntakePendingRef = useRef(false);
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
-  const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
-  const [galleryMode, setGalleryMode] = useState<GalleryMode>('library');
   // Settings stays mounted after its first visit so a debounce timer, an
   // in-flight write, and an unsaved draft all survive a destination change.
-  const [settingsMounted, setSettingsMounted] = useState(false);
+  const [settingsMounted, setSettingsMounted] = useState(section === 'settings');
   const [settingsFocusEpoch, setSettingsFocusEpoch] = useState(0);
   const settingsFocusRequested = useRef(false);
   const settingsHeading = useRef<HTMLHeadingElement>(null);
@@ -409,9 +443,34 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const shouldBlockNavigation = unconfirmedDomains.length > 0
     || rsvpDraftDirty
     || rsvpCommitPending;
-  const blocker = useBlocker(shouldBlockNavigation);
+  const authorizedAlbumTarget = useRef<string | null>(null);
+  const pendingManagerAdoption = useRef<PendingManagerAdoption | null>(null);
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => {
+    const currentTarget = locationTarget(currentLocation);
+    const nextTarget = locationTarget(nextLocation);
+    const currentManagerLocation = parseManagerLocation(currentLocation.search);
+    const currentIsCanonicalAlbum = currentLocation.pathname === `/manage/event/${eventId}`
+      && !currentManagerLocation.needsReplace
+      && currentManagerLocation.location.section === 'gallery'
+      && currentManagerLocation.location.mode === 'album';
+    const isExactPendingManagerAdoption = !currentIsCanonicalAlbum
+      && currentLocation.pathname === `/manage/event/${eventId}`
+      && nextLocation.pathname === currentLocation.pathname
+      && pendingManagerAdoption.current?.target === nextTarget;
+    // Retained Manager subtrees may finish their autosaves behind another
+    // Manager section, as they did before sections became URL-owned. Only the
+    // exact in-app destination we just requested gets that treatment: browser
+    // traversal and every route exit still enter the ordinary work guard.
+    if (shouldBlockNavigation && !isExactPendingManagerAdoption) return true;
+    if (!currentIsCanonicalAlbum) return false;
+    if (nextTarget === currentTarget) return false;
+    return authorizedAlbumTarget.current !== nextTarget;
+  });
   const blockedNavigationKey = blocker.state === 'blocked'
     ? blocker.location.key
+    : null;
+  const blockedNavigationTarget = blocker.state === 'blocked'
+    ? locationTarget(blocker.location)
     : null;
   const blockerStateRef = useRef(blocker.state);
   useLayoutEffect(() => {
@@ -426,10 +485,28 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setAlbumLeaveAttempt(attempt);
   }
 
+  function clearPendingManagerAdoption() {
+    authorizedAlbumTarget.current = null;
+    pendingManagerAdoption.current = null;
+  }
+
   function retireAlbumLeaveAttempt() {
     albumLeaveGeneration.current += 1;
     publishAlbumLeaveAttempt(null);
     galleryWorkspace.current?.retireAlbumLeavePreparation();
+    clearPendingManagerAdoption();
+  }
+
+  function finishAlbumLeavePreparation() {
+    albumLeaveGeneration.current += 1;
+    publishAlbumLeaveAttempt(null);
+    galleryWorkspace.current?.retireAlbumLeavePreparation();
+  }
+
+  function cancelBlockedNavigation() {
+    if (blocker.state === 'blocked') blocker.reset();
+    blockerStateRef.current = 'unblocked';
+    retireAlbumLeaveAttempt();
   }
 
   async function beginAlbumLeave(
@@ -457,7 +534,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     if (outcome.status !== 'ready' || destination.kind === 'router') return;
     // A Router request that arrived while a section was settling owns the page.
     if (blockerStateRef.current === 'blocked') return;
-    retireAlbumLeaveAttempt();
+    finishAlbumLeavePreparation();
     commitManagerLeaveDestination(destination);
   }
 
@@ -493,7 +570,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setPendingSection(null);
     setPendingRsvpClose(false);
     setPendingSettingsRepair(false);
-    setGalleryMode('library');
     retireAlbumLeaveAttempt();
     recentlyDeletedFocusRequested.current = false;
   }, [eventId]);
@@ -507,21 +583,31 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     settingsAutosave.current?.flush();
     appearanceAutosave.current?.flush();
+    if (authorizedAlbumTarget.current === blockedNavigationTarget) return;
+    authorizedAlbumTarget.current = null;
+    if (pendingManagerAdoption.current?.target !== blockedNavigationTarget) {
+      pendingManagerAdoption.current = null;
+    }
     void beginAlbumLeave({ kind: 'router', locationKey: blockedNavigationKey });
-  }, [blockedNavigationKey]);
+  }, [blockedNavigationKey, blockedNavigationTarget]);
   useEffect(() => {
     // The requested navigation happens by itself the moment both domains
     // confirm; the host never has to answer the prompt twice.
     if (
       blocker.state === 'blocked'
-      && albumLeaveAttempt?.destination.kind === 'router'
-      && albumLeaveAttempt.destination.locationKey === blockedNavigationKey
-      && albumLeaveAttempt.outcome.status === 'ready'
+      && (
+        authorizedAlbumTarget.current === blockedNavigationTarget
+        || (
+          albumLeaveAttempt?.destination.kind === 'router'
+          && albumLeaveAttempt.destination.locationKey === blockedNavigationKey
+          && albumLeaveAttempt.outcome.status === 'ready'
+        )
+      )
       && unconfirmedDomains.length === 0
       && !rsvpDraftDirty
       && !rsvpCommitPending
     ) blocker.proceed();
-  }, [albumLeaveAttempt, blockedNavigationKey, blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
+  }, [albumLeaveAttempt, blockedNavigationKey, blockedNavigationTarget, blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
   useEffect(() => {
     if (unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) return;
     // A browser may cancel background requests during unload, so this warns
@@ -1078,20 +1164,47 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     return () => { current = false; };
   }, [eventLink]);
 
-  function transitionToSection(next: Section) {
-    if (section === 'settings' && next !== 'settings') {
-      // Leaving flushes the newest valid drafts. It deliberately does not wait
-      // for their responses: the subtree stays mounted, so they finish anyway.
-      settingsAutosave.current?.flush();
-      appearanceAutosave.current?.flush();
+  function managerLocationForDestination(
+    destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
+  ): ManagerLocation {
+    if (destination.kind === 'gallery-mode') {
+      return { section: 'gallery', mode: destination.mode };
     }
-    setSection(next);
-    if (next === 'settings') setSettingsMounted(true);
+    if (destination.kind === 'settings-repair') return { section: 'settings' };
+    if (destination.kind === 'recently-deleted') return { section: 'intake' };
+    return destination.section === 'gallery'
+      ? { section: 'gallery', mode: 'library' }
+      : { section: destination.section };
+  }
+
+  function commitManagerLeaveDestination(
+    destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
+  ) {
+    const target = managerHref(eventId, managerLocationForDestination(destination));
+    pendingManagerAdoption.current = { destination, target };
+    authorizedAlbumTarget.current = target;
+    void navigate(target);
+  }
+
+  function adoptManagerDestination(
+    destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
+  ) {
+    if (destination.kind === 'recently-deleted') {
+      recentlyDeletedFocusRequested.current = true;
+      setIntakeMode('trash');
+    } else if (destination.kind === 'settings-repair') {
+      settingsFocusRequested.current = true;
+      setSettingsFocusEpoch((current) => current + 1);
+    }
+  }
+
+  function cleanUpAdoptedManagerLocation() {
+    if (section === 'settings') setSettingsMounted(true);
     setSelected([]);
     setActionError(null);
     setEntryAction(null);
     setEntryConfirm('');
-    if (next === 'intake') setStatus('all');
+    if (section === 'intake') setStatus('all');
     // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
     // or under the sticky header. Restore the top once the new section has actually been laid out, and
     // only when there is something to restore. `instant` rather than `auto`, because the document
@@ -1101,36 +1214,26 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     });
   }
 
-  function commitSectionDestination(destination: ManagerSectionDestination) {
-    if (destination.kind === 'recently-deleted') {
-      recentlyDeletedFocusRequested.current = true;
-      setIntakeMode('trash');
-      transitionToSection('intake');
-      return;
-    }
-    if (destination.kind === 'settings-repair') {
-      settingsFocusRequested.current = true;
-      setSettingsFocusEpoch((current) => current + 1);
-      transitionToSection('settings');
-      return;
-    }
-    transitionToSection(destination.section);
-  }
-
-  function commitManagerLeaveDestination(destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>) {
-    if (destination.kind === 'gallery-mode') {
-      setGalleryMode(destination.mode);
-      return;
-    }
-    commitSectionDestination(destination);
-  }
+  const adoptedManagerHref = useRef(canonicalManagerHref);
+  useLayoutEffect(() => {
+    if (adoptedManagerHref.current === canonicalManagerHref) return;
+    adoptedManagerHref.current = canonicalManagerHref;
+    const pending = pendingManagerAdoption.current;
+    if (pending?.target === canonicalManagerHref) adoptManagerDestination(pending.destination);
+    clearPendingManagerAdoption();
+    finishAlbumLeavePreparation();
+    cleanUpAdoptedManagerLocation();
+  }, [canonicalManagerHref]);
 
   function requestGalleryMode(mode: GalleryMode) {
     if (mode === galleryMode) return;
     if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
-      setGalleryMode(mode);
+      clearPendingManagerAdoption();
+      commitManagerLeaveDestination({ kind: 'gallery-mode', mode });
+      authorizedAlbumTarget.current = null;
       return;
     }
+    clearPendingManagerAdoption();
     void beginAlbumLeave({ kind: 'gallery-mode', mode });
   }
 
@@ -1140,6 +1243,12 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       : destination.kind === 'recently-deleted'
         ? 'intake'
         : 'settings';
+    if (section === 'settings' && next !== 'settings') {
+      // Leaving flushes the newest valid drafts. It deliberately does not wait
+      // for their responses: the subtree stays mounted, so they finish anyway.
+      settingsAutosave.current?.flush();
+      appearanceAutosave.current?.flush();
+    }
     if (next === section) {
       if (destination.kind === 'recently-deleted') {
         recentlyDeletedFocusRequested.current = true;
@@ -1154,9 +1263,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       // A new in-app destination is an explicit replacement for the pending
       // Router destination. Reset only that exact blocker before installing the
       // new section generation; its old Album result is retired below.
-      blocker.reset();
-      blockerStateRef.current = 'unblocked';
-      retireAlbumLeaveAttempt();
+      cancelBlockedNavigation();
     }
     if (rsvpCommitPending && next !== 'rsvp') return;
     if (rsvpDraftDirty && next !== 'rsvp') {
@@ -1166,13 +1273,18 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (section === 'gallery') {
       if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
-        commitSectionDestination(destination);
+        clearPendingManagerAdoption();
+        commitManagerLeaveDestination(destination);
+        authorizedAlbumTarget.current = null;
         return;
       }
+      clearPendingManagerAdoption();
       void beginAlbumLeave(destination);
       return;
     }
+    clearPendingManagerAdoption();
     commitManagerLeaveDestination(destination);
+    authorizedAlbumTarget.current = null;
   }
 
   function openSection(next: Section) {
@@ -1718,7 +1830,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       recoveryHint={failure.recoveryHint}
       onRetry={failure.retryable ? () => void refresh() : undefined}
     />
-    <ManagerAccessRecovery failure={failure} eventId={eventId} />
+    <ManagerAccessRecovery failure={failure} eventId={eventId} returnTo={recoveryReturnTo} />
   </div></main>;
   if (!event) return <main className="centered-state"><Brand /><LoadingState label="Opening the event manager…" /></main>;
 
@@ -1830,7 +1942,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           ><X aria-hidden="true" /></button>
         </div>
         {visibleNotice.type === 'load' && (
-          <ManagerAccessRecovery failure={visibleNotice.failure} eventId={eventId} />
+          <ManagerAccessRecovery
+            failure={visibleNotice.failure}
+            eventId={eventId}
+            returnTo={recoveryReturnTo}
+          />
         )}
       </section>}
 
@@ -2104,7 +2220,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       >
         <h2 id="saving-guest-list-title">Your guest list is being saved</h2>
         <p>Stay on this page until Candidary confirms whether the guest-list changes were saved.</p>
-        <button type="button" className="button button--primary" onClick={() => blocker.reset()}>Stay</button>
+        <button type="button" className="button button--primary" onClick={cancelBlockedNavigation}>Stay</button>
       </section>}
       {!rsvpCommitPending && rsvpDraftDirty && (blocker.state === 'blocked' || pendingSection !== null || pendingRsvpClose) && <section
         className="unsaved-settings-prompt"
@@ -2125,14 +2241,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               blocker.proceed();
             } else if (pendingSection) {
               const next = pendingSection;
+              const destination: ManagerSectionDestination = next === 'settings' && pendingSettingsRepair
+                ? { kind: 'settings-repair' }
+                : { kind: 'section', section: next };
               setPendingSection(null);
               setPendingRsvpClose(false);
-              if (next === 'settings' && pendingSettingsRepair) {
-                settingsFocusRequested.current = true;
-                setSettingsFocusEpoch((current) => current + 1);
-              }
               setPendingSettingsRepair(false);
-              transitionToSection(next);
+              clearPendingManagerAdoption();
+              commitManagerLeaveDestination(destination);
+              authorizedAlbumTarget.current = null;
             } else {
               setPendingRsvpClose(false);
               setPendingSettingsRepair(false);
@@ -2142,7 +2259,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             setPendingSection(null);
             setPendingRsvpClose(false);
             setPendingSettingsRepair(false);
-            if (blocker.state === 'blocked') blocker.reset();
+            if (blocker.state === 'blocked') cancelBlockedNavigation();
           }}>Stay</button>
         </div>
       </section>}
@@ -2151,6 +2268,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           activeAlbumLeaveAttempt !== null
           && activeAlbumLeaveAttempt.destination.kind !== 'router'
         ))
+        && (
+          unconfirmedDomains.length > 0
+          || albumPromptOutcome?.status === 'invalid'
+          || albumPromptOutcome?.status === 'failed'
+        )
         && <UnsavedSettingsPrompt
         domains={unconfirmedDomains}
         albumOutcome={albumPromptOutcome}
@@ -2161,17 +2283,25 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               ? `section:${activeAlbumLeaveAttempt.destination.section}`
               : activeAlbumLeaveAttempt.destination.kind
           : blockedNavigationKey ? `router:${blockedNavigationKey}` : undefined}
-        leaveDisabled={albumPromptOutcome === null && blocker.state === 'blocked' && (
+        leaveDisabled={albumPromptOutcome === null
+          && blocker.state === 'blocked'
+          && authorizedAlbumTarget.current !== blockedNavigationTarget
+          && (
           activeAlbumLeaveAttempt?.destination.kind !== 'router'
           || activeAlbumLeaveAttempt.destination.locationKey !== blockedNavigationKey
           || activeAlbumLeaveAttempt.outcome.status !== 'ready'
-        )}
+          )}
         onLeave={() => {
           if (
             blocker.state === 'blocked'
-            && activeAlbumLeaveAttempt?.destination.kind === 'router'
-            && activeAlbumLeaveAttempt.destination.locationKey === blockedNavigationKey
-            && activeAlbumLeaveAttempt.outcome.status === 'ready'
+            && (
+              authorizedAlbumTarget.current === blockedNavigationTarget
+              || (
+                activeAlbumLeaveAttempt?.destination.kind === 'router'
+                && activeAlbumLeaveAttempt.destination.locationKey === blockedNavigationKey
+                && activeAlbumLeaveAttempt.outcome.status === 'ready'
+              )
+            )
           ) blocker.proceed();
         }}
         onRetryAlbum={retryAlbumLeave}
@@ -2180,7 +2310,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           ? stayWithAlbum
           : stuckDomains.length > 0
           ? () => {
-              if (blocker.state === 'blocked') blocker.reset();
+              if (blocker.state === 'blocked') cancelBlockedNavigation();
               openSettingsForRepair();
             }
           : undefined}

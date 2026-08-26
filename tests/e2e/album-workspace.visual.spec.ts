@@ -7,6 +7,7 @@ import { measureDocument, measureTarget } from './helpers/geometry';
 import { settleRendering } from './helpers/rendering';
 
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
+const galleryUrl = `${managerUrl}?section=gallery`;
 const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
 
 function albumRows() {
@@ -55,10 +56,13 @@ async function stubAlbumWorkspace(page: Page, { saved = false, shareActive = fal
 }
 
 async function openGallery(page: Page) {
-  await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
+  await page.goto(galleryUrl);
+  await expect(page).toHaveURL(galleryUrl);
   await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('group', { name: 'Gallery mode' })
+    .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
 }
 
 async function parkAtTop(page: Page) {
@@ -93,6 +97,7 @@ async function selectFirstMoment(page: Page) {
 async function openAlbumFromPicks(page: Page) {
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   await modes.getByRole('button', { name: /^Album/u }).click();
+  await expect(page).toHaveURL(`${managerUrl}?section=gallery&mode=album`);
   await expect(page.getByText('10 photos were picked before this Album existed.')).toBeVisible();
 }
 

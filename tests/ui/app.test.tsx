@@ -894,6 +894,234 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
   });
 }
 
+function managerLocationFetch() {
+  const base = managerFetch({ first: { media: [], nextCursor: null } });
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+    if (url.endsWith('/album') && method === 'GET') return json({ album: {
+      revision: 0,
+      saved: true,
+      title: 'Album',
+      description: '',
+      coverMediaId: null,
+      effectiveCoverMediaId: null,
+      entries: [],
+      photoCount: 0,
+      sectionCount: 0,
+      totalBytes: 0,
+    } });
+    return base(input);
+  });
+}
+
+function deferredAlbumSaveFetch() {
+  const base = managerLocationFetch();
+  let release: (() => void) | null = null;
+  let revision = 0;
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (url.endsWith('/album') && method === 'PUT') {
+      const body = JSON.parse(String(init?.body));
+      return new Promise<Response>((resolve) => {
+        release = () => {
+          revision += 1;
+          void json({ album: {
+            revision,
+            saved: true,
+            ...body.metadata,
+            effectiveCoverMediaId: null,
+            entries: [],
+            photoCount: 0,
+            sectionCount: 0,
+            totalBytes: 0,
+          } }).then(resolve);
+        };
+      });
+    }
+    return base(input, init);
+  });
+  return {
+    fetchMock,
+    hasPendingSave: () => release !== null,
+    releaseSave: () => {
+      if (!release) throw new Error('Album save has not started.');
+      const current = release;
+      release = null;
+      current();
+    },
+  };
+}
+
+describe('canonical Manager location ownership', () => {
+  it.each([
+    [`/manage/event/${MANAGED_EVENT.id}`, 'Intake', null, ''],
+    [`/manage/event/${MANAGED_EVENT.id}?section=intake`, 'Intake', null, ''],
+    [`/manage/event/${MANAGED_EVENT.id}?section=rsvp`, 'RSVP', null, '?section=rsvp'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery`, 'Gallery', 'Library', '?section=gallery'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=album`, 'Gallery', 'Album', '?section=gallery&mode=album'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`, 'Gallery', 'Guest gallery', '?section=gallery&mode=guest-gallery'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=guestbook`, 'Guestbook', null, '?section=guestbook'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=share`, 'Share', null, '?section=share'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=settings`, 'Settings', null, '?section=settings'],
+  ] as const)(
+    'renders the canonical Manager location %s as %s / %s',
+    async (entry, sectionLabel, modeLabel, canonicalSearch) => {
+      vi.stubGlobal('fetch', managerLocationFetch());
+      const router = createAppRouter([entry]);
+      render(<RouterProvider router={router} />);
+
+      const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+      expect(within(managerNavigation).getByText(sectionLabel).closest('button'))
+        .toHaveAttribute('aria-pressed', 'true');
+      if (modeLabel) {
+        expect(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+          .getByRole('button', { name: modeLabel }))
+          .toHaveAttribute('aria-pressed', 'true');
+      }
+      await waitFor(() => expect(router.state.location.search).toBe(canonicalSearch));
+    },
+  );
+
+  it.each([
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&section=share`, 'Intake', null, ''],
+    [`/manage/event/${MANAGED_EVENT.id}?section=rsvp&mode=album`, 'RSVP', null, '?section=rsvp'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=shared`, 'Gallery', 'Guest gallery', '?section=gallery&mode=guest-gallery'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=share&unknown=value`, 'Share', null, '?section=share'],
+  ] as const)(
+    'replaces malformed canonical Manager location %s with %s / %s',
+    async (entry, sectionLabel, modeLabel, canonicalSearch) => {
+      vi.stubGlobal('fetch', managerLocationFetch());
+      const router = createAppRouter([entry]);
+      render(<RouterProvider router={router} />);
+
+      const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+      expect(within(managerNavigation).getByText(sectionLabel).closest('button'))
+        .toHaveAttribute('aria-pressed', 'true');
+      if (modeLabel) {
+        expect(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+          .getByRole('button', { name: modeLabel }))
+          .toHaveAttribute('aria-pressed', 'true');
+      }
+      await waitFor(() => expect(router.state.location.search).toBe(canonicalSearch));
+    },
+  );
+
+  it('preserves pathname, hash, and Router state while replacing a canonical Manager location', async () => {
+    const state = { source: 'canonical-location-test' };
+    vi.stubGlobal('fetch', managerLocationFetch());
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=intake',
+      hash: '#retained-fragment',
+      state,
+    }]);
+    render(<RouterProvider router={router} />);
+    await screen.findByRole('navigation', { name: 'Manager sections' });
+
+    await waitFor(() => expect(router.state.location.search).toBe(''));
+    expect(router.state.location.pathname).toBe(`/manage/event/${MANAGED_EVENT.id}`);
+    expect(router.state.location.hash).toBe('#retained-fragment');
+    expect(router.state.location.state).toEqual(state);
+  });
+
+  it('traverses Manager work in history through Album, Library, and Intake', async () => {
+    vi.stubGlobal('fetch', managerLocationFetch());
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}`]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+
+    await user.click(within(managerNavigation).getByText('Gallery').closest('button')!);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: 'Album' }));
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery&mode=album'));
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Library' }))
+      .toHaveAttribute('aria-pressed', 'true'));
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe(''));
+    await waitFor(() => expect(within(managerNavigation).getByText('Intake').closest('button'))
+      .toHaveAttribute('aria-pressed', 'true'));
+  });
+
+  it.each([
+    ['Gallery mode', '?section=gallery', 'Library'],
+    ['Manager section', '?section=share', 'Share your event'],
+    ['browser Back', '?section=gallery', 'Library'],
+  ] as const)(
+    'keeps Album rendered until URL settlement for a %s request',
+    async (requestSource, expectedSearch, expectedContent) => {
+      const deferred = deferredAlbumSaveFetch();
+      vi.stubGlobal('fetch', deferred.fetchMock);
+      const albumEntry = `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=album`;
+      const router = createAppRouter(requestSource === 'browser Back'
+        ? [`/manage/event/${MANAGED_EVENT.id}?section=gallery`, albumEntry]
+        : [albumEntry]);
+      render(<RouterProvider router={router} />);
+      const user = userEvent.setup();
+      const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+      const title = await screen.findByLabelText('Album title');
+
+      fireEvent.change(title, { target: { value: `Leaving by ${requestSource}` } });
+      if (requestSource === 'Gallery mode') {
+        await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+          .getByRole('button', { name: 'Library' }));
+      } else if (requestSource === 'Manager section') {
+        await user.click(within(managerNavigation).getByText('Share').closest('button')!);
+      } else {
+        void router.navigate(-1);
+      }
+
+      await waitFor(() => expect(deferred.hasPendingSave()).toBe(true));
+      expect(router.state.location.search).toBe('?section=gallery&mode=album');
+      expect(screen.getByLabelText('Album title')).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Album' })).toHaveAttribute('aria-pressed', 'true');
+
+      await act(async () => { deferred.releaseSave(); });
+      await waitFor(() => expect(router.state.location.search).toBe(expectedSearch));
+      if (requestSource === 'Manager section') {
+        expect(await screen.findByRole('heading', { name: expectedContent })).toBeVisible();
+      } else {
+        expect(screen.getByRole('button', { name: expectedContent }))
+          .toHaveAttribute('aria-pressed', 'true');
+      }
+
+      if (requestSource !== 'browser Back') {
+        await router.navigate(-1);
+        await waitFor(() => expect(router.state.location.search)
+          .toBe('?section=gallery&mode=album'));
+        expect(await screen.findByLabelText('Album title')).toBeVisible();
+      }
+    },
+  );
+
+  it('keeps Album rendered until URL settlement for a clean browser Back check', async () => {
+    vi.stubGlobal('fetch', managerLocationFetch());
+    const router = createAppRouter([
+      `/manage/event/${MANAGED_EVENT.id}?section=gallery`,
+      `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=album`,
+    ]);
+    render(<RouterProvider router={router} />);
+    await screen.findByLabelText('Album title');
+
+    const navigation = router.navigate(-1);
+    expect(router.state.location.search).toBe('?section=gallery&mode=album');
+    expect(screen.getByRole('button', { name: 'Album' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('region', { name: 'Album changes are not saved yet' }))
+      .not.toBeInTheDocument();
+
+    await navigation;
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    expect(screen.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
 describe('manager resource ownership', () => {
   it('returns synchronous ownership for a current capture and rejects a retired one', async () => {
     const onResult = vi.fn();
