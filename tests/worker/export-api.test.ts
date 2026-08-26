@@ -1032,6 +1032,70 @@ describe('manager exports', () => {
     }]);
   });
 
+  it.each([
+    ['queued', 'queued'],
+    ['running', 'running'],
+    ['errored', 'failed'],
+    ['terminated', 'failed'],
+    ['complete', 'failed'],
+  ] as const)(
+    'reconciles an empty initial createBatch result with its retained %s Workflow',
+    async (workflowStatus, expectedState) => {
+      const access = await eventAccess();
+      await uploadPending(access, `initial-workflow-empty-${workflowStatus}`, null);
+      const createdRequests: Array<{ id: string; params: { jobId: string; attempt: number } }> = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
+          if (property === 'createBatch') {
+            return async (batch: typeof createdRequests) => {
+              createdRequests.push(batch[0]!);
+              return [];
+            };
+          }
+          if (property === 'get') {
+            return async (id: string) => ({
+              id,
+              status: async () => {
+                if (workflowStatus === 'running') {
+                  await new ExportsRepository(testEnv.DB).claimRunning(
+                    id,
+                    1,
+                    '2026-08-26T12:00:01.000Z',
+                  );
+                }
+                return { status: workflowStatus };
+              },
+            });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      }, { ...testEnv, EXPORT_WORKFLOW: workflow });
+
+      expect(response.status).toBe(202);
+      const returned = (await response.json<any>()).data.export;
+      expect(returned).toMatchObject({
+        state: expectedState,
+        attempt: 1,
+        errorCode: expectedState === 'failed' ? 'EXPORT_WORKFLOW_DISPATCH_FAILED' : null,
+      });
+      expect(createdRequests).toEqual([{
+        id: returned.id,
+        params: { jobId: returned.id, attempt: 1 },
+      }]);
+      expect(await new ExportsRepository(testEnv.DB).getById(returned.id)).toMatchObject({
+        state: expectedState,
+        attempt: 1,
+        errorCode: expectedState === 'failed' ? 'EXPORT_WORKFLOW_DISPATCH_FAILED' : null,
+      });
+    },
+  );
+
   it.each(['errored', 'terminated'] as const)(
     'durably fails a pristine initial job whose only Workflow instance is %s before claim',
     async (terminal) => {
@@ -1089,6 +1153,10 @@ describe('manager exports', () => {
             return async (batch: typeof createdRequests) => {
               createdRequests.push(batch[0]!);
               if (createdRequests.length === 1) throw new Error('simulated unobservable createBatch result');
+              return [{
+                id: batch[0]!.id,
+                status: async () => ({ status: 'queued' as const }),
+              }];
             };
           }
           if (property === 'get') {
@@ -1348,7 +1416,10 @@ describe('manager exports', () => {
       if (deleteAttempts === 1) throw new Error('simulated prior-attempt delete failure');
       return testEnv.MEDIA_BUCKET.delete(input);
     });
-    const dispatched = vi.fn(async () => []);
+    const dispatched = vi.fn(async (batch: Array<{ id: string }>) => [{
+      id: batch[0]!.id,
+      status: async () => ({ status: 'queued' as const }),
+    }]);
     const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
       get(target, property, receiver) {
         if (property === 'delete') return deletePriorAttempt;
@@ -1459,6 +1530,110 @@ describe('manager exports', () => {
     expect(response.status).toBe(202);
     expect((await response.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it.each([
+    ['queued', 'queued'],
+    ['running', 'running'],
+    ['errored', 'failed'],
+    ['terminated', 'failed'],
+    ['complete', 'failed'],
+  ] as const)(
+    'reconciles an empty retry createBatch result with its retained %s Workflow',
+    async (workflowStatus, expectedState) => {
+      const access = await eventAccess();
+      await uploadPending(access, `retry-workflow-empty-${workflowStatus}`, null);
+      const initial = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+      }, testEnv);
+      const job = (await initial.json<any>()).data.export;
+      await failPristineExport(job.id);
+      const createdRequests: Array<{ id: string; params: { jobId: string; attempt: number } }> = [];
+      const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+        get(target, property, receiver) {
+          if (property === 'createBatch') {
+            return async (batch: typeof createdRequests) => {
+              createdRequests.push(batch[0]!);
+              return [];
+            };
+          }
+          if (property === 'get') {
+            return async (id: string) => ({
+              id,
+              status: async () => {
+                if (workflowStatus === 'running') {
+                  await new ExportsRepository(testEnv.DB).claimRunning(
+                    job.id,
+                    2,
+                    '2026-08-26T12:00:01.000Z',
+                  );
+                }
+                return { status: workflowStatus };
+              },
+            });
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const response = await createApp().request(
+        `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+        { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+        { ...testEnv, EXPORT_WORKFLOW: workflow },
+      );
+
+      expect(response.status).toBe(202);
+      const returned = (await response.json<any>()).data.export;
+      expect(createdRequests).toEqual([{
+        id: `${job.id}-2`,
+        params: { jobId: job.id, attempt: 2 },
+      }]);
+      expect(returned).toMatchObject({
+        id: job.id,
+        state: expectedState,
+        attempt: 2,
+        errorCode: expectedState === 'failed' ? 'EXPORT_WORKFLOW_DISPATCH_FAILED' : null,
+      });
+      expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+        state: expectedState,
+        attempt: 2,
+        errorCode: expectedState === 'failed' ? 'EXPORT_WORKFLOW_DISPATCH_FAILED' : null,
+      });
+    },
+  );
+
+  it('keeps an empty retry createBatch result retryable when retained status is unknown', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'retry-workflow-empty-unknown', null);
+    const initial = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await initial.json<any>()).data.export;
+    await failPristineExport(job.id);
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') return async () => [];
+        if (property === 'get') {
+          return async (id: string) => ({ id, status: async () => ({ status: 'unknown' }) });
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, EXPORT_WORKFLOW: workflow },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+      state: 'queued',
+      attempt: 2,
+      errorCode: null,
+    });
   });
 
   it.each(['errored', 'terminated', 'complete'] as const)(

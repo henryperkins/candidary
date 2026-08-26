@@ -276,7 +276,7 @@ test('the private mosaic and the gallery export control hold their layout', asyn
   await page.getByRole('button', { name: 'Close viewer' }).click();
   await expect(viewer).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Shared' }).click();
+  await page.getByRole('button', { name: 'Guest gallery' }).click();
   const shared = page.locator('.gallery-shared');
   await expect(shared.getByRole('button', { name: 'Unpublished' })).toHaveAttribute('aria-pressed', 'true');
   await settle(page);
@@ -301,7 +301,7 @@ test('the private mosaic and the gallery export control hold their layout', asyn
   });
   const exportControl = page.locator('.gallery-export');
   await expect(exportControl).toBeVisible();
-  await expect(page.locator('.gallery-total')).toHaveText('6 photos');
+  await expect(page.locator('.gallery-total')).toHaveText('6 delivered photos');
   expect(await page.evaluate(() => window.scrollY), 'the section is laid out without scrolling').toBe(0);
   await expect(exportControl).toHaveScreenshot('gallery-export-390.png');
   await page.evaluate((authoredBehavior) => {

@@ -129,32 +129,51 @@ function isRecoverableQueuedRetry(
     && job.expiresAt === null;
 }
 
+async function observedWorkflowDispatch(
+  workflow: AppEnv['EXPORT_WORKFLOW'],
+  id: string,
+): Promise<'dispatched' | 'failed' | 'unknown'> {
+  const observed = await (await workflow.get(id)).status();
+  if (observed.status === 'errored'
+    || observed.status === 'terminated'
+    || observed.status === 'complete') {
+    return 'failed';
+  }
+  return observed.status === 'unknown' ? 'unknown' : 'dispatched';
+}
+
+async function dispatchWorkflowBatch(
+  workflow: AppEnv['EXPORT_WORKFLOW'],
+  id: string,
+  input: Parameters<AppEnv['EXPORT_WORKFLOW']['createBatch']>[0],
+): Promise<'dispatched' | 'failed' | 'unknown'> {
+  const created = await workflow.createBatch(input);
+  if (created.length > 0) return 'dispatched';
+  return observedWorkflowDispatch(workflow, id);
+}
+
 async function ensureRetryWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
 ): Promise<'dispatched' | 'failed'> {
   const id = `${job.id}-${job.attempt}`;
   try {
-    await workflow.createBatch([{
+    const dispatch = await dispatchWorkflowBatch(workflow, id, [{
       id,
       params: { jobId: job.id, attempt: job.attempt },
     }]);
-    return 'dispatched';
+    if (dispatch !== 'unknown') return dispatch;
   } catch (error) {
     try {
-      const observed = await (await workflow.get(id)).status();
-      if (observed.status === 'errored'
-        || observed.status === 'terminated'
-        || observed.status === 'complete') {
-        return 'failed';
-      }
-      if (observed.status !== 'unknown') return 'dispatched';
+      const observed = await observedWorkflowDispatch(workflow, id);
+      if (observed !== 'unknown') return observed;
     } catch {
       // The original creation failure remains authoritative when existence
       // cannot be observed. A later request can safely retry the same ID.
     }
     throw error;
   }
+  throw new Error(`Retained retry Workflow ${id} has unknown status.`);
 }
 
 async function ensureInitialWorkflow(
@@ -166,16 +185,12 @@ async function ensureInitialWorkflow(
     params: { jobId: job.id, attempt: job.attempt },
   }];
   try {
-    await workflow.createBatch(input);
-    return 'dispatched';
+    const dispatch = await dispatchWorkflowBatch(workflow, job.id, input);
+    return dispatch === 'unknown' ? 'dispatched' : dispatch;
   } catch {
     try {
-      const observed = await (await workflow.get(job.id)).status();
-      if (observed.status === 'errored'
-        || observed.status === 'terminated'
-        || observed.status === 'complete') {
-        return 'failed';
-      }
+      const observed = await observedWorkflowDispatch(workflow, job.id);
+      if (observed === 'failed') return 'failed';
       // A successful lookup is evidence that the deterministic instance ID is
       // retained, even when status propagation still reports `unknown`.
       return 'dispatched';
@@ -185,8 +200,8 @@ async function ensureInitialWorkflow(
       // retained ID, so replay exactly that ID instead of inventing a successor.
     }
     try {
-      await workflow.createBatch(input);
-      return 'dispatched';
+      const dispatch = await dispatchWorkflowBatch(workflow, job.id, input);
+      return dispatch === 'unknown' ? 'dispatched' : dispatch;
     } catch {
       // Creation is still ambiguous, but leaving the D1 row queued would block every
       // future export and attempt-1 is not eligible for retry redrive. The caller

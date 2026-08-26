@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
-import { eventDateTimeDisplay } from '../app/event-date-time';
+import { eventDateTimeDisplay, formatRetentionDate, TIME_UNAVAILABLE } from '../app/event-date-time';
 import { useDeadlineClock } from '../app/use-deadline-clock';
 import { formatBytes } from '../app/format';
 import { hostSignInHref } from '../app/recovery';
@@ -1705,6 +1705,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const recoverableCount = event.recoverableMediaCount ?? 0;
   const heldCount = photoCount + recoverableCount;
   const heldBytes = (event.storedBytes ?? 0) + (event.recoverableBytes ?? 0);
+  const purgeAfterDisplay = formatRetentionDate(event.purgeAfter, event.eventTimezone);
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
   // Both entry actions are confirmed the same way, and both name the event so the
   // host cannot mistake which one they are typing into.
@@ -1769,7 +1770,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         recoveryHint={eventResource.state.failure.recoveryHint}
         onRetry={() => void eventResource.reload()}
       />}
-      <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{event.purgeAfter ? new Date(event.purgeAfter).toLocaleDateString() : 'on schedule'}</strong></p></div>
+      <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
+        ? TIME_UNAVAILABLE
+        : <time dateTime={event.purgeAfter}>{purgeAfterDisplay}</time>}</strong></p></div>
 
       {visibleNotice && <section
         className="manager-action-error"

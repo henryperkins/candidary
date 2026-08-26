@@ -268,7 +268,11 @@ test('album mode is keyboard-operable and respects reduced motion', async ({ pag
   await page.keyboard.press('Enter');
   const movedEntry = page.locator('.album-review-grid > li').nth(1);
   await expect(movedEntry.locator('.album-review-grid__meta strong')).toHaveText(firstEntryName);
-  await expect(page.getByRole('status')).toHaveText('Moved to position 2 of 10.');
+  const galleryAnnouncement = page.locator('[data-gallery-live-host="true"] [role="status"]');
+  await expect(galleryAnnouncement).toHaveText('Moved to position 2 of 10.');
+  await expect(galleryAnnouncement).toHaveAttribute('role', 'status');
+  await expect(galleryAnnouncement).toHaveAttribute('aria-live', 'polite');
+  await expect(galleryAnnouncement).toHaveAttribute('aria-atomic', 'true');
   await expect(movedEntry.getByRole('button', { name: `Move ${firstEntryName} earlier` })).toBeFocused();
 
   const preview = page.getByRole('button', { name: 'Preview album' });

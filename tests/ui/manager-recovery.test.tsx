@@ -151,6 +151,45 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('the event retention deadline', () => {
+  it('renders purgeAfter in the event zone when the browser is on the next calendar day', async () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = 'UTC';
+    try {
+      const purgeAfter = '2026-09-20T02:30:00.000Z';
+      expect(new Date(purgeAfter).getDate()).toBe(20);
+      const { fetchMock } = managerFetch({
+        event: { ...EVENT, purgeAfter, eventTimezone: 'America/Chicago' },
+      });
+
+      await openManager(fetchMock);
+
+      const deadline = screen.getByText('September 19, 2026 at 9:30 PM CDT', {
+        selector: 'time',
+      });
+      expect(deadline).toHaveAttribute('datetime', purgeAfter);
+      expect(deadline.closest('p'))
+        .toHaveTextContent('Files delete September 19, 2026 at 9:30 PM CDT');
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
+  it('fails closed without semantic time for an invalid purgeAfter', async () => {
+    const { fetchMock } = managerFetch({
+      event: { ...EVENT, purgeAfter: 'not-a-timestamp' },
+    });
+
+    await openManager(fetchMock);
+
+    const deadline = screen.getByText('Time unavailable');
+    const retention = deadline.closest('p');
+    expect(retention).toHaveTextContent('Files delete Time unavailable');
+    expect(retention?.querySelector('time')).toBeNull();
+  });
+});
+
 describe('moving a photo to Recently deleted', () => {
   it('sends no request until the confirmation is explicitly activated', async () => {
     const user = userEvent.setup();
