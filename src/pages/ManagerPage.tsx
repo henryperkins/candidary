@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { useBlocker, useParams, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
+import type { GalleryMode } from '../app/manager-location';
 import { eventDateTimeDisplay, formatRetentionDate, TIME_UNAVAILABLE } from '../app/event-date-time';
 import { useDeadlineClock } from '../app/use-deadline-clock';
 import { formatBytes } from '../app/format';
@@ -85,6 +86,7 @@ type ManagerSectionDestination =
 
 type ManagerLeaveDestination =
   | { kind: 'router'; locationKey: string }
+  | { kind: 'gallery-mode'; mode: GalleryMode }
   | ManagerSectionDestination;
 
 type ManagerLeaveAttempt = {
@@ -100,6 +102,9 @@ function sameManagerDestination(
   if (left.kind !== right.kind) return false;
   if (left.kind === 'router' && right.kind === 'router') {
     return left.locationKey === right.locationKey;
+  }
+  if (left.kind === 'gallery-mode' && right.kind === 'gallery-mode') {
+    return left.mode === right.mode;
   }
   if (left.kind === 'section' && right.kind === 'section') {
     return left.section === right.section;
@@ -266,6 +271,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const [qr, setQr] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [section, setSection] = useState<Section>(() => initialSection(searchParams.get('section')));
+  const [galleryMode, setGalleryMode] = useState<GalleryMode>('library');
   // Settings stays mounted after its first visit so a debounce timer, an
   // in-flight write, and an unsaved draft all survive a destination change.
   const [settingsMounted, setSettingsMounted] = useState(false);
@@ -452,7 +458,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // A Router request that arrived while a section was settling owns the page.
     if (blockerStateRef.current === 'blocked') return;
     retireAlbumLeaveAttempt();
-    commitSectionDestination(destination);
+    commitManagerLeaveDestination(destination);
   }
 
   // Values below belong to one event, not to a revision of the next one.  Clear
@@ -487,6 +493,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setPendingSection(null);
     setPendingRsvpClose(false);
     setPendingSettingsRepair(false);
+    setGalleryMode('library');
     retireAlbumLeaveAttempt();
     recentlyDeletedFocusRequested.current = false;
   }, [eventId]);
@@ -1110,6 +1117,23 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     transitionToSection(destination.section);
   }
 
+  function commitManagerLeaveDestination(destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>) {
+    if (destination.kind === 'gallery-mode') {
+      setGalleryMode(destination.mode);
+      return;
+    }
+    commitSectionDestination(destination);
+  }
+
+  function requestGalleryMode(mode: GalleryMode) {
+    if (mode === galleryMode) return;
+    if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
+      setGalleryMode(mode);
+      return;
+    }
+    void beginAlbumLeave({ kind: 'gallery-mode', mode });
+  }
+
   function requestSectionDestination(destination: ManagerSectionDestination) {
     const next = destination.kind === 'section'
       ? destination.section
@@ -1148,7 +1172,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       void beginAlbumLeave(destination);
       return;
     }
-    commitSectionDestination(destination);
+    commitManagerLeaveDestination(destination);
   }
 
   function openSection(next: Section) {
@@ -1208,7 +1232,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (blockerStateRef.current === 'blocked') return;
     retireAlbumLeaveAttempt();
-    commitSectionDestination(destination);
+    commitManagerLeaveDestination(destination);
   }
 
   // Initial focus is Keep photo, every time the dialog opens.
@@ -1917,6 +1941,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         ref={galleryWorkspace}
         event={event}
         eventId={eventId}
+        mode={galleryMode}
+        onModeChange={requestGalleryMode}
         galleryMutationEpoch={galleryMutationEpoch}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}
         audience={audienceAuthority}

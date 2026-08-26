@@ -35,6 +35,7 @@ import type {
 import { resolveEventTheme } from '../../shared/event-theme';
 import {
   ManagerAlbum,
+  type AlbumLeavePreparation,
   type ManagerAlbumHandle,
 } from '../../src/features/gallery/ManagerAlbum';
 import {
@@ -53,8 +54,10 @@ import {
 import { useDeadlineClock } from '../../src/app/use-deadline-clock';
 import { api } from '../../src/app/api';
 import type { LoadFailure } from '../../src/components/States';
+import { UnsavedSettingsPrompt } from '../../src/components/UnsavedSettingsPrompt';
 import type { ExportDownloadView, ExportView } from '../../src/app/types';
 import { useManagerResource } from '../../src/features/manager/resources';
+import type { GalleryMode } from '../../src/app/manager-location';
 import {
   runAlbumInverse,
   toEntryInput,
@@ -631,6 +634,8 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
     resourceBackedShared?: boolean;
     eventOverride?: Partial<EventView>;
     legacyOnBulk?: (action: 'publish' | 'hide') => Promise<void>;
+    mode?: GalleryMode;
+    onModeChange?: (mode: GalleryMode) => void;
 } = {}) {
   vi.stubGlobal('fetch', fetchMock);
   const onPrepare = exportOverrides.onPrepare ?? vi.fn(noop);
@@ -638,9 +643,18 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
   const invalidateGalleryAfterMutation = vi.fn();
   const galleryRef = createRef<ManagerGalleryWorkspaceHandle>();
   let currentEventOverride = workspaceOverrides.eventOverride;
+  let currentMode = workspaceOverrides.mode ?? 'library';
   let currentOnPublicationChanged = onPublicationChanged;
   let currentAudienceInvalidate = () => {};
   function TestManagerGalleryOwner({ eventId }: { eventId: string }) {
+    const [ownedMode, setOwnedMode] = useState<GalleryMode>('library');
+    const [albumLeaveAttempt, setAlbumLeaveAttempt] = useState<{
+      mode: GalleryMode;
+      outcome: AlbumLeavePreparation;
+    } | null>(null);
+    useEffect(() => {
+      if (workspaceOverrides.mode === undefined) setOwnedMode('library');
+    }, [eventId]);
     const [galleryMutationEpoch, setGalleryMutationEpoch] = useState(0);
     const invalidateOwnedGallery = useCallback(() => {
       invalidateGalleryAfterMutation();
@@ -682,11 +696,63 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
       return () => { liveHost.remove(); };
     }, [liveHost]);
 
+    async function beginAlbumLeave(mode: GalleryMode, retry = false) {
+      setAlbumLeaveAttempt({ mode, outcome: { status: 'waiting' } });
+      const outcome = retry
+        ? await galleryRef.current?.retryPendingAlbumChanges() ?? { status: 'ready' } as const
+        : await galleryRef.current?.prepareToLeave() ?? { status: 'ready' } as const;
+      setAlbumLeaveAttempt({ mode, outcome });
+      if (outcome.status === 'ready') {
+        galleryRef.current?.retireAlbumLeavePreparation();
+        setOwnedMode(mode);
+        setAlbumLeaveAttempt(null);
+      }
+    }
+
+    function requestMode(mode: GalleryMode) {
+      if (workspaceOverrides.mode !== undefined) {
+        workspaceOverrides.onModeChange?.(mode);
+        return;
+      }
+      if (mode === ownedMode) return;
+      if (galleryRef.current?.requiresAlbumLeavePreparation() !== true) {
+        setOwnedMode(mode);
+        return;
+      }
+      void beginAlbumLeave(mode);
+    }
+
+    function discardAlbumAndChangeMode() {
+      const attempt = albumLeaveAttempt;
+      if (!attempt || attempt.outcome.status === 'waiting') return;
+      galleryRef.current?.discardPendingAlbumChanges();
+      galleryRef.current?.retireAlbumLeavePreparation();
+      setOwnedMode(attempt.mode);
+      setAlbumLeaveAttempt(null);
+    }
+
+    function stayWithAlbum() {
+      const attempt = albumLeaveAttempt;
+      if (!attempt) return;
+      galleryRef.current?.restoreAlbumLeaveFocus(attempt.outcome);
+      setAlbumLeaveAttempt(null);
+    }
+
     return <ManagerUndoProvider eventId={eventId}><>
       {createPortal(
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>,
         liveHost,
       )}
+      {albumLeaveAttempt && <UnsavedSettingsPrompt
+        domains={[]}
+        albumOutcome={albumLeaveAttempt.outcome}
+        focusKey={`gallery-mode:${albumLeaveAttempt.mode}`}
+        leaveDisabled={albumLeaveAttempt.outcome.status === 'waiting'}
+        onLeave={discardAlbumAndChangeMode}
+        onDiscardAlbum={discardAlbumAndChangeMode}
+        onRetryAlbum={() => { void beginAlbumLeave(albumLeaveAttempt.mode, true); }}
+        onStay={stayWithAlbum}
+      />}
       <ManagerGalleryWorkspace
         ref={galleryRef}
         event={{ ...event, ...currentEventOverride }}
@@ -696,6 +762,8 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
         audience={audience}
         onAnnouncement={setAnnouncement}
         onAlbumAccessFailure={workspaceOverrides.onAlbumAccessFailure}
+        mode={workspaceOverrides.mode === undefined ? ownedMode : currentMode}
+        onModeChange={requestMode}
         shared={workspaceOverrides.resourceBackedShared ? {
           status: workspaceOverrides.sharedStatus,
           onPublicationChanged: currentOnPublicationChanged,
@@ -750,6 +818,10 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
       rendered.rerender(props(workspaceOverrides.eventId ?? 'event-a'));
     },
     rerenderForEvent(eventId: string) { rendered.rerender(props(eventId)); },
+    rerenderMode(mode: GalleryMode) {
+      currentMode = mode;
+      rendered.rerender(props(workspaceOverrides.eventId ?? 'event-a'));
+    },
   };
 }
 
@@ -854,6 +926,23 @@ async function retainedMarker() {
 }
 
 describe('gallery modes', () => {
+  it('waits for the controlled Gallery mode to be adopted', async () => {
+    const { fetchMock } = harness();
+    const onModeChange = vi.fn();
+    const workspace = renderWorkspace(fetchMock, {}, { mode: 'library', onModeChange });
+    const user = userEvent.setup();
+
+    expect(await screen.findByText('First dance')).toBeVisible();
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album$/u }));
+
+    expect(onModeChange).toHaveBeenCalledWith('album');
+    expect(screen.getByText('First dance')).toBeVisible();
+
+    workspace.rerenderMode('album');
+    expect(await screen.findByRole('heading', { name: 'The Album is empty.' })).toBeVisible();
+  });
+
   it.each([
     [
       {
@@ -1021,21 +1110,26 @@ describe('gallery modes', () => {
     expect(styles).toMatch(/@media \(max-width: 760px\) \{\s*\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}/u);
   });
 
-  it('clears Guest-gallery selections when the host leaves that mode', async () => {
+  it('clears Guest-gallery selection only after controlled Library adoption', async () => {
     const { fetchMock } = harness();
     const onSharedSelectedChange = vi.fn();
-    renderWorkspace(fetchMock, {}, {
+    const onModeChange = vi.fn();
+    const workspace = renderWorkspace(fetchMock, {}, {
       sharedSelected: ['p1'],
       onSharedSelectedChange,
+      mode: 'guest-gallery',
+      onModeChange,
     });
     const user = userEvent.setup();
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
 
-    await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
-    onSharedSelectedChange.mockClear();
     await user.click(within(modes).getByRole('button', { name: 'Library' }));
+    expect(onModeChange).toHaveBeenCalledWith('library');
+    expect(onSharedSelectedChange).not.toHaveBeenCalled();
 
-    expect(onSharedSelectedChange).toHaveBeenCalledOnce();
+    workspace.rerenderMode('library');
+
+    await waitFor(() => expect(onSharedSelectedChange).toHaveBeenCalledOnce());
     expect(onSharedSelectedChange).toHaveBeenCalledWith([]);
   });
 
@@ -2300,7 +2394,7 @@ describe('the album', () => {
     expect(state.orderWrites).toHaveLength(0);
   });
 
-  it('automatically commits only the newest Gallery-mode destination after Album settles', async () => {
+  it('keeps the requested Gallery-mode destination stable while Album settlement is active', async () => {
     const save = deferred();
     const controlled = harness({ orderGates: [save.promise] });
     renderWorkspace(controlled.fetchMock);
@@ -2319,14 +2413,14 @@ describe('the album', () => {
     })).toBeDisabled();
     expect(within(prompt).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
     expect(within(prompt).getByRole('button', { name: 'Stay in Album' })).toBeEnabled();
+    expect(modes.getByRole('button', { name: 'Guest gallery' })).toBeDisabled();
     await user.click(modes.getByRole('button', { name: 'Guest gallery' }));
     expect(modes.getByRole('button', { name: /^Album/ })).toHaveAttribute('aria-pressed', 'true');
-    await waitFor(() => expect(prompt).toHaveFocus());
 
     act(() => { save.resolve(); });
-    await waitFor(() => expect(modes.getByRole('button', { name: 'Guest gallery' }))
+    await waitFor(() => expect(modes.getByRole('button', { name: 'Library' }))
       .toHaveAttribute('aria-pressed', 'true'));
-    expect(modes.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'false');
+    expect(modes.getByRole('button', { name: 'Guest gallery' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByRole('region', { name: 'Album changes are not saved yet' }))
       .not.toBeInTheDocument();
   });

@@ -10,7 +10,9 @@ import { resolveEventTheme } from '../../shared/event-theme';
 import {
   ManagerGalleryWorkspace,
   type GalleryAudienceAuthority,
+  type ManagerGalleryWorkspaceProps,
 } from '../../src/features/gallery/ManagerGalleryWorkspace';
+import type { GalleryMode } from '../../src/app/manager-location';
 import type { ExportCurrentSource } from '../../src/features/gallery/export-control-status';
 import type { ExportDownloadView, ExportView, MediaView } from '../../src/app/types';
 import {
@@ -30,6 +32,13 @@ function failure(code = 'INTERNAL_ERROR', message = 'The manager action could no
     status,
     headers: { 'content-type': 'application/json' },
   }));
+}
+
+function ControlledGalleryWorkspace(
+  props: Omit<ManagerGalleryWorkspaceProps, 'mode' | 'onModeChange'>,
+) {
+  const [mode, setMode] = useState<GalleryMode>('library');
+  return <ManagerGalleryWorkspace {...props} mode={mode} onModeChange={setMode} />;
 }
 
 const event: EventView = {
@@ -250,7 +259,7 @@ function renderGalleryWithFetch(
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>,
         liveHost,
       )}
-      {workspaceMounted && <ManagerGalleryWorkspace
+      {workspaceMounted && <ControlledGalleryWorkspace
         event={event}
         eventId="event-a"
         galleryMutationEpoch={galleryMutationEpoch}
@@ -1287,7 +1296,7 @@ describe('host private gallery', () => {
   it('uses titled publication filters and labeled hide actions in the shared workspace', async () => {
     const onOpenSettings = vi.fn();
     vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));
-    renderWorkspaceWithUndo(<ManagerGalleryWorkspace
+    renderWorkspaceWithUndo(<ControlledGalleryWorkspace
       event={{ ...event, galleryVisible: false }}
       eventId="event-a"
       galleryMutationEpoch={0}
@@ -1423,7 +1432,7 @@ describe('host private gallery', () => {
   it('withdraws the shared settings escape while a guest-list commit holds the destinations', async () => {
     const onOpenSettings = vi.fn();
     vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));
-    renderWorkspaceWithUndo(<ManagerGalleryWorkspace
+    renderWorkspaceWithUndo(<ControlledGalleryWorkspace
       event={{ ...event, galleryVisible: false }}
       eventId="event-a"
       galleryMutationEpoch={0}

@@ -10,9 +10,9 @@ import {
 
 import type { ExportDownloadView, ExportView, MediaView } from '../../app/types';
 import { api } from '../../app/api';
+import type { GalleryMode } from '../../app/manager-location';
 import type { ManagerMediaPage } from '../../app/types';
 import { describeLoadFailure, ErrorState } from '../../components/States';
-import { UnsavedSettingsPrompt } from '../../components/UnsavedSettingsPrompt';
 import { useManagerResource } from '../manager/resources';
 import type { EventView, ExportKind, GalleryAudienceSummaryView } from '../../../shared/contracts';
 import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
@@ -30,8 +30,6 @@ import { ManagerSharedGallery, type GallerySharedStatus } from './ManagerSharedG
 import type { Dispatch, SetStateAction } from 'react';
 import type { ExportCurrentSource } from './export-control-status';
 
-type GalleryMode = 'library' | 'album' | 'shared';
-
 /**
  * Keyed by the mode union rather than matched with a fallback, so a fourth mode is a
  * compile error here instead of an unlabelled tab.
@@ -39,7 +37,7 @@ type GalleryMode = 'library' | 'album' | 'shared';
 const MODE_LABELS: Record<GalleryMode, string> = {
   library: 'Library',
   album: 'Album',
-  shared: 'Guest gallery',
+  'guest-gallery': 'Guest gallery',
 };
 
 /**
@@ -50,7 +48,7 @@ const MODE_LABELS: Record<GalleryMode, string> = {
 const MODE_NOTES: Record<GalleryMode, string> = {
   library: 'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
   album: 'One Album per event. Its order and sections are yours; the delivered photos stay exactly where they are.',
-  shared: 'Publish and Hide change what event guests see. They do not change Album membership or the Album link.',
+  'guest-gallery': 'Publish and Hide change what event guests see. They do not change Album membership or the Album link.',
 };
 
 const ignoreLoadFailure: (failure: LoadFailure) => void = () => {};
@@ -83,9 +81,11 @@ export interface GalleryAudienceAuthority {
   invalidate(): void;
 }
 
-interface ManagerGalleryWorkspaceProps {
+export interface ManagerGalleryWorkspaceProps {
   event: EventView;
   eventId: string;
+  mode: GalleryMode;
+  onModeChange(mode: GalleryMode): void;
   /** Manager-owned generation for every Gallery data owner after a mutation. */
   galleryMutationEpoch: number;
   /** The sole cross-resource mutation invalidator retained by inverse commands. */
@@ -162,6 +162,8 @@ ManagerGalleryWorkspaceProps
 >(function ManagerGalleryWorkspace({
   event,
   eventId,
+  mode,
+  onModeChange,
   galleryMutationEpoch,
   invalidateGalleryAfterMutation,
   shared,
@@ -172,7 +174,6 @@ ManagerGalleryWorkspaceProps
   onAlbumAccessFailure,
   onResourceEscalate,
 }, ref) {
-  const [mode, setMode] = useState<GalleryMode>('library');
   // Ordinary publication writes still own a narrow, workspace-local Library
   // refresh. The Manager epoch is additive: inverse commands use it to retire
   // every Gallery data owner plus Manager's affected sibling resources.
@@ -206,6 +207,7 @@ ManagerGalleryWorkspaceProps
   const sharedActive = useRef(true);
   const currentWorkspaceEvent = useRef(eventId);
   const currentPublicationProjection = useRef(shared.onPublicationChanged);
+  const currentSharedSelectionChange = useRef(shared.onSelectedChange);
   const currentSharedInvalidate = useRef<() => void>(() => {});
   // A success may only dismiss the failure raised by that exact operation. Two
   // row PATCHes can settle in either order, and a successful sibling must not
@@ -215,19 +217,7 @@ ManagerGalleryWorkspaceProps
   const sharedContinuationOperation = useRef(0);
   const sharedContinuationFailureOwner = useRef<number | null>(null);
   const albumRef = useRef<ManagerAlbumHandle>(null);
-  const modeLeaveGeneration = useRef(0);
-  const modeLeaveAttemptRef = useRef<{
-    destination: GalleryMode;
-    generation: number;
-    outcome: AlbumLeavePreparation;
-  } | null>(null);
-  const [modeLeaveAttempt, setModeLeaveAttempt] = useState<{
-    destination: GalleryMode;
-    generation: number;
-    outcome: AlbumLeavePreparation;
-  } | null>(null);
   const [externalLeaveActive, setExternalLeaveActive] = useState(false);
-  const externalLeaveActiveRef = useRef(false);
 
   // A confirmed local Event/Settings projection wins synchronously over a retained
   // summary generation. A later summary settlement may become the new authority.
@@ -243,6 +233,9 @@ ManagerGalleryWorkspaceProps
   useLayoutEffect(() => {
     currentPublicationProjection.current = shared.onPublicationChanged;
   }, [shared.onPublicationChanged]);
+  useLayoutEffect(() => {
+    currentSharedSelectionChange.current = shared.onSelectedChange;
+  }, [shared.onSelectedChange]);
 
   const sharedQueryKey = `shared:${sharedStatus}:gallery:${galleryMutationEpoch}`;
   const currentSharedQuery = useRef(sharedQueryKey);
@@ -264,7 +257,7 @@ ManagerGalleryWorkspaceProps
   const sharedResource = useManagerResource<ManagerMediaPage>({
     eventId,
     queryKey: sharedQueryKey,
-    enabled: mode === 'shared' && !legacySharedSnapshot,
+    enabled: mode === 'guest-gallery' && !legacySharedSnapshot,
     fallbackMessage: 'The Guest gallery could not be loaded.',
     onEscalate: onResourceEscalate ?? ignoreLoadFailure,
     load: useCallback((signal: AbortSignal) => api<ManagerMediaPage>(sharedPath(), { signal }), [sharedPath]),
@@ -570,23 +563,7 @@ ManagerGalleryWorkspaceProps
     }
   }, [clearSharedContinuationFailure, ownsSharedQuery, sharedLoadingMore, sharedPage?.nextCursor, sharedPath, sharedQueryKey, sharedResource]);
 
-  useLayoutEffect(() => {
-    modeLeaveGeneration.current += 1;
-    modeLeaveAttemptRef.current = null;
-    externalLeaveActiveRef.current = false;
-    setModeLeaveAttempt(null);
-    setExternalLeaveActive(false);
-    setMode('library');
-  }, [eventId]);
-
-  const retireModeLeaveAttempt = useCallback(() => {
-    modeLeaveGeneration.current += 1;
-    modeLeaveAttemptRef.current = null;
-    setModeLeaveAttempt(null);
-  }, []);
-
   const setExternalLeaveOwner = useCallback((active: boolean) => {
-    externalLeaveActiveRef.current = active;
     setExternalLeaveActive(active);
   }, []);
 
@@ -602,16 +579,14 @@ ManagerGalleryWorkspaceProps
   }, [mode]);
 
   const prepareToLeave = useCallback(() => {
-    retireModeLeaveAttempt();
     setExternalLeaveOwner(true);
     return prepareCurrentAlbumToLeave();
-  }, [prepareCurrentAlbumToLeave, retireModeLeaveAttempt, setExternalLeaveOwner]);
+  }, [prepareCurrentAlbumToLeave, setExternalLeaveOwner]);
 
   const retryPendingAlbumChanges = useCallback(() => {
-    retireModeLeaveAttempt();
     setExternalLeaveOwner(true);
     return retryCurrentAlbumChanges();
-  }, [retireModeLeaveAttempt, retryCurrentAlbumChanges, setExternalLeaveOwner]);
+  }, [retryCurrentAlbumChanges, setExternalLeaveOwner]);
 
   const reportAlbumDiscarded = useCallback(() => {
     // The coordinator is about to unmount Album, so its passive state-forwarder
@@ -632,10 +607,9 @@ ManagerGalleryWorkspaceProps
 
   const discardPendingAlbumChanges = useCallback(() => {
     setExternalLeaveOwner(false);
-    retireModeLeaveAttempt();
     discardCurrentAlbumChanges();
     reportAlbumDiscarded();
-  }, [discardCurrentAlbumChanges, reportAlbumDiscarded, retireModeLeaveAttempt, setExternalLeaveOwner]);
+  }, [discardCurrentAlbumChanges, reportAlbumDiscarded, setExternalLeaveOwner]);
 
   const retireAlbumLeavePreparation = useCallback(() => {
     setExternalLeaveOwner(false);
@@ -666,89 +640,29 @@ ManagerGalleryWorkspaceProps
     ],
   );
 
-  function commitModeChange(next: GalleryMode) {
-    modeLeaveAttemptRef.current = null;
-    setModeLeaveAttempt(null);
-    if (mode === 'shared' && sharedSelected.length > 0) {
+  const adoptedMode = useRef(mode);
+  useEffect(() => {
+    const previousMode = adoptedMode.current;
+    adoptedMode.current = mode;
+    if (previousMode !== 'guest-gallery' || mode === 'guest-gallery') return;
+    if (sharedSelected.length > 0) {
       setSharedSelected([]);
-      // Legacy standalone consumers supplied a selection setter. Manager's
-      // resource-backed Shared workspace deliberately does not, but preserve
-      // the old explicit reset contract for those embedders.
-      shared.onSelectedChange?.([]);
     }
-    setMode(next);
-  }
-
-  async function beginModeLeave(next: GalleryMode, retry = false) {
-    const generation = ++modeLeaveGeneration.current;
-    const waiting = {
-      destination: next,
-      generation,
-      outcome: { status: 'waiting' } as const,
-    };
-    modeLeaveAttemptRef.current = waiting;
-    setModeLeaveAttempt(waiting);
-    const outcome = retry
-      ? await retryCurrentAlbumChanges()
-      : await prepareCurrentAlbumToLeave();
-    const current = modeLeaveAttemptRef.current;
-    if (!current || current.generation !== generation || current.destination !== next) return;
-    const settled = { destination: next, generation, outcome };
-    modeLeaveAttemptRef.current = settled;
-    setModeLeaveAttempt(settled);
-    if (outcome.status === 'ready') commitModeChange(next);
-  }
-
-  function changeMode(next: GalleryMode) {
-    if (next === mode || externalLeaveActiveRef.current) return;
-    if (mode === 'album') {
-      void beginModeLeave(next);
-      return;
-    }
-    commitModeChange(next);
-  }
-
-  function stayInAlbum() {
-    const attempt = modeLeaveAttemptRef.current;
-    if (!attempt) return;
-    modeLeaveGeneration.current += 1;
-    modeLeaveAttemptRef.current = null;
-    setModeLeaveAttempt(null);
-    restoreAlbumLeaveFocus(attempt.outcome);
-  }
-
-  function discardAlbumAndChangeMode() {
-    const attempt = modeLeaveAttemptRef.current;
-    if (!attempt || attempt.outcome.status === 'waiting') return;
-    discardCurrentAlbumChanges();
-    reportAlbumDiscarded();
-    if (modeLeaveAttemptRef.current !== attempt) return;
-    modeLeaveGeneration.current += 1;
-    commitModeChange(attempt.destination);
-  }
+    currentSharedSelectionChange.current?.([]);
+  }, [mode, sharedSelected.length]);
 
   return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
-    {modeLeaveAttempt && <UnsavedSettingsPrompt
-      domains={[]}
-      albumOutcome={modeLeaveAttempt.outcome}
-      focusKey={`gallery-mode:${modeLeaveAttempt.destination}`}
-      leaveDisabled={modeLeaveAttempt.outcome.status === 'waiting'}
-      onLeave={discardAlbumAndChangeMode}
-      onDiscardAlbum={discardAlbumAndChangeMode}
-      onRetryAlbum={() => { void beginModeLeave(modeLeaveAttempt.destination, true); }}
-      onStay={stayInAlbum}
-    />}
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">Gallery</h2>
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
-        {(['library', 'album', 'shared'] as const).map((value) => (
+        {(['library', 'album', 'guest-gallery'] as const).map((value) => (
           <button
             type="button"
             key={value}
             disabled={externalLeaveActive && value !== mode}
             aria-pressed={mode === value}
             className={mode === value ? 'active' : ''}
-            onClick={() => { void changeMode(value); }}
+            onClick={() => onModeChange(value)}
           >{MODE_LABELS[value]}{value === 'album' && pickCount > 0 ? ` (${pickCount})` : ''}</button>
         ))}
       </div>
@@ -814,7 +728,7 @@ ManagerGalleryWorkspaceProps
         eventId={eventId}
         active={mode === 'album'}
         eventTimezone={event.eventTimezone}
-        onGoToLibrary={() => { void changeMode('library'); }}
+        onGoToLibrary={() => onModeChange('library')}
         onOpenRecentlyDeleted={shared.onOpenRecentlyDeleted}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}
         onPicksChanged={invalidateLibrary}
@@ -836,7 +750,7 @@ ManagerGalleryWorkspaceProps
       />
     </div>}
 
-    <div className="gallery-shared-mode" hidden={mode !== 'shared'}>
+    <div className="gallery-shared-mode" hidden={mode !== 'guest-gallery'}>
       {sharedWriteFailure && <ErrorState
         message={sharedWriteFailure.message}
         recoveryHint={sharedWriteFailure.recoveryHint}

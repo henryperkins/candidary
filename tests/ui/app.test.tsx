@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { startTransition, useLayoutEffect, type ComponentProps } from 'react';
+import { startTransition, useLayoutEffect, useState } from 'react';
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useNavigate, useParams } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -37,9 +37,11 @@ import { ManagerPage } from '../../src/pages/ManagerPage';
 import {
   ManagerGalleryWorkspace,
   type GalleryAudienceAuthority,
+  type ManagerGalleryWorkspaceProps,
 } from '../../src/features/gallery/ManagerGalleryWorkspace';
 import { ManagerUndoProvider } from '../../src/features/gallery/undo';
 import { useManagerResource } from '../../src/features/manager/resources';
+import type { GalleryMode } from '../../src/app/manager-location';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
@@ -848,10 +850,11 @@ function directGalleryAudienceAuthority(): GalleryAudienceAuthority {
 }
 
 function ManagerGalleryWorkspaceWithUndo(
-  props: ComponentProps<typeof ManagerGalleryWorkspace>,
+  props: Omit<ManagerGalleryWorkspaceProps, 'mode' | 'onModeChange'>,
 ) {
+  const [mode, setMode] = useState<GalleryMode>('library');
   return <ManagerUndoProvider eventId={props.eventId}>
-    <ManagerGalleryWorkspace {...props} />
+    <ManagerGalleryWorkspace {...props} mode={mode} onModeChange={setMode} />
   </ManagerUndoProvider>;
 }
 
@@ -3873,8 +3876,7 @@ describe('manager experience', () => {
       }
       throw new Error(`Unexpected request ${url}`);
     }));
-    const workspace = (galleryMutationEpoch: number) => <ManagerUndoProvider eventId="event-a">
-      <ManagerGalleryWorkspace
+    const workspace = (galleryMutationEpoch: number) => <ManagerGalleryWorkspaceWithUndo
         event={MANAGED_EVENT as unknown as EventView}
         eventId="event-a"
         galleryMutationEpoch={galleryMutationEpoch}
@@ -3892,8 +3894,7 @@ describe('manager experience', () => {
           onRetry: async () => {},
           currentSource: { count: MANAGED_EVENT.storedMediaCount, freshness: 'fresh' },
         }}
-      />
-    </ManagerUndoProvider>;
+      />;
     const view = render(workspace(0));
     const user = userEvent.setup();
     await waitFor(() => expect(libraryReads).toBe(1));
