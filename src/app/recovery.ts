@@ -6,26 +6,25 @@
 // end at are accepted, and anything else falls back to the account's own page. That
 // keeps `returnTo` from becoming an open redirect.
 
-const EVENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-const MANAGER_PATH = /^\/manage\/event\/([0-9a-f-]+)$/iu;
+import { canonicalManagerReturnPath, isManagerEventId } from './manager-location';
 
 export const HOST_EVENTS_PATH = '/host/events';
 
-// A path is usable only if it is local, is one of the two known destinations, and —
-// for a manager path — names a well-formed event.
+// A path is usable only if it is the host's event list or a canonical Manager
+// destination. Manager validation and normalization belong to its shared contract.
 export function safeReturnTo(value: string | null | undefined): string | null {
-  if (!value || !value.startsWith('/') || value.startsWith('//')) return null;
+  if (!value) return null;
   if (value === HOST_EVENTS_PATH) return value;
-  const manager = MANAGER_PATH.exec(value);
-  return manager && EVENT_ID.test(manager[1]!) ? value : null;
+  return canonicalManagerReturnPath(value)?.href ?? null;
 }
 
 // Adoption is only attempted for the event the host is actually returning to.
 // A mismatch means the two parameters disagree, and guessing which one to trust
 // would be how an unrelated event gets claimed.
 export function adoptTargetFor(returnTo: string | null, adopt: string | null | undefined): string | null {
-  if (!adopt || !EVENT_ID.test(adopt) || !returnTo) return null;
-  return MANAGER_PATH.exec(returnTo)?.[1]?.toLowerCase() === adopt.toLowerCase() ? adopt : null;
+  if (!adopt || !isManagerEventId(adopt) || !returnTo) return null;
+  const eventId = canonicalManagerReturnPath(returnTo)?.eventId;
+  return eventId?.toLowerCase() === adopt.toLowerCase() ? adopt : null;
 }
 
 function hostRecoveryHref(
@@ -34,7 +33,7 @@ function hostRecoveryHref(
   returnTo?: string | null,
   pending = false,
 ): string {
-  const validEventId = eventId && EVENT_ID.test(eventId) ? eventId : null;
+  const validEventId = eventId && isManagerEventId(eventId) ? eventId : null;
   // A valid manager event supplies its own safe return destination. Otherwise a
   // caller may only keep a separately validated path; raw query state never wins.
   const safeDestination = safeReturnTo(returnTo)

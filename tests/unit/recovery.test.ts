@@ -122,6 +122,11 @@ describe('host recovery paths', () => {
   it('accepts only the two local destinations a recovery can end at', () => {
     expect(safeReturnTo('/host/events')).toBe('/host/events');
     expect(safeReturnTo(`/manage/event/${EVENT}`)).toBe(`/manage/event/${EVENT}`);
+    expect(safeReturnTo(`/manage/event/${EVENT}?section=gallery&mode=album`))
+      .toBe(`/manage/event/${EVENT}?section=gallery&mode=album`);
+    expect(safeReturnTo(`/manage/event/${EVENT}?section=gallery&mode=shared`))
+      .toBe(`/manage/event/${EVENT}?section=gallery&mode=guest-gallery`);
+    expect(safeReturnTo(`/manage/event/${EVENT}?section=intake`)).toBe(`/manage/event/${EVENT}`);
   });
 
   // These are the strings that turn `returnTo` into an open redirect. Each one must
@@ -137,6 +142,10 @@ describe('host recovery paths', () => {
     ['unknown local path', '/admin'],
     ['manager path with non-uuid', '/manage/event/not-a-uuid'],
     ['manager path with suffix', `/manage/event/${EVENT}/settings`],
+    ['manager path with unknown query', `/manage/event/${EVENT}?section=gallery&mode=album&extra=1`],
+    ['manager path with duplicate mode', `/manage/event/${EVENT}?section=gallery&mode=album&mode=library`],
+    ['manager path with fragment', `/manage/event/${EVENT}?section=gallery#secret`],
+    ['host events query', '/host/events?section=gallery'],
     ['empty', ''],
     ['null', null],
   ])('refuses %s', (_label, value) => {
@@ -145,6 +154,7 @@ describe('host recovery paths', () => {
 
   it('adopts only the event the host is actually returning to', () => {
     expect(adoptTargetFor(`/manage/event/${EVENT}`, EVENT)).toBe(EVENT);
+    expect(adoptTargetFor(`/manage/event/${EVENT}?section=gallery&mode=album`, EVENT)).toBe(EVENT);
   });
 
   it('refuses an adopt target that disagrees with the return path', () => {
@@ -163,6 +173,13 @@ describe('host recovery paths', () => {
     const returnTo = safeReturnTo(search.get('returnTo'));
     expect(returnTo).toBe(`/manage/event/${EVENT}`);
     expect(adoptTargetFor(returnTo, search.get('adopt'))).toBe(EVENT);
+  });
+
+  it('uses the canonical guest-gallery destination in a sign-in href', () => {
+    const href = hostSignInHref(EVENT, `/manage/event/${EVENT}?section=gallery&mode=shared`);
+    const search = new URLSearchParams(href.slice(href.indexOf('?') + 1));
+
+    expect(search.get('returnTo')).toBe(`/manage/event/${EVENT}?section=gallery&mode=guest-gallery`);
   });
 
   it('falls back to a bare sign-in link for an unusable event id', () => {

@@ -4900,7 +4900,7 @@ describe('host recovery from a dead credential', () => {
     expect(screen.queryByText(/added to your account/u)).not.toBeInTheDocument();
   });
 
-  it('keeps the return note when the management link it arrived with has already expired', async () => {
+  it('keeps the return note for a query-bearing Manager destination when the management link it arrived with has already expired', async () => {
     const eventId = '11111111-2222-4333-8444-555555555555';
     // The dead-end path: the cookie that authorizes the lookup is the thing that
     // expired. The note loses the name and keeps the promise rather than erroring.
@@ -4908,11 +4908,12 @@ describe('host recovery from a dead credential', () => {
       { code: 'SESSION_EXPIRED', message: 'That link has expired.', requestId: 'r' }, 401,
     )));
     render(<RouterProvider router={createAppRouter([
-      `/host/login?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}`,
+      `/host/login?returnTo=%2Fmanage%2Fevent%2F${eventId}%3Fsection%3Dgallery%26mode%3Dalbum&adopt=${eventId}`,
     ])} />);
 
     expect(await screen.findByText('You will come back here, and this event will be added to your account.'))
       .toBeVisible();
+    expect(fetch).toHaveBeenCalledWith(`/api/manage/events/${eventId}`, expect.anything());
     expect(screen.queryByText('That link has expired.')).not.toBeInTheDocument();
   });
 
