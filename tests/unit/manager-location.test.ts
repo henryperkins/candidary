@@ -140,6 +140,8 @@ describe('manager location paths', () => {
     ['duplicate section', `/manage/event/${EVENT}?section=rsvp&section=gallery`],
     ['duplicate mode', `/manage/event/${EVENT}?section=gallery&mode=album&mode=guest-gallery`],
     ['fragment', `/manage/event/${EVENT}#saved`],
+    ['bare fragment', `/manage/event/${EVENT}#`],
+    ['bare fragment after canonical query', `/manage/event/${EVENT}?section=rsvp#`],
     ['foreign origin', `https://evil.example/manage/event/${EVENT}`],
     ['protocol-relative', `//evil.example/manage/event/${EVENT}`],
     ['malformed path', `/manage/event/${EVENT}/settings`],

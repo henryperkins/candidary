@@ -91,7 +91,12 @@ export function canonicalManagerReturnPath(value: string): {
   eventId: string;
   href: string;
 } | null {
-  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return null;
+  if (
+    typeof value !== 'string'
+    || !value.startsWith('/')
+    || value.startsWith('//')
+    || value.includes('#')
+  ) return null;
 
   try {
     const url = new URL(value, 'https://candidary.invalid');
