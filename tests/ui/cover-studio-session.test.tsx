@@ -489,6 +489,7 @@ describe('useCoverStudioSession', () => {
     });
     expect(session.result.current.draftState.status).toBe('error');
 
+    act(() => session.result.current.openStudio());
     await act(async () => session.result.current.enterCompose());
 
     expect(reservations).toBe(2);
@@ -1188,10 +1189,13 @@ describe('useCoverStudioSession', () => {
     expect(session.result.current.open).toBe(false);
   });
 
-  it('fetches each real effect at most once and revokes all URLs on close', async () => {
+  it('prefetches all five real effects through one deduplicated session owner', async () => {
     const createObjectURL = vi.fn()
       .mockReturnValueOnce('blob:natural')
-      .mockReturnValueOnce('blob:warm');
+      .mockReturnValueOnce('blob:warm')
+      .mockReturnValueOnce('blob:film')
+      .mockReturnValueOnce('blob:soft')
+      .mockReturnValueOnce('blob:monochrome');
     const revokeObjectURL = vi.fn();
     Object.defineProperties(URL, {
       createObjectURL: { configurable: true, value: createObjectURL },
@@ -1221,19 +1225,270 @@ describe('useCoverStudioSession', () => {
     }));
     await act(async () => session.result.current.enterCompose());
     await act(async () => {
-      await session.result.current.setEffect('warm');
-      await session.result.current.setEffect('warm');
+      await Promise.all([
+        session.result.current.prefetchStylePreviews(),
+        session.result.current.prefetchStylePreviews(),
+      ]);
     });
-    expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith('/previews/warm')))
-      .toHaveLength(1);
+    for (const effect of ['natural', 'warm', 'film', 'soft', 'monochrome']) {
+      expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith(`/previews/${effect}`)))
+        .toHaveLength(1);
+    }
     expect(session.result.current.styleThumbnails.warm).toMatchObject({
       status: 'ready',
       url: 'blob:warm',
     });
 
     act(() => session.result.current.close());
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:natural');
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:warm');
+    for (const url of ['blob:natural', 'blob:warm', 'blob:film', 'blob:soft', 'blob:monochrome']) {
+      expect(revokeObjectURL).toHaveBeenCalledTimes(5);
+      expect(revokeObjectURL).toHaveBeenCalledWith(url);
+    }
+  });
+
+  it('retains the last usable tile until an exact replacement succeeds', async () => {
+    const createObjectURL = vi.fn()
+      .mockReturnValueOnce('blob:natural-old')
+      .mockReturnValueOnce('blob:warm-old')
+      .mockReturnValueOnce('blob:natural-new')
+      .mockReturnValueOnce('blob:warm-new');
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: createObjectURL },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const ready = (id: string, source: CoverDraftView['source']) => draft({
+      id,
+      source,
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.3, y: 0.4, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    let draftRequest = 0;
+    let newWarmRequest = 0;
+    let releaseNatural!: () => void;
+    const naturalGate = new Promise<void>((resolve) => { releaseNatural = resolve; });
+    let newNaturalStarted = false;
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        draftRequest += 1;
+        return envelope({
+          draft: draftRequest === 1
+            ? ready('draft-old', 'existing-upload')
+            : ready('draft-new', 'new-upload'),
+          ingress: null,
+        }, 201);
+      }
+      if (value.endsWith('/draft-old/previews/natural')
+          || value.endsWith('/draft-old/previews/warm')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/draft-new/previews/natural')) {
+        newNaturalStarted = true;
+        await naturalGate;
+        return new Response(new Uint8Array([4, 5, 6]), { status: 200 });
+      }
+      if (value.endsWith('/draft-new/previews/warm')) {
+        newWarmRequest += 1;
+        return newWarmRequest === 1
+          ? envelope({ code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' }, 503)
+          : new Response(new Uint8Array([7, 8, 9]), { status: 200 });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => session.result.current.setEffect('warm'));
+    expect(session.result.current.styleThumbnails.warm).toMatchObject({
+      status: 'ready', url: 'blob:warm-old',
+    });
+
+    let replacement!: Promise<void>;
+    act(() => {
+      replacement = session.result.current.chooseFile(
+        new File(['new'], 'new.jpg', { type: 'image/jpeg', lastModified: 11 }),
+      );
+    });
+    await waitFor(() => expect(newNaturalStarted).toBe(true));
+    expect(revokeObjectURL).not.toHaveBeenCalledWith('blob:natural-old');
+    expect(revokeObjectURL).not.toHaveBeenCalledWith('blob:warm-old');
+
+    releaseNatural();
+    await act(async () => replacement);
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:natural-old')).toHaveLength(1);
+    expect(revokeObjectURL).not.toHaveBeenCalledWith('blob:warm-old');
+    expect(session.result.current.styleThumbnails.warm).toMatchObject({
+      status: 'loading', url: 'blob:warm-old',
+    });
+    expect(session.result.current.canvasPreview).toEqual({
+      kind: 'draft', url: 'blob:natural-new',
+    });
+
+    await act(async () => session.result.current.setEffect('warm'));
+    expect(session.result.current.styleThumbnails.warm).toMatchObject({
+      status: 'error', url: 'blob:warm-old',
+    });
+    expect(session.result.current.canvasPreview).toEqual({
+      kind: 'draft', url: 'blob:natural-new',
+    });
+    expect(revokeObjectURL).not.toHaveBeenCalledWith('blob:warm-old');
+
+    await act(async () => session.result.current.retryEffectPreview('warm'));
+    expect(session.result.current.styleThumbnails.warm).toMatchObject({
+      status: 'ready', url: 'blob:warm-new',
+    });
+    expect(session.result.current.canvasPreview).toEqual({
+      kind: 'draft', url: 'blob:warm-new',
+    });
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:warm-old')).toHaveLength(1);
+
+    session.unmount();
+    for (const url of ['blob:natural-old', 'blob:warm-old', 'blob:natural-new', 'blob:warm-new']) {
+      expect(revokeObjectURL.mock.calls.filter(([revoked]) => revoked === url)).toHaveLength(1);
+    }
+  });
+
+  it('keeps a newer request owned when a superseded request settles', async () => {
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:natural') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.3, y: 0.4, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const warmSignals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) return envelope({ draft: ready, ingress: null }, 201);
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      if (value.endsWith('/previews/warm')) {
+        warmSignals.push(init?.signal as AbortSignal);
+        await (warmSignals.length === 1 ? firstGate : secondGate);
+        return new Response(new Uint8Array([4, 5, 6]), { status: 200 });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }),
+      reconciler: reconciler(),
+    }));
+    await act(async () => session.result.current.enterCompose());
+
+    let first!: Promise<void>;
+    act(() => { first = session.result.current.setEffect('warm'); });
+    await waitFor(() => expect(warmSignals).toHaveLength(1));
+    act(() => {
+      session.result.current.close();
+      session.result.current.openStudio();
+    });
+    let second!: Promise<void>;
+    act(() => { second = session.result.current.setEffect('warm'); });
+    await waitFor(() => expect(warmSignals).toHaveLength(2));
+
+    releaseFirst();
+    await act(async () => first);
+    session.unmount();
+    expect(warmSignals[1]?.aborted).toBe(true);
+
+    releaseSecond();
+    await second;
+  });
+
+  it('retries a failed effect after close and reopen without refetching cached effects', async () => {
+    const createdUrls: string[] = [];
+    const createObjectURL = vi.fn(() => {
+      const url = `blob:preview-${createdUrls.length + 1}`;
+      createdUrls.push(url);
+      return url;
+    });
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: createObjectURL },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const ready = draft({
+      source: 'existing-upload',
+      state: 'ready',
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.3, y: 0.4, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    let warmRequests = 0;
+    const fetchMock = vi.fn(async (path: RequestInfo | URL) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) return envelope({ draft: ready, ingress: null }, 201);
+      if (value.endsWith('/previews/warm')) {
+        warmRequests += 1;
+        return warmRequests === 1
+          ? envelope({ code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' }, 503)
+          : new Response(new Uint8Array([4, 5, 6]), { status: 200 });
+      }
+      if (value.includes('/previews/')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({
+        version: 1,
+        source: { kind: 'upload' },
+        focus: { mode: 'auto' },
+        effect: 'natural',
+      }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.enterCompose());
+    await act(async () => session.result.current.setEffect('warm'));
+    expect(session.result.current.styleThumbnails.warm.status).toBe('error');
+
+    act(() => session.result.current.close());
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:preview-1')).toHaveLength(1);
+    expect(session.result.current.styleThumbnails.warm.status).toBe('idle');
+
+    act(() => session.result.current.openStudio());
+    await act(async () => session.result.current.prefetchStylePreviews());
+
+    expect(warmRequests).toBe(2);
+    expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith('/previews/natural')))
+      .toHaveLength(1);
+    expect(session.result.current.styleThumbnails.warm.status).toBe('ready');
+    expect(session.result.current.selection.effect).toBe('warm');
+
+    session.unmount();
+    expect(createdUrls).toHaveLength(6);
+    for (const url of createdUrls) {
+      expect(revokeObjectURL.mock.calls.filter(([revoked]) => revoked === url)).toHaveLength(1);
+    }
   });
 
   it('marks dispatch before publication and sends nothing with a before-dispatch denial', async () => {

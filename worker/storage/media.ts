@@ -3,6 +3,7 @@ import { ApiError } from '../../shared/errors';
 import type { MediaRecord } from '../db/types';
 import type {
   ClaimedMediaPromotion,
+  MediaObjectDeletionClaim,
   MediaObjectPromotion,
   MediaRepository,
 } from '../db/media';
@@ -12,7 +13,7 @@ import {
 } from '../media-upload-release';
 import { resolveMediaTimeline, type MediaTimelineContext } from '../media-timeline';
 import { inspectImageHeader } from '../security/image-metadata';
-import { finalizedMediaObjectKey, legacyMediaPreviewObjectKey } from './media-keys';
+import { finalizedMediaObjectKey } from './media-keys';
 
 const MEDIA_INGRESS_LEASE_MS = 20 * 60 * 1_000;
 
@@ -622,41 +623,58 @@ export async function cleanupInactiveMediaPromotion(
   );
 }
 
+/**
+ * Delete exactly the object keys a suppression claim won, and prove they are gone.
+ *
+ * The claim is the authorization. A key an active export holds, or a recoverable
+ * photo still owns, never appears in one — so this cannot be the path that pulls
+ * bytes out from under either, no matter which caller reaches it. An empty claim
+ * is a complete, correct no-op: the tombstone janitor owns those keys until the
+ * hold that kept them releases.
+ */
 export async function deleteMediaObjectAliases(
   legacyBucket: R2Bucket,
   canonicalBucket: R2Bucket,
-  repository: MediaRepository,
-  beforeDelete: MediaRecord,
+  claim: MediaObjectDeletionClaim,
 ): Promise<void> {
-  const deleted = await repository.getById(beforeDelete.id);
-  if (!deleted || deleted.uploadState !== 'deleted' || deleted.deletedAt === null) {
-    throw new Error('Media object cleanup requires a durable deleted row.');
-  }
-  // The durable promotion row is also deletion cleanup inventory. The route's
-  // attempt is latency only; hourly recovery owns eventual verified deletion.
-  if (await repository.getPromotion(beforeDelete.id)) return;
-  const legacyKeys = new Set<string>([
-    legacyMediaPreviewObjectKey(beforeDelete.eventId, beforeDelete.id),
-  ]);
-  const canonicalKeys = new Set<string>([
-    finalizedMediaObjectKey(beforeDelete.eventId, beforeDelete.id),
-  ]);
-  (beforeDelete.objectBucketGeneration === 'canonical' ? canonicalKeys : legacyKeys)
-    .add(beforeDelete.objectKey);
-  (deleted.objectBucketGeneration === 'canonical' ? canonicalKeys : legacyKeys)
-    .add(deleted.objectKey);
-  if (beforeDelete.previewObjectKey) legacyKeys.add(beforeDelete.previewObjectKey);
-  if (deleted.previewObjectKey) legacyKeys.add(deleted.previewObjectKey);
+  if (claim.legacyKeys.length === 0 && claim.canonicalKeys.length === 0) return;
   await Promise.all([
-    legacyBucket.delete([...legacyKeys]),
-    canonicalBucket.delete([...canonicalKeys]),
+    claim.legacyKeys.length > 0 ? legacyBucket.delete(claim.legacyKeys) : Promise.resolve(),
+    claim.canonicalKeys.length > 0 ? canonicalBucket.delete(claim.canonicalKeys) : Promise.resolve(),
   ]);
   for (const [bucket, keys] of [
-    [legacyBucket, legacyKeys],
-    [canonicalBucket, canonicalKeys],
+    [legacyBucket, claim.legacyKeys],
+    [canonicalBucket, claim.canonicalKeys],
   ] as const) {
     for (const key of keys) {
       if (await bucket.head(key)) throw new Error('Deleted media object remained in storage.');
     }
   }
+}
+
+/**
+ * The whole retirement of one permanently deleted photo: claim what may go, then
+ * delete exactly that. Callers use this rather than assembling key sets of their
+ * own, because a key set assembled from a record is precisely the bypass the
+ * source hold exists to close.
+ */
+export async function retireMediaObjects(
+  legacyBucket: R2Bucket,
+  canonicalBucket: R2Bucket,
+  repository: MediaRepository,
+  media: MediaRecord,
+  claimedAt: string,
+): Promise<MediaObjectDeletionClaim> {
+  const deleted = await repository.getById(media.id);
+  if (!deleted || deleted.uploadState !== 'deleted' || deleted.deletedAt === null) {
+    throw new Error('Media object cleanup requires a durable deleted row.');
+  }
+  // The durable promotion row is also deletion cleanup inventory. The route's
+  // attempt is latency only; hourly recovery owns eventual verified deletion.
+  if (await repository.getPromotion(media.id)) {
+    return { mediaId: media.id, eventId: media.eventId, legacyKeys: [], canonicalKeys: [] };
+  }
+  const claim = await repository.claimMediaObjectDeletion(deleted, claimedAt);
+  await deleteMediaObjectAliases(legacyBucket, canonicalBucket, claim);
+  return claim;
 }

@@ -8,6 +8,7 @@ import type {
   EventThemeOverridesV1,
   EventThemePresetId,
   EventView,
+  GalleryAudienceSummaryView,
   GuestEventView,
   GuestGuestbookItem,
   ManagerGuestbookItem,
@@ -78,6 +79,10 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
 
 export const EVENT_FIXTURE: EventView = {
   ...GUEST_EVENT_FIXTURE,
+  // Manager-only, like the capacity counters beside them: a guest is never told
+  // how much of the event is in Recently deleted.
+  recoverableMediaCount: 0,
+  recoverableBytes: 0,
   // Manager-only semantic configuration and preparation never reach the guest.
   cover: {
     config: { version: 1, source: { kind: 'none' } },
@@ -334,6 +339,7 @@ interface ManagerRouteOptions {
   };
   exports?: unknown[];
   album?: AlbumWorkspaceRouteOptions;
+  galleryAudienceSummary?: GalleryAudienceSummaryView;
   cover?: Buffer;
   coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
   coverScenario?: CoverStudioRouteScenario;
@@ -1049,7 +1055,8 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
 
   const albumView = (): AlbumView => {
     const entries = resolveAlbumEntries();
-    const firstPhotoId = entries.find((entry) => entry.kind === 'photo')?.photo.id ?? null;
+    const firstEntry = entries.find((entry) => entry.kind === 'photo');
+    const firstPhotoId = firstEntry?.kind === 'photo' ? firstEntry.photo.id : null;
     const coverIsPicked = albumCoverMediaId !== null && pickedMediaIds.has(albumCoverMediaId);
     return {
       revision: albumRevision,
@@ -1058,8 +1065,11 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       description: albumDescription,
       coverMediaId: coverIsPicked ? albumCoverMediaId : null,
       effectiveCoverMediaId: coverIsPicked ? albumCoverMediaId : firstPhotoId,
+      // These fixtures never trash a photo, so nothing is retained here.
+      coverRetained: null,
       entries,
       photoCount: entries.filter((entry) => entry.kind === 'photo').length,
+      retainedCount: 0,
       sectionCount: entries.filter((entry) => entry.kind === 'section').length,
       totalBytes: entries.filter((entry) => entry.kind === 'photo').length * 128,
     };
@@ -1067,21 +1077,37 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
 
   const publicAlbumView = (): PublicAlbumView => {
     const album = albumView();
+    const entries: PublicAlbumView['entries'] = [];
+    let pendingSection: Extract<PublicAlbumView['entries'][number], { kind: 'section' }> | null = null;
+    for (const entry of album.entries) {
+      if (entry.kind === 'section') {
+        pendingSection = { kind: 'section', id: entry.id, heading: entry.heading };
+        continue;
+      }
+      // A retained slot is a Manager concept; a recipient sees the album close
+      // up around the gap. Keep a section pending across that gap so it only
+      // appears if a later included photo gives it content.
+      if (entry.kind === 'photo-retained') continue;
+      if (pendingSection) {
+        entries.push(pendingSection);
+        pendingSection = null;
+      }
+      entries.push({
+        kind: 'photo',
+        photo: {
+          id: entry.photo.id,
+          // Publication controls caption eligibility for the Album link only.
+          caption: entry.photo.publicationStatus === 'published' ? entry.photo.caption : null,
+          previewAvailable: true,
+        },
+      });
+    }
     return {
       title: album.title,
       description: album.description,
       coverMediaId: album.effectiveCoverMediaId,
-      entries: album.entries.map((entry) => entry.kind === 'section'
-        ? { kind: 'section' as const, id: entry.id, heading: entry.heading }
-        : {
-            kind: 'photo' as const,
-            photo: {
-              id: entry.photo.id,
-              caption: entry.photo.caption,
-              previewAvailable: true,
-            },
-          }),
-      photoCount: album.photoCount,
+      entries,
+      photoCount: entries.filter((entry) => entry.kind === 'photo').length,
     };
   };
 
@@ -1367,7 +1393,23 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     const mediaPage = options.mediaPages[cursor] ?? { media: [], nextCursor: null };
     return route.fulfill({ json: { data: mediaPage, requestId: 'request-a' } });
   });
+  await page.route(`${base}/gallery/summary`, (route) => {
+    const album = albumView();
+    const summary = options.galleryAudienceSummary ?? {
+      albumPhotoCount: album.photoCount,
+      albumEntryCount: album.entries.length,
+      albumLink: { active: shareActive, sharedAt: shareActive ? sharedAt : null },
+      guestGalleryVisible: event.galleryVisible,
+      guestGalleryPublishedCount: galleryMedia.filter(
+        ({ publicationStatus }) => publicationStatus === 'published',
+      ).length,
+    };
+    return route.fulfill({ json: { data: { summary }, requestId: 'request-a' } });
+  });
   await page.route(`${base}/gallery**`, (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/gallery/summary')) {
+      return route.fallback();
+    }
     const first = options.mediaPages.first?.media ?? [];
     const media = (first as Array<Record<string, unknown>>).map((item, index) => ({
       id: item.id ?? `gallery-${index}`,
@@ -1478,9 +1520,6 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     guestbookItems = guestbookItems.map((candidate) => candidate.id === id ? item : candidate);
     await route.fulfill({ json: { data: { item }, requestId: 'request-a' } });
   });
-  await page.route(`${base}/exports`, (route) => route.fulfill({
-    json: { data: { exports: options.exports ?? [] }, requestId: 'request-a' },
-  }));
   const summary = options.rsvp?.summary ?? RSVP_SUMMARY_FIXTURE;
   const households = options.rsvp?.households ?? RSVP_HOUSEHOLD_LIST_FIXTURE;
   const detail = options.rsvp?.detail ?? RSVP_HOUSEHOLD_DETAIL_FIXTURE;
@@ -1663,6 +1702,45 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     });
   });
 
+  // Manager Album Preview. Registered with the other exact `/album/...` routes,
+  // and deliberately independent of `shareActive`: Preview answers "what will a
+  // recipient see", which a host may ask before they ever share and after they
+  // stop. It is Manager-authenticated and never mints or exposes a credential.
+  await page.route(`${base}/album/preview`, async (route) => {
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      headers: { 'cache-control': 'private, no-store', vary: 'Cookie' },
+      json: { data: { album: publicAlbumView() }, requestId: 'request-a' },
+    });
+  });
+
+  await page.route(`${base}/album/media/*/preview`, async (route) => {
+    const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    if (!pickedMediaIds.has(mediaId)) {
+      return route.fulfill({
+        status: 403,
+        headers: { 'cache-control': 'private, no-store', vary: 'Cookie' },
+        json: {
+          code: 'RESOURCE_FORBIDDEN',
+          message: 'This photo is not available.',
+          requestId: 'request-a',
+        },
+      });
+    }
+    observeAlbumRoute(route, 200);
+    return route.fulfill({
+      status: 200,
+      headers: {
+        'cache-control': 'private, no-store',
+        vary: 'Cookie',
+        'x-content-type-options': 'nosniff',
+        'cross-origin-resource-policy': 'same-origin',
+      },
+      contentType: 'image/png',
+      body: PHOTOGRAPHIC_COVER,
+    });
+  });
+
   // More exact than `/album**`, therefore intentionally registered afterwards.
   await page.route(`${base}/album/share`, async (route) => {
     await albumOptions.shareGate;
@@ -1706,10 +1784,18 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       }
     }
     observeAlbumRoute(route, 200);
-    return route.fulfill({ json: { data: { changed }, requestId: 'request-a' } });
+    return route.fulfill({
+      json: {
+        data: { changed: galleryMedia.filter(({ id }) => changed.includes(id)) },
+        requestId: 'request-a',
+      },
+    });
   });
 
   await page.route(`${base}/gallery**`, (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/gallery/summary')) {
+      return route.fallback();
+    }
     const query = new URL(route.request().url()).searchParams;
     const search = query.get('query')?.toLocaleLowerCase() ?? '';
     const favoritesOnly = query.get('favorites') === '1';
@@ -1754,8 +1840,11 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     return route.fulfill({ json: { data: { media }, requestId: 'request-a' } });
   });
 
-  // The list/create route comes after the legacy `/exports` route above. The
-  // download and retry handlers are still more exact and are registered last.
+  // One authoritative list/create route owns the lifecycle. A newly created
+  // job remains queued on the first list read, advances to running with
+  // observable progress on the second, and becomes ready on the configured
+  // terminal read.
+  // Download and retry handlers are more exact and are registered last.
   await page.route(`${base}/exports`, async (route) => {
     const method = route.request().method();
     if (method === 'POST') {
@@ -1769,11 +1858,18 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
         kind,
         state: 'queued',
         snapshotAt: '2026-08-23T12:00:00.000Z',
+        createdAt: '2026-08-23T12:00:00.000Z',
+        startedAt: null,
+        completedAt: null,
         mediaCount,
         totalBytes: mediaCount * 128,
+        processedMediaCount: null,
+        processedBytes: null,
+        progressUpdatedAt: null,
         attempt: 1,
         partCount: 0,
         expiresAt: null,
+        errorCode: null,
         guestbookEntryCount: kind === 'album' ? null : guestbookItems.length,
         guestbookSharedCount: kind === 'album' ? null : currentGuestbookSummary().sharedCount,
         guestbookEventName: kind === 'album' ? null : event.name,
@@ -1794,16 +1890,40 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
 
     if (createdExportId) {
       createdExportReads += 1;
-      const readyAfter = Math.max(1, albumOptions.exportReadyAfterReads ?? 2);
-      if (createdExportReads >= readyAfter) {
-        const index = exportJobs.findIndex(({ id }) => id === createdExportId);
-        const current = exportJobs[index];
-        if (current && current.state !== 'ready') {
+      const readyAfter = Math.max(3, albumOptions.exportReadyAfterReads ?? 3);
+      const index = exportJobs.findIndex(({ id }) => id === createdExportId);
+      const current = exportJobs[index];
+      if (current && current.state !== 'ready') {
+        if (createdExportReads >= readyAfter) {
           exportJobs[index] = {
             ...current,
             state: 'ready',
+            startedAt: current.startedAt ?? '2026-08-23T12:00:01.000Z',
+            completedAt: '2026-08-23T12:00:03.000Z',
+            processedMediaCount: current.mediaCount,
+            processedBytes: current.totalBytes,
+            progressUpdatedAt: '2026-08-23T12:00:03.000Z',
             partCount: current.mediaCount > 0 ? 1 : 0,
             expiresAt: '2026-08-24T12:00:00.000Z',
+          };
+        } else if (createdExportReads > 1) {
+          const processedMediaCount = current.mediaCount === 0
+            ? 0
+            : Math.max(1, Math.floor(current.mediaCount / 2));
+          const processedBytes = current.mediaCount === 0
+            ? 0
+            : Math.round(current.totalBytes * processedMediaCount / current.mediaCount);
+          exportJobs[index] = {
+            ...current,
+            state: 'running',
+            startedAt: '2026-08-23T12:00:01.000Z',
+            completedAt: null,
+            processedMediaCount,
+            processedBytes,
+            progressUpdatedAt: '2026-08-23T12:00:02.000Z',
+            partCount: 0,
+            expiresAt: null,
+            errorCode: null,
           };
         }
       }
@@ -1817,7 +1937,19 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   await page.route(`${base}/exports/*/retry`, (route) => {
     const exportId = new URL(route.request().url()).pathname.split('/').at(-2)!;
     const index = exportJobs.findIndex(({ id }) => id === exportId);
-    if (index >= 0) exportJobs[index] = { ...exportJobs[index]!, state: 'queued', attempt: exportJobs[index]!.attempt + 1 };
+    if (index >= 0) exportJobs[index] = {
+      ...exportJobs[index]!,
+      state: 'queued',
+      startedAt: null,
+      completedAt: null,
+      processedMediaCount: null,
+      processedBytes: null,
+      progressUpdatedAt: null,
+      attempt: exportJobs[index]!.attempt + 1,
+      partCount: 0,
+      expiresAt: null,
+      errorCode: null,
+    };
     observeAlbumRoute(route, 200);
     return route.fulfill({
       json: { data: { export: index >= 0 ? exportJobs[index] : null }, requestId: 'request-a' },

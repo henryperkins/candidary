@@ -26,7 +26,7 @@ import {
   DEFAULT_EVENT_THEME_CONFIG,
   serializeEventThemeConfig,
 } from '../../shared/event-theme';
-import { png } from './helpers';
+import { png, seedExportJob } from './helpers';
 
 interface TestMigration {
   name: string;
@@ -259,6 +259,12 @@ describe('manager media storage timestamp migration', () => {
       stored_media_count: 1,
       stored_bytes: 900,
     });
+
+    // The stamp above is the point of this test and had to happen on the exact
+    // 0005 schema. Reading it back is current-Worker code, and every ordinary
+    // media query has selected `trashed_at` since 0019, so finish the upgrade
+    // before asking the repository for the row the old Worker committed.
+    await applyD1Migrations(env.DB, migrations.slice(storedAtMigrationIndex + 1));
 
     const managerPage = await new MediaRepository(env.DB).listForManager('event-a');
     expect(managerPage.media.map((media) => media.id)).toContain('media-old-worker');
@@ -701,6 +707,97 @@ describe('media reservation and lifecycle', () => {
       .toMatchObject({ suppressionStartedAt: '2026-07-21T12:36:03.000Z' });
   });
 
+  it('settles a verified promotion when trash wins before the pointer compare-and-set', async () => {
+    await seedEvent();
+    const sessionId = await seedGuestSession();
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve({
+      id: 'media-verified-trash-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      objectKey: 'events/event-a/media/media-verified-trash-race', originalFilename: 'photo.png',
+      mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
+      idempotencyKey: 'idem-verified-trash-race',
+      reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
+    });
+    await env.DB.exec('DROP TRIGGER IF EXISTS media_stored_legacy_guard_update;');
+    await repository.finalize(
+      reserved.id,
+      { byteSize: 128, width: 1200, height: 800 },
+      '2026-07-21T12:16:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:16:00.000Z' },
+    );
+    const previewKey = `events/event-a/previews/${reserved.id}.webp`;
+    await repository.setPreviewObjectKey(reserved.id, previewKey);
+    await env.MEDIA_BUCKET.put(previewKey, png(320, 240));
+    const claimToken = 'verified-trash-race-owner-at-least-sixteen';
+    const claimed = await repository.claimPromotion(
+      reserved.id,
+      claimToken,
+      '2026-07-21T12:16:01.000Z',
+      '2026-07-21T12:36:01.000Z',
+    );
+    expect(claimed).not.toBeNull();
+    await expect(repository.recordPromotionSource(reserved.id, claimToken, {
+      etag: 'legacy-source-etag', mimeType: 'image/png', byteSize: 128,
+      sha256: 'c'.repeat(64), width: 1200, height: 800,
+      recordedAt: '2026-07-21T12:16:02.000Z',
+    })).resolves.toBe(true);
+    const finalKey = finalizedMediaObjectKey('event-a', reserved.id);
+    await repository.ensureFinalObjectWriteTombstone(
+      reserved.id, finalKey, '2026-07-21T12:16:02.000Z',
+    );
+    await expect(repository.markPromotionTargetVerified(
+      reserved.id,
+      claimToken,
+      'canonical-target-etag',
+      '2026-07-21T12:16:03.000Z',
+    )).resolves.toBe(true);
+
+    // Trash commits after target verification but before the pointer CAS.
+    await repository.trashStored('event-a', reserved.id, '2026-07-21T12:16:04.000Z');
+    await expect(repository.commitPromotionPointer(
+      reserved.id, claimToken, '2026-07-21T12:16:05.000Z',
+    )).resolves.toBe(false);
+    await expect(repository.parkInactiveVerifiedPromotionCleanup(
+      reserved.id, claimToken, '2026-07-21T12:16:06.000Z',
+    )).resolves.toBe(true);
+    await expect(repository.handoffPromotionToPermanentSuppression(
+      reserved.id, claimToken, '2026-07-21T12:16:07.000Z',
+    )).resolves.toBe(true);
+
+    expect(await repository.getPromotion(reserved.id)).toBeNull();
+    expect(await repository.getById(reserved.id)).toMatchObject({
+      uploadState: 'stored',
+      objectBucketGeneration: 'legacy',
+      objectKey: reserved.objectKey,
+      previewObjectKey: previewKey,
+      trashedAt: '2026-07-21T12:16:04.000Z',
+    });
+    const tombstones = new MediaObjectWriteTombstoneRepository(env.DB);
+    expect(await tombstones.get(reserved.objectKey, 'legacy'))
+      .toMatchObject({ suppressionStartedAt: null });
+    expect(await tombstones.get(finalKey, 'canonical'))
+      .toMatchObject({ suppressionStartedAt: '2026-07-21T12:16:07.000Z' });
+    expect(await tombstones.get(previewKey, 'legacy'))
+      .toMatchObject({ suppressionStartedAt: null });
+    expect(await env.MEDIA_BUCKET.head(previewKey)).not.toBeNull();
+
+    const restored = await repository.restoreTrashed(
+      'event-a', reserved.id, '2026-07-21T12:16:08.000Z',
+    );
+    expect(restored).toMatchObject({
+      uploadState: 'stored',
+      objectBucketGeneration: 'legacy',
+      objectKey: reserved.objectKey,
+      previewObjectKey: previewKey,
+      deletedAt: null,
+      trashedAt: null,
+      restoreUntil: null,
+    });
+    expect(await tombstones.get(previewKey, 'legacy'))
+      .toMatchObject({ suppressionStartedAt: null });
+    expect(await env.MEDIA_BUCKET.head(previewKey)).not.toBeNull();
+  });
+
   it('hands a deleted canonical photo to permanent suppression without requiring a source-kind row', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
@@ -727,6 +824,15 @@ describe('media reservation and lifecycle', () => {
       .bind(reserved.id).run();
     await repository.delete(reserved.id, '2026-07-21T12:16:00.000Z');
     expect(await repository.getPromotion(reserved.id)).toBeNull();
+    // Suppression is no longer a side effect of the delete — it is the claim
+    // that wins the right to remove bytes, so that an export hold or a
+    // recoverable owner can withhold a key from any caller. The claim still has
+    // to reach a canonical final key with no promotion row behind it.
+    const claim = await repository.claimMediaObjectDeletion(
+      (await repository.getById(reserved.id))!,
+      '2026-07-21T12:16:00.000Z',
+    );
+    expect(claim.canonicalKeys).toContain(finalKey);
     expect(await new MediaObjectWriteTombstoneRepository(env.DB).get(finalKey, 'canonical')).toMatchObject({
       objectKind: 'final',
       suppressionStartedAt: '2026-07-21T12:16:00.000Z',
@@ -1851,16 +1957,28 @@ describe('RSVP household sessions and lookup budgets', () => {
 
 describe('export jobs', () => {
   it('permits only one queued or running export per event', async () => {
+    await env.DB.prepare(`
+      UPDATE export_protocol_admission
+      SET state = 'closed', closed_at = '2026-08-25T00:00:00.000Z'
+      WHERE singleton = 1 AND state = 'legacy-open'
+    `).run();
+    await env.DB.prepare(`
+      UPDATE export_protocol_admission
+      SET state = 'open',
+        worker_version_id = '123e4567-e89b-42d3-a456-426614174000',
+        admitted_at = '2026-08-25T00:00:01.000Z'
+      WHERE singleton = 1 AND state = 'closed'
+    `).run();
     await seedEvent();
     const exports = new ExportsRepository(env.DB);
-    await exports.createActive({
-      id: 'export-a', eventId: 'event-a', snapshotAt: now,
-      mediaCount: 2, totalBytes: 4096, createdAt: now,
-    });
+    // The first job is seeded rather than created. Creation is what the second
+    // call is testing, and since 0019 a queued complete job must be entry-backed
+    // with its Guestbook counts already frozen — the shape `seedExportJob`
+    // writes and the shape `createActive` no longer accepts as a fixture.
+    await seedExportJob({ id: 'export-a', eventId: 'event-a', snapshotAt: now, createdAt: now });
 
     await expect(exports.createActive({
-      id: 'export-b', eventId: 'event-a', snapshotAt: now,
-      mediaCount: 2, totalBytes: 4096, createdAt: now,
+      id: 'export-b', eventId: 'event-a', snapshotAt: now, createdAt: now,
     })).rejects.toMatchObject({ code: 'EXPORT_ALREADY_ACTIVE' });
   });
 });

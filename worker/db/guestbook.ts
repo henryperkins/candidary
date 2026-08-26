@@ -141,6 +141,7 @@ const GUEST_PROJECTION = `
   WHERE media.event_id = ?1
     AND media.upload_state = 'stored'
     AND media.deleted_at IS NULL
+    AND media.trashed_at IS NULL
     AND media.caption IS NOT NULL
     AND length(trim(media.caption)) > 0
 `;
@@ -196,6 +197,7 @@ const MANAGER_PROJECTION = `
   WHERE media.event_id = ?1
     AND media.upload_state = 'stored'
     AND media.deleted_at IS NULL
+    AND media.trashed_at IS NULL
     AND media.caption IS NOT NULL
     AND length(trim(media.caption)) > 0
 `;
@@ -473,6 +475,7 @@ export class GuestbookRepository {
         WHERE media.event_id = ?2
           AND media.upload_state = 'stored'
           AND media.deleted_at IS NULL
+          AND media.trashed_at IS NULL
           AND media.created_at <= ?3
           AND media.caption IS NOT NULL
           AND length(trim(media.caption)) > 0
@@ -552,6 +555,7 @@ export class GuestbookRepository {
       WHERE media.id = ?
         AND media.upload_state = 'stored'
         AND media.deleted_at IS NULL
+        AND media.trashed_at IS NULL
         AND media.caption IS NOT NULL
         AND length(trim(media.caption)) > 0
     `).bind(id).first<GuestbookRow>();

@@ -24,7 +24,10 @@ const entry = (id: string): AlbumEntryView => ({ kind: 'photo', photo: photo(id)
 const section = (id: string, heading: string): AlbumEntryView => ({ kind: 'section', id, heading });
 
 function ids(entries: readonly AlbumEntryView[]): string[] {
-  return entries.map((item) => (item.kind === 'photo' ? item.photo.id : item.id));
+  return entries.map((item) => {
+    if (item.kind === 'photo') return item.photo.id;
+    return item.kind === 'photo-retained' ? item.slot.mediaId : item.id;
+  });
 }
 
 describe('moveEntry', () => {

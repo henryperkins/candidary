@@ -5,6 +5,7 @@ import {
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { AlbumRepository } from '../db/album';
+import { PublicAlbumService } from './public-album';
 import {
   AlbumSharesRepository,
   type AlbumShareRecord,
@@ -40,25 +41,6 @@ function tokenParts(token: string): { id: string; secret: string } | null {
   return match ? { id: match[1]!, secret: match[2]! } : null;
 }
 
-function publicProjection(album: Awaited<ReturnType<AlbumRepository['get']>>): PublicAlbumView {
-  return {
-    title: album.title,
-    description: album.description,
-    coverMediaId: album.effectiveCoverMediaId,
-    entries: album.entries.map((entry) => entry.kind === 'section'
-      ? { kind: 'section' as const, id: entry.id, heading: entry.heading }
-      : {
-          kind: 'photo' as const,
-          photo: {
-            id: entry.photo.id,
-            caption: entry.photo.caption,
-            previewAvailable: entry.photo.previewAvailable,
-          },
-        }),
-    photoCount: album.photoCount,
-  };
-}
-
 export interface AlbumShareExchange {
   album: PublicAlbumView;
   session: SecretToken;
@@ -68,6 +50,7 @@ export interface AlbumShareExchange {
 export class AlbumShareService {
   private readonly shares: AlbumSharesRepository;
   private readonly albums: AlbumRepository;
+  private readonly publicAlbums: PublicAlbumService;
   private readonly events: EventsRepository;
 
   constructor(
@@ -76,6 +59,7 @@ export class AlbumShareService {
   ) {
     this.shares = new AlbumSharesRepository(env.DB);
     this.albums = new AlbumRepository(env.DB);
+    this.publicAlbums = new PublicAlbumService(env.DB);
     this.events = new EventsRepository(env.DB);
   }
 
@@ -158,7 +142,7 @@ export class AlbumShareService {
 
   async exchange(token: string, now = new Date()): Promise<AlbumShareExchange> {
     const { share, event } = await this.credential(token, now);
-    const album = publicProjection(await this.albums.get(share.eventId));
+    const album = await this.publicAlbums.project(share.eventId, now.toISOString());
     const session = createSecretToken();
     const expiresAtMs = Math.min(
       now.getTime() + (ALBUM_SHARE_SESSION_SECONDS * 1_000),
@@ -212,6 +196,6 @@ export class AlbumShareService {
 
   async publicAlbum(token: string, now = new Date()): Promise<PublicAlbumView> {
     const session = await this.authorizeSession(token, now);
-    return publicProjection(await this.albums.get(session.eventId));
+    return this.publicAlbums.project(session.eventId, now.toISOString());
   }
 }

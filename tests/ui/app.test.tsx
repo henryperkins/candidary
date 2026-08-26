@@ -1,10 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom';
+import { startTransition, useLayoutEffect, type ComponentProps } from 'react';
+import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useNavigate, useParams } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type * as ManagementLinkModule from '../../src/app/management-link';
-import type { MediaView } from '../../src/app/types';
+import type { ExportView, MediaView } from '../../src/app/types';
 
 const { replaceManagementLocation } = vi.hoisted(() => ({
   replaceManagementLocation: vi.fn(),
@@ -24,7 +25,7 @@ import {
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_PAGE_SIZE,
 } from '../../shared/constants';
-import type { GuestEventView } from '../../shared/contracts';
+import type { EventView, GalleryAudienceSummaryView, GuestEventView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
 import { hostSignInHref } from '../../src/app/recovery';
@@ -32,6 +33,13 @@ import { createAppRouter } from '../../src/app/router';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
 import { EventPage } from '../../src/pages/EventPage';
+import { ManagerPage } from '../../src/pages/ManagerPage';
+import {
+  ManagerGalleryWorkspace,
+  type GalleryAudienceAuthority,
+} from '../../src/features/gallery/ManagerGalleryWorkspace';
+import { ManagerUndoProvider } from '../../src/features/gallery/undo';
+import { useManagerResource } from '../../src/features/manager/resources';
 import { makeMedia } from '../e2e/fixtures/ui-data';
 
 function json(data: unknown, status = 200) {
@@ -45,6 +53,63 @@ function errorJson(body: Record<string, unknown>, status: number) {
   return Promise.resolve(new Response(JSON.stringify(body), {
     status, headers: { 'content-type': 'application/json' },
   }));
+}
+
+function ResourceCaptureHarness({ onResult }: { onResult(current: boolean, retired: boolean): void }) {
+  const resource = useManagerResource<number>({
+    eventId: 'event-a',
+    queryKey: 'capture',
+    enabled: false,
+    fallbackMessage: 'Capture failed.',
+    onEscalate: () => {},
+    load: async () => 0,
+  });
+  return <>
+    <button type="button" onClick={() => {
+      const current = resource.capture();
+      const accepted = resource.updateIfCurrent(current, (value) => (value ?? 0) + 1);
+      const retired = resource.capture();
+      resource.update((value) => (value ?? 0) + 1);
+      onResult(accepted, resource.updateIfCurrent(retired, (value) => (value ?? 0) + 1));
+    }}>Exercise capture</button>
+    <output aria-label="Captured value">{resource.state.value ?? 0}</output>
+  </>;
+}
+
+function DeferredResourceCaptureHarness() {
+  const resource = useManagerResource<number>({
+    eventId: 'event-a',
+    queryKey: 'capture',
+    enabled: false,
+    fallbackMessage: 'Capture failed.',
+    onEscalate: () => {},
+    load: async () => 0,
+  });
+  return <>
+    <button type="button" onClick={() => {
+      const capture = resource.capture();
+      // This is deliberately deferred. The newer update enters React's queue
+      // before React evaluates this functional updater, so accepted work must
+      // compose in queue order rather than consult a later ref generation.
+      startTransition(() => {
+        resource.updateIfCurrent(capture, (value) => (value ?? 0) + 1);
+      });
+      resource.update((value) => (value ?? 0) + 1);
+    }}>Compose deferred capture</button>
+    <output aria-label="Deferred captured value">{resource.state.value ?? 0}</output>
+  </>;
+}
+
+function LayoutReleaseManagerRoute({ onEventBLayout }: { onEventBLayout(): void }) {
+  const { eventId } = useParams();
+  const navigate = useNavigate();
+  useLayoutEffect(() => {
+    if (eventId === 'event-b') onEventBLayout();
+  }, [eventId, onEventBLayout]);
+  return <>
+    <button type="button" onClick={() => { void navigate('/manage/event/event-b'); }}>Route to event B</button>
+    <ManagerPage />
+  </>;
 }
 
 const CREATED = {
@@ -208,7 +273,7 @@ describe('public Candidary experience', () => {
     expect(screen.queryByText('That page wandered off.')).not.toBeInTheDocument();
   });
 
-  it('creates an event and clearly returns both access links', async () => {
+  it('creates an event with its Event link readable and its Management link masked', async () => {
     const fetchMock = vi.fn<typeof fetch>(() => json(CREATED, 201));
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/create'])} />);
@@ -221,7 +286,10 @@ describe('public Candidary experience', () => {
     // A new event is paused by default, so the receipt names the next real step.
     expect(screen.getByRole('link', { name: 'Set up guest list' }))
       .toHaveAttribute('href', `/manage/event/${CREATED.event.id}?section=rsvp`);
-    expect(screen.getByText(CREATED.managementLink)).toBeInTheDocument();
+    expect(screen.getByText(CREATED.eventLink)).toBeInTheDocument();
+    expect(screen.queryByText(CREATED.managementLink)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reveal management link' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Copy management link' })).toBeVisible();
     expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
     expect(fetchMock).toHaveBeenCalledOnce();
     const [, request] = fetchMock.mock.calls[0]!;
@@ -393,8 +461,13 @@ describe('public Candidary experience', () => {
     expect(revealed).toBeVisible();
     expect(revealed).toHaveTextContent('https://example.test/join#entry-id.entry-secret');
     expect(revealed).toHaveAttribute('tabindex', '0');
-    // The management link keeps its own independent control.
-    expect(screen.getByRole('button', { name: 'Show full management link' })).toHaveAttribute('aria-expanded', 'false');
+    // The management credential keeps its own independent, hidden-by-default control.
+    expect(document.body.innerHTML).not.toContain(CREATED.managementLink);
+    expect(screen.queryByDisplayValue(CREATED.managementLink)).not.toBeInTheDocument();
+    expect(screen.getByText('••••••••••••')).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByRole('button', { name: 'Reveal management link' }))
+      .toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: 'Copy management link' })).toBeVisible();
 
     await user.click(hide);
     expect(screen.getByRole('button', { name: 'Show full event link' })).toHaveAttribute('aria-expanded', 'false');
@@ -442,10 +515,12 @@ describe('guest event experience', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: { ...GUEST_EVENT, galleryVisible: true }, role: 'guest' });
-      if (url.endsWith('/gallery')) return json({ media: [{
-        id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'Golden hour',
-        publicationStatus: 'published', uploadState: 'stored', width: 800, height: 600,
-      }] });
+      // Exactly `GuestGalleryMediaView`. The guest gallery answer carries no original filename,
+      // publication status, or storage metadata at all, so the fixture must not either.
+      if (url.endsWith('/gallery')) return json({ media: [
+        { id: 'media-a', guestName: 'Avery', caption: 'Golden hour', previewAvailable: true },
+        { id: 'media-b', guestName: 'Rowan', caption: null, previewAvailable: true },
+      ] });
       if (url.endsWith('/contributions')) return json({ media: [] });
       if (url.endsWith('/messages?contract=2')) return json({ ...EMPTY_GUESTBOOK, items: [{
         id: 'note-a', source: 'guest_note', kind: 'message', guestName: 'Sam',
@@ -464,10 +539,51 @@ describe('guest event experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByText(/Shared gallery/, { selector: 'span' }));
     expect(await screen.findByAltText('Golden hour')).toBeVisible();
+    /* A photo whose uploader wrote no caption is named for what it is. It used to borrow the
+       uploader's device filename — announced to every other guest as the image's alternative text —
+       and that filename no longer crosses the boundary at all. */
+    expect(screen.getByAltText('Shared photo')).toBeVisible();
+    expect(screen.getByText('Shared photo', { selector: 'figcaption span' })).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     expect(screen.getByText('To many happy years.')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  /* The other half of the boundary. A filename is the uploader's device talking, so it does not
+     reach the shared gallery — but a guest looking at their *own* deliveries is the one person it
+     belongs to, and it is how they recognize the photo they just sent. `GuestContributionMediaView`
+     carries it, and nothing about storage, bucket, size, or moderation comes with it. */
+  it('still shows a guest their own filenames and transfer state under My deliveries', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/contributions')) return json({ media: [
+        {
+          id: 'mine-a', originalFilename: 'first-dance.jpg', caption: 'First dance',
+          uploadState: 'stored', previewAvailable: true, createdAt: '2026-09-19T21:00:00Z',
+        },
+        {
+          id: 'mine-b', originalFilename: 'IMG_4471.HEIC', caption: null,
+          uploadState: 'reserved', previewAvailable: false, createdAt: '2026-09-19T21:05:00Z',
+        },
+      ] });
+      throw new Error(`Unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
+    expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
+
+    await userEvent.setup().click(screen.getByText(/My deliveries/, { selector: 'span' }));
+    const rows = await screen.findAllByRole('listitem');
+    expect(rows.map((row) => row.querySelector('span')?.textContent))
+      .toEqual(['first-dance.jpg', 'IMG_4471.HEIC']);
+    expect(within(rows[0]!).getByText('Delivered')).toBeVisible();
+    expect(within(rows[1]!).getByText('Not delivered')).toBeVisible();
+    // The count is the received ones, not everything this device ever started.
+    expect(screen.getByText('1 received')).toBeVisible();
+    expect(fetchMock.mock.calls.map(([input]) => String(input)))
+      .toEqual(['/api/event/maya-theo', '/api/event/maya-theo/contributions']);
   });
 
   it('names the note field after the event rather than leaving it to a placeholder', async () => {
@@ -698,7 +814,7 @@ const MANAGED_EVENT = {
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
-  storedMediaCount: 3, storedBytes: 128,
+  storedMediaCount: 3, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -708,6 +824,36 @@ const MANAGED_EVENT = {
   rsvpRosterVersion: 7,
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
 };
+
+const EMPTY_GALLERY_AUDIENCE_SUMMARY = {
+  albumPhotoCount: 0,
+  albumEntryCount: 0,
+  albumLink: { active: false, sharedAt: null },
+  guestGalleryVisible: true,
+  guestGalleryPublishedCount: 0,
+} satisfies GalleryAudienceSummaryView;
+
+function galleryAudienceSummaryJson() {
+  return json({ summary: EMPTY_GALLERY_AUDIENCE_SUMMARY });
+}
+
+function directGalleryAudienceAuthority(): GalleryAudienceAuthority {
+  return {
+    summary: EMPTY_GALLERY_AUDIENCE_SUMMARY,
+    freshness: 'fresh',
+    failure: null,
+    reload: async () => {},
+    invalidate: () => {},
+  };
+}
+
+function ManagerGalleryWorkspaceWithUndo(
+  props: ComponentProps<typeof ManagerGalleryWorkspace>,
+) {
+  return <ManagerUndoProvider eventId={props.eventId}>
+    <ManagerGalleryWorkspace {...props} />
+  </ManagerUndoProvider>;
+}
 
 const RSVP_SUMMARY = {
   invitedCapacity: 8, namedInvitees: 6, plusOneCapacity: 2,
@@ -727,6 +873,7 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
     if (url.endsWith('/guestbook/summary')) return json({ summary: {
       needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
     } });
+    if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
     if (url.includes('/media')) {
       mediaRequests.push(url);
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
@@ -743,6 +890,22 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
     throw new Error(`Unexpected request ${url}`);
   });
 }
+
+describe('manager resource ownership', () => {
+  it('returns synchronous ownership for a current capture and rejects a retired one', async () => {
+    const onResult = vi.fn();
+    render(<ResourceCaptureHarness onResult={onResult} />);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exercise capture' }));
+    expect(onResult).toHaveBeenCalledWith(true, false);
+    expect(screen.getByLabelText('Captured value')).toHaveTextContent('2');
+  });
+
+  it('composes a current deferred capture with a newer queued projection', async () => {
+    render(<DeferredResourceCaptureHarness />);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Compose deferred capture' }));
+    expect(screen.getByLabelText('Deferred captured value')).toHaveTextContent('2');
+  });
+});
 
 function previewSources() {
   return Array.from(document.querySelectorAll('.moderation-grid img'), (image) => image.getAttribute('src'));
@@ -777,7 +940,7 @@ describe('manager experience', () => {
     },
   );
 
-  it('uses the Guestbook summary for initial navigation without eagerly loading entries', async () => {
+  it('owns one audience summary before Gallery opens without duplicating it across section remounts', async () => {
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     vi.stubGlobal('fetch', fetchMock);
 
@@ -785,10 +948,21 @@ describe('manager experience', () => {
 
     const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
     expect(within(navigation).getByRole('button', { name: 'Guestbook' })).toBeVisible();
-    const requested = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(requested.filter((url) => url.endsWith('/guestbook/summary'))).toHaveLength(1);
-    expect(requested.some((url) => url.endsWith('/messages'))).toBe(false);
-    expect(requested.some((url) => /\/guestbook(?:\?|$)/u.test(url))).toBe(false);
+    const requested = () => fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requested().filter((url) => url.endsWith('/guestbook/summary'))).toHaveLength(1);
+    expect(requested().filter((url) => url.endsWith('/gallery/summary'))).toHaveLength(1);
+    expect(requested().some((url) => url.endsWith('/messages'))).toBe(false);
+    expect(requested().some((url) => /\/guestbook(?:\?|$)/u.test(url))).toBe(false);
+
+    const user = userEvent.setup();
+    await user.click(within(navigation).getByRole('button', { name: 'Gallery' }));
+    expect(await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published'))
+      .toBeVisible();
+    await user.click(within(navigation).getByRole('button', { name: 'Share' }));
+    await user.click(within(navigation).getByRole('button', { name: 'Gallery' }));
+    expect(await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published'))
+      .toBeVisible();
+    expect(requested().filter((url) => url.endsWith('/gallery/summary'))).toHaveLength(1);
   });
 
   it('keeps appearance inside Settings between its form and account controls', async () => {
@@ -865,17 +1039,217 @@ describe('manager experience', () => {
     expect(screen.getByTestId('event-appearance-canvas')).toHaveStyle({ '--event-primary': '#4a2415' });
   });
 
+  it('reconciles a confirmed galleryVisible change into an already-open Gallery summary', async () => {
+    let releaseSettings!: () => void;
+    const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve; });
+    let settingsStarted = false;
+    let summaryVisible = true;
+    let summaryReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        settingsStarted = true;
+        await settingsGate;
+        return json({ event: { ...MANAGED_EVENT, galleryVisible: false } });
+      }
+      if (url.endsWith('/gallery/summary')) {
+        summaryReads += 1;
+        return json({ summary: {
+          albumPhotoCount: 0,
+          albumEntryCount: 0,
+          albumLink: { active: false, sharedAt: null },
+          guestGalleryVisible: summaryVisible,
+          guestGalleryPublishedCount: 0,
+        } });
+      }
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(navigation).getByRole('button', { name: /settings/i }));
+    await user.click(screen.getByLabelText('Show the optional shared gallery'));
+    await waitFor(() => expect(settingsStarted).toBe(true));
+
+    await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    expect(await screen.findByText(
+      'Album: 0 photos · Link: Off · Guest gallery: On, 0 published',
+    )).toBeVisible();
+    expect(summaryReads).toBe(1);
+    summaryVisible = false;
+    releaseSettings();
+
+    expect(await screen.findByText(
+      'Album: 0 photos · Link: Off · Guest gallery: Off, 0 published',
+    )).toBeVisible();
+    expect(summaryReads).toBe(2);
+  });
+
+  it('does not invalidate the Gallery summary when confirmed settings preserve galleryVisible', async () => {
+    let releaseSettings!: () => void;
+    const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve; });
+    let settingsStarted = false;
+    let summaryReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        settingsStarted = true;
+        await settingsGate;
+        return json({ event: { ...MANAGED_EVENT, name: 'Renamed' } });
+      }
+      if (url.endsWith('/gallery/summary')) {
+        summaryReads += 1;
+        return json({ summary: {
+          albumPhotoCount: 0,
+          albumEntryCount: 0,
+          albumLink: { active: false, sharedAt: null },
+          guestGalleryVisible: true,
+          guestGalleryPublishedCount: 0,
+        } });
+      }
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(navigation).getByRole('button', { name: /settings/i }));
+    fireEvent.change(screen.getByLabelText('Event name'), { target: { value: 'Renamed' } });
+    fireEvent.blur(screen.getByLabelText('Event name'));
+    await waitFor(() => expect(settingsStarted).toBe(true));
+
+    await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published');
+    releaseSettings();
+    await screen.findByRole('heading', { level: 1, name: 'Renamed' });
+
+    expect(summaryReads).toBe(1);
+  });
+
+  it('invalidates an already-open Gallery summary only after parent trash succeeds', async () => {
+    const row: MediaView = {
+      id: 'trash-summary-row',
+      originalFilename: 'trash-summary-row.jpg',
+      guestName: 'Avery',
+      caption: 'Audience boundary',
+      publicationStatus: 'published',
+      uploadState: 'stored',
+    };
+    let releaseTrash!: () => void;
+    const trashGate = new Promise<void>((resolve) => { releaseTrash = resolve; });
+    let trashStarted = false;
+    let summaryReads = 0;
+    const base = managerFetch({ first: { media: [row], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/trash-summary-row/trash') && method === 'POST') {
+        trashStarted = true;
+        await trashGate;
+        return json({ media: {
+          ...row,
+          trashedAt: '2026-09-20T01:00:00.000Z',
+          restoreUntil: '2026-10-19T00:00:00.000Z',
+        } });
+      }
+      if (url.endsWith('/gallery/summary')) {
+        summaryReads += 1;
+        return json({ summary: {
+          albumPhotoCount: 1,
+          albumEntryCount: 1,
+          albumLink: { active: false, sharedAt: null },
+          guestGalleryVisible: true,
+          guestGalleryPublishedCount: 1,
+        } });
+      }
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(await screen.findByRole('button', {
+      name: 'Move trash-summary-row.jpg to Recently deleted',
+    }));
+    await user.click(within(await screen.findByRole('dialog'))
+      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await waitFor(() => expect(trashStarted).toBe(true));
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    await waitFor(() => expect(summaryReads).toBe(1));
+    releaseTrash();
+
+    await waitFor(() => expect(summaryReads).toBe(2));
+  });
+
+  it('invalidates an already-open Gallery summary only after parent Restore succeeds', async () => {
+    const row = {
+      id: 'restore-summary-row',
+      originalFilename: 'restore-summary-row.jpg',
+      guestName: 'Avery',
+      caption: 'Restored audience',
+      trashedAt: '2026-09-20T01:00:00.000Z',
+      restoreUntil: '2099-10-19T00:00:00.000Z',
+    };
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreStarted = false;
+    let summaryReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/manage/events/event-a')) {
+        return json({ event: { ...MANAGED_EVENT, recoverableMediaCount: 1 } });
+      }
+      if (url.endsWith('/media/trash') && method === 'GET') {
+        return json({ media: [row], nextCursor: null });
+      }
+      if (url.endsWith('/media/restore-summary-row/restore') && method === 'POST') {
+        restoreStarted = true;
+        await restoreGate;
+        return json({ media: { ...row, trashedAt: null, restoreUntil: null } });
+      }
+      if (url.endsWith('/gallery/summary')) {
+        summaryReads += 1;
+        return json({ summary: {
+          albumPhotoCount: 0,
+          albumEntryCount: 0,
+          albumLink: { active: false, sharedAt: null },
+          guestGalleryVisible: true,
+          guestGalleryPublishedCount: 0,
+        } });
+      }
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(await screen.findByRole('button', { name: /Recently deleted/ }));
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+    await waitFor(() => expect(restoreStarted).toBe(true));
+
+    fireEvent.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    await waitFor(() => expect(summaryReads).toBe(1));
+    releaseRestore();
+
+    await waitFor(() => expect(summaryReads).toBe(2));
+  });
+
   it('drops a whole-event read that a later write overtook', async () => {
     const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
     let releaseRead: (() => void) | null = null;
     let reads = 0;
+    const interval = vi.spyOn(window, 'setInterval');
     const fetchMock = managerFetch({ first: { media: makeMedia(1), nextCursor: null } });
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
         reads += 1;
-        // Hold the read that a manager action opened, so a theme write can
+    // Hold the read that the Intake poll opened, so a theme write can
         // commit underneath it. It answers with the pre-write row.
         if (reads === 2) await new Promise<void>((resolve) => { releaseRead = resolve; });
         return json({ event: MANAGED_EVENT });
@@ -891,9 +1265,8 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
 
-    await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
-    await user.click(await screen.findByRole('button', { name: 'Shared' }));
-    await user.click(await screen.findByRole('button', { name: /^Publish / }));
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as (() => void) | undefined;
+    poll?.();
     await waitFor(() => expect(reads).toBe(2));
 
     await user.click(within(navigation).getByRole('button', { name: /settings/i }));
@@ -1230,9 +1603,10 @@ describe('manager experience', () => {
     await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
 
-    // The filtered rows have not arrived yet, so the old grid is still on screen — but the cursor it
-    // was paged with belongs to the unfiltered keyset and must no longer be spendable.
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
+    // Query ownership clears old rows and its cursor immediately. Rendering
+    // unfiltered cards while the new question is pending would make its cursor
+    // spendable against the wrong filter.
+    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(0);
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
     expect(mediaRequests).toBe(2);
 
@@ -1333,6 +1707,125 @@ describe('manager experience', () => {
     expect(pageSignal?.aborted).toBe(true);
   });
 
+  it('silently drops a retired Intake continuation failure after a confirmed mutation', async () => {
+    const row: MediaView = {
+      id: 'intake-retire-row', originalFilename: 'intake-retire-row.jpg', guestName: 'Avery',
+      caption: 'Retire Intake', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let releaseStalePage!: () => void;
+    let trashed = false;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('cursor=intake-retire-cursor')) {
+        return new Promise<Response>((resolve) => {
+          releaseStalePage = () => void errorJson({
+            code: 'INTERNAL_ERROR', message: 'Stale Intake continuation failed.', requestId: 'request-stale-intake',
+          }, 500).then(resolve);
+        });
+      }
+      if (url.endsWith('/media/intake-retire-row/trash') && method === 'POST') {
+        trashed = true;
+        return json({ media: {
+          ...row,
+          trashedAt: '2026-09-20T01:00:00.000Z',
+          restoreUntil: '2026-10-19T00:00:00.000Z',
+        } });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({
+        media: trashed ? [] : [row],
+        nextCursor: trashed ? null : 'intake-retire-cursor',
+      });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(releaseStalePage).toBeTypeOf('function'));
+
+    // A confirmed Intake mutation retires the page capture while the older
+    // continuation is still held. Its retryable answer must then be silent.
+    await user.click(screen.getByRole('button', { name: 'Move intake-retire-row.jpg to Recently deleted' }));
+    await user.click(within(await screen.findByRole('dialog'))
+      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Move intake-retire-row.jpg to Recently deleted' }))
+      .not.toBeInTheDocument());
+    await act(async () => { releaseStalePage(); });
+
+    expect(screen.queryByText('Stale Intake continuation failed.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Retire Intake')).not.toBeInTheDocument();
+  });
+
+  it('keeps newer Intake feedback when a retired continuation succeeds', async () => {
+    const row: MediaView = {
+      id: 'intake-success-row', originalFilename: 'intake-success-row.jpg', guestName: 'Avery',
+      caption: 'Retire Intake success', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let releaseStalePage!: () => void;
+    let trashed = false;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('cursor=intake-success-cursor')) {
+        return new Promise<Response>((resolve) => {
+          releaseStalePage = () => void json({ media: [], nextCursor: null }).then(resolve);
+        });
+      }
+      if (url.endsWith('/media/intake-success-row/trash') && method === 'POST') {
+        trashed = true;
+        return json({ media: {
+          ...row,
+          trashedAt: '2026-09-20T01:00:00.000Z',
+          restoreUntil: '2026-10-19T00:00:00.000Z',
+        } });
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({
+        media: trashed ? [] : [row],
+        nextCursor: trashed ? null : 'intake-success-cursor',
+      });
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) {
+        return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
+      }
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('Clipboard rejected'));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(releaseStalePage).toBeTypeOf('function'));
+
+    await user.click(screen.getByRole('button', { name: 'Move intake-success-row.jpg to Recently deleted' }));
+    await user.click(within(await screen.findByRole('dialog'))
+      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Move intake-success-row.jpg to Recently deleted' }))
+      .not.toBeInTheDocument());
+
+    await user.click(screen.getAllByRole('button', { name: 'Copy event link' })[0]!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('The event link could not be copied.');
+    await act(async () => { releaseStalePage(); });
+
+    // The page is retired by the trash projection, so its success cannot clear
+    // an unrelated action that happened after that mutation.
+    expect(screen.getByRole('alert')).toHaveTextContent('The event link could not be copied.');
+  });
+
   it('discards media pages that resolve after the guest filter narrowed the list', async () => {
     const rows = makeMedia(7).slice(1);
     const held: Array<() => void> = [];
@@ -1394,6 +1887,7 @@ describe('manager experience', () => {
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
       if (url.includes('/media')) return json({ media: rows, nextCursor: null });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
@@ -1406,7 +1900,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /gallery/i }));
-    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid article')).toHaveLength(2));
 
     async function expectRecoverableFailure(label: string, act_: () => Promise<void>, heading: string) {
@@ -1442,6 +1936,331 @@ describe('manager experience', () => {
    * only lives while the job is queued or running. Both ways of losing that poll are
    * silent by construction, so both are pinned here.
    */
+  it('keeps one export poll and live owner running outside Gallery until the job is terminal', async () => {
+    const exportJob = (state: 'queued' | 'running' | 'ready'): ExportView => ({
+      id: 'export-global',
+      kind: 'complete',
+      state,
+      snapshotAt: '2026-09-20T00:00:00.000Z',
+      createdAt: '2026-09-20T00:00:01.000Z',
+      startedAt: state === 'queued' ? null : '2026-09-20T00:00:02.000Z',
+      completedAt: state === 'ready' ? '2026-09-20T00:00:03.000Z' : null,
+      mediaCount: 3,
+      totalBytes: 1_024,
+      processedMediaCount: state === 'queued' ? null : state === 'running' ? 1 : 3,
+      processedBytes: state === 'queued' ? null : state === 'running' ? 256 : 1_024,
+      progressUpdatedAt: state === 'queued' ? null : '2026-09-20T00:00:02.500Z',
+      attempt: 1,
+      partCount: state === 'ready' ? 1 : 0,
+      expiresAt: state === 'ready' ? '2026-09-21T00:00:03.000Z' : null,
+      guestbookEntryCount: 0,
+      guestbookSharedCount: 0,
+      guestbookEventName: 'Maya & Theo',
+      guestbookEventDate: '2026-09-19',
+      guestbookEventTimezone: 'America/Chicago',
+      guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
+      guestbookGalleryVisible: true,
+      errorCode: null,
+    });
+    let exportReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const interval = vi.spyOn(window, 'setInterval');
+    const clearInterval = vi.spyOn(window, 'clearInterval');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/exports')) {
+        exportReads += 1;
+        return json({ exports: [exportJob(exportReads === 1 ? 'queued' : exportReads === 2 ? 'running' : 'ready')] });
+      }
+      return base(input);
+    }));
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    const compact = await screen.findByRole('region', { name: 'Export progress' });
+    expect(within(compact).getByText('Complete export · Queued')).toBeVisible();
+    const liveHost = document.querySelector('[data-gallery-live-host]');
+    expect(liveHost).not.toBeNull();
+    expect(liveHost?.querySelectorAll('[role="status"]')).toHaveLength(1);
+
+    const scheduled = await waitFor(() => {
+      const index = interval.mock.calls.findLastIndex(([, delay]) => delay === 10_000);
+      const call = interval.mock.calls[index];
+      if (!call) throw new Error('the global export poll was never scheduled');
+      return { handler: call[0] as () => void, id: interval.mock.results[index]?.value };
+    });
+    await act(async () => { scheduled.handler(); });
+    expect(await screen.findByText('Complete export · Running')).toBeVisible();
+    expect(document.querySelector('[data-gallery-live-host]')).toBe(liveHost);
+
+    await act(async () => { scheduled.handler(); });
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Export progress' }))
+      .not.toBeInTheDocument());
+    expect(clearInterval).toHaveBeenCalledWith(scheduled.id);
+    expect(exportReads).toBe(3);
+  });
+
+  it.each(['prepare', 'retry'] as const)(
+    'adopts an accepted %s response before a failed reconciliation read',
+    async (action) => {
+      const failed: ExportView = {
+        id: 'export-accepted', kind: 'complete', state: 'failed',
+        snapshotAt: '2026-09-20T00:00:00.000Z', createdAt: '2026-09-20T00:00:01.000Z',
+        startedAt: '2026-09-20T00:00:02.000Z', completedAt: '2026-09-20T00:00:03.000Z',
+        mediaCount: 3, totalBytes: 1_024, processedMediaCount: 1, processedBytes: 256,
+        progressUpdatedAt: '2026-09-20T00:00:02.500Z', attempt: 1, partCount: 0,
+        expiresAt: null, guestbookEntryCount: 0, guestbookSharedCount: 0,
+        guestbookEventName: 'Maya & Theo', guestbookEventDate: '2026-09-19',
+        guestbookEventTimezone: 'America/Chicago', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
+        guestbookGalleryVisible: true, errorCode: 'EXPORT_FAILED',
+      };
+      const accepted: ExportView = {
+        ...failed,
+        state: 'queued',
+        startedAt: null,
+        completedAt: null,
+        processedMediaCount: null,
+        processedBytes: null,
+        progressUpdatedAt: null,
+        attempt: action === 'retry' ? 2 : 1,
+        errorCode: null,
+      };
+      let acceptedByServer = false;
+      let exportReads = 0;
+      const interval = vi.spyOn(window, 'setInterval');
+      const base = managerFetch({ first: { media: [], nextCursor: null } });
+      const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const isPrepare = url.endsWith('/exports') && method === 'POST';
+        const isRetry = url.endsWith('/exports/export-accepted/retry') && method === 'POST';
+        if (isPrepare || isRetry) {
+          acceptedByServer = true;
+          return json({ export: accepted }, 202);
+        }
+        if (url.endsWith('/exports') && method === 'GET') {
+          exportReads += 1;
+          return acceptedByServer
+            ? errorJson({
+                code: 'INTERNAL_ERROR',
+                message: 'Export reconciliation is temporarily unavailable.',
+                requestId: 'request-reconcile',
+              }, 503)
+            : json({ exports: action === 'retry' ? [failed] : [] });
+        }
+        if (url.endsWith('/gallery/summary')) return json({ summary: {
+          ...EMPTY_GALLERY_AUDIENCE_SUMMARY,
+          albumPhotoCount: 1,
+          albumEntryCount: 1,
+        } });
+        if (url.endsWith('/album') && method === 'GET') return json({ album: {
+          revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+          effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+        } });
+        return base(input);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+      await screen.findByRole('heading', { name: 'Live intake' });
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('button', { name: 'Gallery' }));
+      await user.click(await screen.findByRole('button', { name: 'Library' }));
+      await user.click(screen.getByRole('button', {
+        name: action === 'retry' ? 'Retry this prepared export' : 'Download all',
+      }));
+
+      expect(await screen.findByText('Queued', { selector: '.export-state strong' })).toBeVisible();
+      expect(exportReads).toBe(2);
+      await waitFor(() => expect(interval.mock.calls.some(([, delay]) => delay === 10_000)).toBe(true));
+
+      await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+        .getByRole('button', { name: /^Album/ }));
+      expect(await screen.findByRole('button', { name: 'Download album photos' })).toBeDisabled();
+      expect(screen.getByText(
+        'Complete collection export is Queued. Prepare and retry actions will be available when it finishes.',
+      )).toBeVisible();
+
+      await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+        .getByRole('button', { name: /^Intake/ }));
+      expect(within(await screen.findByRole('region', { name: 'Export progress' }))
+        .getByText('Complete export · Queued')).toBeVisible();
+    },
+  );
+
+  it('announces the terminal result of the job it was tracking across kinds', async () => {
+    const complete = (state: 'running' | 'failed'): ExportView => ({
+      id: 'complete-retry', kind: 'complete', state,
+      snapshotAt: '2026-09-20T00:00:00.000Z', createdAt: '2026-09-20T00:00:01.000Z',
+      startedAt: '2026-09-20T00:10:00.000Z', completedAt: state === 'failed'
+        ? '2026-09-20T00:11:00.000Z' : null,
+      mediaCount: 3, totalBytes: 1_024, processedMediaCount: 1, processedBytes: 256,
+      progressUpdatedAt: '2026-09-20T00:10:30.000Z', attempt: 2, partCount: 0,
+      expiresAt: null, guestbookEntryCount: 0, guestbookSharedCount: 0,
+      guestbookEventName: 'Maya & Theo', guestbookEventDate: '2026-09-19',
+      guestbookEventTimezone: 'America/Chicago', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
+      guestbookGalleryVisible: true, errorCode: state === 'failed' ? 'EXPORT_FAILED' : null,
+    });
+    const newerAlbum: ExportView = {
+      id: 'album-older-terminal', kind: 'album', state: 'ready',
+      snapshotAt: '2026-09-20T00:05:00.000Z', createdAt: '2026-09-20T00:05:01.000Z',
+      startedAt: '2026-09-20T00:05:02.000Z', completedAt: '2026-09-20T00:06:00.000Z',
+      mediaCount: 1, totalBytes: 64, processedMediaCount: 1, processedBytes: 64,
+      progressUpdatedAt: '2026-09-20T00:05:30.000Z', attempt: 1, partCount: 1,
+      expiresAt: '2026-09-21T00:06:00.000Z', guestbookEntryCount: null,
+      guestbookSharedCount: null, guestbookEventName: null, guestbookEventDate: null,
+      guestbookEventTimezone: null, guestbookPrompt: null, guestbookGalleryVisible: null,
+      errorCode: null,
+    };
+    let exportReads = 0;
+    const interval = vi.spyOn(window, 'setInterval');
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/exports')) {
+        exportReads += 1;
+        return json({ exports: exportReads === 1
+          ? [complete('running'), newerAlbum]
+          : [complete('failed'), newerAlbum] });
+      }
+      return base(input);
+    }));
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(within(await screen.findByRole('region', { name: 'Export progress' }))
+      .getByText('Complete export · Running')).toBeVisible();
+    const poll = await waitFor(() => {
+      const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
+      if (!scheduled) throw new Error('the tracked export poll was never scheduled');
+      return scheduled as () => void;
+    });
+
+    await act(async () => { poll(); });
+
+    const status = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    await waitFor(() => expect(status).toHaveTextContent(
+      'Complete export. Failed This prepared export did not finish.',
+    ));
+    expect(status).not.toHaveTextContent('Album export. Ready');
+    expect(exportReads).toBe(2);
+  });
+
+  it('tracks an accepted retry even when its response is already terminal', async () => {
+    const failedComplete: ExportView = {
+      id: 'complete-dispatch', kind: 'complete', state: 'failed',
+      snapshotAt: '2026-09-20T00:00:00.000Z', createdAt: '2026-09-20T00:00:01.000Z',
+      startedAt: '2026-09-20T00:00:02.000Z', completedAt: '2026-09-20T00:00:03.000Z',
+      mediaCount: 3, totalBytes: 1_024, processedMediaCount: 1, processedBytes: 256,
+      progressUpdatedAt: '2026-09-20T00:00:02.500Z', attempt: 1, partCount: 0,
+      expiresAt: null, guestbookEntryCount: 0, guestbookSharedCount: 0,
+      guestbookEventName: 'Maya & Theo', guestbookEventDate: '2026-09-19',
+      guestbookEventTimezone: 'America/Chicago', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
+      guestbookGalleryVisible: true, errorCode: 'EXPORT_FAILED',
+    };
+    const dispatchFailed: ExportView = {
+      ...failedComplete,
+      attempt: 2,
+      completedAt: '2026-09-20T00:12:00.000Z',
+      processedMediaCount: null,
+      processedBytes: null,
+      progressUpdatedAt: null,
+      errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
+    };
+    const newerAlbum: ExportView = {
+      id: 'album-newer-created', kind: 'album', state: 'ready',
+      snapshotAt: '2026-09-20T00:05:00.000Z', createdAt: '2026-09-20T00:05:01.000Z',
+      startedAt: '2026-09-20T00:05:02.000Z', completedAt: '2026-09-20T00:06:00.000Z',
+      mediaCount: 1, totalBytes: 64, processedMediaCount: 1, processedBytes: 64,
+      progressUpdatedAt: '2026-09-20T00:05:30.000Z', attempt: 1, partCount: 1,
+      expiresAt: '2026-09-21T00:06:00.000Z', guestbookEntryCount: null,
+      guestbookSharedCount: null, guestbookEventName: null, guestbookEventDate: null,
+      guestbookEventTimezone: null, guestbookPrompt: null, guestbookGalleryVisible: null,
+      errorCode: null,
+    };
+    let retried = false;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/exports/complete-dispatch/retry') && method === 'POST') {
+        retried = true;
+        return json({ export: dispatchFailed }, 202);
+      }
+      if (url.endsWith('/exports') && method === 'GET') {
+        return json({ exports: [retried ? dispatchFailed : failedComplete, newerAlbum] });
+      }
+      return base(input);
+    }));
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Library' }));
+    await user.click(screen.getByRole('button', { name: 'Retry this prepared export' }));
+
+    const status = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    await waitFor(() => expect(status).toHaveTextContent(
+      'Complete export. Failed Export preparation could not start.',
+    ));
+    expect(status).not.toHaveTextContent('Album export. Ready');
+  });
+
+  it('reconciles another tab\'s active export after a stale Prepare conflict', async () => {
+    const activeAlbum: ExportView = {
+      id: 'album-other-tab', kind: 'album', state: 'running',
+      snapshotAt: '2026-09-20T00:05:00.000Z', createdAt: '2026-09-20T00:05:01.000Z',
+      startedAt: '2026-09-20T00:05:02.000Z', completedAt: null,
+      mediaCount: 1, totalBytes: 64, processedMediaCount: 0, processedBytes: 0,
+      progressUpdatedAt: '2026-09-20T00:05:02.000Z', attempt: 1, partCount: 0,
+      expiresAt: null, guestbookEntryCount: null, guestbookSharedCount: null,
+      guestbookEventName: null, guestbookEventDate: null, guestbookEventTimezone: null,
+      guestbookPrompt: null, guestbookGalleryVisible: null, errorCode: null,
+    };
+    let conflict = false;
+    let exportReads = 0;
+    const interval = vi.spyOn(window, 'setInterval');
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/exports') && method === 'POST') {
+        conflict = true;
+        return errorJson({
+          code: 'EXPORT_ALREADY_ACTIVE',
+          message: 'Another export is already being prepared.',
+          requestId: 'request-other-tab',
+        }, 409);
+      }
+      if (url.endsWith('/exports') && method === 'GET') {
+        exportReads += 1;
+        return json({ exports: conflict ? [activeAlbum] : [] });
+      }
+      return base(input);
+    }));
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Library' }));
+    await user.click(screen.getByRole('button', { name: 'Download all' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Another export is already being prepared.');
+    expect(screen.getByRole('button', { name: 'Download all' })).toBeDisabled();
+    expect(screen.getByText(
+      'Album export is Running. Prepare and retry actions will be available when it finishes.',
+    )).toBeVisible();
+    expect(exportReads).toBe(2);
+    await waitFor(() => expect(interval.mock.calls.some(([, delay]) => delay === 10_000)).toBe(true));
+    expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
+      .toHaveTextContent('Album export. Running');
+
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: /^Intake/ }));
+    expect(within(await screen.findByRole('region', { name: 'Export progress' }))
+      .getByText('Album export · Running')).toBeVisible();
+  });
+
   it('surfaces a credential failure from the export poll instead of waiting on Preparing forever', async () => {
     const queued = {
       id: 'export-a', kind: 'complete', state: 'queued', attempt: 1, mediaCount: 6, totalBytes: 1024,
@@ -1466,6 +2285,7 @@ describe('manager experience', () => {
       if (url.endsWith('/guestbook/summary')) return json({ summary: {
         needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
       } });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/media')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
@@ -1521,6 +2341,7 @@ describe('manager experience', () => {
       if (url.endsWith('/guestbook/summary')) return json({ summary: {
         needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
       } });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/media')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
@@ -1542,7 +2363,7 @@ describe('manager experience', () => {
       return scheduled as () => void;
     });
     const shownState = () => document.querySelector('.export-state strong')?.textContent;
-    expect(shownState()).toBe('Preparing');
+    expect(shownState()).toBe('Queued');
     holdNextExportRead = true;
     // The first tick is held open; the second answers first, with the state the job has reached.
     await act(async () => { poll(); });
@@ -1550,9 +2371,91 @@ describe('manager experience', () => {
     await waitFor(() => expect(shownState()).toBe('Ready'));
 
     // Ready is terminal, so the poll has stopped. An older answer landing now would put the
-    // job back to Preparing with nothing left running to correct it.
+    // job back to Queued with nothing left running to correct it.
     await act(async () => { releaseStale(); });
     expect(shownState()).toBe('Ready');
+  });
+
+  it('adopts the newer export after a stale retry refusal without hiding the action error', async () => {
+    const exportJob = (
+      id: string,
+      state: 'failed' | 'ready',
+      mediaCount: number,
+    ): ExportView => ({
+      id,
+      kind: 'complete',
+      state,
+      snapshotAt: state === 'failed'
+        ? '2026-09-20T00:00:00.000Z'
+        : '2026-09-20T01:00:00.000Z',
+      createdAt: state === 'failed'
+        ? '2026-09-20T00:01:00.000Z'
+        : '2026-09-20T01:01:00.000Z',
+      startedAt: '2026-09-20T01:02:00.000Z',
+      completedAt: '2026-09-20T01:03:00.000Z',
+      mediaCount,
+      totalBytes: mediaCount * 1_024,
+      processedMediaCount: mediaCount,
+      processedBytes: mediaCount * 1_024,
+      progressUpdatedAt: '2026-09-20T01:03:00.000Z',
+      attempt: 1,
+      partCount: state === 'ready' ? 1 : 0,
+      expiresAt: state === 'ready' ? '2099-09-21T00:00:00.000Z' : null,
+      guestbookEntryCount: 0,
+      guestbookSharedCount: 0,
+      guestbookEventName: 'Maya & Theo',
+      guestbookEventDate: '2026-09-19',
+      guestbookEventTimezone: 'America/Chicago',
+      guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT,
+      guestbookGalleryVisible: true,
+      errorCode: state === 'failed' ? 'EXPORT_FAILED' : null,
+    });
+    const older = exportJob('older-failed', 'failed', 1);
+    const newer = exportJob('newer-ready', 'ready', 7);
+    let retryRefused = false;
+    let exportReads = 0;
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/exports/older-failed/retry') && method === 'POST') {
+        retryRefused = true;
+        return errorJson({
+          code: 'EXPORT_ALREADY_ACTIVE',
+          message: 'A newer prepared export is available. Refresh before retrying.',
+          requestId: 'request-stale-retry',
+        }, 409);
+      }
+      if (url.endsWith('/exports') && method === 'GET') {
+        exportReads += 1;
+        return json({ exports: [retryRefused ? newer : older] });
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await screen.findByRole('heading', { name: 'Live intake' });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Library' }));
+    expect(await screen.findByText(/1 photo · Failed/, { selector: 'span' })).toBeVisible();
+    expect(screen.getByText('Frozen size: 1 KB · 0 guestbook entries.')).toBeVisible();
+    const readsBeforeRetry = exportReads;
+
+    await user.click(screen.getByRole('button', { name: 'Retry this prepared export' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'A newer prepared export is available. Refresh before retrying.',
+    );
+    expect(await screen.findByText(/7 photos · Ready/, { selector: 'span' })).toBeVisible();
+    expect(screen.getByText('Frozen size: 7 KB · 0 guestbook entries.')).toBeVisible();
+    expect(screen.getByText('Ready')).toBeVisible();
+    expect(exportReads).toBeGreaterThan(readsBeforeRetry);
+    expect(fetchMock.mock.calls.filter(([input, init]) => (
+      String(input).endsWith('/exports/older-failed/retry')
+        && (init?.method ?? 'GET').toUpperCase() === 'POST'
+    ))).toHaveLength(1);
   });
 
   it('keeps the latest complete and album exports on their independent Gallery surfaces', async () => {
@@ -1591,6 +2494,7 @@ describe('manager experience', () => {
         effectiveCoverMediaId: albumPhoto.id, entries: [{ kind: 'photo', photo: albumPhoto }],
         photoCount: 1, sectionCount: 0, totalBytes: 200,
       } });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [albumPhoto], nextCursor: null });
       if (url.includes('/media')) return json({ media: [], nextCursor: null });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry.secret', disabledAt: null });
@@ -1601,10 +2505,12 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
 
-    expect((await screen.findAllByText(/9 photos · 1 KB · 3 guestbook entries/))[0]).toBeVisible();
+    expect((await screen.findAllByText(/9 photos · Ready/, { selector: 'span' }))[0]).toBeVisible();
+    expect(screen.getByText('Frozen size: 1 KB · 3 guestbook entries.')).toBeVisible();
     expect(screen.getByText('Ready')).toBeVisible();
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' })).getByRole('button', { name: /^Album/ }));
-    expect((await screen.findAllByText(/2 photos · 2 KB\. Attempt 2 failed/))[0]).toBeVisible();
+    expect((await screen.findAllByText(/2 photos · Failed/, { selector: 'span' }))[0]).toBeVisible();
+    expect(screen.getByText('Frozen size: 2 KB.')).toBeVisible();
     expect(screen.getByText('Failed')).toBeVisible();
   });
 
@@ -1639,6 +2545,11 @@ describe('manager experience', () => {
         effectiveCoverMediaId: albumPhoto.id, entries: [{ kind: 'photo', photo: albumPhoto }],
         photoCount: 1, sectionCount: 0, totalBytes: 64,
       } });
+      if (url.endsWith('/gallery/summary')) return json({ summary: {
+        ...EMPTY_GALLERY_AUDIENCE_SUMMARY,
+        albumPhotoCount: 1,
+        albumEntryCount: 1,
+      } });
       if (url.includes('/gallery')) return json({ media: [albumPhoto], nextCursor: null });
       if (url.includes('/media')) return json({ media: [], nextCursor: null });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry.secret', disabledAt: null });
@@ -1672,6 +2583,7 @@ describe('manager experience', () => {
           ? json({ media: rows.slice(MANAGER_BULK_SELECTION_MAX), nextCursor: null })
           : json({ media: rows.slice(0, MANAGER_BULK_SELECTION_MAX), nextCursor: 'page-two' });
       }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
@@ -1683,7 +2595,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
     expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
     const choices = await screen.findAllByRole('checkbox', { name: /^Select /u });
@@ -1691,15 +2603,12 @@ describe('manager experience', () => {
 
     for (const choice of choices.slice(0, MANAGER_BULK_SELECTION_MAX)) fireEvent.click(choice);
     const extra = choices[MANAGER_BULK_SELECTION_MAX]!;
-    expect(screen.getByRole('status')).toHaveTextContent(
-      '50 of 50 photos selected. Remove one to choose another.',
-    );
+    const capacity = screen.getByText('50 of 50 selected. Remove one to choose another.');
+    expect(capacity).toBeVisible();
     expect(extra).toBeDisabled();
     await user.click(extra);
     expect(extra).not.toBeChecked();
-    expect(screen.getByRole('status')).toHaveTextContent(
-      '50 of 50 photos selected. Remove one to choose another.',
-    );
+    expect(capacity).toBeVisible();
 
     await user.click(choices[0]!);
     expect(extra, 'unchecking remains available as the recovery').toBeEnabled();
@@ -1720,7 +2629,7 @@ describe('manager experience', () => {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
         welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: false,
         moderationRequired: true, photoIntakeState: 'open',
-        storedMediaCount: mediaRequests > 0 ? 1 : 0, storedBytes: 128,
+        storedMediaCount: mediaRequests > 0 ? 1 : 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
         guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
       } });
       if (url.includes('/media')) {
@@ -1746,6 +2655,47 @@ describe('manager experience', () => {
     await act(async () => { (poll as () => void)(); });
 
     expect(await screen.findByText('From Avery')).toBeVisible();
+  });
+
+  it('keeps an older held Intake poll from overwriting the newer same-query poll', async () => {
+    const oldRow = {
+      id: 'poll-old', originalFilename: 'old.jpg', guestName: 'Avery', caption: 'Older poll',
+      publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const newRow = {
+      id: 'poll-new', originalFilename: 'new.jpg', guestName: 'Jamie', caption: 'Newer poll',
+      publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const releases: Array<() => void> = [];
+    let mediaReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaReads += 1;
+        if (mediaReads === 1) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+        const row = mediaReads === 2 ? oldRow : newRow;
+        return new Promise<Response>((resolve) => { releases.push(() => void json({ media: [row], nextCursor: null }).then(resolve)); });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const interval = vi.spyOn(window, 'setInterval');
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as () => void;
+
+    await act(async () => { poll(); });
+    await act(async () => { poll(); });
+    expect(releases).toHaveLength(2);
+    await act(async () => { releases[1]!(); });
+    expect(await screen.findByAltText('Newer poll')).toBeVisible();
+    await act(async () => { releases[0]!(); });
+
+    expect(screen.getByAltText('Newer poll')).toBeVisible();
+    expect(screen.queryByAltText('Older poll')).not.toBeInTheDocument();
   });
 
   it('keeps the last usable intake on screen when a poll fails', async () => {
@@ -1816,6 +2766,86 @@ describe('manager experience', () => {
     expect(screen.getByLabelText('Management link')).toBeVisible();
   });
 
+  it('locks the Intake interval after a terminal poll failure even when its notice is dismissed', async () => {
+    let mediaReads = 0;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('/media')) {
+        mediaReads += 1;
+        return mediaReads === 1
+          ? json({ media: makeMedia(2).slice(1), nextCursor: null })
+          : errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401);
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('This session has expired.');
+    expect(mediaReads).toBe(2);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(mediaReads).toBe(2);
+  });
+
+  it('does not resurface a dismissed terminal notice when a second Intake poll sibling settles', async () => {
+    let eventReads = 0;
+    let mediaReads = 0;
+    let releaseEventFailure!: () => void;
+    let releaseMediaFailure!: () => void;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) {
+        eventReads += 1;
+        if (eventReads === 1) return json({ event: MANAGED_EVENT });
+        return new Promise<Response>((resolve) => {
+          releaseEventFailure = () => void errorJson({
+            code: 'SESSION_EXPIRED', message: 'The event poll lost access.', requestId: 'request-event',
+          }, 401).then(resolve);
+        });
+      }
+      if (url.includes('/media')) {
+        mediaReads += 1;
+        if (mediaReads === 1) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+        return new Promise<Response>((resolve) => {
+          releaseMediaFailure = () => void errorJson({
+            code: 'SESSION_EXPIRED', message: 'The intake poll lost access.', requestId: 'request-media',
+          }, 401).then(resolve);
+        });
+      }
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const interval = vi.spyOn(window, 'setInterval');
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+
+    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as () => void;
+    await act(async () => { poll(); });
+    await waitFor(() => {
+      expect(releaseEventFailure).toBeTypeOf('function');
+      expect(releaseMediaFailure).toBeTypeOf('function');
+    });
+    await act(async () => { releaseEventFailure(); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('The event poll lost access.');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await act(async () => { releaseMediaFailure(); });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByAltText('Moment 2')).toBeVisible();
+  });
+
   it('names the way out when a load fails after the manager has already rendered', async () => {
     let mediaRequests = 0;
     const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
@@ -1879,7 +2909,9 @@ describe('manager experience', () => {
     expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Delete moment-2.jpg' }));
+    await user.click(screen.getByRole('button', { name: 'Move moment-2.jpg to Recently deleted' }));
+    await user.click(within(await screen.findByRole('dialog'))
+      .getByRole('button', { name: 'Move to Recently deleted' }));
 
     // A refused write is retryable by definition — the control is still under the host's thumb — so
     // the notice carries the failure and nothing else. The recovery line belongs to load failures.
@@ -1922,7 +2954,7 @@ describe('manager experience', () => {
       .not.toBeInTheDocument();
   });
 
-  it('retires rendered and in-flight event QR codes once the entry is disabled', async () => {
+  it('does not reload the event entry when an Intake query changes', async () => {
     let disabled = false;
     let resolveFirstQr!: (value: string) => void;
     qrToDataURL.mockImplementationOnce(() => new Promise<string>((resolve) => {
@@ -1947,20 +2979,23 @@ describe('manager experience', () => {
 
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
     const user = userEvent.setup();
-    // Any refresh re-reads the entry; this one comes back disabled.
+    // Intake has its own query owner; filtering must not re-read entry or
+    // replace the independent QR input.
     await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
 
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(await screen.findByText(/cannot be replaced/iu)).toBeVisible();
+    expect(screen.getByText('https://example.test/join#entry-id.entry-secret')).toBeVisible();
+    expect(qrToDataURL).toHaveBeenCalledTimes(1);
 
-    // The QR render that was already in flight when the entry died must not
-    // paint a scannable code afterwards.
+    // The in-flight render still belongs to the unchanged entry.
     await act(async () => {
       resolveFirstQr('data:image/png;base64,stale-entry');
       await Promise.resolve();
     });
-    expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
+    for (const qr of screen.getAllByAltText('Event QR code')) {
+      expect(qr).toHaveAttribute('src', 'data:image/png;base64,stale-entry');
+    }
   });
 
   it('keeps the readable event link usable when QR generation rejects', async () => {
@@ -2177,7 +3212,10 @@ describe('manager experience', () => {
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
     expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Delete moment-2.jpg' }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Move moment-2.jpg to Recently deleted' }));
+    await user.click(within(await screen.findByRole('dialog'))
+      .getByRole('button', { name: 'Move to Recently deleted' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('This link was replaced with a new one.');
     expect(screen.getByAltText('Moment 2')).toBeVisible();
@@ -2186,13 +3224,343 @@ describe('manager experience', () => {
     expect(screen.getByLabelText('Management link')).toBeVisible();
   });
 
+  it.each([
+    ['manager action', 'trash'],
+    ['trash', 'manager action'],
+  ] as const)('does not re-escalate dismissed terminal recovery when %s settles before %s', async (first, second) => {
+    const row: MediaView = {
+      id: 'terminal-row', originalFilename: 'terminal-row.jpg', guestName: 'Avery', caption: 'Terminal row',
+      publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let exportWrites = 0;
+    let trashWrites = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/exports') && method === 'POST') {
+        exportWrites += 1;
+        return errorJson({
+          code: 'TOKEN_REVOKED', message: 'Export access was revoked.', requestId: 'request-export',
+        }, 403);
+      }
+      if (url.endsWith('/media/terminal-row/trash') && method === 'POST') {
+        trashWrites += 1;
+        return errorJson({
+          code: 'SESSION_EXPIRED', message: 'Trash access expired.', requestId: 'request-trash',
+        }, 401);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/api/manage/events/event-a/media')) return json({ media: [row], nextCursor: null });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+
+    const trigger = async (source: 'manager action' | 'trash') => {
+      if (source === 'manager action') {
+        await user.click(screen.getByRole('button', { name: 'Gallery' }));
+        await user.click(await screen.findByRole('button', { name: 'Download all' }));
+        await waitFor(() => expect(exportWrites).toBeGreaterThan(0));
+        return;
+      }
+      await user.click(screen.getByRole('button', { name: /^Intake/ }));
+      await user.click(await screen.findByRole('button', { name: 'Move terminal-row.jpg to Recently deleted' }));
+      await user.click(within(await screen.findByRole('dialog'))
+        .getByRole('button', { name: 'Move to Recently deleted' }));
+      await waitFor(() => expect(trashWrites).toBeGreaterThan(0));
+    };
+
+    await trigger(first);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      first === 'manager action' ? 'Export access was revoked.' : 'Trash access expired.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+
+    await trigger(second);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(exportWrites).toBe(1);
+    expect(trashWrites).toBe(1);
+  });
+
+  it('drops a held event-A Shared mutation after routing to event B', async () => {
+    const eventA = { ...MANAGED_EVENT, id: 'event-a', name: 'Event A' };
+    const eventB = { ...MANAGED_EVENT, id: 'event-b', name: 'Event B' };
+    const aRow = {
+      id: 'a-row', originalFilename: 'a-row.jpg', guestName: 'Avery', caption: 'Only event A',
+      publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let releaseAWrite!: () => void;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const event = url.includes('/event-b') ? eventB : eventA;
+      if (url.endsWith('/media/a-row') && method === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          releaseAWrite = () => void errorJson({
+            code: 'SESSION_EXPIRED', message: 'Event A access expired.', requestId: 'request-a',
+          }, 401).then(resolve);
+        });
+      }
+      if (url.endsWith(`/api/manage/events/${event.id}`)) return json({ event });
+      if (url.includes('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({ media: event.id === 'event-a' ? [aRow] : [], nextCursor: null });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Publish a-row.jpg' }));
+    await waitFor(() => expect(releaseAWrite).toBeTypeOf('function'));
+
+    await router.navigate('/manage/event/event-b');
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+    await act(async () => { releaseAWrite(); });
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText('Only event A')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+  });
+
+  it('does not let an event-A Undo settlement reconcile or announce inside event B', async () => {
+    const eventA = { ...MANAGED_EVENT, id: 'event-a', name: 'Event A' };
+    const eventB = { ...MANAGED_EVENT, id: 'event-b', name: 'Event B', storedMediaCount: 0 };
+    const aRow: MediaView = {
+      id: 'stale-undo', originalFilename: 'stale-undo.jpg', guestName: 'Avery',
+      caption: 'Event A undo', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let aRowActive = true;
+    let releaseRestore!: () => void;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const event = url.includes('/event-b') ? eventB : eventA;
+      if (url.endsWith('/media/stale-undo/trash') && method === 'POST') {
+        aRowActive = false;
+        return json({ media: {
+          ...aRow,
+          trashedAt: '2026-09-20T01:00:00.000Z',
+          restoreUntil: '2099-10-19T00:00:00.000Z',
+        } });
+      }
+      if (url.endsWith('/media/stale-undo/restore') && method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          releaseRestore = () => {
+            aRowActive = true;
+            void json({ media: aRow }).then(resolve);
+          };
+        });
+      }
+      if (url.endsWith(`/api/manage/events/${event.id}`)) return json({ event });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/media')) {
+        return json({ media: event.id === 'event-a' && aRowActive ? [aRow] : [], nextCursor: null });
+      }
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(await screen.findByRole('button', {
+      name: 'Move stale-undo.jpg to Recently deleted',
+    }));
+    await user.click(within(await screen.findByRole('dialog'))
+      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await user.click(await screen.findByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(releaseRestore).toBeTypeOf('function'));
+
+    await router.navigate('/manage/event/event-b');
+    expect(await screen.findByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+    const eventAReads = () => fetchMock.mock.calls.filter(([input, request]) => (
+      String(input).includes('/api/manage/events/event-a')
+      && ((request as RequestInit | undefined)?.method ?? 'GET').toUpperCase() === 'GET'
+    ));
+    const readsBeforeSettlement = eventAReads().length;
+    await act(async () => {
+      releaseRestore();
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    });
+
+    expect(eventAReads()).toHaveLength(readsBeforeSettlement);
+    expect(screen.queryByText('Change undone.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+  });
+
+  it('does not start an event-A export reload after its Manager unmounts for event B', async () => {
+    const eventA = { ...MANAGED_EVENT, id: 'event-a', name: 'Event A' };
+    const eventB = { ...MANAGED_EVENT, id: 'event-b', name: 'Event B' };
+    let releaseAExport!: () => void;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const event = url.includes('/event-b') ? eventB : eventA;
+      if (url.endsWith('/exports') && method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          releaseAExport = () => void json({ accepted: true }).then(resolve);
+        });
+      }
+      if (url.endsWith(`/api/manage/events/${event.id}`)) return json({ event });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createAppRouter(['/manage/event/event-a']);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Download all' }));
+    await waitFor(() => expect(releaseAExport).toBeTypeOf('function'));
+
+    await router.navigate('/manage/event/event-b');
+    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+    const eventAExportReads = () => fetchMock.mock.calls.filter(([requested, request]) => (
+      String(requested).endsWith('/api/manage/events/event-a/exports')
+        && ((request as RequestInit | undefined)?.method ?? 'GET').toUpperCase() === 'GET'
+    ));
+    const readsBeforeRelease = eventAExportReads().length;
+
+    await act(async () => {
+      releaseAExport();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(eventAExportReads()).toHaveLength(readsBeforeRelease);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+  });
+
+  it('retires event-A export work before event B layout effects can release it', async () => {
+    const eventA = { ...MANAGED_EVENT, id: 'event-a', name: 'Event A' };
+    const eventB = { ...MANAGED_EVENT, id: 'event-b', name: 'Event B' };
+    let releaseAExport!: () => void;
+    let resolveBLayout!: () => void;
+    const bLayout = new Promise<void>((resolve) => { resolveBLayout = resolve; });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const event = url.includes('/event-b') ? eventB : eventA;
+      if (url.endsWith('/exports') && method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          releaseAExport = () => void json({ accepted: true }).then(resolve);
+        });
+      }
+      if (url.endsWith(`/api/manage/events/${event.id}`)) return json({ event });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/media')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const router = createMemoryRouter([{
+      path: '/manage/event/:eventId',
+      element: <LayoutReleaseManagerRoute onEventBLayout={() => {
+        releaseAExport();
+        resolveBLayout();
+      }} />,
+    }], { initialEntries: ['/manage/event/event-a'] });
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(screen.getByRole('button', { name: 'Download all' }));
+    await waitFor(() => expect(releaseAExport).toBeTypeOf('function'));
+
+    const eventAExportReads = () => fetchMock.mock.calls.filter(([requested, request]) => (
+      String(requested).endsWith('/api/manage/events/event-a/exports')
+        && ((request as RequestInit | undefined)?.method ?? 'GET').toUpperCase() === 'GET'
+    ));
+    const readsBeforeRoute = eventAExportReads().length;
+    void router.navigate('/manage/event/event-b');
+    await bLayout;
+    // The held response crosses `api()`'s envelope parse before the export
+    // continuation asks for its follow-up read. Stay in the microtask queue:
+    // React's passive unmount cleanup is intentionally not allowed to run here.
+    await new Promise<void>((resolve) => {
+      let remaining = 20;
+      const drain = () => {
+        remaining -= 1;
+        if (remaining === 0) resolve();
+        else queueMicrotask(drain);
+      };
+      queueMicrotask(drain);
+    });
+
+    expect(eventAExportReads()).toHaveLength(readsBeforeRoute);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('opens on live intake, filters by guest name, and keeps the shared gallery secondary', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
         id: 'event-a', slug: 'maya-theo', name: 'Maya & Theo', eventDate: '2026-09-19',
         welcomeMessage: 'Welcome.', uploadsEnabled: true, galleryVisible: false,
-        moderationRequired: true, photoIntakeState: 'open', storedMediaCount: 2, storedBytes: 128,
+        moderationRequired: true, photoIntakeState: 'open', storedMediaCount: 2, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
         guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
       } });
       if (url.includes('/media')) {
@@ -2202,6 +3570,7 @@ describe('manager experience', () => {
           { id: 'media-b', originalFilename: 'dance.png', guestName: 'Jamie', caption: 'First dance', publicationStatus: 'unpublished', uploadState: 'stored' },
         ] });
       }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
@@ -2214,8 +3583,9 @@ describe('manager experience', () => {
     expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
     expect(screen.getByText('From Avery')).toBeVisible();
     expect(screen.getByRole('link', { name: /download original toast.png/i })).toHaveAttribute('href', '/api/media/media-a/original');
-    const intakeNavigation = screen.getByRole('button', { name: /intake/i });
-    const galleryNavigation = screen.getByRole('button', { name: /gallery/i });
+    const managerNavigation = screen.getByRole('navigation', { name: 'Manager sections' });
+    const intakeNavigation = within(managerNavigation).getByRole('button', { name: /intake/i });
+    const galleryNavigation = within(managerNavigation).getByRole('button', { name: /gallery/i });
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'false');
     const user = userEvent.setup();
@@ -2230,7 +3600,7 @@ describe('manager experience', () => {
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
     await user.click(screen.getByRole('checkbox', { name: /The toast/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -2255,9 +3625,17 @@ describe('manager experience', () => {
     let releaseBulk!: () => void;
     const bulkGate = new Promise<void>((resolve) => { releaseBulk = resolve; });
     let failBulk = false;
+    let failIndividual = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/media-b') && method === 'PATCH') {
+        if (failIndividual) return errorJson({
+          code: 'INTERNAL_ERROR', message: 'The photo could not be published.', requestId: 'request-a',
+        }, 500);
+        rows[1]!.publicationStatus = 'published';
+        return json({ media: rows[1] });
+      }
       if (url.endsWith('/media/bulk') && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as { ids: string[]; action: 'publish' | 'hide' };
         await bulkGate;
@@ -2269,7 +3647,7 @@ describe('manager experience', () => {
         for (const row of rows) {
           if (body.ids.includes(row.id)) row.publicationStatus = body.action === 'publish' ? 'published' : 'hidden';
         }
-        return json({ changed: body.ids });
+        return json({ changed: rows.filter((row) => body.ids.includes(row.id)) });
       }
       if (url.endsWith('/api/manage/events/event-a')) {
         return json({ event: { ...MANAGED_EVENT, storedMediaCount: rows.length } });
@@ -2277,7 +3655,14 @@ describe('manager experience', () => {
       if (url.endsWith('/guestbook/summary')) return json({ summary: {
         needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
       } });
-      if (url.includes('/media')) return json({ media: rows, nextCursor: null });
+      if (url.includes('/media')) {
+        const status = new URL(url, window.location.origin).searchParams.get('status');
+        return json({
+          media: status ? rows.filter((row) => row.publicationStatus === status) : rows,
+          nextCursor: null,
+        });
+      }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
       if (url.endsWith('/album')) return json({ album: {
         revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
@@ -2295,11 +3680,9 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Live intake' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
 
-    expect(screen.getByText(
-      'Publication is a separate axis from the album. A photo is delivered privately whether or not it is published, and an album pick never publishes anything.',
-    )).toBeVisible();
+    expect(screen.getByText('Published photos are visible to event guests.')).toBeVisible();
     const shared = document.querySelector('.gallery-shared') as HTMLElement;
     const images = shared.querySelectorAll<HTMLImageElement>('.intake-photo img');
     expect(images).toHaveLength(2);
@@ -2311,19 +3694,29 @@ describe('manager experience', () => {
     await user.click(toast);
     expect(toast).toBeChecked();
     await user.click(within(shared).getByRole('button', { name: 'Published' }));
-    expect(toast).not.toBeChecked();
+    // A status change is a new Shared question. The old status's rows and
+    // selection do not remain mounted while its cursor is being replaced.
+    expect(await within(shared).findByText('No published photos.')).toBeVisible();
+    expect(within(shared).queryByRole('checkbox', { name: 'Select The toast' })).not.toBeInTheDocument();
     expect(within(shared).getByRole('button', { name: 'Publish selected' })).toBeDisabled();
     expect(within(shared).getByRole('button', { name: 'Hide selected' })).toBeDisabled();
 
     await user.click(within(shared).getByRole('button', { name: 'Unpublished' }));
-    await user.click(toast);
+    // The individual card intentionally uses a fire-and-forget handler. A
+    // rejected write stays panel-local instead of becoming an unhandled click
+    // promise, and leaves the trusted row selectable for later work.
+    failIndividual = true;
+    await user.click(await within(shared).findByRole('button', { name: 'Publish private-camera-b.jpg' }));
+    expect(await screen.findByText('The photo could not be published.')).toBeVisible();
+    expect(within(shared).getByText('First dance')).toBeVisible();
+    await user.click(await within(shared).findByRole('checkbox', { name: 'Select The toast' }));
     await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
     const publishing = within(shared).getByRole('button', { name: 'Publishing…' });
     expect(publishing).toBeDisabled();
     expect(publishing).toHaveAttribute('aria-busy', 'true');
     expect(within(shared).getByRole('button', { name: 'Hide selected' })).toBeDisabled();
     expect(within(shared).queryByRole('button', { name: 'Hiding…' })).not.toBeInTheDocument();
-    expect(within(shared).getByText('1 selected').closest('.bulk-bar')).toHaveAttribute('aria-busy', 'true');
+    expect(within(shared).getByText('1 of 50 selected').closest('.bulk-bar')).toHaveAttribute('aria-busy', 'true');
     expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
     expect(shared.querySelector('[role="status"]')).toBeNull();
 
@@ -2341,6 +3734,535 @@ describe('manager experience', () => {
     const liveStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
     expect(liveStatus).toHaveTextContent('Publishing could not be completed.');
     expect(liveStatus).not.toHaveTextContent('Publishing finished.');
+
+    // The card handler is intentionally fire-and-forget. Its controller owns
+    // the rejection and the recovery repeats this exact write rather than
+    // merely dismissing the panel notice.
+    failBulk = false;
+    const failedBulk = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/media/bulk'));
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/media/bulk')))
+      .toHaveLength(failedBulk.length + 1));
+    const retriedBulk = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/media/bulk'));
+    expect(retriedBulk.at(-1)?.[1]?.body).toBe(failedBulk.at(-1)?.[1]?.body);
+  });
+
+  it('keeps confirmed Shared rows and retries only its failed continuation', async () => {
+    let rejectContinuation = true;
+    const first = { id: 'shared-first', originalFilename: 'first.jpg', guestName: 'Avery', caption: 'Confirmed shared row', publicationStatus: 'unpublished', uploadState: 'stored' };
+    const next = { id: 'shared-next', originalFilename: 'next.jpg', guestName: 'Jamie', caption: 'Retried shared row', publicationStatus: 'unpublished', uploadState: 'stored' };
+    const base = managerFetch({
+      first: { media: [first], nextCursor: 'shared-next' },
+      'shared-next': { media: [next], nextCursor: null },
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('cursor=shared-next') && rejectContinuation) {
+        return errorJson({ code: 'INTERNAL_ERROR', message: 'Shared continuation unavailable.', requestId: 'request-a' }, 500);
+      }
+      return base(input);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    expect(await within(shared).findByText('Confirmed shared row')).toBeVisible();
+
+    await user.click(within(shared).getByRole('button', { name: 'Load more photos' }));
+    expect(await screen.findByText('Shared continuation unavailable.')).toBeVisible();
+    expect(within(shared).getByText('Confirmed shared row')).toBeVisible();
+
+    rejectContinuation = false;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await within(shared).findByText('Retried shared row')).toBeVisible();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('cursor=shared-next'))).toHaveLength(2);
+  });
+
+  it.each([
+    ['row write'],
+    ['bulk write'],
+    ['continuation'],
+  ] as const)('clears the obsolete Shared %s retry after its retry escalates terminally', async (operation) => {
+    const row: MediaView = {
+      id: 'shared-terminal-row', originalFilename: 'shared-terminal-row.jpg', guestName: 'Avery',
+      caption: 'Shared terminal row', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const retryMessage = `Retryable Shared ${operation} failure.`;
+    const terminalMessage = `Terminal Shared ${operation} failure.`;
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const isOperation = operation === 'row write'
+        ? url.endsWith('/media/shared-terminal-row') && method === 'PATCH'
+        : operation === 'bulk write'
+          ? url.endsWith('/media/bulk') && method === 'POST'
+          : url.includes('cursor=shared-terminal-next') && method === 'GET';
+      if (isOperation) {
+        attempts += 1;
+        return attempts === 1
+          ? errorJson({ code: 'INTERNAL_ERROR', message: retryMessage, requestId: 'request-retry' }, 500)
+          : errorJson({ code: 'TOKEN_REVOKED', message: terminalMessage, requestId: 'request-terminal' }, 403);
+      }
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.includes('/api/manage/events/event-a/media')) return json({
+        media: [row], nextCursor: operation === 'continuation' ? 'shared-terminal-next' : null,
+      });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    await within(shared).findByText('Shared terminal row');
+
+    if (operation === 'row write') {
+      await user.click(within(shared).getByRole('button', { name: 'Publish shared-terminal-row.jpg' }));
+    } else if (operation === 'bulk write') {
+      await user.click(within(shared).getByRole('checkbox', { name: 'Select Shared terminal row' }));
+      await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
+    } else {
+      await user.click(within(shared).getByRole('button', { name: 'Load more photos' }));
+    }
+    expect(await screen.findByText(retryMessage)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(attempts).toBe(2));
+    expect(await screen.findByText(terminalMessage)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
+    expect(screen.queryByText(retryMessage)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    if (operation === 'continuation') {
+      // Dismissing recovery does not make a confirmed credential answer
+      // retryable. The retained page can still show its cursor, but it must
+      // not keep issuing that terminal continuation on every click.
+      await user.click(within(shared).getByRole('button', { name: 'Load more photos' }));
+      expect(attempts).toBe(2);
+    }
+  });
+
+  it('preserves the selected Gallery mode while a Manager epoch remounts Library and reloads Shared', async () => {
+    let libraryReads = 0;
+    let sharedReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/gallery?')) {
+        libraryReads += 1;
+        return json({ media: [], nextCursor: null });
+      }
+      if (url.includes('/media')) {
+        sharedReads += 1;
+        return json({ media: [], nextCursor: null });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const workspace = (galleryMutationEpoch: number) => <ManagerUndoProvider eventId="event-a">
+      <ManagerGalleryWorkspace
+        event={MANAGED_EVENT as unknown as EventView}
+        eventId="event-a"
+        galleryMutationEpoch={galleryMutationEpoch}
+        invalidateGalleryAfterMutation={() => {}}
+        audience={directGalleryAudienceAuthority()}
+        onAnnouncement={vi.fn()}
+        shared={{
+          onPublicationChanged: () => {},
+          onOpenSettings: () => {},
+          settingsBlocked: false,
+        }}
+        exports={{
+          onPrepare: async () => {},
+          onDownload: async () => {},
+          onRetry: async () => {},
+          currentSource: { count: MANAGED_EVENT.storedMediaCount, freshness: 'fresh' },
+        }}
+      />
+    </ManagerUndoProvider>;
+    const view = render(workspace(0));
+    const user = userEvent.setup();
+    await waitFor(() => expect(libraryReads).toBe(1));
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    await waitFor(() => expect(sharedReads).toBe(1));
+
+    view.rerender(workspace(1));
+
+    expect(screen.getByRole('button', { name: 'Guest gallery' })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => {
+      expect(libraryReads).toBe(2);
+      expect(sharedReads).toBe(2);
+    });
+  });
+
+  it('adopts each confirmed mixed-status Shared bulk group and retries only the failed group', async () => {
+    const unpublished: MediaView = {
+      id: 'mixed-unpublished', originalFilename: 'unpublished.jpg', guestName: 'Avery',
+      caption: 'Unpublished mixed', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const published: MediaView = {
+      id: 'mixed-published', originalFilename: 'published.jpg', guestName: 'Jamie',
+      caption: 'Published mixed', publicationStatus: 'published', uploadState: 'stored',
+    };
+    const publishedUnpublished = { ...unpublished, publicationStatus: 'published' as const };
+    const bulkBodies: Array<{ ids: string[]; action: string; expectedStatus: string }> = [];
+    let failPublishedGroup = true;
+    const onPublicationChanged = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/bulk') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { ids: string[]; action: string; expectedStatus: string };
+        bulkBodies.push(body);
+        if (body.expectedStatus === 'published' && failPublishedGroup) {
+          return errorJson({ code: 'INTERNAL_ERROR', message: 'Published group unavailable.', requestId: 'request-published' }, 500);
+        }
+        return json({ changed: body.expectedStatus === 'unpublished' ? [publishedUnpublished] : [published] });
+      }
+      if (url.endsWith('/api/manage/events/event-a/media')) {
+        return json({ media: [unpublished, published], nextCursor: null });
+      }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<ManagerGalleryWorkspaceWithUndo
+      event={MANAGED_EVENT as unknown as EventView}
+      eventId="event-a"
+      galleryMutationEpoch={0}
+      invalidateGalleryAfterMutation={() => {}}
+      audience={directGalleryAudienceAuthority()}
+      onAnnouncement={vi.fn()}
+      shared={{
+        status: 'all',
+        onPublicationChanged,
+        onOpenSettings: () => {},
+        settingsBlocked: false,
+      }}
+      exports={{
+        onPrepare: async () => {},
+        onDownload: async () => {},
+        onRetry: async () => {},
+        currentSource: { count: MANAGED_EVENT.storedMediaCount, freshness: 'fresh' },
+      }}
+    />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    expect(await within(shared).findByText('Unpublished mixed')).toBeVisible();
+    await user.click(within(shared).getByRole('checkbox', { name: 'Select Unpublished mixed' }));
+    await user.click(within(shared).getByRole('checkbox', { name: 'Select Published mixed' }));
+    await user.click(within(shared).getByRole('button', { name: 'Publish selected' }));
+
+    expect(await screen.findByText('Published group unavailable.')).toBeVisible();
+    expect(bulkBodies).toEqual([
+      { ids: ['mixed-unpublished'], action: 'publish', expectedStatus: 'unpublished' },
+      { ids: ['mixed-published'], action: 'publish', expectedStatus: 'published' },
+    ]);
+    expect(onPublicationChanged).toHaveBeenCalledWith([publishedUnpublished]);
+    expect(within(shared).getByText('1 of 50 selected')).toBeVisible();
+
+    failPublishedGroup = false;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(bulkBodies).toHaveLength(3));
+    expect(bulkBodies[2]).toEqual({
+      ids: ['mixed-published'], action: 'publish', expectedStatus: 'published',
+    });
+    expect(onPublicationChanged).toHaveBeenLastCalledWith([published]);
+  });
+
+  it('composes two held same-query Shared row projections in their settlement order', async () => {
+    const first: MediaView = {
+      id: 'row-first', originalFilename: 'first.jpg', guestName: 'Avery',
+      caption: 'First held row', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const second: MediaView = {
+      id: 'row-second', originalFilename: 'second.jpg', guestName: 'Jamie',
+      caption: 'Second held row', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const onPublicationChanged = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/row-first') && method === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          releaseFirst = () => void json({ media: { ...first, publicationStatus: 'published' } }).then(resolve);
+        });
+      }
+      if (url.endsWith('/media/row-second') && method === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          releaseSecond = () => void json({ media: { ...second, publicationStatus: 'published' } }).then(resolve);
+        });
+      }
+      if (url.includes('/api/manage/events/event-a/media') && method === 'GET') {
+        return json({ media: [first, second], nextCursor: null });
+      }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<ManagerGalleryWorkspaceWithUndo
+      event={MANAGED_EVENT as unknown as EventView}
+      eventId="event-a"
+      galleryMutationEpoch={0}
+      invalidateGalleryAfterMutation={() => {}}
+      audience={directGalleryAudienceAuthority()}
+      onAnnouncement={vi.fn()}
+      shared={{
+        onPublicationChanged,
+        onOpenSettings: () => {},
+        settingsBlocked: false,
+      }}
+      exports={{
+        onPrepare: async () => {},
+        onDownload: async () => {},
+        onRetry: async () => {},
+        currentSource: { count: MANAGED_EVENT.storedMediaCount, freshness: 'fresh' },
+      }}
+    />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    expect(await within(shared).findByText('First held row')).toBeVisible();
+    await user.click(within(shared).getByRole('button', { name: 'Publish first.jpg' }));
+    await user.click(within(shared).getByRole('button', { name: 'Publish second.jpg' }));
+    await waitFor(() => {
+      expect(releaseFirst).toBeTypeOf('function');
+      expect(releaseSecond).toBeTypeOf('function');
+    });
+
+    await act(async () => { releaseSecond(); });
+    await act(async () => { releaseFirst(); });
+
+    expect(await within(shared).findByText('No unpublished photos.')).toBeVisible();
+    expect(onPublicationChanged).toHaveBeenCalledWith([{ ...second, publicationStatus: 'published' }]);
+    expect(onPublicationChanged).toHaveBeenCalledWith([{ ...first, publicationStatus: 'published' }]);
+  });
+
+  it('keeps a Shared write failure until that write, rather than a sibling, succeeds', async () => {
+    const first: MediaView = {
+      id: 'failure-first', originalFilename: 'first-failure.jpg', guestName: 'Avery',
+      caption: 'Successful sibling', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const second: MediaView = {
+      id: 'failure-second', originalFilename: 'second-failure.jpg', guestName: 'Jamie',
+      caption: 'Failed write', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let releaseFirst!: () => void;
+    let releaseSecondFailure!: () => void;
+    let secondWrites = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/media/failure-first') && method === 'PATCH') {
+        return new Promise<Response>((resolve) => {
+          releaseFirst = () => void json({ media: { ...first, publicationStatus: 'published' } }).then(resolve);
+        });
+      }
+      if (url.endsWith('/media/failure-second') && method === 'PATCH') {
+        secondWrites += 1;
+        if (secondWrites === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseSecondFailure = () => void errorJson({
+              code: 'INTERNAL_ERROR', message: 'The failed row is unavailable.', requestId: 'request-failed-row',
+            }, 500).then(resolve);
+          });
+        }
+        return json({ media: { ...second, publicationStatus: 'published' } });
+      }
+      if (url.includes('/api/manage/events/event-a/media') && method === 'GET') {
+        return json({ media: [first, second], nextCursor: null });
+      }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<ManagerGalleryWorkspaceWithUndo
+      event={MANAGED_EVENT as unknown as EventView}
+      eventId="event-a"
+      galleryMutationEpoch={0}
+      invalidateGalleryAfterMutation={() => {}}
+      audience={directGalleryAudienceAuthority()}
+      onAnnouncement={vi.fn()}
+      shared={{
+        onPublicationChanged: () => {},
+        onOpenSettings: () => {},
+        settingsBlocked: false,
+      }}
+      exports={{
+        onPrepare: async () => {},
+        onDownload: async () => {},
+        onRetry: async () => {},
+        currentSource: { count: MANAGED_EVENT.storedMediaCount, freshness: 'fresh' },
+      }}
+    />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    expect(await within(shared).findByText('Successful sibling')).toBeVisible();
+    await user.click(within(shared).getByRole('button', { name: 'Publish first-failure.jpg' }));
+    await user.click(within(shared).getByRole('button', { name: 'Publish second-failure.jpg' }));
+    await waitFor(() => {
+      expect(releaseFirst).toBeTypeOf('function');
+      expect(releaseSecondFailure).toBeTypeOf('function');
+    });
+
+    await act(async () => { releaseSecondFailure(); });
+    expect(await screen.findByText('The failed row is unavailable.')).toBeVisible();
+    await act(async () => { releaseFirst(); });
+    expect(screen.getByText('The failed row is unavailable.')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(secondWrites).toBe(2));
+    expect(screen.queryByText('The failed row is unavailable.')).not.toBeInTheDocument();
+  });
+
+  it('drops a held Shared continuation failure when its status query changes', async () => {
+    let releaseOldContinuation!: () => void;
+    const unpublished = {
+      id: 'unpublished-row', originalFilename: 'unpublished.jpg', guestName: 'Avery', caption: 'Unpublished row',
+      publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    const published = {
+      id: 'published-row', originalFilename: 'published.jpg', guestName: 'Jamie', caption: 'Published row',
+      publicationStatus: 'published', uploadState: 'stored',
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.includes('status=unpublished') && url.includes('cursor=old-shared')) {
+        return new Promise<Response>((resolve) => {
+          releaseOldContinuation = () => void errorJson({
+            code: 'INTERNAL_ERROR', message: 'Old shared continuation failed.', requestId: 'request-a',
+          }, 500).then(resolve);
+        });
+      }
+      if (url.includes('status=unpublished')) return json({ media: [unpublished], nextCursor: 'old-shared' });
+      if (url.includes('status=published')) return json({ media: [published], nextCursor: null });
+      if (url.includes('/media')) return json({ media: [unpublished], nextCursor: null });
+      if (url.includes('/guestbook/summary')) return json({ summary: {
+        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
+      } });
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/messages')) return json({ messages: [] });
+      if (url.endsWith('/exports')) return json({ exports: [] });
+      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    expect(await within(shared).findByText('Unpublished row')).toBeVisible();
+    await user.click(within(shared).getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(releaseOldContinuation).toBeTypeOf('function'));
+
+    await user.click(within(shared).getByRole('button', { name: 'Published' }));
+    expect(await within(shared).findByText('Published row')).toBeVisible();
+    await act(async () => { releaseOldContinuation(); });
+
+    expect(screen.queryByText('Old shared continuation failed.')).not.toBeInTheDocument();
+    expect(within(shared).getByText('Published row')).toBeVisible();
+  });
+
+  it('silently drops a retired Shared continuation failure after a confirmed row projection', async () => {
+    const row: MediaView = {
+      id: 'shared-retire-row', originalFilename: 'shared-retire-row.jpg', guestName: 'Avery',
+      caption: 'Retire Shared', publicationStatus: 'unpublished', uploadState: 'stored',
+    };
+    let releaseStalePage!: () => void;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('cursor=shared-retire-cursor')) {
+        return new Promise<Response>((resolve) => {
+          releaseStalePage = () => void errorJson({
+            code: 'INTERNAL_ERROR', message: 'Stale Shared continuation failed.', requestId: 'request-stale-shared',
+          }, 500).then(resolve);
+        });
+      }
+      if (url.endsWith('/media/shared-retire-row') && method === 'PATCH') {
+        return json({ media: { ...row, publicationStatus: 'published' } });
+      }
+      if (url.includes('/api/manage/events/event-a/media')) {
+        return json({ media: [row], nextCursor: 'shared-retire-cursor' });
+      }
+      if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
+      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.endsWith('/album')) return json({ album: {
+        revision: 0, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, entries: [], photoCount: 0, sectionCount: 0, totalBytes: 0,
+      } });
+      throw new Error(`Unexpected request ${method} ${url}`);
+    }));
+    render(<ManagerGalleryWorkspaceWithUndo
+      event={MANAGED_EVENT as unknown as EventView}
+      eventId="event-a"
+      galleryMutationEpoch={0}
+      invalidateGalleryAfterMutation={() => {}}
+      audience={directGalleryAudienceAuthority()}
+      onAnnouncement={vi.fn()}
+      shared={{
+        onPublicationChanged: () => {},
+        onOpenSettings: () => {},
+        settingsBlocked: false,
+      }}
+      exports={{
+        onPrepare: async () => {},
+        onDownload: async () => {},
+        onRetry: async () => {},
+        currentSource: { count: MANAGED_EVENT.storedMediaCount, freshness: 'fresh' },
+      }}
+    />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    expect(await within(shared).findByText('Retire Shared')).toBeVisible();
+    await user.click(within(shared).getByRole('button', { name: 'Load more photos' }));
+    await waitFor(() => expect(releaseStalePage).toBeTypeOf('function'));
+
+    await user.click(within(shared).getByRole('button', { name: 'Publish shared-retire-row.jpg' }));
+    expect(await within(shared).findByText('No unpublished photos.')).toBeVisible();
+    await act(async () => { releaseStalePage(); });
+
+    expect(screen.queryByText('Stale Shared continuation failed.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
   it('drains Album work before a manager-section change and a router unmount', async () => {
@@ -2397,6 +4319,14 @@ describe('manager experience', () => {
     fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before Intake' } });
     await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
     expect(screen.getByLabelText('Album title')).toBeVisible();
+    const sectionPrompt = await screen.findByRole('region', {
+      name: 'Album changes are not saved yet',
+    });
+    expect(sectionPrompt).toHaveFocus();
+    expect(within(sectionPrompt).getByRole('button', {
+      name: 'Discard unsent Album changes and leave',
+    })).toBeDisabled();
+    expect(sectionPrompt).toHaveTextContent('A change already sent may still finish saving');
     await act(async () => { resolveFirstSave(); });
     expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
 
@@ -2409,9 +4339,60 @@ describe('manager experience', () => {
       String(request).endsWith('/album') && requestInit?.method === 'PUT'
     ))).toBe(true));
     expect(screen.getByLabelText('Album title')).toBeVisible();
+    expect(await screen.findByRole('region', {
+      name: 'Album changes are not saved yet',
+    })).toHaveTextContent('Finishing Album checks');
     await act(async () => { resolveSecondSave(); });
     await navigation;
     expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
+  });
+
+  it('offers the Album recovery actions for an invalid manager-section destination', async () => {
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 0,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const user = userEvent.setup();
+    const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    await user.clear(await screen.findByLabelText('Album title'));
+
+    await user.click(within(managerNavigation).getByRole('button', { name: 'Share' }));
+    const prompt = await screen.findByRole('region', {
+      name: 'Album changes are not saved yet',
+    });
+    expect(prompt).toHaveFocus();
+    expect(within(managerNavigation).getByRole('button', { name: /gallery/i }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(within(prompt).getByRole('button', { name: 'Retry' })).toBeEnabled();
+    expect(within(prompt).getByRole('button', { name: 'Stay in Album' })).toBeEnabled();
+
+    await user.click(within(prompt).getByRole('button', {
+      name: 'Discard unsent Album changes and leave',
+    }));
+    expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
+    await user.click(screen.getByRole('link', { name: 'Candidary home' }));
+    await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Manager sections' }))
+      .not.toBeInTheDocument());
+    expect(screen.queryByRole('region', { name: /not saved yet/i })).not.toBeInTheDocument();
   });
 
   it('restarts Album preparation when a blocked router destination changes', async () => {
@@ -2480,10 +4461,13 @@ describe('manager experience', () => {
     expect(screen.queryByRole('heading', { name: 'Privacy' })).not.toBeInTheDocument();
   });
 
-  it('does not continue a blocked router navigation when Album rejects the conflict exit', async () => {
+  it('offers recovery and discards only to the exact current Router destination after an Album conflict', async () => {
     let albumReads = 0;
+    let albumWrites = 0;
+    let resolveReplacementSave!: () => void;
+    const replacementSave = new Promise<void>((resolve) => { resolveReplacementSave = resolve; });
     const base = managerFetch({ first: { media: [], nextCursor: null } });
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = (init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
@@ -2503,6 +4487,8 @@ describe('manager experience', () => {
         } });
       }
       if (url.endsWith('/album') && method === 'PUT') {
+        albumWrites += 1;
+        if (albumWrites === 2) await replacementSave;
         return errorJson({
           code: 'REVISION_CONFLICT',
           message: 'A co-host saved a newer album.',
@@ -2521,28 +4507,51 @@ describe('manager experience', () => {
       .getByRole('button', { name: /^Album/ }));
     fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Losing edit' } });
 
-    const rejectedNavigation = router.navigate('/privacy');
-    await waitFor(() => expect(albumReads).toBeGreaterThanOrEqual(3));
-    await act(async () => {
-      await new Promise<void>((resolve) => { window.setTimeout(resolve, 80); });
+    void router.navigate('/privacy');
+    await waitFor(() => expect(albumReads).toBeGreaterThanOrEqual(2));
+    const prompt = await screen.findByRole('region', {
+      name: 'Album changes are not saved yet',
     });
+    expect(prompt).toHaveFocus();
+    expect(prompt).toHaveTextContent('A change already sent may still finish saving');
+    expect(prompt).toHaveTextContent('The Album changed while leaving was being prepared. Try again.');
+    expect(within(prompt).getByRole('button', { name: 'Retry' })).toBeEnabled();
+    expect(within(prompt).getByRole('button', { name: 'Stay in Album' })).toBeEnabled();
+    expect(within(prompt).getByRole('button', {
+      name: 'Discard unsent Album changes and leave',
+    })).toBeEnabled();
+    const modes = within(screen.getByRole('group', { name: 'Gallery mode' }));
+    expect(modes.getByRole('button', { name: 'Library' })).toBeDisabled();
+    expect(modes.getByRole('button', { name: 'Guest gallery' })).toBeDisabled();
 
+    await user.click(within(prompt).getByRole('button', { name: 'Stay in Album' }));
     expect(router.state.location.pathname).toBe('/manage/event/event-a');
-    expect(screen.getByLabelText('Album title')).toBeVisible();
-    const leaveNow = screen.getByRole('button', { name: 'Leave now' });
-    expect(leaveNow).toBeDisabled();
-    expect(screen.getByText('Finishing Album checks before Leave now is available.')).toBeVisible();
-    expect(leaveNow).toHaveAccessibleDescription(
-      'Finishing Album checks before Leave now is available.',
-    );
-    expect(router.state.location.pathname).toBe('/manage/event/event-a');
-    expect(screen.getByLabelText('Album title')).toBeVisible();
-    await rejectedNavigation;
+    const title = screen.getByLabelText('Album title');
+    expect(screen.getByRole('heading', { name: 'Album' })).toHaveFocus();
+    expect(modes.getByRole('button', { name: 'Library' })).toBeEnabled();
 
-    // The rejected attempt is cancelled rather than left wedged in the router.
-    // With the canonical album now settled, a fresh explicit attempt may leave.
-    await router.navigate('/privacy');
-    expect(await screen.findByRole('heading', { name: 'Privacy' })).toBeVisible();
+    fireEvent.change(title, { target: { value: 'Second losing edit' } });
+    void router.navigate('/privacy');
+    await waitFor(() => expect(albumWrites).toBe(2));
+    const waitingPrompt = await screen.findByRole('region', {
+      name: 'Album changes are not saved yet',
+    });
+    expect(within(waitingPrompt).getByRole('button', {
+      name: 'Discard unsent Album changes and leave',
+    })).toBeDisabled();
+    void router.navigate('/terms');
+    await act(async () => { resolveReplacementSave(); });
+    await waitFor(() => expect(within(screen.getByRole('region', {
+      name: 'Album changes are not saved yet',
+    })).getByRole('button', { name: 'Discard unsent Album changes and leave' })).toBeEnabled());
+    const replacement = screen.getByRole('region', {
+      name: 'Album changes are not saved yet',
+    });
+    await user.click(within(replacement).getByRole('button', {
+      name: 'Discard unsent Album changes and leave',
+    }));
+    expect(await screen.findByRole('heading', { name: 'Terms' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Privacy' })).not.toBeInTheDocument();
   });
 
   it('hoists a non-retryable Album load into focused manager access recovery', async () => {
@@ -2713,9 +4722,12 @@ describe('host account attachment and recovery', () => {
   it('completes and resends a pending registration through the registration endpoints', async () => {
     const fetchMock = stubHostFlow();
     const user = userEvent.setup();
-    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    const router = createAppRouter(['/create']);
+    render(<RouterProvider router={router} />);
     await registerFromCreate(user);
 
+    await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
+    expect(new URLSearchParams(router.state.location.search).get('pending')).toBe('1');
     const resend = screen.getByRole('button', { name: 'Send another code' });
     await waitFor(() => expect(resend).toBeEnabled());
     await user.click(resend);

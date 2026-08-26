@@ -164,7 +164,7 @@ contentRoutes.get('/manage/events/:eventId/cover/:revision/:profile/:slot', asyn
 async function previewResponse(context: Context<AppBindings>) {
   const repository = new MediaRepository(context.env.DB);
   const media = await repository.getById(context.req.param('mediaId')!);
-  if (!media || media.uploadState !== 'stored' || media.deletedAt) {
+  if (!media || media.uploadState !== 'stored' || media.deletedAt || media.trashedAt) {
     throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
   }
   // The event comes from the row here, not the path, so authorization is asked per
@@ -194,7 +194,7 @@ contentRoutes.get('/media/:mediaId/content', previewResponse);
 
 contentRoutes.get('/media/:mediaId/original', async (context) => {
   const media = await new MediaRepository(context.env.DB).getById(context.req.param('mediaId'));
-  if (!media || media.uploadState !== 'stored' || media.deletedAt) {
+  if (!media || media.uploadState !== 'stored' || media.deletedAt || media.trashedAt) {
     throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
   }
   await requireManager(context, {

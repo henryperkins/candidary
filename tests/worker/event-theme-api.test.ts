@@ -31,6 +31,8 @@ const EVENT_VIEW_KEYS = [
   'storedMediaCount',
   'reservedBytes',
   'storedBytes',
+  'recoverableMediaCount',
+  'recoverableBytes',
   'guestAccessExpiresAt',
   'managementAccessExpiresAt',
   'purgeAfter',
@@ -219,6 +221,11 @@ describe('event theme create and read serialization', () => {
     expect(Object.keys(guestBody.data.event).sort()).toEqual([...GUEST_EVENT_VIEW_KEYS].sort());
     expect(guestBody.data.event).not.toHaveProperty('themeConfig');
     expect(guestBody.data.event).not.toHaveProperty('theme_config');
+    // Recently deleted is a Manager-only fact. A guest learning that photos are
+    // being held back would leak host moderation, so neither recovery counter
+    // may cross into the guest projection.
+    expect(guestBody.data.event).not.toHaveProperty('recoverableMediaCount');
+    expect(guestBody.data.event).not.toHaveProperty('recoverableBytes');
     expect(guestBody.data.event.theme).toEqual(body.data.event.theme);
   });
 

@@ -70,12 +70,14 @@ export interface CoverStudioProps {
   canRemove: boolean;
   presetThumbnail(presetId: EventCoverPresetId): string;
   styleThumbnail(effect: EventCoverEffectId): CoverStyleThumbnailState;
+  onStyleStepVisible?(): void;
   onSourceChange(source: StudioSource): void;
   onUpload(file: File): void;
   onEnterCompose(): void;
   onFocusChange(focus: CoverFocusValue): void;
   onResetFocus(): void;
   onEffectChange(effect: EventCoverEffectId): void;
+  onEffectRetry?(effect: EventCoverEffectId): void;
   onPublish(intent: CoverPublishIntent): void;
   onDiscardDraft(): void | Promise<void>;
   onClose(): void;
@@ -87,6 +89,8 @@ const STEP_TITLES: Record<CoverStudioStep, string> = {
   style: 'Choose a style',
   done: 'Save this cover',
 };
+
+const NOOP = () => undefined;
 
 type CoverStudioViewport = 'default' | 'compact' | 'short';
 type HistorySentinelState = 'disarmed' | 'armed' | 'consumed';
@@ -131,12 +135,14 @@ export function CoverStudio({
   canRemove,
   presetThumbnail,
   styleThumbnail,
+  onStyleStepVisible = NOOP,
   onSourceChange,
   onUpload,
   onEnterCompose,
   onFocusChange,
   onResetFocus,
   onEffectChange,
+  onEffectRetry = NOOP,
   onPublish,
   onDiscardDraft,
   onClose,
@@ -350,6 +356,10 @@ export function CoverStudio({
   useEffect(() => {
     if (step === 'compose' && composeState.status === 'error') composeRetryRef.current?.focus();
   }, [composeState.status, step]);
+
+  useEffect(() => {
+    if (open && step === 'style') onStyleStepVisible();
+  }, [onStyleStepVisible, open, step]);
 
   useEffect(() => {
     if (open && error) coverErrorRef.current?.focus();
@@ -639,7 +649,7 @@ export function CoverStudio({
             onEffectChange(next);
             setDirty(true);
           }}
-          onRetry={(next) => { if (!editingDisabled) onEffectChange(next); }}
+          onRetry={(next) => { if (!editingDisabled) onEffectRetry(next); }}
           thumbnail={styleThumbnail}
         />}
 

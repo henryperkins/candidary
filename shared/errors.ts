@@ -32,6 +32,13 @@ export type ApiErrorCode =
   | 'EXPORT_LIMIT_EXCEEDED'
   | 'EXPORT_MEDIA_UPGRADE_REQUIRED'
   | 'EXPORT_FAILED'
+  // A frozen export source is gone for good: its bytes were permanently deleted,
+  // its pointer moved, or its write target entered permanent suppression. Only
+  // ever produced by the guarded retry/queue transitions in `worker/db/exports.ts`
+  // and by migration 0019's validation of pre-existing queued jobs — never passed
+  // through from an arbitrary stored string. The action it maps to is preparing
+  // the current collection, not retrying this job.
+  | 'EXPORT_SOURCE_REMOVED'
   | 'VALIDATION_FAILED'
   | 'CSRF_INVALID'
   | 'ORIGIN_FORBIDDEN'

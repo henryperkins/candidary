@@ -29,7 +29,7 @@ const SCHEDULED: EventView = {
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
-  reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
+  reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
@@ -134,24 +134,32 @@ describe('manager photo delivery', () => {
   /* The manager page is left open across the event's own start. Nothing here compares a
      clock: the server sent the delay with the view it resolved, and the refetch it arms is
      the only thing that moves the status and the action the host is offered. */
-  it('moves its status and its action across the start from the server-sent delay alone', async () => {
+  it('uses Photo delivery and Delivered photos as a scheduled event opens', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const fetchMock = managerFetch([SCHEDULED, OPEN]);
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    const intakeHeading = await screen.findByRole('heading', { name: 'Live intake' });
+    const intakeSection = intakeHeading.closest('section');
+    expect(intakeSection).toHaveTextContent('Delivered photos');
+    expect(intakeSection).not.toHaveTextContent('Private collection');
     await openSettings(user);
 
-    expect(screen.getByText('Guest uploads scheduled')).toBeVisible();
+    expect(screen.getByText('Photo delivery scheduled')).toBeVisible();
     expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open photo delivery now' })).toBeVisible();
+    expect(document.querySelector('.lifecycle')).toHaveTextContent('3 delivered photos');
+    const capacity = screen.getByText('Event capacity').closest('section');
+    expect(capacity).toHaveTextContent('Delivered photos');
+    expect(capacity).not.toHaveTextContent('photos stored');
     const readsBeforeStart = fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith('/api/manage/events/event-a')).length;
 
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     // The host touched nothing between these two states.
-    expect(screen.getByText('Guest uploads open')).toBeVisible();
+    expect(screen.getByText('Photo delivery open')).toBeVisible();
     expect(screen.getByText('Photo delivery is open.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Pause photo delivery' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Open photo delivery now' })).not.toBeInTheDocument();

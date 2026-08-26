@@ -5,6 +5,7 @@ import {
   removeQueueItem,
   runUploadQueue,
   type UploadQueueItem,
+  type UploadReservation,
   type UploadTransport,
 } from '../../src/features/uploads/upload-queue';
 
@@ -64,6 +65,28 @@ describe('photo upload queue', () => {
     expect(result.map(({ state }) => state)).toEqual(['delivered', 'delivered', 'delivered', 'delivered']);
     expect(seenStates).toEqual(new Set(['reserving', 'queued', 'uploading', 'finalizing', 'delivered']));
     expect(getReceiptCount(result)).toBe(4);
+  });
+
+  /* The server's answer about a reserved photo is three fields and a place to put the bytes. The
+     photo itself never came back from it: the queue sends the exact `File` the guest chose, which it
+     has held since the moment it was selected, so a reservation carrying storage detail, byte sizes,
+     or dimensions was telling the browser things it already knew about its own file. */
+  it('sends the file the guest chose and asks the reservation only where to put it', async () => {
+    const seen: Array<{ file: File; reservation: UploadReservation }> = [];
+    const transport = acceptingTransport({
+      upload: async (queued, reservation, progress) => {
+        seen.push({ file: queued.file, reservation });
+        progress(100);
+      },
+    });
+    const selected = item('a');
+
+    const result = await runUploadQueue([selected], transport);
+
+    expect(result[0]).toMatchObject({ state: 'delivered', progress: 100 });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.file).toBe(selected.file);
+    expect(Object.keys(seen[0]!.reservation).sort()).toEqual(['mediaId', 'mimeType', 'uploadUrl']);
   });
 
   it('keeps accepted siblings delivered while a rejected photo remains removable', async () => {

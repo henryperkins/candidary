@@ -4,6 +4,7 @@ import { useState, type CSSProperties } from 'react';
 import { mediaPreview } from '../../app/api';
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
 import { formatMomentHeading, galleryPhotoTitle, mosaicStyleVars, type GalleryMoment as MomentModel } from './gallery-timeline';
+import { PUBLICATION_LABELS } from './ManagerSharedGallery';
 
 export const COMPACT_MOSAIC_LIMIT = 8;
 
@@ -90,25 +91,25 @@ function GalleryTile({
             aria-label={`Open ${title}, from ${photo.guestName}`}
             onClick={(event) => onOpen(photo, event.currentTarget)}
           />
-          {/* Plus-then-check, not a heart. A heart only ever reads "loved"; album membership
-              has to read in both directions. The action label and `aria-pressed` expose that
-              state programmatically while the visible badge keeps it scannable. */}
+          {/* Plus-then-check, not a heart. The control itself is the one visible Album-membership
+              state, so a picked card never repeats the same fact in a second badge. */}
           <button
             type="button"
             className="gallery-mosaic__favorite"
             aria-pressed={photo.isFavorite}
             aria-label={photo.isFavorite
-              ? `Remove ${title} from the album`
-              : `Add ${title} to the album`}
+              ? `Remove ${title} from Album`
+              : `Pick ${title} for the Album`}
             disabled={favoritePending}
             onClick={() => onFavorite(photo)}
           >
             {photo.isFavorite ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" />}
+            <span aria-hidden="true">{photo.isFavorite ? 'In Album' : 'Pick'}</span>
           </button>
-          {photo.isFavorite && <span className="gallery-mosaic__album-badge" aria-hidden="true">
-            In album
-          </span>}
         </>}
+    <span className={`gallery-mosaic__publication publication--${photo.publicationStatus}`}>
+      Guest gallery · {PUBLICATION_LABELS[photo.publicationStatus]}
+    </span>
     {/* Only the hero carries a visible caption. On a unit tile the band covered ~59% of the
         photograph to restate a camera filename the open control already announces, and its
         contrast was a function of whatever the photo happened to be underneath. */}

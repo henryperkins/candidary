@@ -1,9 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   assertGeneratedDeploymentTarget,
   assertProductionDeploymentTreeClean,
+  buildCronOnlyWranglerConfig,
   buildDeploymentCommandPlan,
+  buildWorkflowOnlyWranglerConfig,
   previewAlias,
   resolveDeploymentBranch,
   resolveDeploymentSha,
@@ -112,6 +117,82 @@ function previewTopology(): Record<string, unknown> {
 }
 
 describe('built-artifact deployment', () => {
+  it('exposes the upload-only production mode through the existing release script', () => {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, string> };
+
+    expect(packageJson.scripts?.['upload:production-version:built'])
+      .toBe('node --experimental-strip-types scripts/deploy-built.ts production-upload');
+    expect(packageJson.scripts?.['prepare:production-control-plane-configs:built'])
+      .toBe('node --experimental-strip-types scripts/deploy-built.ts production-control-plane-configs');
+  });
+
+  it('projects a Cron-only config that cannot deploy Workflows or any other trigger class', () => {
+    const production = {
+      ...productionTopology(),
+      compatibility_date: '2026-08-01',
+      account_id: 'account-a',
+      routes: [{ pattern: 'candidary.app/*', custom_domain: true }],
+      queues: { consumers: [{ queue: 'must-not-deploy' }] },
+      triggers: {
+        crons: ['17 3 * * *', '47 * * * *'],
+        events: [{ type: 'webhook', targets: [] }],
+      },
+    };
+
+    expect(buildCronOnlyWranglerConfig(production)).toEqual({
+      name: 'candidary',
+      account_id: 'account-a',
+      compatibility_date: '2026-08-01',
+      workers_dev: false,
+      preview_urls: false,
+    });
+    expect(JSON.stringify(buildCronOnlyWranglerConfig(production))).not.toMatch(
+      /workflow|queue|route|trigger|schedule/iu,
+    );
+  });
+
+  it('refuses to project a Cron config from anything except the validated production target', () => {
+    expect(() => buildCronOnlyWranglerConfig(previewTopology()))
+      .toThrow(/production target/iu);
+    expect(() => buildCronOnlyWranglerConfig({ name: 'candidary' }))
+      .toThrow(/production target/iu);
+  });
+
+  it('projects a Workflow-only config that cannot mutate Cron or any other trigger class', () => {
+    const production = {
+      ...productionTopology(),
+      compatibility_date: '2026-08-01',
+      account_id: 'account-a',
+      routes: [{ pattern: 'candidary.app/*', custom_domain: true }],
+      queues: { consumers: [{ queue: 'must-not-deploy' }] },
+      triggers: {
+        crons: ['17 3 * * *', '47 * * * *'],
+        events: [{ type: 'webhook', targets: [] }],
+      },
+    };
+
+    expect(buildWorkflowOnlyWranglerConfig(production)).toEqual({
+      name: 'candidary',
+      account_id: 'account-a',
+      compatibility_date: '2026-08-01',
+      workers_dev: false,
+      preview_urls: false,
+      workflows: productionTopology().workflows,
+    });
+    expect(JSON.stringify(buildWorkflowOnlyWranglerConfig(production))).not.toMatch(
+      /queue|route|trigger|schedule/iu,
+    );
+  });
+
+  it('refuses to project a Workflow config from anything except the validated production target', () => {
+    expect(() => buildWorkflowOnlyWranglerConfig(previewTopology()))
+      .toThrow(/production target/iu);
+    expect(() => buildWorkflowOnlyWranglerConfig({ name: 'candidary' }))
+      .toThrow(/production target/iu);
+  });
+
   it('deploys the existing production artifact with one Wrangler command', () => {
     const plan = buildDeploymentCommandPlan({
       repositoryRoot: 'C:/repo',
@@ -142,27 +223,69 @@ describe('built-artifact deployment', () => {
     ]);
   });
 
-  it('refuses to deploy a non-main Workers build to production', () => {
-    expect(() => buildDeploymentCommandPlan({
+  it('uploads the validated production artifact as one inert version without deployment mutation', () => {
+    const plan = buildDeploymentCommandPlan({
       repositoryRoot: 'C:/repo',
       target: 'production',
-      branch: 'feature/simpler-release',
-      sha: 'b'.repeat(40),
+      uploadOnly: true,
+      branch: 'main',
+      sha: 'd'.repeat(40),
       nodeExecPath: 'node',
       wranglerCliPath: 'wrangler.js',
-      environment: {},
-    })).toThrow(/production deployment requires the main branch/iu);
+      environment: { CLOUDFLARE_API_TOKEN: 'configured' },
+    });
+
+    expect(plan).toEqual([
+      expect.objectContaining({
+        id: 'upload',
+        executable: 'node',
+        args: [
+          'wrangler.js',
+          'versions',
+          'upload',
+          '--config',
+          'dist/candidary/wrangler.json',
+          '--strict',
+          '--tag',
+          'd'.repeat(40),
+        ],
+        cwd: 'C:/repo',
+        shell: false,
+      }),
+    ]);
+    expect(plan[0]?.args).not.toContain('deploy');
+    expect(plan[0]?.args).not.toContain('triggers');
+    expect(plan[0]?.args).not.toContain('--preview-alias');
+    expect(JSON.stringify(plan)).not.toContain('deploy');
   });
 
-  it('refuses a production deploy without a trustworthy branch identity', () => {
-    expect(() => buildDeploymentCommandPlan({
-      repositoryRoot: 'C:/repo',
-      target: 'production',
-      sha: 'b'.repeat(40),
-      nodeExecPath: 'node',
-      wranglerCliPath: 'wrangler.js',
-      environment: {},
-    })).toThrow(/branch identity/iu);
+  it('refuses a non-main Workers build for both production operations', () => {
+    for (const uploadOnly of [false, true]) {
+      expect(() => buildDeploymentCommandPlan({
+        repositoryRoot: 'C:/repo',
+        target: 'production',
+        uploadOnly,
+        branch: 'feature/simpler-release',
+        sha: 'b'.repeat(40),
+        nodeExecPath: 'node',
+        wranglerCliPath: 'wrangler.js',
+        environment: {},
+      })).toThrow(/production deployment requires the main branch/iu);
+    }
+  });
+
+  it('refuses both production operations without a trustworthy branch identity', () => {
+    for (const uploadOnly of [false, true]) {
+      expect(() => buildDeploymentCommandPlan({
+        repositoryRoot: 'C:/repo',
+        target: 'production',
+        uploadOnly,
+        sha: 'b'.repeat(40),
+        nodeExecPath: 'node',
+        wranglerCliPath: 'wrangler.js',
+        environment: {},
+      })).toThrow(/branch identity/iu);
+    }
     expect(() => resolveDeploymentBranch({ WORKERS_CI_BRANCH: 'main' }, 'feature/not-main'))
       .toThrow(/does not match/iu);
   });
@@ -212,6 +335,19 @@ describe('built-artifact deployment', () => {
       previewAlias('123/This Is A Very Long Branch Name With Punctuation!!!', 'c'.repeat(40)),
     ]);
     expect(plan[0]?.args.at(-1)).toMatch(/^[a-z][a-z0-9-]{0,44}$/u);
+  });
+
+  it('does not let upload-only production mode acquire preview behavior', () => {
+    expect(() => buildDeploymentCommandPlan({
+      repositoryRoot: 'C:/repo',
+      target: 'preview',
+      uploadOnly: true,
+      branch: 'feature/preview',
+      sha: 'c'.repeat(40),
+      nodeExecPath: 'node',
+      wranglerCliPath: 'wrangler.js',
+      environment: {},
+    })).toThrow(/restricted to the production target/iu);
   });
 
   it('refuses a production artifact when a preview deploy was requested', () => {

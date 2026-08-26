@@ -13,6 +13,7 @@ import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
 import { MediaObjectWriteTombstoneRepository } from '../../worker/db/media-write-tombstones';
 import {
+  cleanupExpiredRecoverableMedia,
   cleanupMediaObjectWriteTombstones,
   deleteEventData,
   promoteLegacyStoredMedia,
@@ -788,12 +789,23 @@ describe('manager settings and private photo intake', () => {
     await testEnv.DB.prepare('UPDATE media SET preview_object_key = ? WHERE id = ?')
       .bind(previewObjectKey, media.id).run();
 
-    const deleted = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
-      method: 'PATCH', headers: writeHeaders(access.manager),
-      body: JSON.stringify({ action: 'delete', expectedStatus: 'unpublished' }),
-    }, testEnv);
+    const trashed = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${media.id}/trash`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
 
-    expect(deleted.status).toBe(200);
+    expect(trashed.status).toBe(200);
+    // Host removal is recoverable, so every alias is deliberately retained while
+    // the photo can still come back. Nothing is scheduled for deletion yet.
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(previewObjectKey)).not.toBeNull();
+
+    // Past the recovery deadline the retained row becomes permanently deleted,
+    // which is the point where the durable object schedule starts.
+    await cleanupExpiredRecoverableMedia(testEnv, new Date('2099-08-13T10:20:00.000Z'));
+    expect(await new MediaRepository(env.DB).getById(media.id))
+      .toMatchObject({ uploadState: 'deleted', trashedAt: null, restoreUntil: null });
     expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
     expect(await testEnv.MEDIA_BUCKET.head(previewObjectKey)).not.toBeNull();
     expect(await new MediaRepository(env.DB).getPromotion(media.id)).not.toBeNull();
@@ -842,19 +854,23 @@ describe('manager settings and private photo intake', () => {
     const proof = await repository.getPromotion(uploaded.id);
     expect(proof).toMatchObject({ state: 'target_verified', finalObjectKey: canonicalKey });
 
-    const deleted = await createApp().request(
-      `/api/manage/events/${access.event.id}/media/${uploaded.id}`,
-      {
-        method: 'PATCH',
-        headers: writeHeaders(access.manager),
-        body: JSON.stringify({ action: 'delete', expectedStatus: 'unpublished' }),
-      },
+    const trashed = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${uploaded.id}/trash`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
       testEnv,
     );
 
-    expect(deleted.status).toBe(200);
+    expect(trashed.status).toBe(200);
     expect(await repository.getById(uploaded.id)).toMatchObject({
-      uploadState: 'deleted', deletedAt: expect.any(String),
+      uploadState: 'stored', trashedAt: expect.any(String), restoreUntil: expect.any(String),
+    });
+    expect(await repository.getPromotion(uploaded.id)).toEqual(proof);
+
+    // Permanent removal only happens once recovery has run out, and even then the
+    // proof survives until the promotion itself hands the aliases to suppression.
+    await cleanupExpiredRecoverableMedia(testEnv, new Date('2099-08-13T10:20:00.000Z'));
+    expect(await repository.getById(uploaded.id)).toMatchObject({
+      uploadState: 'deleted', deletedAt: expect.any(String), trashedAt: null,
     });
     expect(await repository.getPromotion(uploaded.id)).toEqual(proof);
     expect(await testEnv.MEDIA_BUCKET.head(legacyKey)).not.toBeNull();
@@ -881,18 +897,95 @@ describe('manager settings and private photo intake', () => {
     const second = await eventAccess();
     const media = await uploadPending(second, 'foreign-photo');
 
+    // Removal is two explicit routes now, and neither may confirm that an id it
+    // does not own exists somewhere else.
+    for (const route of ['trash', 'cancel-reservation']) {
+      const response = await createApp().request(
+        `/api/manage/events/${first.event.id}/media/${media.id}/${route}`,
+        { method: 'POST', headers: writeHeaders(first.manager), body: '{}' },
+        testEnv,
+      );
+
+      expect([route, response.status]).toEqual([route, 403]);
+      expect((await response.json<any>()).code).toBe('RESOURCE_FORBIDDEN');
+    }
+  });
+
+  it('no longer accepts removal as a moderation action', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'patch-delete-retired');
+
     const response = await createApp().request(
-      `/api/manage/events/${first.event.id}/media/${media.id}`,
+      `/api/manage/events/${access.event.id}/media/${media.id}`,
       {
         method: 'PATCH',
-        headers: writeHeaders(first.manager),
+        headers: writeHeaders(access.manager),
         body: JSON.stringify({ action: 'delete', expectedStatus: 'unpublished' }),
       },
       testEnv,
     );
 
-    expect(response.status).toBe(403);
-    expect((await response.json<any>()).code).toBe('RESOURCE_FORBIDDEN');
+    // Removing a photo stopped being a third value in the moderation enum when it
+    // stopped being irreversible, so the old word is now simply not an action.
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    expect(await new MediaRepository(env.DB).getById(media.id)).toMatchObject({
+      uploadState: 'stored', deletedAt: null, trashedAt: null,
+    });
+  });
+
+  it('refuses to cancel a reservation for a photo that was already delivered', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'cancel-delivered');
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${media.id}/cancel-reservation`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    // Cancelling is permanent; a delivered original has bytes a host may want
+    // back, so it belongs to the recoverable route instead.
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).code).toBe('MEDIA_STATE_CONFLICT');
+    expect(await new MediaRepository(env.DB).getById(media.id)).toMatchObject({
+      uploadState: 'stored', deletedAt: null, trashedAt: null,
+    });
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+  });
+
+  it('permanently cancels a reservation that never became a photograph', async () => {
+    const access = await eventAccess();
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST',
+      headers: writeHeaders(access.guest),
+      body: JSON.stringify({
+        filename: 'abandoned.png',
+        mimeType: 'image/png',
+        byteSize: png().byteLength,
+        idempotencyKey: 'cancel-reservation',
+        guestName: 'Avery',
+      }),
+    }, testEnv);
+    const reserved = (await initiated.json<any>()).data.media as { id: string };
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${reserved.id}/cancel-reservation`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(response.status).toBe(200);
+    // The upload allowlist, not the manager projection: a reservation has no
+    // caption, guest, or storage metadata worth returning.
+    expect((await response.json<any>()).data.media).toEqual({
+      id: reserved.id,
+      mimeType: 'image/png',
+      uploadState: 'deleted',
+    });
+    expect(await new MediaRepository(env.DB).getById(reserved.id)).toMatchObject({
+      uploadState: 'deleted', trashedAt: null, restoreUntil: null,
+    });
   });
 });
 

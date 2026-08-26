@@ -174,6 +174,36 @@ outlive media/events. The scanner repeatedly wraps the entire legacy namespace f
 finite drain detector. `source_writable_until`, signer revocation, TTL expiry, and repeated HEADs do
 not prove an already-admitted legacy operation is gone.
 
+### Recoverable host deletion
+
+Host deletion is recoverable; guest self-deletion is not. `0019_media_recovery.sql` adds
+`media.trashed_at`/`media.restore_until` and `events.recoverable_media_count`/`recoverable_bytes`.
+A trashed row keeps `upload_state = 'stored'`, its publication status, its favorite, its album
+position, and its bytes, and sets `deleted_at = trashed_at` — an exact equality that is both the
+discriminator (`deleted_at` alone means permanently deleted) and the compatibility marker an 0018
+Worker already reads as ordinary deletion. `restore_until` is
+`min(now + 30 days, management_access_expires_at, purge_after)`, computed inside the transition.
+
+Recovery spends capacity. Reservation, idempotent refresh, and finalization all count
+`reserved + active stored + recoverable`, and a trigger enforces that sum against `MAX_EVENT_MEDIA`
+and `MAX_EVENT_BYTES` on every counter write, so a Restore can never fail for want of room a trash
+only looked like it freed. Every ordinary media query adds `trashed_at IS NULL` explicitly; the named
+exceptions are the trash listing, restore, terminal cleanup, purge terminalization, guest self-delete,
+and the Manager Album retained-slot resolver, which renders a trashed pick as an opaque marker
+carrying only a media ID, `restoreUntil`, and `recoverable`/`expired-cleanup-pending`.
+
+`export_media_entries` plus a `queued` or `running` owner is a D1 source hold: while it stands, no
+tombstone for that exact `(bucket_generation, object_key)` may enter suppression, from any path.
+Physical deletion runs only through `MediaRepository.claimMediaObjectDeletion`, which wins the
+suppression transition for the aliases nothing else owns and hands `deleteMediaObjectAliases` a
+`MediaObjectDeletionClaim` of exactly those keys — never a `MediaRecord` to derive keys from.
+Retry additionally proves every frozen entry still resolves to an active-or-recoverable stored row at
+that exact key, and reports `EXPORT_SOURCE_REMOVED` when it does not.
+
+`0019` refuses to run while any export job is `running`, and fails every queued job it cannot vouch
+for. After the new Worker admits the first trash write or `attempt-v2` export the release is
+forward-fix-only.
+
 ### Event covers
 
 An event cover is not guest media and shares none of its limits. `shared/event-cover.ts` owns the
@@ -217,7 +247,8 @@ reader, legacy-object response, lazy Images transform, or normalized-master fall
 relationships database invariants; Phase 2 ends one file earlier at
 `0013_guest_message_hardening.sql`. Those 13/14-migration boundaries remain immutable historical
 release evidence. The album scope is also ordered: `0017_event_album.sql` creates the album/order
-foundation and `0018_album_end_to_end.sql` adds metadata, sharing, sessions, and export fields.
+foundation and `0018_album_end_to_end.sql` adds metadata, sharing, sessions, and export fields;
+`0019_media_recovery.sql` adds recoverable host deletion and the export source hold.
 
 ### Exports
 

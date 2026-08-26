@@ -43,7 +43,7 @@ const event: EventView = {
   reservedMediaCount: 0,
   storedMediaCount: 0,
   reservedBytes: 0,
-  storedBytes: 0,
+  storedBytes: 0, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-10-20T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z',

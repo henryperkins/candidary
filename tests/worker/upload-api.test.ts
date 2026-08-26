@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../worker/app';
 import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
-import { finalizedMediaObjectKey } from '../../worker/storage/media-keys';
+import { finalizedMediaObjectKey, mediaReservationObjectKey } from '../../worker/storage/media-keys';
 import { getOrCreatePreview } from '../../worker/storage/previews';
 import { exchangeEventEntry, withRecordingImages } from './helpers';
 
@@ -77,6 +77,46 @@ function uploadContent(
   }, testEnv);
 }
 
+/**
+ * The durable row behind an upload.
+ *
+ * The upload responses are deliberate allowlists, so a claim about the object
+ * key, the bytes, the reservation, or moderation has to be made against what
+ * D1 actually holds rather than against the body the guest received. Reading it
+ * here also keeps those claims honest: a field the guest never sees can still
+ * be wrong, and this is the only place that would notice.
+ */
+async function mediaRow(mediaId: string) {
+  const row = await testEnv.DB.prepare('SELECT * FROM media WHERE id = ?')
+    .bind(mediaId).first<Record<string, any>>();
+  if (!row) throw new Error(`Expected a durable media row for ${mediaId}.`);
+  return row;
+}
+
+// The exact allowlists. Every guest-facing media body is compared against one
+// of these key sets rather than spot-checked for a few absent fields, because a
+// field that leaks back in is invisible to `not.toHaveProperty` on some other
+// field.
+const UPLOAD_MEDIA_KEYS = ['id', 'mimeType', 'uploadState'];
+const GALLERY_MEDIA_KEYS = ['caption', 'guestName', 'id', 'previewAvailable'];
+const CONTRIBUTION_MEDIA_KEYS = [
+  'caption', 'createdAt', 'id', 'originalFilename', 'previewAvailable', 'uploadState',
+];
+
+function keysOf(value: unknown) {
+  return Object.keys(value as object).sort();
+}
+
+/**
+ * These bodies belong to exactly one signed-in reader. A shared cache keyed on
+ * the URL alone would be free to hand one guest's contributions to the next, so
+ * every one of them states both halves of that.
+ */
+function expectPrivateToOneReader(response: Response) {
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(response.headers.get('vary')).toBe('Cookie');
+}
+
 function png(width: number, height: number, size = 64) {
   const bytes = new Uint8Array(size);
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -121,11 +161,29 @@ describe('upload initiation', () => {
     const secondBody = await second.json<any>();
 
     expect(first.status).toBe(201);
-    expect(firstBody.data.media.objectKey).toMatch(new RegExp(`^events/${access.event.id}/uploads/`));
-    expect(firstBody.data.media.objectKey).not.toContain('our moment');
+    expectPrivateToOneReader(first);
+    // The reservation tells the queue what to upload and where, and nothing
+    // else: no object key, no bucket generation, no byte or reservation
+    // metadata, no guest name it already typed.
+    expect(keysOf(firstBody.data))
+      .toEqual(['alreadyDelivered', 'media', 'uploadUrl', 'uploadUrlExpiresAt']);
+    expect(keysOf(firstBody.data.media)).toEqual(UPLOAD_MEDIA_KEYS);
+    expect(firstBody.data.alreadyDelivered).toBe(false);
     expect(firstBody.data.uploadUrl)
       .toBe(`/api/event/${access.event.slug}/uploads/${firstBody.data.media.id}/content`);
     expect(firstBody.data.uploadUrl).not.toContain('X-Amz-Signature=');
+    // The key is still derived from the event and the media id alone, and the
+    // filename the guest chose never reaches R2 — it is simply no longer the
+    // guest's business what it is.
+    const reservedRow = await mediaRow(firstBody.data.media.id);
+    expect(reservedRow.object_key).toBe(
+      mediaReservationObjectKey(access.event.id, firstBody.data.media.id),
+    );
+    expect(reservedRow.object_key).not.toContain('our moment');
+    // The expiry the queue is given is the row's own reservation window; the
+    // idempotent retry reopened it, so the row now carries the second one.
+    expect(Date.parse(firstBody.data.uploadUrlExpiresAt)).toBeGreaterThan(Date.now());
+    expect(reservedRow.reservation_expires_at).toBe(secondBody.data.uploadUrlExpiresAt);
     expect(secondBody.data.media.id).toBe(firstBody.data.media.id);
     expect((await env.DB.prepare('SELECT reserved_media_count FROM events WHERE id = ?').bind(access.event.id).first<any>()).reserved_media_count).toBe(1);
   });
@@ -194,12 +252,27 @@ describe('upload initiation', () => {
     const repeatedItems = (await (await send()).json<any>()).data.items;
 
     expect(first.status).toBe(201);
+    expectPrivateToOneReader(first);
     expect(firstItems.map((item: any) => [item.idempotencyKey, item.status, item.error?.code])).toEqual([
       ['batch-1', 'accepted', undefined],
       ['batch-2', 'rejected', 'EVENT_MEDIA_LIMIT'],
       ['batch-3', 'rejected', 'FILE_TYPE_UNSUPPORTED'],
     ]);
-    expect(firstItems[0].media).toMatchObject({ mimeType: 'image/heic', guestName: 'Avery', publicationStatus: 'unpublished' });
+    // Both batch shapes are exact. An accepted item still needing bytes carries
+    // its writable path; a rejected one carries only the key it was asked about
+    // and why it was refused, so a refusal cannot describe a row that does not
+    // exist.
+    expect(keysOf(firstItems[0]))
+      .toEqual(['alreadyDelivered', 'idempotencyKey', 'media', 'status', 'uploadUrl', 'uploadUrlExpiresAt']);
+    expect(keysOf(firstItems[0].media)).toEqual(UPLOAD_MEDIA_KEYS);
+    expect(firstItems[0].media.mimeType).toBe('image/heic');
+    expect(keysOf(firstItems[1])).toEqual(['error', 'idempotencyKey', 'status']);
+    expect(keysOf(firstItems[1].error)).toEqual(['code', 'message']);
+    // The trimmed guest name and the starting moderation state are the host's
+    // to read, so they are proved on the row rather than in the guest's copy.
+    expect(await mediaRow(firstItems[0].media.id)).toMatchObject({
+      guest_name: 'Avery', publication_status: 'unpublished',
+    });
     expect(repeatedItems[0].media.id).toBe(firstItems[0].media.id);
     expect((await env.DB.prepare('SELECT reserved_media_count FROM events WHERE id = ?').bind(access.event.id).first<any>()).reserved_media_count).toBe(1);
   });
@@ -245,13 +318,31 @@ describe('upload finalization and private delivery', () => {
       method: 'POST', headers: writeHeaders(access), body: '{}',
     }, testEnv);
 
+    const reservationKey = mediaReservationObjectKey(access.event.id, reserved.id);
+    const finalKey = finalizedMediaObjectKey(access.event.id, reserved.id);
+
     expect(first.status).toBe(200);
-    expect(firstBody.data.media).toMatchObject({ uploadState: 'stored', publicationStatus: 'unpublished', width: 1600, height: 900, byteSize: 64 });
-    expect(firstBody.data.media.objectKey).toMatch(new RegExp(`^events/${access.event.id}/media/final/`));
-    expect(firstBody.data.media.objectKey).not.toBe(reserved.objectKey);
-    expect(await env.MEDIA_BUCKET.head(reserved.objectKey)).toBeNull();
-    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(firstBody.data.media.objectKey)).not.toBeNull();
-    expect((await repeated.json<any>()).data.media.id).toBe(reserved.id);
+    expectPrivateToOneReader(first);
+    // The content PUT confirms the transfer and says nothing more. The measured
+    // dimensions, the verified byte count, and the moderation state the host
+    // will act on are all read back from D1.
+    expect(keysOf(firstBody.data)).toEqual(['media']);
+    expect(keysOf(firstBody.data.media)).toEqual(UPLOAD_MEDIA_KEYS);
+    expect(firstBody.data.media).toMatchObject({ id: reserved.id, uploadState: 'stored' });
+    expect(await mediaRow(reserved.id)).toMatchObject({
+      publication_status: 'unpublished', width: 1600, height: 900, byte_size: 64,
+      object_key: finalKey, object_bucket_generation: 'canonical',
+    });
+    expect(finalKey).not.toBe(reservationKey);
+    expect(await env.MEDIA_BUCKET.head(reservationKey)).toBeNull();
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(finalKey)).not.toBeNull();
+    expectPrivateToOneReader(repeated);
+    // Finalize is the queue's confirmation, not a second delivery: an already
+    // stored row answers with the same three fields and no writable URL.
+    const repeatedBody = await repeated.json<any>();
+    expect(keysOf(repeatedBody.data)).toEqual(['media']);
+    expect(repeatedBody.data.media)
+      .toEqual({ id: reserved.id, mimeType: 'image/png', uploadState: 'stored' });
 
     const ownContent = await createApp().request(`/api/media/${reserved.id}/content`, { headers: { cookie: access.cookie } }, withImages());
     expect(ownContent.status).toBe(200);
@@ -273,27 +364,33 @@ describe('upload finalization and private delivery', () => {
     };
     const bytes = png(800, 600);
     const media = await reserve('worker-ingress', bytes.byteLength);
+    const reservationKey = mediaReservationObjectKey(access.event.id, media.id);
     const path = `/api/event/${access.event.slug}/uploads/${media.id}/content`;
     const unauthenticated = await createApp().request(path, {
       method: 'PUT', headers: { 'content-type': 'image/png', 'content-length': String(bytes.byteLength) }, body: bytes,
     }, testEnv);
     expect(unauthenticated.status).toBe(401);
-    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(reservationKey)).toBeNull();
 
     const short = await createApp().request(path, {
       method: 'PUT', headers: { ...writeHeaders(access), 'content-type': 'image/png', 'content-length': String(bytes.byteLength - 1) }, body: bytes,
     }, testEnv);
     expect(short.status).toBe(422);
-    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(reservationKey)).toBeNull();
 
     const accepted = await createApp().request(path, {
       method: 'PUT', headers: { ...writeHeaders(access), 'content-type': 'image/png', 'content-length': String(bytes.byteLength) }, body: bytes,
     }, testEnv);
     expect(accepted.status).toBe(200);
+    expectPrivateToOneReader(accepted);
     const stored = (await accepted.json<any>()).data.media;
-    expect(stored).toMatchObject({ uploadState: 'stored', byteSize: bytes.byteLength });
-    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(stored.objectKey)).toMatchObject({ size: bytes.byteLength });
-    expect(await testEnv.MEDIA_BUCKET.head(media.objectKey)).toBeNull();
+    expect(keysOf(stored)).toEqual(UPLOAD_MEDIA_KEYS);
+    expect(stored).toMatchObject({ id: media.id, uploadState: 'stored' });
+    const storedRow = await mediaRow(media.id);
+    expect(storedRow.byte_size).toBe(bytes.byteLength);
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(storedRow.object_key as string))
+      .toMatchObject({ size: bytes.byteLength });
+    expect(await testEnv.MEDIA_BUCKET.head(reservationKey)).toBeNull();
 
     const delayed = await reserve('worker-ingress-delayed', bytes.byteLength);
     await testEnv.DB.prepare('UPDATE media SET reservation_expires_at = ? WHERE id = ?')
@@ -304,8 +401,13 @@ describe('upload finalization and private delivery', () => {
       testEnv,
     );
     expect(delayedResponse.status).toBe(409);
+    // A refusal names a photo and a deadline, so it is no more cacheable than
+    // the success it replaced.
+    expectPrivateToOneReader(delayedResponse);
     expect((await delayedResponse.json<any>()).code).toBe('UPLOAD_RESERVATION_EXPIRED');
-    expect(await testEnv.MEDIA_BUCKET.head(delayed.objectKey)).toBeNull();
+    expect(await testEnv.MEDIA_BUCKET.head(
+      mediaReservationObjectKey(access.event.id, delayed.id),
+    )).toBeNull();
   });
 
   it('cannot write after the reservation or event is deleted', async () => {
@@ -364,7 +466,13 @@ describe('upload finalization and private delivery', () => {
     deleteSpy.mockRestore();
 
     expect(deleted.status).toBe(200);
-    expect((await deleted.json<any>()).data.media.uploadState).toBe('deleted');
+    expectPrivateToOneReader(deleted);
+    // The acknowledgement is exactly that: the row is gone for good, so there
+    // is no longer a repository record worth serializing back to the guest.
+    const deletedBody = await deleted.json<any>();
+    expect(keysOf(deletedBody.data)).toEqual(['media']);
+    expect(deletedBody.data.media).toEqual({ id: reserved.id, deleted: true });
+    expect((await mediaRow(reserved.id)).upload_state).toBe('deleted');
     expect(await new MediaRepository(testEnv.DB).getPromotion(reserved.id)).not.toBeNull();
   });
 
@@ -416,8 +524,13 @@ describe('upload finalization and private delivery', () => {
     const recovered = await request(original);
 
     expect(recovered.status).toBe(200);
-    expect((await recovered.json<any>()).data.media).toMatchObject({
-      uploadState: 'stored', objectKey: finalObjectKey,
+    expect((await recovered.json<any>()).data.media).toEqual({
+      id: media.id, mimeType: 'image/png', uploadState: 'stored',
+    });
+    // The recovered row has to be pointing at the object the retry proved, and
+    // that pointer is the durable row's, not the response's.
+    expect(await mediaRow(media.id)).toMatchObject({
+      upload_state: 'stored', object_key: finalObjectKey, object_bucket_generation: 'canonical',
     });
     expect((await testEnv.DB.prepare('SELECT stored_media_count FROM events WHERE id = ?')
       .bind(access.event.id).first<any>()).stored_media_count).toBe(1);
@@ -490,9 +603,10 @@ describe('upload finalization and private delivery', () => {
       method: 'POST', headers: writeHeaders(access), body: JSON.stringify(file),
     }, testEnv);
     const firstBody = (await (await initiate()).json<any>()).data;
-    const temporaryKey = firstBody.media.objectKey;
+    const temporaryKey = (await mediaRow(firstBody.media.id)).object_key as string;
     const finalized = await uploadContent(access, firstBody.media, png(800, 600));
     const stored = (await finalized.json<any>()).data.media;
+    const storedKey = (await mediaRow(stored.id)).object_key as string;
 
     const replay = (await (await initiate()).json<any>()).data;
     const batch = await createApp().request(`/api/event/${access.event.slug}/uploads/batch`, {
@@ -501,18 +615,22 @@ describe('upload finalization and private delivery', () => {
     }, testEnv);
     const batchReplay = (await batch.json<any>()).data.items[0];
 
-    expect(replay).toMatchObject({ alreadyDelivered: true, media: { id: stored.id, uploadState: 'stored', objectKey: stored.objectKey } });
-    expect(replay.uploadUrl).toBeUndefined();
-    expect(replay.uploadUrlExpiresAt).toBeUndefined();
-    expect(batchReplay).toMatchObject({
+    // An already delivered reservation answers without the two writable-URL
+    // keys at all, so the key sets themselves are the proof that no second
+    // ingress was handed out.
+    expect(keysOf(replay)).toEqual(['alreadyDelivered', 'media']);
+    expect(replay).toEqual({
+      alreadyDelivered: true,
+      media: { id: stored.id, mimeType: 'image/png', uploadState: 'stored' },
+    });
+    expect(keysOf(batchReplay)).toEqual(['alreadyDelivered', 'idempotencyKey', 'media', 'status']);
+    expect(batchReplay).toEqual({
       idempotencyKey: file.idempotencyKey,
       status: 'accepted',
       alreadyDelivered: true,
-      media: { id: stored.id, uploadState: 'stored', objectKey: stored.objectKey },
+      media: { id: stored.id, mimeType: 'image/png', uploadState: 'stored' },
     });
-    expect(batchReplay.uploadUrl).toBeUndefined();
-    expect(batchReplay.uploadUrlExpiresAt).toBeUndefined();
-    expect(stored.objectKey).not.toBe(temporaryKey);
+    expect(storedKey).not.toBe(temporaryKey);
   });
 
   it('keeps finalized bytes immutable when the old upload key is overwritten with same-size data', async () => {
@@ -527,14 +645,19 @@ describe('upload finalization and private delivery', () => {
     expect(replacement.byteLength).toBe(original.byteLength);
     const finalized = await uploadContent(access, reserved, original);
     const stored = (await finalized.json<any>()).data.media;
+    const storedKey = (await mediaRow(stored.id)).object_key as string;
 
-    await env.MEDIA_BUCKET.put(reserved.objectKey, replacement, { httpMetadata: { contentType: 'image/png' } });
+    await env.MEDIA_BUCKET.put(
+      mediaReservationObjectKey(access.event.id, reserved.id),
+      replacement,
+      { httpMetadata: { contentType: 'image/png' } },
+    );
     const content = await createApp().request(`/api/media/${stored.id}/original`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
 
     expect(new Uint8Array(await content.arrayBuffer())).toEqual(original);
-    expect(new Uint8Array(await (await testEnv.CANONICAL_MEDIA_BUCKET.get(stored.objectKey))!.arrayBuffer())).toEqual(original);
+    expect(new Uint8Array(await (await testEnv.CANONICAL_MEDIA_BUCKET.get(storedKey))!.arrayBuffer())).toEqual(original);
   });
 
   it('rejects a body larger than its declaration before claiming or writing canonical storage', async () => {
@@ -595,8 +718,10 @@ describe('upload finalization and private delivery', () => {
       body: JSON.stringify({ filename: 'cache.png', mimeType: 'image/png', byteSize: 64, idempotencyKey: 'preview-cache', guestName: 'Avery' }),
     }, testEnv);
     const reserved = (await initiated.json<any>()).data.media;
-    const finalizedResponse = await uploadContent(access, reserved, png(400, 300));
-    const finalized = (await finalizedResponse.json<any>()).data.media;
+    await uploadContent(access, reserved, png(400, 300));
+    // The preview helper works from the durable record, which the guest's
+    // three-field confirmation deliberately is not.
+    const finalized = (await new MediaRepository(env.DB).getById(reserved.id))!;
 
     const transformedBytes = new TextEncoder().encode('deterministic-webp-preview');
     const recording = withRecordingImages({
@@ -624,8 +749,8 @@ describe('upload finalization and private delivery', () => {
       body: JSON.stringify({ filename: 'metadata.png', mimeType: 'image/png', byteSize: 64, idempotencyKey: 'no-fallback', guestName: 'Avery' }),
     }, testEnv);
     const reserved = (await initiated.json<any>()).data.media;
-    const finalizedResponse = await uploadContent(access, reserved, png(400, 300));
-    const finalized = (await finalizedResponse.json<any>()).data.media;
+    await uploadContent(access, reserved, png(400, 300));
+    const finalized = (await new MediaRepository(env.DB).getById(reserved.id))!;
     const noImagesEnv = {
       ...testEnv,
       IMAGES: undefined,
@@ -634,5 +759,137 @@ describe('upload finalization and private delivery', () => {
     await expect(getOrCreatePreview(noImagesEnv, finalized))
       .rejects.toMatchObject({ code: 'FILE_TYPE_UNSUPPORTED', status: 503 });
     expect(await env.MEDIA_BUCKET.head(`events/${access.event.id}/previews/${reserved.id}.webp`)).toBeNull();
+  });
+});
+
+describe('guest media listings', () => {
+  /** Reserves and delivers one photo, and answers with the id and the filename it sent. */
+  async function deliver(
+    access: Awaited<ReturnType<typeof guestAccess>>,
+    key: string,
+    caption: string | null,
+    guestName = 'Avery',
+  ) {
+    const filename = `${key}.png`;
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({
+        filename, mimeType: 'image/png', byteSize: 64, idempotencyKey: key, guestName, caption,
+      }),
+    }, testEnv);
+    const media = (await initiated.json<any>()).data.media;
+    const delivered = await uploadContent(access, media, png(800, 600));
+    if (delivered.status !== 200) {
+      throw new Error(`Delivery fixture failed: ${await delivered.text()}`);
+    }
+    return { id: media.id as string, filename };
+  }
+
+  async function publishGallery(access: Awaited<ReturnType<typeof guestAccess>>) {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE media SET publication_status = 'published', published_at = ? WHERE event_id = ?")
+        .bind(new Date().toISOString(), access.event.id),
+      env.DB.prepare('UPDATE events SET gallery_visible = 1 WHERE id = ?').bind(access.event.id),
+    ]);
+  }
+
+  it('gives one guest exactly four fields about another guest photo', async () => {
+    const access = await guestAccess();
+    const captioned = await deliver(access, 'first-dance', 'From our table');
+    await publishGallery(access);
+    const other = cookiesFrom(await exchangeEventEntry(access.eventLink));
+
+    const response = await createApp().request(
+      `/api/event/${access.event.slug}/gallery`,
+      { headers: { cookie: other.cookie } },
+      testEnv,
+    );
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(200);
+    expectPrivateToOneReader(response);
+    expect(keysOf(body.data)).toEqual(['media']);
+    expect(body.data.media).toHaveLength(1);
+    expect(keysOf(body.data.media[0])).toEqual(GALLERY_MEDIA_KEYS);
+    expect(body.data.media[0]).toEqual({
+      id: captioned.id,
+      guestName: 'Avery',
+      caption: 'From our table',
+      previewAvailable: true,
+    });
+  });
+
+  // The filename is the uploader's device talking, and an absent caption is
+  // exactly when a projection that quietly substituted it would look most
+  // helpful. The gallery renders `Shared photo` instead, so the name must not
+  // reach the browser at all — not under `caption`, and not under any other key.
+  it('never sends the original filename to the gallery, caption or no caption', async () => {
+    const access = await guestAccess();
+    const uncaptioned = await deliver(access, 'IMG-4471-avery-home-address', null);
+    await publishGallery(access);
+    const other = cookiesFrom(await exchangeEventEntry(access.eventLink));
+
+    const response = await createApp().request(
+      `/api/event/${access.event.slug}/gallery`,
+      { headers: { cookie: other.cookie } },
+      testEnv,
+    );
+    const raw = await response.text();
+    const body = JSON.parse(raw);
+
+    expect(response.status).toBe(200);
+    expect(keysOf(body.data.media[0])).toEqual(GALLERY_MEDIA_KEYS);
+    expect(body.data.media[0]).toEqual({
+      id: uncaptioned.id,
+      guestName: 'Avery',
+      caption: null,
+      previewAvailable: true,
+    });
+    expect(raw).not.toContain('IMG-4471');
+    expect(raw).not.toContain(uncaptioned.filename);
+  });
+
+  it('shows a guest their own filename and transfer state, and nobody else theirs', async () => {
+    const access = await guestAccess();
+    const stored = await deliver(access, 'ours-delivered', 'Ours');
+    const reserving = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({
+        filename: 'ours-pending.png', mimeType: 'image/png', byteSize: 64,
+        idempotencyKey: 'ours-pending', guestName: 'Avery', caption: null,
+      }),
+    }, testEnv);
+    const pending = (await reserving.json<any>()).data.media;
+    const other = cookiesFrom(await exchangeEventEntry(access.eventLink));
+
+    const own = await createApp().request(
+      `/api/event/${access.event.slug}/contributions`,
+      { headers: { cookie: access.cookie } },
+      testEnv,
+    );
+    const ownBody = await own.json<any>();
+    const stranger = await createApp().request(
+      `/api/event/${access.event.slug}/contributions`,
+      { headers: { cookie: other.cookie } },
+      testEnv,
+    );
+
+    expect(own.status).toBe(200);
+    expectPrivateToOneReader(own);
+    expect(keysOf(ownBody.data)).toEqual(['media']);
+    for (const item of ownBody.data.media) {
+      expect(keysOf(item)).toEqual(CONTRIBUTION_MEDIA_KEYS);
+    }
+    expect(ownBody.data.media.map((item: any) => [
+      item.id, item.originalFilename, item.uploadState, item.previewAvailable, item.caption,
+    ])).toEqual([
+      [stored.id, 'ours-delivered.png', 'stored', true, 'Ours'],
+      [pending.id, 'ours-pending.png', 'reserved', false, null],
+    ]);
+    expect(Date.parse(ownBody.data.media[0].createdAt)).not.toBeNaN();
+    // A contributions list is one session's, and the session is the only thing
+    // that decides whose. A second device on the same printed entry is a
+    // different guest.
+    expect((await stranger.json<any>()).data.media).toEqual([]);
   });
 });

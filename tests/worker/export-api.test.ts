@@ -1,14 +1,20 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { strFromU8, unzipSync } from 'fflate';
 
 import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { createApp } from '../../worker/app';
 import { ExportsRepository } from '../../worker/db/exports';
-import { processExport } from '../../worker/workflows/export';
-import { eventAccess, png, resetDatabase, testEnv, uploadPending, writeHeaders } from './helpers';
+import { cleanupExpiredRecoverableMedia } from '../../worker/workflows/cleanup';
+import {
+  eventAccess, png, processExport, resetDatabase, seedExportJob, testEnv, trashMedia,
+  resetDatabaseWithExportProtocolClosed, uploadPending, writeHeaders,
+} from './helpers';
 
 const managerExportKeys = [
   'attempt',
+  'completedAt',
+  'createdAt',
+  'errorCode',
   'expiresAt',
   'guestbookEntryCount',
   'guestbookEventDate',
@@ -21,13 +27,36 @@ const managerExportKeys = [
   'kind',
   'mediaCount',
   'partCount',
+  'processedBytes',
+  'processedMediaCount',
+  'progressUpdatedAt',
   'snapshotAt',
+  'startedAt',
   'state',
   'totalBytes',
 ].sort();
 
 function expectManagerExport(value: Record<string, unknown>) {
   expect(Object.keys(value).sort()).toEqual(managerExportKeys);
+}
+
+async function failPristineExport(jobId: string, errorCode = 'EXPORT_TEST_FAILURE') {
+  const result = await new ExportsRepository(testEnv.DB).markInitialDispatchFailed(jobId, errorCode);
+  if (!result.changed || !result.job) throw new Error('Expected a pristine v2 export to fail.');
+  return result.job;
+}
+
+async function expireReadyExport(jobId: string) {
+  const repository = new ExportsRepository(testEnv.DB);
+  const expiredAt = '2026-08-11T00:00:00.000Z';
+  await testEnv.DB.prepare(`UPDATE export_jobs SET expires_at = ?2 WHERE id = ?1 AND state = 'ready'`)
+    .bind(jobId, expiredAt).run();
+  const candidate = (await repository.listExpiredReady('2026-08-12T00:00:00.000Z'))
+    .find(({ id }) => id === jobId);
+  if (!candidate) throw new Error('Expected a Ready export expiry candidate.');
+  const result = await repository.markExpired(candidate, '2026-08-12T00:00:00.000Z');
+  if (!result.changed) throw new Error('Expected the Ready export to expire.');
+  return result.job;
 }
 
 async function failedExportWithArtifacts(
@@ -48,10 +77,8 @@ async function failedExportWithArtifacts(
     ready!.guestbookHtmlObjectKey,
     ready!.guestbookCsvObjectKey,
   ].filter((key): key is string => Boolean(key));
-  await testEnv.DB.prepare(`
-    UPDATE export_jobs SET state = 'failed', error_code = 'EXPORT_TEST_FAILURE' WHERE id = ?
-  `).bind(job.id).run();
-  return { job, keys };
+  const terminal = await expireReadyExport(job.id);
+  return { job: terminal, keys };
 }
 
 function signerFreeEnv() {
@@ -92,10 +119,308 @@ async function setAlbumSnapshotSource(
   ]);
 }
 
+async function seedHistoricalZeroPhotoComplete(
+  access: Awaited<ReturnType<typeof eventAccess>>,
+  id: string,
+  state: 'failed' | 'expired' | 'ready',
+) {
+  const snapshotAt = '2026-08-10T09:00:00.000Z';
+  const createdAt = '2026-08-10T10:00:00.000Z';
+  const htmlKey = `events/${access.event.id}/exports/${id}/attempt-1/guestbook.html`;
+  const csvKey = `events/${access.event.id}/exports/${id}/attempt-1/guestbook-private.csv`;
+  const html = '<!doctype html><title>Historical guestbook</title>';
+  const csv = 'entry_type,entry_id\r\n';
+  await Promise.all([
+    testEnv.MEDIA_BUCKET.put(htmlKey, html),
+    testEnv.MEDIA_BUCKET.put(csvKey, csv),
+  ]);
+  await testEnv.DB.prepare(`
+    INSERT INTO export_jobs (
+      id, event_id, kind, state, snapshot_at, media_count, total_bytes, attempt,
+      error_code, created_at, completed_at, expires_at,
+      guestbook_html_object_key, guestbook_html_bytes, guestbook_html_sha256,
+      guestbook_csv_object_key, guestbook_csv_bytes, guestbook_csv_sha256,
+      guestbook_entry_count, guestbook_shared_count, guestbook_event_name,
+      guestbook_event_date, guestbook_event_timezone, guestbook_prompt,
+      guestbook_gallery_visible
+    ) VALUES (
+      ?1, ?2, 'complete', ?3, ?4, 0, 0, 1,
+      ?5, ?6, ?7, ?8,
+      ?9, ?10, ?11,
+      ?12, ?13, ?14,
+      0, 0, ?15,
+      ?16, ?17, ?18,
+      ?19
+    )
+  `).bind(
+    id,
+    access.event.id,
+    state,
+    snapshotAt,
+    state === 'ready' ? null : 'EXPORT_FAILED',
+    createdAt,
+    '2026-08-10T10:05:00.000Z',
+    state === 'expired' ? '2026-08-10T11:00:00.000Z' : '2099-08-10T11:00:00.000Z',
+    htmlKey,
+    new TextEncoder().encode(html).byteLength,
+    'a'.repeat(64),
+    csvKey,
+    new TextEncoder().encode(csv).byteLength,
+    'b'.repeat(64),
+    access.event.name,
+    access.event.eventDate,
+    access.event.eventTimezone,
+    access.event.guestbookPrompt,
+    access.event.galleryVisible ? 1 : 0,
+  ).run();
+  return { id, htmlKey, csvKey };
+}
+
 describe('manager exports', () => {
   beforeEach(resetDatabase);
 
-  it('atomically creates a new-format notes-only job with frozen metadata and entries', async () => {
+  it('pauses complete, album, and retry admission without mutation, dispatch, or deletion', async () => {
+    await resetDatabaseWithExportProtocolClosed();
+    const completeAccess = await eventAccess('Complete release gate');
+    await uploadPending(completeAccess, 'release-gate-complete', null);
+    const albumAccess = await eventAccess('Album release gate');
+    const albumMedia = await uploadPending(albumAccess, 'release-gate-album', null);
+    await setAlbumSnapshotSource(
+      albumAccess,
+      [albumMedia.id],
+      JSON.stringify([{ kind: 'photo', mediaId: albumMedia.id }]),
+    );
+    const retryAccess = await eventAccess('Retry release gate');
+    const retryMedia = await uploadPending(retryAccess, 'release-gate-retry', null);
+    await seedExportJob({
+      id: 'release-gate-retry',
+      eventId: retryAccess.event.id,
+      snapshotAt: '2026-08-24T00:00:00.000Z',
+      createdAt: '2026-08-24T00:01:00.000Z',
+      state: 'failed',
+      media: [retryMedia],
+    });
+    const retainedKey = `events/${retryAccess.event.id}/exports/release-gate-retry/attempt-1/manifest.csv`;
+    await testEnv.DB.prepare(`
+      UPDATE export_jobs SET manifest_object_key = ? WHERE id = 'release-gate-retry'
+    `).bind(retainedKey).run();
+    await testEnv.MEDIA_BUCKET.put(retainedKey, 'retained');
+
+    const dispatched = vi.fn(async () => []);
+    const deleted = vi.fn(testEnv.MEDIA_BUCKET.delete.bind(testEnv.MEDIA_BUCKET));
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') return dispatched;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
+      get(target, property, receiver) {
+        if (property === 'delete') return deleted;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const guardedEnv = { ...testEnv, EXPORT_WORKFLOW: workflow, MEDIA_BUCKET: bucket };
+
+    const complete = await createApp().request(
+      `/api/manage/events/${completeAccess.event.id}/exports`,
+      { method: 'POST', headers: writeHeaders(completeAccess.manager), body: '{}' },
+      guardedEnv,
+    );
+    const album = await createApp().request(
+      `/api/manage/events/${albumAccess.event.id}/exports`,
+      {
+        method: 'POST',
+        headers: writeHeaders(albumAccess.manager),
+        body: JSON.stringify({ kind: 'album' }),
+      },
+      guardedEnv,
+    );
+    const retry = await createApp().request(
+      `/api/manage/events/${retryAccess.event.id}/exports/release-gate-retry/retry`,
+      { method: 'POST', headers: writeHeaders(retryAccess.manager), body: '{}' },
+      guardedEnv,
+    );
+
+    for (const response of [complete, album, retry]) {
+      expect(response.status).toBe(503);
+      expect(await response.json<any>()).toMatchObject({
+        code: 'EXPORT_FAILED',
+        message: 'Export preparation is temporarily paused for a release. Try again shortly.',
+      });
+    }
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_jobs
+      WHERE event_id IN (?, ?)
+    `).bind(completeAccess.event.id, albumAccess.event.id).first<number>('count')).toBe(0);
+    expect(await new ExportsRepository(testEnv.DB).getById('release-gate-retry')).toMatchObject({
+      state: 'failed',
+      attempt: 1,
+      manifestObjectKey: retainedKey,
+    });
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(deleted).not.toHaveBeenCalled();
+    expect(await testEnv.MEDIA_BUCKET.head(retainedKey)).not.toBeNull();
+  });
+
+  it('projects only the deterministic latest job per kind with normalized Manager timestamps', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'latest-manager-projection', null);
+    await testEnv.DB.prepare(`
+      UPDATE media SET created_at = '2026-07-31T09:00:00.000Z',
+        stored_at = '2026-07-31T09:00:00.000Z'
+      WHERE id = ?
+    `).bind(media.id).run();
+    await seedExportJob({
+      id: 'complete-history-a', eventId: access.event.id,
+      snapshotAt: '2026-08-01T09:00:00.000Z', createdAt: '2026-08-01T10:00:00.000Z',
+      state: 'failed', media: [media],
+    });
+    await seedExportJob({
+      id: 'album-history-a', eventId: access.event.id,
+      snapshotAt: '2026-08-02T09:00:00.000Z', createdAt: '2026-08-03T10:00:00.000Z',
+      state: 'failed', kind: 'album', media: [media],
+    });
+    await seedExportJob({
+      id: 'album-history-z', eventId: access.event.id,
+      snapshotAt: '2026-08-03T09:00:00.000Z', createdAt: '2026-08-03T10:00:00.000Z',
+      state: 'failed', kind: 'album', media: [media],
+    });
+    await testEnv.DB.prepare(`
+      UPDATE export_jobs SET started_at = '2026-08-03T10:05:00.000Z',
+        completed_at = '2026-08-03T10:06:00.000Z'
+      WHERE id = 'album-history-z'
+    `).run();
+    const repository = new ExportsRepository(testEnv.DB);
+    const complete = await repository.createActive({
+      id: 'complete-v2-z', eventId: access.event.id,
+      snapshotAt: '2026-08-04T09:00:00.000Z', createdAt: '2026-08-04T10:00:00.000Z',
+    });
+    const claim = await repository.claimRunning(
+      complete.id,
+      complete.attempt,
+      '2026-08-04T10:05:00.000Z',
+    );
+    if (claim.status === 'lost') throw new Error('Expected latest complete claim.');
+    await repository.markOwnedFailed(
+      claim.owner,
+      'INTERNAL_PROVIDER_DETAIL',
+      '2026-08-04T10:06:00.000Z',
+    );
+
+    const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const exports = (await response.json<any>()).data.exports;
+
+    expect(exports.map(({ id }: { id: string }) => id))
+      .toEqual(['complete-v2-z', 'album-history-z']);
+    expect(exports[0]).toMatchObject({
+      snapshotAt: '2026-08-04T09:00:00.000Z',
+      createdAt: '2026-08-04T10:00:00.000Z',
+      startedAt: '2026-08-04T10:05:00.000Z',
+      completedAt: '2026-08-04T10:06:00.000Z',
+      processedMediaCount: 0,
+      processedBytes: 0,
+      progressUpdatedAt: '2026-08-04T10:05:00.000Z',
+      errorCode: 'EXPORT_FAILED',
+    });
+    expect(exports[1]).toMatchObject({
+      createdAt: '2026-08-03T10:00:00.000Z',
+      startedAt: '2026-08-03T10:05:00.000Z',
+      completedAt: '2026-08-03T10:06:00.000Z',
+      processedMediaCount: null,
+      processedBytes: null,
+      progressUpdatedAt: null,
+    });
+    expect(await repository.listForEvent(access.event.id)).toHaveLength(4);
+  });
+
+  it.each([
+    ['EXPORT_SOURCE_MISSING', 'EXPORT_SOURCE_MISSING'],
+    ['EXPORT_SOURCE_REMOVED', 'EXPORT_SOURCE_REMOVED'],
+    ['EXPORT_EVENT_DELETED', 'EXPORT_EVENT_DELETED'],
+    ['EXPORT_GUESTBOOK_SNAPSHOT_INVALID', 'EXPORT_GUESTBOOK_SNAPSHOT_INVALID'],
+    ['EXPORT_SNAPSHOT_CHANGED', 'EXPORT_SNAPSHOT_CHANGED'],
+    ['EXPORT_WORKFLOW_DISPATCH_FAILED', 'EXPORT_WORKFLOW_DISPATCH_FAILED'],
+    ['EXPORT_FAILED', 'EXPORT_FAILED'],
+    ['EXPORT_PART_LIMIT_EXCEEDED', 'EXPORT_FAILED'],
+    ['provider stack: do not expose', 'EXPORT_FAILED'],
+  ] as const)('projects stored export error %s as safe code %s', async (stored, projected) => {
+    const access = await eventAccess();
+    await seedExportJob({
+      id: 'safe-error-job', eventId: access.event.id,
+      snapshotAt: '2026-08-01T09:00:00.000Z', state: 'failed',
+    });
+    await testEnv.DB.prepare('UPDATE export_jobs SET error_code = ? WHERE id = ?')
+      .bind(stored, 'safe-error-job').run();
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/safe-error-job`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+
+    expect((await response.json<any>()).data.export.errorCode).toBe(projected);
+  });
+
+  it('refuses an older hidden retry before mutation, dispatch, or artifact deletion', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'latest-retry-source', null);
+    await seedExportJob({
+      id: 'older-failed', eventId: access.event.id,
+      snapshotAt: '2026-08-01T09:00:00.000Z', createdAt: '2026-08-01T10:00:00.000Z',
+      state: 'failed', media: [media],
+    });
+    await seedExportJob({
+      id: 'newer-failed', eventId: access.event.id,
+      snapshotAt: '2026-08-02T09:00:00.000Z', createdAt: '2026-08-02T10:00:00.000Z',
+      state: 'failed', media: [media],
+    });
+    const oldKey = `events/${access.event.id}/exports/older-failed/attempt-1/manifest.csv`;
+    await testEnv.DB.prepare(`
+      UPDATE export_jobs SET manifest_object_key = ?2 WHERE id = ?1
+    `).bind('older-failed', oldKey).run();
+    await testEnv.MEDIA_BUCKET.put(oldKey, 'older artifact');
+    const dispatched = vi.fn(async () => []);
+    const deleted = vi.fn(testEnv.MEDIA_BUCKET.delete.bind(testEnv.MEDIA_BUCKET));
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') return dispatched;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
+      get(target, property, receiver) {
+        if (property === 'delete') return deleted;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/older-failed/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      { ...testEnv, EXPORT_WORKFLOW: workflow, MEDIA_BUCKET: bucket },
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({
+      code: 'EXPORT_ALREADY_ACTIVE',
+      message: expect.stringMatching(/newer prepared export|refresh/iu),
+    });
+    expect(await new ExportsRepository(testEnv.DB).getById('older-failed')).toMatchObject({
+      state: 'failed', attempt: 1, manifestObjectKey: oldKey,
+    });
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(deleted).not.toHaveBeenCalled();
+    expect(await testEnv.MEDIA_BUCKET.head(oldKey)).not.toBeNull();
+  });
+
+  it('rejects a new notes-only complete export without creating a job or dispatching a Workflow', async () => {
     const access = await eventAccess();
     const guestSessionId = await testEnv.DB.prepare(`
       SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
@@ -108,67 +433,77 @@ describe('manager exports', () => {
         'note-only-key', '2026-08-12T12:00:00.000Z', '2026-08-12T12:00:00.000Z', NULL)
     `).bind(access.event.id, guestSessionId).run();
 
+    const dispatched = vi.fn(async () => []);
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') return dispatched;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
     const response = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
+    }, { ...testEnv, EXPORT_WORKFLOW: workflow });
 
-    expect(response.status).toBe(202);
-    const job = (await response.json<any>()).data.export;
-    expect(job).toMatchObject({
-      mediaCount: 0,
-      guestbookEntryCount: 1,
-      guestbookSharedCount: 1,
-      guestbookEventName: access.event.name,
-      guestbookEventDate: access.event.eventDate,
-      guestbookEventTimezone: access.event.eventTimezone,
-      guestbookPrompt: access.event.guestbookPrompt,
-      guestbookGalleryVisible: access.event.galleryVisible,
-    });
-    expect(job.snapshotAt).toBeTruthy();
-    const rows = await testEnv.DB.prepare(`
-      SELECT source, source_id, body, source_state, guest_visibility, included_in_keepsake
-      FROM export_guestbook_entries WHERE export_job_id = ?
-    `).bind(job.id).all();
-    expect(rows.results).toEqual([{
-      source: 'guest_note', source_id: 'note-only', body: 'A frozen note',
-      source_state: 'approved', guest_visibility: 'shared', included_in_keepsake: 1,
-    }]);
+    expect(response.status).toBe(409);
+    expect((await response.json<any>()).code).toBe('EXPORT_EMPTY');
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_jobs WHERE event_id = ?
+    `).bind(access.event.id).first<number>('count')).toBe(0);
+    expect(dispatched).not.toHaveBeenCalled();
+  });
 
-    await testEnv.DB.prepare(`
-      UPDATE guest_messages SET body = 'Changed after snapshot', moderation_status = 'rejected'
-      WHERE id = 'note-only'
-    `).run();
-    const ready = await processExport(testEnv, job.id, new Date());
-    expect(ready).toMatchObject({ state: 'ready', manifestObjectKey: null, partCount: 0 });
-    expect(ready?.guestbookHtmlBytes).toBeGreaterThan(0);
-    expect(ready?.guestbookHtmlSha256).toMatch(/^[a-f0-9]{64}$/u);
-    expect(ready?.guestbookCsvBytes).toBeGreaterThan(0);
-    expect(ready?.guestbookCsvSha256).toMatch(/^[a-f0-9]{64}$/u);
-    const htmlObject = await testEnv.MEDIA_BUCKET.get(ready!.guestbookHtmlObjectKey!);
-    const csvObject = await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!);
-    expect(await htmlObject!.text()).toContain('A frozen note');
-    expect(await csvObject!.text()).toContain('A frozen note');
-    expect(await (await testEnv.MEDIA_BUCKET.get(ready!.guestbookCsvObjectKey!))!.text())
-      .not.toContain('Changed after snapshot');
-    expect(htmlObject!.httpMetadata).toMatchObject({
-      contentType: 'text/html; charset=utf-8',
-      contentDisposition: 'attachment; filename="guestbook.html"',
-    });
+  it.each(['failed', 'expired'] as const)(
+    'retries a valid historical zero-photo %s complete export to Ready at 0 / 0',
+    async (state) => {
+      const access = await eventAccess();
+      const seeded = await seedHistoricalZeroPhotoComplete(access, `zero-${state}`, state);
+
+      const listed = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+        headers: { cookie: access.manager.cookie },
+      }, testEnv);
+      expect((await listed.json<any>()).data.exports).toEqual([
+        expect.objectContaining({ id: seeded.id, state, mediaCount: 0, totalBytes: 0 }),
+      ]);
+
+      const retried = await createApp().request(
+        `/api/manage/events/${access.event.id}/exports/${seeded.id}/retry`,
+        { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+        testEnv,
+      );
+      expect(retried.status).toBe(202);
+      expect((await retried.json<any>()).data.export).toMatchObject({
+        id: seeded.id, state: 'queued', attempt: 2, mediaCount: 0, totalBytes: 0,
+      });
+      expect(await testEnv.MEDIA_BUCKET.head(seeded.htmlKey)).toBeNull();
+      expect(await testEnv.MEDIA_BUCKET.head(seeded.csvKey)).toBeNull();
+
+      const ready = await processExport(testEnv, seeded.id, new Date('2026-08-12T00:00:00.000Z'));
+      expect(ready).toMatchObject({
+        state: 'ready', processedMediaCount: 0, processedBytes: 0,
+        mediaCount: 0, totalBytes: 0, manifestObjectKey: null, partCount: 0,
+      });
+      expect(ready?.guestbookHtmlObjectKey).toBeTruthy();
+      expect(ready?.guestbookCsvObjectKey).toBeTruthy();
+    },
+  );
+
+  it('keeps a valid historical Ready zero-photo complete export downloadable', async () => {
+    const access = await eventAccess();
+    const seeded = await seedHistoricalZeroPhotoComplete(access, 'zero-ready', 'ready');
 
     const download = await createApp().request(
-      `/api/manage/events/${access.event.id}/exports/${job.id}/download`,
+      `/api/manage/events/${access.event.id}/exports/${seeded.id}/download`,
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
       testEnv,
     );
     expect(download.status).toBe(200);
-    const data = (await download.json<any>()).data;
-    expect(data.manifest).toBeNull();
-    expect(data.parts).toEqual([]);
-    expect(data.printableGuestbook.filename).toBe('guestbook.html');
-    expect(data.privateGuestbook.filename).toBe('guestbook-private.csv');
-    expect(data.printableGuestbook.expiresAt).toBe(data.privateGuestbook.expiresAt);
-    expect(data.printableGuestbook.url).toContain('/artifact/printable-guestbook');
-    expect(data.privateGuestbook.url).toContain('/artifact/private-guestbook');
+    expect((await download.json<any>()).data).toMatchObject({
+      manifest: null,
+      parts: [],
+      printableGuestbook: { filename: 'guestbook.html' },
+      privateGuestbook: { filename: 'guestbook-private.csv' },
+    });
   });
 
   it('rejects an empty snapshot', async () => {
@@ -377,17 +712,16 @@ describe('manager exports', () => {
 
   it('lists equal-time exports newest-first with a stable ID tie-breaker', async () => {
     const access = await eventAccess();
-    const repository = new ExportsRepository(testEnv.DB);
     const createdAt = '2026-08-23T12:00:00.000Z';
+    // Both jobs are seeded terminal: only one job per event may be queued or
+    // running at a time, and the ordering under test is over the whole history.
     for (const id of ['export-a', 'export-b']) {
-      await repository.createActive({
-        id, eventId: access.event.id, snapshotAt: createdAt,
-        mediaCount: 0, totalBytes: 0, createdAt,
+      await seedExportJob({
+        id, eventId: access.event.id, snapshotAt: createdAt, createdAt, state: 'failed',
       });
-      await repository.markFailed(id, 'EXPORT_TEST_FAILURE');
     }
 
-    expect((await repository.listForEvent(access.event.id)).map(({ id }) => id))
+    expect((await new ExportsRepository(testEnv.DB).listForEvent(access.event.id)).map(({ id }) => id))
       .toEqual(['export-b', 'export-a']);
   });
 
@@ -453,6 +787,7 @@ describe('manager exports', () => {
 
   it('rolls back the queued job when immutable entry insertion fails', async () => {
     const access = await eventAccess();
+    await uploadPending(access, 'rollback-photo', null);
     const sessionId = await testEnv.DB.prepare(`
       SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
     `).bind(access.event.id).first<string>('id');
@@ -479,6 +814,7 @@ describe('manager exports', () => {
 
   it('preserves more than 1,000 legacy notes without truncating the private snapshot', async () => {
     const access = await eventAccess();
+    await uploadPending(access, 'legacy-note-snapshot-photo', null);
     const sessionId = await testEnv.DB.prepare(`
       SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
     `).bind(access.event.id).first<string>('id');
@@ -506,7 +842,7 @@ describe('manager exports', () => {
     `).bind(job.id).first<number>('count')).toBe(1001);
     expect(await testEnv.DB.prepare(`
       SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
-    `).bind(job.id).first<number>('count')).toBe(0);
+    `).bind(job.id).first<number>('count')).toBe(1);
   });
 
   it('exports unpublished originals in bounded parts with a manifest and manager-only URLs', async () => {
@@ -647,14 +983,15 @@ describe('manager exports', () => {
 
   it('uses an attempt-specific object key when retrying a failed job', async () => {
     const access = await eventAccess();
-    const repository = new ExportsRepository(testEnv.DB);
-    const job = await repository.createActive({
-      id: crypto.randomUUID(), eventId: access.event.id,
-      snapshotAt: '2026-07-21T12:00:00.000Z', mediaCount: 1, totalBytes: 64,
-      createdAt: '2026-07-21T12:00:00.000Z',
+    const media = await uploadPending(access, 'attempt-specific-key', null);
+    const jobId = crypto.randomUUID();
+    // The seeded job carries the real row it froze, so retry can prove the source
+    // is still there before it reacquires the hold.
+    await seedExportJob({
+      id: jobId, eventId: access.event.id, snapshotAt: '2026-07-21T12:00:00.000Z',
+      createdAt: '2026-07-21T12:00:00.000Z', state: 'failed', media: [media],
     });
-    await repository.markFailed(job.id, 'EXPORT_SOURCE_MISSING');
-    const retry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/retry`, {
+    const retry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${jobId}/retry`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     expect(retry.status).toBe(202);
@@ -664,13 +1001,13 @@ describe('manager exports', () => {
   it('keeps a found initial Workflow with unknown status on its one deterministic instance ID', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'initial-workflow-failure', null);
-    const createdIds: string[] = [];
+    const createdRequests: Array<{ id: string; params: { jobId: string; attempt: number } }> = [];
     const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
       get(target, property, receiver) {
         if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
         if (property === 'createBatch') {
-          return async (batch: Array<{ id: string }>) => {
-            createdIds.push(batch[0]!.id);
+          return async (batch: typeof createdRequests) => {
+            createdRequests.push(batch[0]!);
             throw new Error('simulated lost initial Workflow creation response');
           };
         }
@@ -689,7 +1026,10 @@ describe('manager exports', () => {
     expect(response.status).toBe(202);
     const [job] = await new ExportsRepository(testEnv.DB).listForEvent(access.event.id);
     expect(job).toMatchObject({ state: 'queued', attempt: 1, errorCode: null });
-    expect(createdIds).toEqual([job!.id]);
+    expect(createdRequests).toEqual([{
+      id: job!.id,
+      params: { jobId: job!.id, attempt: 1 },
+    }]);
   });
 
   it.each(['errored', 'terminated'] as const)(
@@ -697,13 +1037,13 @@ describe('manager exports', () => {
     async (terminal) => {
       const access = await eventAccess();
       await uploadPending(access, `initial-workflow-${terminal}`, null);
-      const createdIds: string[] = [];
+      const createdRequests: Array<{ id: string; params: { jobId: string; attempt: number } }> = [];
       const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
         get(target, property, receiver) {
           if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
           if (property === 'createBatch') {
-            return async (batch: Array<{ id: string }>) => {
-              createdIds.push(batch[0]!.id);
+            return async (batch: typeof createdRequests) => {
+              createdRequests.push(batch[0]!);
               throw new Error('simulated lost terminal Workflow response');
             };
           }
@@ -726,7 +1066,10 @@ describe('manager exports', () => {
       expect(job).toMatchObject({
         state: 'failed', attempt: 1, errorCode: 'EXPORT_WORKFLOW_DISPATCH_FAILED',
       });
-      expect(createdIds).toEqual([job!.id]);
+      expect(createdRequests).toEqual([{
+        id: job!.id,
+        params: { jobId: job!.id, attempt: 1 },
+      }]);
       expect((await testEnv.DB.prepare(`
         SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
       `).bind(job!.id).first<number>('count'))).toBe(0);
@@ -738,14 +1081,14 @@ describe('manager exports', () => {
     async (unobservable) => {
       const access = await eventAccess();
       await uploadPending(access, `initial-workflow-unobservable-${unobservable}`, null);
-      const createdIds: string[] = [];
+      const createdRequests: Array<{ id: string; params: { jobId: string; attempt: number } }> = [];
       const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
         get(target, property, receiver) {
           if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
           if (property === 'createBatch') {
-            return async (batch: Array<{ id: string }>) => {
-              createdIds.push(batch[0]!.id);
-              if (createdIds.length === 1) throw new Error('simulated unobservable createBatch result');
+            return async (batch: typeof createdRequests) => {
+              createdRequests.push(batch[0]!);
+              if (createdRequests.length === 1) throw new Error('simulated unobservable createBatch result');
             };
           }
           if (property === 'get') {
@@ -769,7 +1112,10 @@ describe('manager exports', () => {
       expect(response.status).toBe(202);
       const job = (await response.json<any>()).data.export;
       expect(job).toMatchObject({ state: 'queued', attempt: 1 });
-      expect(createdIds).toEqual([job.id, job.id]);
+      expect(createdRequests).toEqual([
+        { id: job.id, params: { jobId: job.id, attempt: 1 } },
+        { id: job.id, params: { jobId: job.id, attempt: 1 } },
+      ]);
       expect((await new ExportsRepository(testEnv.DB).listForEvent(access.event.id))).toHaveLength(1);
       expect((await testEnv.DB.prepare(`
         SELECT count(*) AS count FROM export_parts WHERE export_job_id = ?
@@ -891,11 +1237,13 @@ describe('manager exports', () => {
       get(target, property, receiver) {
         if (property === 'create') return async () => { throw new Error('non-idempotent create used'); };
         if (property === 'createBatch') {
-          return async (batch: Array<{ id: string }>) => {
-            const id = batch[0]!.id;
-            await testEnv.DB.prepare(`
-              UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
-            `).bind('2026-08-23T12:00:01.000Z', id).run();
+          return async (batch: Array<{ id: string; params: { attempt: number } }>) => {
+            const { id, params } = batch[0]!;
+            await new ExportsRepository(testEnv.DB).claimRunning(
+              id,
+              params.attempt,
+              '2026-08-23T12:00:01.000Z',
+            );
             throw new Error('simulated lost initial Workflow response after claim');
           };
         }
@@ -933,7 +1281,7 @@ describe('manager exports', () => {
     );
 
     expect(response.status).toBe(500);
-    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'failed' });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'expired' });
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
   });
 
@@ -969,7 +1317,75 @@ describe('manager exports', () => {
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
   });
 
-  it('recovers a queued retry after Workflow creation fails without deleting prior-attempt objects early', async () => {
+  it('rediscovers an unrecorded current-attempt object before dispatching its retry', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'retry-lost-r2-response', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await failPristineExport(job.id);
+    const orphan = `events/${access.event.id}/exports/${job.id}/attempt-1/lost-response.zip`;
+    await testEnv.MEDIA_BUCKET.put(orphan, 'committed before the response was lost');
+
+    const retried = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(retried.status).toBe(202);
+    expect((await retried.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    expect(await testEnv.MEDIA_BUCKET.head(orphan)).toBeNull();
+  });
+
+  it('redrives a queued retry only after prior-attempt deletion succeeds', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-delete-redrive');
+    let deleteAttempts = 0;
+    const deletePriorAttempt = vi.fn(async (input: string | string[]) => {
+      deleteAttempts += 1;
+      if (deleteAttempts === 1) throw new Error('simulated prior-attempt delete failure');
+      return testEnv.MEDIA_BUCKET.delete(input);
+    });
+    const dispatched = vi.fn(async () => []);
+    const bucket = new Proxy(testEnv.MEDIA_BUCKET, {
+      get(target, property, receiver) {
+        if (property === 'delete') return deletePriorAttempt;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
+      get(target, property, receiver) {
+        if (property === 'createBatch') return dispatched;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const retryEnv = { ...testEnv, MEDIA_BUCKET: bucket, EXPORT_WORKFLOW: workflow };
+    const retry = () => createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      retryEnv,
+    );
+
+    const failedCleanup = await retry();
+    expect(failedCleanup.status).toBe(500);
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
+      state: 'queued', attempt: 2,
+    });
+    expect(dispatched).not.toHaveBeenCalled();
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+
+    const recovered = await retry();
+    expect(recovered.status).toBe(202);
+    expect((await recovered.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    expect(dispatched).toHaveBeenCalledTimes(1);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('cleans prior-attempt objects before a failed Workflow creation, then redrives the queued retry', async () => {
     const access = await eventAccess();
     const { job, keys } = await failedExportWithArtifacts(access, 'retry-workflow-failure');
     const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
@@ -998,7 +1414,7 @@ describe('manager exports', () => {
     expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({
       state: 'queued', attempt: 2,
     });
-    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
 
     const recovered = await createApp().request(
       `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
@@ -1050,12 +1466,12 @@ describe('manager exports', () => {
     async (terminal) => {
       const access = await eventAccess();
       const { job } = await failedExportWithArtifacts(access, `retry-workflow-${terminal}`);
-      const createdIds: string[] = [];
+      const createdRequests: Array<{ id: string; params: { jobId: string; attempt: number } }> = [];
       const workflow = new Proxy(testEnv.EXPORT_WORKFLOW, {
         get(target, property, receiver) {
           if (property === 'createBatch') {
-            return async (batch: Array<{ id: string }>) => {
-              createdIds.push(batch[0]!.id);
+            return async (batch: typeof createdRequests) => {
+              createdRequests.push(batch[0]!);
               throw new Error(`simulated retained ${terminal} retry Workflow`);
             };
           }
@@ -1075,7 +1491,10 @@ describe('manager exports', () => {
 
       expect(response.status).toBe(202);
       const failed = (await response.json<any>()).data.export;
-      expect(createdIds).toEqual([`${job.id}-2`]);
+      expect(createdRequests).toEqual([{
+        id: `${job.id}-2`,
+        params: { jobId: job.id, attempt: 2 },
+      }]);
       expect(failed).toMatchObject({
         id: job.id,
         state: 'failed',
@@ -1115,10 +1534,11 @@ describe('manager exports', () => {
           return async (id: string) => ({
             id,
             status: async () => {
-              await testEnv.DB.prepare(`
-                UPDATE export_jobs SET state = 'running', started_at = ?2
-                WHERE id = ?1 AND state = 'queued' AND attempt = 2
-              `).bind(job.id, '2026-08-23T12:00:01.000Z').run();
+              await new ExportsRepository(testEnv.DB).claimRunning(
+                job.id,
+                2,
+                '2026-08-23T12:00:01.000Z',
+              );
               return { status: 'errored' };
             },
           });
@@ -1197,6 +1617,11 @@ describe('manager exports', () => {
       }),
     }, testEnv);
     const reserved = (await initiated.json<any>()).data.media;
+    // The reservation response is an allowlist of id, MIME, and state, so the
+    // key the browser wrote to comes from the durable row while it still holds
+    // it — after the commit that column names the immutable finalized object.
+    const reservationObjectKey = await testEnv.DB.prepare('SELECT object_key FROM media WHERE id = ?')
+      .bind(reserved.id).first<string>('object_key');
     const finalized = await createApp().request(
       `/api/event/${access.event.slug}/uploads/${reserved.id}/content`,
       {
@@ -1214,14 +1639,15 @@ describe('manager exports', () => {
       testEnv,
     );
     expect(finalized.status).toBe(200);
-    const stored = (await finalized.json<any>()).data.media;
-    expect(stored.objectKey).not.toBe(reserved.objectKey);
+    const storedObjectKey = await testEnv.DB.prepare('SELECT object_key FROM media WHERE id = ?')
+      .bind(reserved.id).first<string>('object_key');
+    expect(storedObjectKey).not.toBe(reservationObjectKey);
 
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     const job = (await created.json<any>()).data.export;
-    await testEnv.MEDIA_BUCKET.put(reserved.objectKey, png(320, 240, 96), {
+    await testEnv.MEDIA_BUCKET.put(reservationObjectKey!, png(320, 240, 96), {
       httpMetadata: { contentType: 'image/png' },
     });
     const ready = await processExport(testEnv, job.id, new Date());
@@ -1311,8 +1737,7 @@ describe('manager exports', () => {
     expect(range.status).toBe(206);
     expect((await range.arrayBuffer()).byteLength).toBe(8);
 
-    await testEnv.DB.prepare("UPDATE export_jobs SET state = 'failed' WHERE id = ?")
-      .bind(job.id).run();
+    await expireReadyExport(job.id);
     const retried = await createApp().request(
       `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
@@ -1351,7 +1776,7 @@ describe('manager exports', () => {
     expect(completeConflict.status).toBe(409);
     expect((await completeConflict.json<any>()).code).toBe('EXPORT_ALREADY_ACTIVE');
 
-    await new ExportsRepository(testEnv.DB).markFailed(albumJob.id, 'EXPORT_TEST_FAILURE');
+    await failPristineExport(albumJob.id);
     const complete = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
@@ -1374,11 +1799,13 @@ describe('manager exports', () => {
     const access = await eventAccess();
     const picked = await uploadPending(access, 'album-create-conflict-race', null);
     await setAlbumSnapshotSource(access, [picked.id], '[]');
-    const repository = new ExportsRepository(testEnv.DB);
     const boundary = '2026-08-23T12:00:00.000Z';
-    const winner = await repository.createActive({
-      id: 'complete-create-winner', eventId: access.event.id, snapshotAt: boundary,
-      mediaCount: 0, totalBytes: 0, createdAt: boundary,
+    const winnerId = 'complete-create-winner';
+    // The winning job holds the real frozen row, because a queued job that froze
+    // nothing is no longer a shape this schema will accept.
+    await seedExportJob({
+      id: winnerId, eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+      media: [picked],
     });
     let transitioned = false;
     const terminalAfterBatch = new Proxy(testEnv.DB, {
@@ -1388,8 +1815,12 @@ describe('manager exports', () => {
             const results = await target.batch(statements);
             if (!transitioned) {
               transitioned = true;
-              await target.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`)
-                .bind(winner.id).run();
+              await target.prepare(`
+                UPDATE export_jobs
+                SET state = 'failed', execution_transition = execution_transition + 1
+                WHERE id = ?
+              `)
+                .bind(winnerId).run();
             }
             return results;
           };
@@ -1416,10 +1847,13 @@ describe('manager exports', () => {
     const candidate = await repository.createAlbumActive({
       id: 'album-retry-candidate', eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
     });
-    await repository.markFailed(candidate.id, 'EXPORT_TEST_FAILURE');
-    const winner = await repository.createActive({
-      id: 'complete-retry-winner', eventId: access.event.id, snapshotAt: boundary,
-      mediaCount: 0, totalBytes: 0, createdAt: boundary,
+    await failPristineExport(candidate.id);
+    const winnerId = 'complete-retry-winner';
+    // The winning job holds the real frozen row, because a queued job that froze
+    // nothing is no longer a shape this schema will accept.
+    await seedExportJob({
+      id: winnerId, eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
+      media: [picked],
     });
     let transitioned = false;
     const terminalAfterBatch = new Proxy(testEnv.DB, {
@@ -1429,8 +1863,12 @@ describe('manager exports', () => {
             const results = await target.batch(statements);
             if (!transitioned) {
               transitioned = true;
-              await target.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`)
-                .bind(winner.id).run();
+              await target.prepare(`
+                UPDATE export_jobs
+                SET state = 'failed', execution_transition = execution_transition + 1
+                WHERE id = ?
+              `)
+                .bind(winnerId).run();
             }
             return results;
           };
@@ -1471,7 +1909,7 @@ describe('manager exports', () => {
     expect(listedJobs).toHaveLength(1);
     expectManagerExport(listedJobs[0]);
 
-    await new ExportsRepository(testEnv.DB).markFailed(createdJob.id, 'EXPORT_SOURCE_MISSING');
+    await failPristineExport(createdJob.id, 'EXPORT_SOURCE_MISSING');
     const retried = await app.request(
       `/api/manage/events/${access.event.id}/exports/${createdJob.id}/retry`,
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
@@ -1520,7 +1958,9 @@ describe('manager exports', () => {
     const job = (await created.json<any>()).data.export;
     const repository = new ExportsRepository(testEnv.DB);
     const claimStartedAt = '2026-08-12T12:00:00.000Z';
-    expect(await repository.claimRunning(job.id, claimStartedAt)).toMatchObject({ owned: true });
+    expect(await repository.claimRunning(job.id, job.attempt, claimStartedAt)).toMatchObject({
+      status: 'claimed',
+    });
     const attemptPrefix = `events/${access.event.id}/exports/${job.id}/attempt-1/`;
     const staleObjectKey = `${attemptPrefix}orphaned-before-step-retry`;
     await testEnv.MEDIA_BUCKET.put(staleObjectKey, 'stale');
@@ -1544,7 +1984,7 @@ describe('manager exports', () => {
       claimStartedAt,
     )).rejects.toThrow('attempt cleanup unavailable');
     expect(await repository.getById(job.id)).toMatchObject({
-      state: 'running', startedAt: claimStartedAt,
+      state: 'running', startedAt: null, executionStartedAt: claimStartedAt,
     });
 
     const resumed = await processExport(
@@ -1555,20 +1995,25 @@ describe('manager exports', () => {
       claimStartedAt,
     );
 
-    expect(resumed).toMatchObject({ state: 'ready', startedAt: claimStartedAt });
+    expect(resumed).toMatchObject({
+      state: 'ready', startedAt: null, executionStartedAt: claimStartedAt,
+    });
     expect(await testEnv.MEDIA_BUCKET.get(staleObjectKey)).toBeNull();
   });
 
   it('lets only the distinct queued-to-running transition owner process one attempt', async () => {
     const access = await eventAccess();
-    const snapshotAt = new Date().toISOString();
+    await uploadPending(access, 'single-transition-owner', null);
     const repository = new ExportsRepository(testEnv.DB);
-    const job = await repository.createActive({
-      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
-      mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
-    });
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(created.status).toBe(202);
+    const job = (await repository.getById((await created.json<any>()).data.export.id))!;
     const ownerStartedAt = '2026-08-12T12:00:00.000Z';
-    expect(await repository.claimRunning(job.id, ownerStartedAt)).toMatchObject({ owned: true });
+    expect(await repository.claimRunning(job.id, job.attempt, ownerStartedAt)).toMatchObject({
+      status: 'claimed',
+    });
 
     const duplicate = await processExport(
       testEnv,
@@ -1578,9 +2023,11 @@ describe('manager exports', () => {
       '2026-08-12T12:00:01.000Z',
     );
 
-    expect(duplicate).toMatchObject({ state: 'running', startedAt: ownerStartedAt });
+    expect(duplicate).toMatchObject({
+      state: 'running', startedAt: null, executionStartedAt: ownerStartedAt,
+    });
     expect(await repository.getById(job.id)).toMatchObject({
-      state: 'running', startedAt: ownerStartedAt, errorCode: null,
+      state: 'running', startedAt: null, executionStartedAt: ownerStartedAt, errorCode: null,
     });
     expect((await testEnv.MEDIA_BUCKET.list({
       prefix: `events/${access.event.id}/exports/${job.id}/`,
@@ -1641,15 +2088,26 @@ describe('manager exports', () => {
 
   it('does not mutate winner parts when markReady loses the running-state transition', async () => {
     const access = await eventAccess();
-    const snapshotAt = new Date().toISOString();
+    await uploadPending(access, 'markready-winner-parts', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const snapshotAt = job.snapshotAt as string;
     const repository = new ExportsRepository(testEnv.DB);
-    const job = await repository.createActive({
-      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
-      mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
+    const claimed = await repository.claimRunning(job.id, job.attempt, snapshotAt);
+    if (claimed.status === 'lost') throw new Error('Expected the Ready-race attempt to be claimed.');
+    await repository.recordProgress(claimed.owner, {
+      processedMediaCount: 1, processedBytes: 64, progressUpdatedAt: snapshotAt,
     });
-    await testEnv.DB.prepare(`
-      UPDATE export_jobs SET state = 'running', started_at = ? WHERE id = ?
-    `).bind(snapshotAt, job.id).run();
+    const winnerInventory = {
+      manifestObjectKey: 'winner-manifest',
+      parts: [{ partNumber: 1, objectKey: 'winner-part', mediaCount: 1, sourceBytes: 64 }],
+      guestbook: {
+        htmlObjectKey: 'winner-guestbook.html', htmlBytes: 1, htmlSha256: 'a'.repeat(64),
+        csvObjectKey: 'winner-guestbook.csv', csvBytes: 1, csvSha256: 'b'.repeat(64),
+      },
+    };
 
     let interleaved = false;
     const interleavingDb = new Proxy(testEnv.DB, {
@@ -1658,18 +2116,13 @@ describe('manager exports', () => {
           return async (statements: D1PreparedStatement[]) => {
             if (!interleaved) {
               interleaved = true;
-              await testEnv.DB.batch([
-                testEnv.DB.prepare(`
-                  UPDATE export_jobs SET state = 'ready', manifest_object_key = 'winner-manifest',
-                    part_count = 1, completed_at = ?, expires_at = ?, error_code = NULL
-                  WHERE id = ? AND state = 'running'
-                `).bind(snapshotAt, new Date(Date.now() + 60_000).toISOString(), job.id),
-                testEnv.DB.prepare(`
-                  INSERT INTO export_parts (
-                    id, export_job_id, part_number, object_key, media_count, source_bytes, created_at
-                  ) VALUES ('winner-part-id', ?, 1, 'winner-part', 1, 64, ?)
-                `).bind(job.id, snapshotAt),
-              ]);
+              const winner = await repository.markReady(
+                claimed.owner,
+                winnerInventory,
+                snapshotAt,
+                new Date(Date.now() + 60_000).toISOString(),
+              );
+              expect(winner.changed).toBe(true);
             }
             return testEnv.DB.batch(statements);
           };
@@ -1680,18 +2133,23 @@ describe('manager exports', () => {
     });
     const staleRepository = new ExportsRepository(interleavingDb);
 
-    await expect(staleRepository.markReady(job.id, {
+    await expect(staleRepository.markReady(claimed.owner, {
       manifestObjectKey: 'stale-manifest',
       parts: [{ partNumber: 1, objectKey: 'stale-part', mediaCount: 1, sourceBytes: 64 }],
-      guestbook: null,
+      // A complete job that froze Guestbook metadata owes complete Guestbook
+      // inventory, so the loser arrives with a whole one and still loses.
+      guestbook: {
+        htmlObjectKey: 'stale-guestbook.html', htmlBytes: 1, htmlSha256: 'a'.repeat(64),
+        csvObjectKey: 'stale-guestbook.csv', csvBytes: 1, csvSha256: 'b'.repeat(64),
+      },
     }, snapshotAt, new Date(Date.now() + 120_000).toISOString()))
-      .rejects.toThrow('Export job was not running.');
+      .resolves.toMatchObject({ changed: false, job: { state: 'ready' } });
 
     expect(await repository.getById(job.id)).toMatchObject({
       state: 'ready', manifestObjectKey: 'winner-manifest', partCount: 1,
     });
     expect(await repository.listParts(job.id)).toMatchObject([{
-      id: 'winner-part-id', partNumber: 1, objectKey: 'winner-part',
+      partNumber: 1, objectKey: 'winner-part',
     }]);
   });
 
@@ -1702,15 +2160,19 @@ describe('manager exports', () => {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     const job = (await created.json<any>()).data.export;
-    await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
-      .bind(new Date().toISOString(), media.id).run();
+    // Permanent deletion is the terminal state, not a lone `deleted_at`: since
+    // 0019 that marker on a stored row means recoverable, and the trash-pair
+    // invariant refuses to let a fixture invent a shape the runtime cannot reach.
+    await testEnv.DB.prepare(`
+      UPDATE media SET upload_state = 'deleted', deleted_at = ? WHERE id = ?
+    `).bind(new Date().toISOString(), media.id).run();
     const ready = await processExport(testEnv, job.id, new Date());
     expect(ready).toMatchObject({ state: 'ready', mediaCount: 1 });
     const manifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
     expect(manifest).toContain(media.id);
   });
 
-  it('never substitutes a reservation finalized after snapshot for a deleted frozen photo', async () => {
+  it('never substitutes a reservation finalized after snapshot for a removed frozen photo', async () => {
     const access = await eventAccess();
     const frozen = await uploadPending(access, 'frozen-member', 'Frozen member caption');
     const replacementBytes = png();
@@ -1728,8 +2190,10 @@ describe('manager exports', () => {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     const job = (await created.json<any>()).data.export;
-    await testEnv.DB.prepare(`UPDATE media SET deleted_at = ? WHERE id = ?`)
-      .bind(new Date().toISOString(), frozen.id).run();
+    // Host removal is now Recently deleted: the row leaves every live read while
+    // its exact bytes stay, which is the case where an implementation that reads
+    // live media instead of its frozen entries would reach for the replacement.
+    await trashMedia(access, frozen.id);
     const finalized = await createApp().request(
       `/api/event/${access.event.slug}/uploads/${replacement.id}/content`,
       {
@@ -1757,8 +2221,7 @@ describe('manager exports', () => {
     expect(manifest).toContain(frozen.id);
     expect(manifest).not.toContain(replacement.id);
 
-    await testEnv.DB.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`)
-      .bind(job.id).run();
+    await expireReadyExport(job.id);
     const retried = await createApp().request(
       `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
@@ -1770,6 +2233,217 @@ describe('manager exports', () => {
     const retryCsv = await (await testEnv.MEDIA_BUCKET.get(retryReady!.guestbookCsvObjectKey!))!.text();
     expect(retryManifest).toBe(manifest);
     expect(retryCsv).toBe(csv);
+  });
+
+  it('retries a failed export whose photo moved to Recently deleted, because its bytes stay', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'retry-after-trash', 'Kept caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    // Retry deletes the previous attempt's objects, so the artifact this run must
+    // reproduce is read while it still exists.
+    const firstManifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
+    await expireReadyExport(job.id);
+    await trashMedia(access, media.id);
+
+    const retry = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(retry.status).toBe(202);
+    expect((await retry.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2 });
+    const retried = await processExport(testEnv, job.id, new Date());
+    expect(retried).toMatchObject({ state: 'ready', attempt: 2, mediaCount: 1 });
+    expect(await (await testEnv.MEDIA_BUCKET.get(retried!.manifestObjectKey!))!.text())
+      .toBe(firstManifest);
+  });
+
+  it('refuses to retry a failed export whose photo was permanently deleted', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'retry-after-permanent-delete', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    const ready = await processExport(testEnv, job.id, new Date());
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+    await expireReadyExport(job.id);
+    // Guest self-deletion is permanent by design, and a terminal job holds
+    // nothing, so this is the one removal that truly takes the source away.
+    const removed = await createApp().request(
+      `/api/event/${access.event.slug}/uploads/${media.id}`,
+      { method: 'DELETE', headers: writeHeaders(access.guest) },
+      testEnv,
+    );
+    expect(removed.status).toBe(200);
+
+    const retry = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(retry.status).toBe(409);
+    expect(await retry.json<any>()).toMatchObject({
+      code: 'EXPORT_SOURCE_REMOVED',
+      message: 'Some photos in this export are no longer available. Prepare the current collection instead.',
+    });
+    expect(await repository.getById(job.id)).toMatchObject({ state: 'expired', attempt: 1 });
+    // A refused retry is not a cleanup: the previous attempt's artifact is still
+    // the host's to download until it expires.
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+  });
+
+  it('returns EXPORT_SOURCE_REMOVED when retry cannot prove the exact unsuppressed tombstone', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'retry-missing-tombstone', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await failPristineExport(job.id);
+
+    // Tombstones are permanent in production. This deliberately corrupts a
+    // terminal fixture to prove retry fails closed at its own boundary instead
+    // of relying on the history that normally makes the row undeletable.
+    await testEnv.DB.exec('DROP TRIGGER media_object_write_tombstone_permanent;');
+    await testEnv.DB.prepare(`
+      DELETE FROM media_object_write_tombstones
+      WHERE bucket_generation = ? AND object_key = ?
+    `).bind(media.objectBucketGeneration, media.objectKey).run();
+
+    const retry = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(retry.status).toBe(409);
+    expect(await retry.json<any>()).toMatchObject({ code: 'EXPORT_SOURCE_REMOVED' });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id))
+      .toMatchObject({ state: 'failed', attempt: 1 });
+  });
+
+  it('returns EXPORT_SOURCE_REMOVED when retry byte proof disagrees with the frozen job', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'retry-byte-proof', null);
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await failPristineExport(job.id);
+    await testEnv.DB.prepare(`
+      UPDATE export_media_entries SET byte_size = COALESCE(byte_size, declared_byte_size) + 1
+      WHERE export_job_id = ?
+    `).bind(job.id).run();
+
+    const retry = await createApp().request(
+      `/api/manage/events/${access.event.id}/exports/${job.id}/retry`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+
+    expect(retry.status).toBe(409);
+    expect(await retry.json<any>()).toMatchObject({ code: 'EXPORT_SOURCE_REMOVED' });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id))
+      .toMatchObject({ state: 'failed', attempt: 1 });
+  });
+
+  it('excludes a photo in Recently deleted from a new snapshot while the accepted job keeps it', async () => {
+    const access = await eventAccess();
+    const kept = await uploadPending(access, 'snapshot-kept', 'Still delivered');
+    const removed = await uploadPending(access, 'snapshot-removed', 'Moved to Recently deleted');
+    const accepted = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const acceptedJob = (await accepted.json<any>()).data.export;
+    expect(acceptedJob).toMatchObject({ mediaCount: 2, totalBytes: 128 });
+
+    await trashMedia(access, removed.id);
+
+    expect((await testEnv.DB.prepare(`
+      SELECT media_id FROM export_media_entries WHERE export_job_id = ? ORDER BY media_id
+    `).bind(acceptedJob.id).all()).results).toEqual(
+      [kept.id, removed.id].sort().map((media_id) => ({ media_id })),
+    );
+    // One job at a time per event, so the accepted one goes terminal before the
+    // host can ask for the collection as it stands now.
+    await failPristineExport(acceptedJob.id);
+    const next = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+
+    expect(next.status).toBe(202);
+    const nextJob = (await next.json<any>()).data.export;
+    expect(nextJob).toMatchObject({ mediaCount: 1, totalBytes: 64 });
+    expect((await testEnv.DB.prepare(`
+      SELECT media_id FROM export_media_entries WHERE export_job_id = ?
+    `).bind(nextJob.id).all()).results).toEqual([{ media_id: kept.id }]);
+  });
+
+  it('keeps an expired recoverable photo until the export holding its source is terminal', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'held-source-cleanup', 'Held caption');
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await trashMedia(access, media.id);
+    // The server computes a deadline 30 days out, so the fixture moves the whole
+    // pair into the past rather than the clock: cleanup, Restore, and the trash
+    // listing all read the same two columns.
+    await testEnv.DB.prepare(`
+      UPDATE media SET trashed_at = ?1, deleted_at = ?1, restore_until = ?2 WHERE id = ?3
+    `).bind('2026-06-01T12:00:00.000Z', '2026-06-02T12:00:00.000Z', media.id).run();
+
+    expect(await cleanupExpiredRecoverableMedia(testEnv, new Date()))
+      .toEqual({ terminalized: 0, held: 1 });
+    const listed = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/trash`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+    expect((await listed.json<any>()).data.media).toEqual([{
+      id: media.id,
+      originalFilename: 'held-source-cleanup.png',
+      guestName: 'Avery',
+      caption: 'Held caption',
+      trashedAt: '2026-06-01T12:00:00.000Z',
+      restoreUntil: '2026-06-02T12:00:00.000Z',
+    }]);
+    const restore = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${media.id}/restore`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(restore.status).toBe(409);
+    expect((await restore.json<any>()).code).toBe('MEDIA_STATE_CONFLICT');
+    expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
+
+    await failPristineExport(job.id);
+
+    expect(await cleanupExpiredRecoverableMedia(testEnv, new Date()))
+      .toEqual({ terminalized: 1, held: 0 });
+    expect(await testEnv.DB.prepare(`
+      SELECT upload_state, trashed_at, restore_until FROM media WHERE id = ?
+    `).bind(media.id).first()).toEqual({
+      upload_state: 'deleted', trashed_at: null, restore_until: null,
+    });
+    expect(await testEnv.DB.prepare(`
+      SELECT recoverable_media_count AS count, recoverable_bytes AS bytes FROM events WHERE id = ?
+    `).bind(access.event.id).first()).toEqual({ count: 0, bytes: 0 });
   });
 
   it('refuses retry before deleting ready inventory and resets all six Guestbook fields after durable deletion', async () => {
@@ -1798,7 +2472,7 @@ describe('manager exports', () => {
     expect(readyRetry.status).toBe(409);
     for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
 
-    await testEnv.DB.prepare(`UPDATE export_jobs SET state = 'failed' WHERE id = ?`).bind(job.id).run();
+    await expireReadyExport(job.id);
     const retry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/retry`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
@@ -1818,6 +2492,7 @@ describe('manager exports', () => {
 
   it('keeps private-only entries out of printable HTML and in the private archive', async () => {
     const access = await eventAccess();
+    await uploadPending(access, 'private-note-snapshot-photo', null);
     const sessionId = await testEnv.DB.prepare(`
       SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
     `).bind(access.event.id).first<string>('id');
@@ -1850,8 +2525,9 @@ describe('manager exports', () => {
     }, testEnv);
     const job = (await created.json<any>()).data.export;
     const repository = new ExportsRepository(testEnv.DB);
-    await repository.claimRunning(job.id, new Date().toISOString());
-    await expect(repository.markReady(job.id, {
+    const claimed = await repository.claimRunning(job.id, job.attempt, new Date().toISOString());
+    if (claimed.status === 'lost') throw new Error('Expected the test attempt to be claimed.');
+    await expect(repository.markReady(claimed.owner, {
       manifestObjectKey: null,
       parts: [],
       guestbook: {
@@ -1861,7 +2537,8 @@ describe('manager exports', () => {
     }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))
       .rejects.toThrow('requires a manifest and parts');
 
-    await testEnv.DB.prepare(`UPDATE export_jobs SET state = 'queued' WHERE id = ?`).bind(job.id).run();
+    await repository.markOwnedFailed(claimed.owner, 'EXPORT_TEST_FAILURE', new Date().toISOString());
+    await repository.retry(job.id);
     const ready = await processExport(testEnv, job.id, new Date());
     await testEnv.DB.prepare(`UPDATE export_jobs SET guestbook_csv_sha256 = NULL WHERE id = ?`)
       .bind(job.id).run();
@@ -1874,26 +2551,23 @@ describe('manager exports', () => {
     expect((await download.json<any>()).code).toBe('EXPORT_FAILED');
 
     const notesAccess = await eventAccess();
-    const sessionId = await testEnv.DB.prepare(`
-      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
-    `).bind(notesAccess.event.id).first<string>('id');
-    await testEnv.DB.prepare(`
-      INSERT INTO guest_messages (
-        id, event_id, guest_session_id, guest_name, body, moderation_status,
-        idempotency_key, created_at, approved_at, deleted_at
-      ) VALUES ('partial-note', ?, ?, NULL, 'Partial note', 'pending',
-        'partial-note-key', '2026-08-12T12:00:00.000Z', NULL, NULL)
-    `).bind(notesAccess.event.id, sessionId).run();
-    const notesCreated = await createApp().request(`/api/manage/events/${notesAccess.event.id}/exports`, {
-      method: 'POST', headers: writeHeaders(notesAccess.manager), body: '{}',
-    }, testEnv);
-    const notesJob = (await notesCreated.json<any>()).data.export;
-    await repository.claimRunning(notesJob.id, new Date().toISOString());
-    await expect(repository.markReady(notesJob.id, {
+    const notesSeeded = await seedHistoricalZeroPhotoComplete(
+      notesAccess,
+      'partial-zero-photo',
+      'failed',
+    );
+    const notesJob = await repository.retry(notesSeeded.id);
+    const notesClaimed = await repository.claimRunning(
+      notesJob.id,
+      notesJob.attempt,
+      new Date().toISOString(),
+    );
+    if (notesClaimed.status === 'lost') throw new Error('Expected the notes attempt to be claimed.');
+    await expect(repository.markReady(notesClaimed.owner, {
       manifestObjectKey: null, parts: [], guestbook: null,
     }, new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()))
       .rejects.toThrow('requires complete Guestbook inventory');
-    await expect(repository.markReady(notesJob.id, {
+    await expect(repository.markReady(notesClaimed.owner, {
       manifestObjectKey: 'unexpected-manifest',
       parts: [],
       guestbook: {
@@ -1913,7 +2587,8 @@ describe('manager exports', () => {
     const job = await repository.createAlbumActive({
       id: crypto.randomUUID(), eventId: access.event.id, snapshotAt: boundary, createdAt: boundary,
     });
-    await repository.claimRunning(job.id, '2026-08-23T12:00:01.000Z');
+    const claimed = await repository.claimRunning(job.id, job.attempt, '2026-08-23T12:00:01.000Z');
+    if (claimed.status === 'lost') throw new Error('Expected the Album attempt to be claimed.');
     const inventory = {
       manifestObjectKey: `events/${access.event.id}/exports/${job.id}/attempt-1/candidary-export-manifest.csv`,
       parts: [{
@@ -1943,7 +2618,7 @@ describe('manager exports', () => {
       await testEnv.DB.prepare(`UPDATE export_jobs SET ${column} = ? WHERE id = ?`)
         .bind(value, job.id).run();
       await expect(repository.markReady(
-        job.id,
+        claimed.owner,
         inventory,
         '2026-08-23T12:00:02.000Z',
         '2026-08-24T12:00:02.000Z',
@@ -1952,8 +2627,13 @@ describe('manager exports', () => {
         .bind(job.id).run();
     }
 
+    await repository.recordProgress(claimed.owner, {
+      processedMediaCount: 1,
+      processedBytes: 64,
+      progressUpdatedAt: '2026-08-23T12:00:01.500Z',
+    });
     await repository.markReady(
-      job.id,
+      claimed.owner,
       inventory,
       '2026-08-23T12:00:02.000Z',
       '2026-08-24T12:00:02.000Z',
@@ -1973,21 +2653,38 @@ describe('manager exports', () => {
   it('keeps legacy photo-only rows downloadable with null Guestbook descriptors', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'legacy-download', null);
-    const snapshotAt = new Date().toISOString();
-    const repository = new ExportsRepository(testEnv.DB);
-    const legacy = await repository.createActive({
-      id: crypto.randomUUID(), eventId: access.event.id, snapshotAt,
-      mediaCount: 1, totalBytes: 64, createdAt: snapshotAt,
-    });
+    const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    const job = (await created.json<any>()).data.export;
+    await processExport(testEnv, job.id, new Date());
+    // A pre-0015 job froze no entries and carries no Guestbook columns at all.
+    // 0019 refuses to create that shape again and fails any queued one it finds,
+    // but it deliberately leaves an already-ready artifact alone, so the host who
+    // still has one must be able to download it.
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE export_jobs SET
+          guestbook_entry_count = NULL, guestbook_shared_count = NULL,
+          guestbook_event_name = NULL, guestbook_event_date = NULL,
+          guestbook_event_timezone = NULL, guestbook_prompt = NULL,
+          guestbook_gallery_visible = NULL, guestbook_html_object_key = NULL,
+          guestbook_html_bytes = NULL, guestbook_html_sha256 = NULL,
+          guestbook_csv_object_key = NULL, guestbook_csv_bytes = NULL,
+          guestbook_csv_sha256 = NULL
+        WHERE id = ?
+      `).bind(job.id),
+      testEnv.DB.prepare('DELETE FROM export_media_entries WHERE export_job_id = ?').bind(job.id),
+    ]);
+    const legacy = await new ExportsRepository(testEnv.DB).getById(job.id);
     expect(legacy).toMatchObject({
+      state: 'ready',
       guestbookEntryCount: null,
       guestbookHtmlObjectKey: null,
       guestbookCsvObjectKey: null,
     });
-    const ready = await processExport(testEnv, legacy.id, new Date());
-    expect(ready).toMatchObject({ state: 'ready', guestbookEntryCount: null });
     const response = await createApp().request(
-      `/api/manage/events/${access.event.id}/exports/${legacy.id}/download`,
+      `/api/manage/events/${access.event.id}/exports/${job.id}/download`,
       { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
       testEnv,
     );
@@ -2001,17 +2698,16 @@ describe('manager exports', () => {
   it('uses a domain refusal when an export belongs to another event', async () => {
     const first = await eventAccess();
     const second = await eventAccess();
-    const job = await new ExportsRepository(testEnv.DB).createActive({
-      id: crypto.randomUUID(),
+    const jobId = crypto.randomUUID();
+    await seedExportJob({
+      id: jobId,
       eventId: second.event.id,
       snapshotAt: new Date().toISOString(),
-      mediaCount: 1,
-      totalBytes: 64,
       createdAt: new Date().toISOString(),
     });
 
     const response = await createApp().request(
-      `/api/manage/events/${first.event.id}/exports/${job.id}`,
+      `/api/manage/events/${first.event.id}/exports/${jobId}`,
       { headers: { cookie: first.manager.cookie } },
       testEnv,
     );

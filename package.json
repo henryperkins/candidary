@@ -13,6 +13,8 @@
     "build:cloudflare": "node --experimental-strip-types scripts/build-cloudflare.ts",
     "deploy": "npm run build:cloudflare && npm run deploy:built",
     "deploy:built": "node --experimental-strip-types scripts/deploy-built.ts production",
+    "upload:production-version:built": "node --experimental-strip-types scripts/deploy-built.ts production-upload",
+    "prepare:production-control-plane-configs:built": "node --experimental-strip-types scripts/deploy-built.ts production-control-plane-configs",
     "deploy:preview:built": "node --experimental-strip-types scripts/deploy-built.ts preview",
     "typecheck": "tsc -b --pretty false",
     "typecheck:e2e": "tsc -p tsconfig.e2e.json --pretty false",

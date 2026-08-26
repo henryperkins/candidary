@@ -1,3 +1,5 @@
+import type { GalleryAudienceSummaryView } from '../../shared/contracts';
+
 export interface AlbumShareRecord {
   id: string;
   eventId: string;
@@ -76,6 +78,13 @@ export class AlbumSharesRepository {
       FROM event_album_shares WHERE event_id = ?
     `).bind(eventId).first<AlbumShareRow>();
     return row ? mapShare(row) : null;
+  }
+
+  async audienceStatus(eventId: string): Promise<GalleryAudienceSummaryView['albumLink']> {
+    const row = await this.db.prepare(`
+      SELECT shared_at FROM event_album_shares WHERE event_id = ?
+    `).bind(eventId).first<{ shared_at: string }>();
+    return { active: row !== null, sharedAt: row?.shared_at ?? null };
   }
 
   async getById(id: string): Promise<AlbumShareRecord | null> {

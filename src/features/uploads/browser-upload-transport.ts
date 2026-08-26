@@ -1,4 +1,5 @@
 import { UPLOAD_BATCH_SIZE } from '../../../shared/constants';
+import type { UploadBatchItemView } from '../../../shared/contracts';
 import { api, ClientApiError } from '../../app/api';
 import type {
   ReservationResult,
@@ -13,14 +14,13 @@ const FINALIZE_REUPLOAD_CODES = new Set([
   'FILE_TYPE_UNSUPPORTED',
 ]);
 
-interface BatchResponseItem {
-  idempotencyKey: string;
-  status: 'accepted' | 'rejected';
-  alreadyDelivered?: boolean;
-  media?: { id: string; mimeType: string; uploadState: 'reserved' | 'stored' | 'failed' | 'deleted' };
-  uploadUrl?: string;
-  error?: { message: string };
-}
+/* The reservation answer, exactly as the contract writes it. The queue only ever needed three things
+   about a photo the server had already been told about — which media row it is, what to send it as,
+   and whether the bytes are already there — and everything else the response used to carry (object
+   key, byte size, dimensions, guest name, publication status, reservation expiry) was either the
+   guest's own file talking back to it or storage detail it had no business reading. The file being
+   sent is the client's; it is the one already in hand. */
+const RESERVATION_FAILED = 'This photo could not be reserved.';
 
 function cancellation() {
   return new DOMException('Sending was cancelled.', 'AbortError');
@@ -92,7 +92,7 @@ export function createBrowserTransport(slug: string, guestName: string): UploadT
       const results: ReservationResult[] = [];
       for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
         const chunk = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
-        const response = await api<{ items: BatchResponseItem[] }>(`/api/event/${slug}/uploads/batch`, {
+        const response = await api<{ items: UploadBatchItemView[] }>(`/api/event/${slug}/uploads/batch`, {
           method: 'POST',
           signal,
           body: JSON.stringify({
@@ -106,14 +106,24 @@ export function createBrowserTransport(slug: string, guestName: string): UploadT
             })),
           }),
         });
-        results.push(...response.items.map((item) => {
-          if (item.status === 'accepted' && item.alreadyDelivered && item.media?.uploadState === 'stored') {
-            return { id: item.idempotencyKey, status: 'delivered' as const };
-          }
-          if (item.status === 'accepted' && item.media && item.uploadUrl) {
+        results.push(...response.items.map((item): ReservationResult => {
+          if (item.status === 'rejected') {
             return {
               id: item.idempotencyKey,
-              status: 'accepted' as const,
+              status: 'rejected',
+              error: item.error?.message ?? RESERVATION_FAILED,
+            };
+          }
+          if (item.alreadyDelivered && item.media?.uploadState === 'stored') {
+            return { id: item.idempotencyKey, status: 'delivered' };
+          }
+          // An accepted reservation that still needs its bytes always carries both. Anything else is
+          // an answer this queue cannot act on, and a photo it cannot send is a photo it must not
+          // report as sent.
+          if (item.media && item.uploadUrl) {
+            return {
+              id: item.idempotencyKey,
+              status: 'accepted',
               reservation: {
                 mediaId: item.media.id,
                 uploadUrl: item.uploadUrl,
@@ -121,11 +131,7 @@ export function createBrowserTransport(slug: string, guestName: string): UploadT
               },
             };
           }
-          return {
-            id: item.idempotencyKey,
-            status: 'rejected' as const,
-            error: item.error?.message ?? 'This photo could not be reserved.',
-          };
+          return { id: item.idempotencyKey, status: 'rejected', error: RESERVATION_FAILED };
         }));
       }
       return results;

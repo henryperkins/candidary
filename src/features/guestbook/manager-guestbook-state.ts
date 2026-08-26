@@ -58,7 +58,7 @@ export function guestbookItemMatchesSource(
 
 export function guestbookStateLabel(item: ManagerGuestbookItem, galleryVisible: boolean): string {
   if (item.source === 'photo_caption' && item.state === 'published' && !galleryVisible) {
-    return 'Published · gallery off';
+    return 'Not currently visible to event guests';
   }
   return item.state.charAt(0).toUpperCase() + item.state.slice(1);
 }

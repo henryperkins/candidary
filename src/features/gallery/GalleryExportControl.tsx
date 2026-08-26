@@ -3,7 +3,15 @@ import { useState } from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
-import { EXPORT_STATE_LABELS, ExportStatusAnnouncement } from './export-control-status';
+import {
+  ExportJobStatus,
+  exportAnnouncementMessage,
+  exportWaitMessage,
+  hasTrustedEmptySource,
+  isTerminalExport,
+  useExportAnnouncement,
+  type ExportCurrentSource,
+} from './export-control-status';
 
 // Complete-export rendering predates the wire-level `kind` discriminator. Direct callers that
 // still supply that legacy shape remain source-compatible; current API jobs retain the field.
@@ -15,28 +23,18 @@ export function normalizeCompleteExport(job: CompleteExportInput): ExportView {
 }
 
 interface GalleryExportControlProps {
+  eventTimezone: string;
+  currentSource: ExportCurrentSource;
+  now?: number;
   job?: CompleteExportInput;
   activeJob?: ExportView;
   download?: ExportDownloadView;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
+  /** Retained while call sites move to Manager's one live owner; controls render no live nodes. */
   live?: boolean;
   onAnnouncement?(message: string): void;
-}
-
-// A host planning a multi-gigabyte download needs the size before they start, not after.
-// `totalBytes` and each part's `sourceBytes` were already on the wire and unused.
-function exportStateDetail(job: ExportView): string {
-  const counts = [
-    `${job.mediaCount.toLocaleString()} photos`,
-    formatBytes(job.totalBytes),
-    `${job.guestbookEntryCount ?? 0} guestbook entries`,
-  ].join(' · ');
-  if (job.state === 'ready') return `${counts}. Download links last 24 hours.`;
-  if (job.state === 'failed') return `${counts}. Attempt ${job.attempt} failed.`;
-  if (job.state === 'expired') return `${counts}. The download links have expired.`;
-  return counts;
 }
 
 /**
@@ -52,55 +50,68 @@ const DESKTOP_ADVISORY_BYTES = 2 * 1024 ** 3;
  * of that same logical job rather than a second entry point.
  */
 export function GalleryExportControl({
+  eventTimezone,
+  currentSource,
+  now = Date.now(),
   job,
   activeJob,
   download,
   onPrepare,
   onDownload,
   onRetry,
-  live = true,
   onAnnouncement,
 }: GalleryExportControlProps) {
-  const [preparing, setPreparing] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
   const normalizedJob = job ? normalizeCompleteExport(job) : undefined;
-  const otherExportActive = activeJob !== undefined && activeJob.id !== normalizedJob?.id;
-  // One live region that outlives every branch below. A `role="status"` inserted alongside its own
-  // first text is not announced, and the prepare button cannot carry the news either: it is disabled
-  // the moment it is pressed, which blurs it. So the region is mounted outside the branch and filled
-  // afterwards. It only speaks for changes that happen while the host is here: a job already running
-  // when Gallery opens mounts the region full, which is why the state is also rendered visibly.
-  const liveMessage = normalizedJob
-    ? `${EXPORT_STATE_LABELS[normalizedJob.state]}. ${exportStateDetail(normalizedJob)}`
-    : preparing ? 'Preparing your download…' : '';
+  const waitMessage = exportWaitMessage(activeJob, normalizedJob?.id);
+  const currentSourceEmpty = hasTrustedEmptySource(currentSource);
+  const liveMessage = normalizedJob === undefined
+    ? pendingAction === 'prepare' ? 'Preparing the current collection…' : ''
+    : exportAnnouncementMessage(normalizedJob, 'collection', now);
+  useExportAnnouncement(liveMessage, onAnnouncement);
+  const run = (action: Exclude<typeof pendingAction, null>, request: () => Promise<void>) => {
+    if (pendingAction !== null) return;
+    setPendingAction(action);
+    void request().finally(() => setPendingAction(null));
+  };
+
+  const prepareDisabled = pendingAction !== null || waitMessage !== null || currentSourceEmpty;
+  const prepareReason = waitMessage
+    ?? (currentSourceEmpty ? 'Deliver a photo before preparing the current collection.' : null);
+
   return <div className="gallery-export">
-    <ExportStatusAnnouncement
-      live={live}
-      message={liveMessage}
-      onAnnouncement={onAnnouncement}
-    />
     {!normalizedJob
       ? <>
           <p className="gallery-export__copy">
-            Every private photo, the photo manifest, and the printable and private guestbook files. Search and album picks do not change this.
+            Every delivered photo, the photo manifest, and the printable and private guestbook files. Search and Album picks do not change this.
           </p>
           <button
             type="button"
             className="button button--primary"
-            disabled={preparing || otherExportActive}
-            onClick={() => {
-              setPreparing(true);
-              void onPrepare().finally(() => setPreparing(false));
-            }}
+            disabled={prepareDisabled}
+            onClick={() => run('prepare', onPrepare)}
           >
-            <Download aria-hidden="true" /> {preparing ? 'Preparing download…' : 'Download all'}
+            <Download aria-hidden="true" /> {pendingAction === 'prepare' ? 'Preparing download…' : 'Download all'}
           </button>
+          {prepareReason === null ? null : <p className="gallery-export__copy">{prepareReason}</p>}
         </>
       : <div className="export-state">
-          <strong>{EXPORT_STATE_LABELS[normalizedJob.state]}</strong>
-          <span>{exportStateDetail(normalizedJob)}</span>
+          <ExportJobStatus
+            job={normalizedJob}
+            eventTimezone={eventTimezone}
+            currentSource={currentSource}
+            currentLabel="collection"
+            now={now}
+          />
           {normalizedJob.state === 'ready' && !download && (
-            <button type="button" className="button button--secondary" onClick={() => void onDownload(normalizedJob)}>
-              <Download aria-hidden="true" /> Get download links
+            <button
+              type="button"
+              className="button button--secondary"
+              disabled={pendingAction !== null}
+              onClick={() => run('download', () => onDownload(normalizedJob))}
+            >
+              <Download aria-hidden="true" />
+              {pendingAction === 'download' ? 'Getting download links…' : 'Get download links'}
             </button>
           )}
           {download && <div className="export-links">
@@ -122,16 +133,30 @@ export function GalleryExportControl({
             {download.printableGuestbook && <a href={download.printableGuestbook.url}>Printable guestbook</a>}
             {download.privateGuestbook && <a href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
           </div>}
-          {(normalizedJob.state === 'failed' || normalizedJob.state === 'expired') && (
-            <button
-              type="button"
-              className="button button--secondary"
-              disabled={otherExportActive}
-              onClick={() => void onRetry(normalizedJob)}
-            >
-              Retry export
-            </button>
-          )}
+          {(normalizedJob.state === 'failed' || normalizedJob.state === 'expired')
+            && normalizedJob.errorCode !== 'EXPORT_SOURCE_REMOVED'
+            ? <button
+                type="button"
+                className="button button--secondary"
+                disabled={pendingAction !== null || waitMessage !== null}
+                onClick={() => run('retry', () => onRetry(normalizedJob))}
+              >
+                {pendingAction === 'retry' ? 'Retrying export…' : 'Retry this prepared export'}
+              </button>
+            : null}
+          {isTerminalExport(normalizedJob)
+            ? <button
+                type="button"
+                className="button button--secondary"
+                disabled={prepareDisabled}
+                onClick={() => run('prepare', onPrepare)}
+              >
+                {pendingAction === 'prepare' ? 'Preparing current collection…' : 'Prepare current collection'}
+              </button>
+            : null}
+          {isTerminalExport(normalizedJob) && prepareReason !== null
+            ? <p className="gallery-export__copy">{prepareReason}</p>
+            : null}
         </div>}
   </div>;
 }

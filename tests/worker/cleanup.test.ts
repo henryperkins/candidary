@@ -30,7 +30,6 @@ import {
   scheduledCleanup,
   type CoverPurgeWorkflowAccessors,
 } from '../../worker/workflows/cleanup';
-import { processExport } from '../../worker/workflows/export';
 import type { CoverWorkflowLookup } from '../../worker/workflows/cover-platform';
 import { restartCoverPublication } from '../../worker/services/event-cover-publication';
 import { finalizedMediaObjectKey } from '../../worker/storage/media-keys';
@@ -42,7 +41,10 @@ import {
   importRoster,
   openRsvp,
   png,
+  processExport,
   resetDatabase,
+  resetDatabaseWithExportProtocolLegacyOpen,
+  seedExportJob,
   seedEventCoverGraph,
   testEnv,
   uploadPending,
@@ -185,6 +187,67 @@ async function moveStoredMediaToLegacyKey(access: Access, idempotencyKey: string
 describe('Guestbook export cleanup', () => {
   beforeEach(resetDatabase);
 
+  it('expires a legacy Ready job without advancing its v2-only execution ledger', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(access, 'cleanup-legacy-ready', null);
+    const jobId = 'legacy-ready-expiry';
+    const snapshotAt = '2026-08-10T12:00:00.000Z';
+    const expiresAt = '2026-08-13T12:00:00.000Z';
+    const objectKey = `historical-export-artifacts/${jobId}/complete.zip`;
+    const manifestKey = `historical-export-artifacts/${jobId}/manifest.json`;
+    const partKey = `historical-export-artifacts/${jobId}/photos-001.zip`;
+    await seedExportJob({
+      id: jobId,
+      eventId: access.event.id,
+      snapshotAt,
+      state: 'ready',
+      media: [media],
+    });
+    await testEnv.DB.batch([
+      testEnv.DB.prepare(`
+        UPDATE export_jobs
+        SET object_key = ?, manifest_object_key = ?, part_count = 1,
+          completed_at = ?, expires_at = ?
+        WHERE id = ?
+      `).bind(objectKey, manifestKey, '2026-08-12T12:00:00.000Z', expiresAt, jobId),
+      testEnv.DB.prepare(`
+        INSERT INTO export_parts (
+          id, export_job_id, part_number, object_key, media_count, source_bytes, created_at
+        ) VALUES (?, ?, 1, ?, 1, ?, ?)
+      `).bind(
+        `${jobId}-part-1`,
+        jobId,
+        partKey,
+        media.byteSize ?? media.declaredByteSize,
+        '2026-08-12T12:00:00.000Z',
+      ),
+    ]);
+    for (const key of [objectKey, manifestKey, partKey]) {
+      await testEnv.MEDIA_BUCKET.put(key, key);
+    }
+    const repository = new ExportsRepository(testEnv.DB);
+    expect(await repository.getById(jobId)).toMatchObject({
+      state: 'ready', executionProtocol: 'legacy', executionTransition: 0,
+    });
+
+    expect(await cleanupExpiredExports(
+      testEnv,
+      new Date('2026-08-13T12:00:01.000Z'),
+    )).toBe(1);
+
+    expect(await repository.getById(jobId)).toMatchObject({
+      state: 'expired', executionProtocol: 'legacy', executionTransition: 0,
+      objectKey: null, manifestObjectKey: null, partCount: 0,
+    });
+    expect(await repository.listParts(jobId)).toEqual([]);
+    expect(await testEnv.DB.prepare(`
+      SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
+    `).bind(jobId).first<number>('count')).toBe(1);
+    for (const key of [objectKey, manifestKey, partKey]) {
+      expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    }
+  });
+
   it('deletes the complete durable inventory before expiring a job and retains immutable snapshot rows', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'cleanup-export', 'Frozen cleanup caption');
@@ -258,21 +321,35 @@ describe('Guestbook export cleanup', () => {
     `).bind(job.id).first<number>('count')).toBe(0);
   });
 
-  it('keeps Ready state and durable inventory when object deletion fails', async () => {
+  it('keeps Expired inventory durable and recovers it when object deletion fails', async () => {
     const access = await eventAccess();
     await uploadPending(access, 'cleanup-failure', null);
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
     const job = (await created.json<any>()).data.export;
-    await processExport(testEnv, job.id, new Date('2026-08-12T12:00:00.000Z'));
+    const ready = await processExport(testEnv, job.id, new Date('2026-08-12T12:00:00.000Z'));
+    const repository = new ExportsRepository(testEnv.DB);
+    const parts = await repository.listParts(job.id);
+    const keys = [
+      ready!.manifestObjectKey,
+      ...parts.map(({ objectKey }) => objectKey),
+      ready!.guestbookHtmlObjectKey,
+      ready!.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
     const bucket = Object.create(testEnv.MEDIA_BUCKET) as R2Bucket;
     bucket.delete = vi.fn(async () => { throw new Error('R2 unavailable'); });
     const failingEnv = { ...testEnv, MEDIA_BUCKET: bucket };
 
-    await expect(cleanupExpiredExports(failingEnv, new Date('2026-08-14T12:00:00.000Z')))
-      .rejects.toThrow('R2 unavailable');
-    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'ready' });
+    expect(await cleanupExpiredExports(failingEnv, new Date('2026-08-14T12:00:00.000Z'))).toBe(1);
+    expect(await repository.getById(job.id)).toMatchObject({
+      state: 'expired', manifestObjectKey: ready!.manifestObjectKey, partCount: parts.length,
+    });
+    expect(await cleanupExpiredExports(testEnv, new Date('2026-08-14T12:01:00.000Z'))).toBe(0);
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect(await repository.getById(job.id)).toMatchObject({
+      state: 'expired', manifestObjectKey: null, partCount: 0,
+    });
   });
 
   it('deletes exact durable export keys before event purge removes dependent rows', async () => {
@@ -323,6 +400,97 @@ describe('Guestbook export cleanup', () => {
       SELECT count(*) AS count FROM export_media_entries WHERE export_job_id = ?
     `).bind(job.id).first<number>('count')).toBe(0);
     for (const key of durableKeys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+  });
+
+  it('terminalizes queued legacy and v2 exports with their protocol-specific event-purge transitions', async () => {
+    await resetDatabaseWithExportProtocolLegacyOpen();
+    const legacyAccess = await eventAccess('Legacy queued purge');
+    const legacyMedia = await uploadPending(legacyAccess, 'purge-queued-legacy', null);
+    const legacyJobId = 'purge-queued-legacy';
+    await seedExportJob({
+      id: legacyJobId,
+      eventId: legacyAccess.event.id,
+      snapshotAt: '2026-08-12T12:00:00.000Z',
+      state: 'queued',
+      media: [legacyMedia],
+      executionProtocol: 'legacy',
+    });
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = false;
+    expect(await deleteEventData(
+      testEnv,
+      legacyAccess.event.id,
+      new Date('2026-08-13T12:00:00.000Z'),
+    )).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await new ExportsRepository(testEnv.DB).getById(legacyJobId)).toMatchObject({
+      state: 'failed', errorCode: 'EXPORT_EVENT_DELETED',
+      executionProtocol: 'legacy', executionTransition: 0,
+    });
+
+    // A successful cutover cannot contain active legacy and v2 jobs at once.
+    // Exercise the post-cutover branch in a fresh, normally admitted database.
+    await resetDatabase();
+    delete globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__;
+    const v2Access = await eventAccess('V2 queued purge');
+    await uploadPending(v2Access, 'purge-queued-v2', null);
+    const created = await createApp().request(`/api/manage/events/${v2Access.event.id}/exports`, {
+      method: 'POST', headers: writeHeaders(v2Access.manager), body: '{}',
+    }, testEnv);
+    expect(created.status).toBe(202);
+    const v2JobId = (await created.json<any>()).data.export.id as string;
+    globalThis.__CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE_OVERRIDE__ = false;
+    expect(await deleteEventData(
+      testEnv,
+      v2Access.event.id,
+      new Date('2026-08-13T12:00:01.000Z'),
+    )).toMatchObject({ phase: 'fences', remainder: true });
+    expect(await new ExportsRepository(testEnv.DB).getById(v2JobId)).toMatchObject({
+      state: 'failed', errorCode: 'EXPORT_EVENT_DELETED',
+      executionProtocol: 'attempt-v2', executionTransition: 1,
+    });
+  });
+
+  it('deletes exact inventory for every historical export rather than only the latest per kind', async () => {
+    const access = await eventAccess('Historical export purge');
+    const jobs = [
+      { id: 'purge-history-a', state: 'failed' as const, createdAt: '2026-08-09T12:00:00.000Z' },
+      { id: 'purge-history-b', state: 'expired' as const, createdAt: '2026-08-10T12:00:00.000Z' },
+      { id: 'purge-history-c', state: 'ready' as const, createdAt: '2026-08-11T12:00:00.000Z' },
+      { id: 'purge-history-d', state: 'failed' as const, createdAt: '2026-08-12T12:00:00.000Z' },
+    ].map((job) => ({
+      ...job,
+      durableKey: `historical-export-artifacts/${access.event.id}/${job.id}/manifest.json`,
+    }));
+    const durableKeys = jobs.map(({ durableKey }) => durableKey);
+    for (const { durableKey, ...job } of jobs) {
+      await seedExportJob({
+        ...job,
+        eventId: access.event.id,
+        snapshotAt: job.createdAt,
+      });
+      await testEnv.DB.prepare(`
+        UPDATE export_jobs SET manifest_object_key = ?, completed_at = ?, expires_at = ?
+        WHERE id = ?
+      `).bind(
+        durableKey,
+        job.createdAt,
+        '2099-08-13T12:00:00.000Z',
+        job.id,
+      ).run();
+      await testEnv.MEDIA_BUCKET.put(durableKey, job.id);
+    }
+    const repository = new ExportsRepository(testEnv.DB);
+    expect(await repository.listForEvent(access.event.id)).toHaveLength(4);
+    expect(await repository.listLatestForManager(access.event.id)).toHaveLength(1);
+
+    expect(await deleteEventData(
+      testEnv,
+      access.event.id,
+      new Date('2026-08-13T12:00:00.000Z'),
+    )).toMatchObject({ phase: 'complete', remainder: false });
+
+    for (const key of durableKeys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect(await testEnv.DB.prepare('SELECT id FROM export_jobs WHERE event_id = ?')
+      .bind(access.event.id).all()).toMatchObject({ results: [] });
   });
 
   it('holds the event prefix and relational purge until a running export is terminal', async () => {

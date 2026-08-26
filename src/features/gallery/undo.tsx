@@ -1,153 +1,445 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 
-/** The proposal's window. Long enough to read the sentence that explains what survived. */
+/** The standard Manager recovery window. */
 export const UNDO_WINDOW_MS = 9_000;
+/** Recoverable trash remains available longer, but never past its server deadline. */
+export const TRASH_UNDO_WINDOW_MS = 30_000;
+export const UNDO_FAILED_MESSAGE = 'Undo could not be completed. Check the current Manager state, then try Undo again.';
 
-export interface UndoOffer {
-  /**
-   * Names what changed *and* what survived it. Album mutations are frightening in a way
-   * ordinary undo copy does not cover — a host removing a photo from the album needs to
-   * be told, in the same breath, that the delivered original is untouched.
-   */
+const MAX_TIMER_MS = 2_147_483_647;
+
+export type ManagerUndoDuration = typeof UNDO_WINDOW_MS | typeof TRASH_UNDO_WINDOW_MS;
+export type ManagerUndoState = 'idle' | 'offered' | 'running' | 'failed';
+
+export interface ManagerUndoOffer {
+  eventId: string;
   message: string;
+  durationMs: ManagerUndoDuration;
+  absoluteDeadline?: string;
+  input: 'keyboard' | 'pointer';
   run(): Promise<void>;
 }
 
-interface PresentedOffer extends UndoOffer {
+export interface ManagerUndoController {
+  state: ManagerUndoState;
+  canPresent: boolean;
+  present(offer: ManagerUndoOffer, presentation: { fallback: HTMLElement | null }): boolean;
+  dismiss(): void;
+  run(): void;
+}
+
+interface InternalUndoOffer {
+  eventId: string;
+  message: string;
+  durationMs: number;
+  absoluteDeadline?: string;
+  input: 'keyboard' | 'pointer';
+  run(): Promise<void>;
+}
+
+interface PresentedManagerUndoOffer extends InternalUndoOffer {
   sequence: number;
 }
 
-export interface UndoController {
-  offer: PresentedOffer | null;
-  running: boolean;
-  error: string | null;
-  present(offer: UndoOffer): void;
+interface UndoSlot {
+  offer: PresentedManagerUndoOffer;
+  generation: number;
+  remainingMs: number;
+  durationDeadline: number | null;
+  fallback: HTMLElement | null;
+  focusUndo: boolean;
+}
+
+interface EngineSnapshot {
+  state: ManagerUndoState;
+  offer: PresentedManagerUndoOffer | null;
+  rawError: string | null;
+  announcement: string;
+  restoreVersion: number;
+  focusRequest: number | null;
+}
+
+type HoldSource = 'focus' | 'pointer';
+
+interface UndoEngine {
+  controller: ManagerUndoController;
+  snapshot: EngineSnapshot;
   dismiss(): void;
   run(): void;
-  /** Held while focus is inside the bar; see `UndoBar`. */
-  hold(source: 'focus' | 'pointer'): void;
-  release(source: 'focus' | 'pointer'): void;
+  hold(source: HoldSource): void;
+  release(source: HoldSource): void;
+  claimUndoFocus(sequence: number): boolean;
+  restoreClosedFocus(): void;
 }
 
-/**
- * A single-slot undo. A second mutation replaces the first offer rather than stacking,
- * because two live "Undo" controls on one surface cannot say which one they reverse.
- *
- * The expiry is suspended while focus is inside the bar. A control that removes itself
- * from under a keyboard host drops focus to `<body>` and loses their place in the mosaic
- * entirely — the nine seconds are a convenience for a pointer, never a deadline for
- * someone who has actually reached the button.
- */
-export function useUndo(): UndoController {
-  const [offer, setOffer] = useState<PresentedOffer | null>(null);
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const offerRef = useRef<PresentedOffer | null>(null);
-  const sequence = useRef(0);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const holds = useRef(new Set<'focus' | 'pointer'>());
-  const expired = useRef(false);
+function monotonicNow(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
 
-  const clearTimer = useCallback(() => {
-    if (timer.current !== null) {
-      clearTimeout(timer.current);
-      timer.current = null;
+function parsedDeadline(deadline: string | undefined): number | null {
+  if (deadline === undefined) return null;
+  const parsed = Date.parse(deadline);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function currentSectionHeading(): HTMLElement | null {
+  const selectors = [
+    'main section:not([hidden]) h1',
+    'main section:not([hidden]) h2',
+    'main h1',
+    'main h2',
+  ];
+  for (const selector of selectors) {
+    const headings = document.querySelectorAll<HTMLElement>(selector);
+    for (const heading of headings) {
+      if (heading.closest('[hidden], [aria-hidden="true"]') === null) return heading;
+    }
+  }
+  return null;
+}
+
+function focusElement(target: HTMLElement): void {
+  if (!target.matches('button, a[href], input, select, textarea, [tabindex]')) target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+}
+
+function useUndoEngine(eventId: string): UndoEngine {
+  const initialSnapshot: EngineSnapshot = {
+    state: 'idle',
+    offer: null,
+    rawError: null,
+    announcement: '',
+    restoreVersion: 0,
+    focusRequest: null,
+  };
+  const [snapshot, setSnapshot] = useState(initialSnapshot);
+  const snapshotRef = useRef(initialSnapshot);
+  const generationRef = useRef(0);
+  const sequenceRef = useRef(0);
+  const slotRef = useRef<UndoSlot | null>(null);
+  const holdsRef = useRef(new Set<HoldSource>());
+  const durationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const capTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closedFallbackRef = useRef<HTMLElement | null>(null);
+
+  const publish = useCallback((next: EngineSnapshot) => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
+
+  const clearDurationTimer = useCallback(() => {
+    if (durationTimerRef.current !== null) {
+      clearTimeout(durationTimerRef.current);
+      durationTimerRef.current = null;
     }
   }, []);
 
-  const dismiss = useCallback(() => {
-    clearTimer();
-    expired.current = false;
-    holds.current.clear();
-    offerRef.current = null;
-    setError(null);
-    setOffer(null);
-  }, [clearTimer]);
+  const clearCapTimer = useCallback(() => {
+    if (capTimerRef.current !== null) {
+      clearTimeout(capTimerRef.current);
+      capTimerRef.current = null;
+    }
+  }, []);
 
-  const startTimer = useCallback((forSequence: number) => {
-    clearTimer();
-    timer.current = setTimeout(() => {
-      timer.current = null;
-      if (offerRef.current?.sequence !== forSequence) return;
-      if (holds.current.size > 0) {
-        expired.current = true;
+  const retire = useCallback((sequence: number, announcement = '') => {
+    const slot = slotRef.current;
+    if (slot?.offer.sequence !== sequence) return;
+    clearDurationTimer();
+    clearCapTimer();
+    holdsRef.current.clear();
+    closedFallbackRef.current = slot.fallback;
+    slotRef.current = null;
+    const previous = snapshotRef.current;
+    publish({
+      state: 'idle',
+      offer: null,
+      rawError: null,
+      announcement,
+      restoreVersion: previous.restoreVersion + 1,
+      focusRequest: null,
+    });
+  }, [clearCapTimer, clearDurationTimer, publish]);
+
+  const armDurationTimer = useCallback((sequence: number) => {
+    clearDurationTimer();
+    const slot = slotRef.current;
+    const currentState = snapshotRef.current.state;
+    if (slot?.offer.sequence !== sequence || holdsRef.current.size > 0
+      || (currentState !== 'offered' && currentState !== 'failed')) return;
+    if (slot.remainingMs <= 0) {
+      retire(sequence);
+      return;
+    }
+    slot.durationDeadline = monotonicNow() + slot.remainingMs;
+    const waitForDeadline = () => {
+      const active = slotRef.current;
+      if (active?.offer.sequence !== sequence || active.durationDeadline === null) return;
+      const remaining = active.durationDeadline - monotonicNow();
+      if (remaining <= 0) {
+        active.remainingMs = 0;
+        active.durationDeadline = null;
+        retire(sequence);
         return;
       }
-      offerRef.current = null;
-      setOffer(null);
-    }, UNDO_WINDOW_MS);
-  }, [clearTimer]);
+      durationTimerRef.current = setTimeout(waitForDeadline, Math.min(remaining, MAX_TIMER_MS));
+    };
+    durationTimerRef.current = setTimeout(waitForDeadline, Math.min(slot.remainingMs, MAX_TIMER_MS));
+  }, [clearDurationTimer, retire]);
 
-  const present = useCallback((next: UndoOffer) => {
-    const nextSequence = ++sequence.current;
-    expired.current = false;
-    holds.current.clear();
-    setError(null);
-    const presented = { ...next, sequence: nextSequence };
-    offerRef.current = presented;
-    setOffer(presented);
-    startTimer(nextSequence);
-  }, [startTimer]);
+  const armCapTimer = useCallback((sequence: number) => {
+    clearCapTimer();
+    const waitForDeadline = () => {
+      const active = slotRef.current;
+      if (active?.offer.sequence !== sequence) return;
+      const deadline = parsedDeadline(active.offer.absoluteDeadline);
+      if (deadline === null) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        retire(sequence);
+        return;
+      }
+      capTimerRef.current = setTimeout(waitForDeadline, Math.min(remaining, MAX_TIMER_MS));
+    };
+    waitForDeadline();
+  }, [clearCapTimer, retire]);
+
+  const pauseDuration = useCallback((slot: UndoSlot) => {
+    if (slot.durationDeadline === null) return;
+    slot.remainingMs = Math.max(0, slot.durationDeadline - monotonicNow());
+    slot.durationDeadline = null;
+    clearDurationTimer();
+  }, [clearDurationTimer]);
+
+  const retireIfDurationOverdue = useCallback((slot: UndoSlot): boolean => {
+    if (slot.durationDeadline === null || slot.durationDeadline > monotonicNow()) return false;
+    slot.remainingMs = 0;
+    slot.durationDeadline = null;
+    retire(slot.offer.sequence);
+    return true;
+  }, [retire]);
+
+  const presentInternal = useCallback((
+    next: InternalUndoOffer,
+    fallback: HTMLElement | null,
+  ): boolean => {
+    if (next.eventId !== eventId
+      || snapshotRef.current.state === 'running') return false;
+    const absoluteDeadline = parsedDeadline(next.absoluteDeadline);
+    if (absoluteDeadline !== null && absoluteDeadline <= Date.now()) return false;
+
+    clearDurationTimer();
+    clearCapTimer();
+    closedFallbackRef.current = null;
+    const sequence = ++sequenceRef.current;
+    const active = typeof document === 'undefined' ? null : document.activeElement;
+    const focusUndo = next.input === 'keyboard'
+      && (active === document.body || active === fallback);
+    const presented: PresentedManagerUndoOffer = { ...next, sequence };
+    const slot: UndoSlot = {
+      offer: presented,
+      generation: generationRef.current,
+      remainingMs: Math.max(0, next.durationMs),
+      durationDeadline: null,
+      fallback,
+      focusUndo,
+    };
+    slotRef.current = slot;
+    publish({
+      state: 'offered',
+      offer: presented,
+      rawError: null,
+      announcement: '',
+      restoreVersion: snapshotRef.current.restoreVersion,
+      focusRequest: focusUndo ? sequence : null,
+    });
+    armDurationTimer(sequence);
+    armCapTimer(sequence);
+    return true;
+  }, [armCapTimer, armDurationTimer, clearCapTimer, clearDurationTimer, eventId, publish]);
+
+  const present = useCallback((next: ManagerUndoOffer, presentation: {
+    fallback: HTMLElement | null;
+  }) => presentInternal(next, presentation.fallback), [presentInternal]);
+
+  const dismiss = useCallback(() => {
+    const slot = slotRef.current;
+    if (!slot || snapshotRef.current.state === 'running') return;
+    retire(slot.offer.sequence);
+  }, [retire]);
 
   const run = useCallback(() => {
-    if (!offer || running) return;
-    clearTimer();
-    setError(null);
-    setRunning(true);
+    const slot = slotRef.current;
+    const state = snapshotRef.current.state;
+    if (!slot || (state !== 'offered' && state !== 'failed')) return;
+    if (retireIfDurationOverdue(slot)) return;
+    const absoluteDeadline = parsedDeadline(slot.offer.absoluteDeadline);
+    if (absoluteDeadline !== null && absoluteDeadline <= Date.now()) {
+      retire(slot.offer.sequence);
+      return;
+    }
+    pauseDuration(slot);
+    const { generation, offer } = slot;
+    publish({
+      state: 'running',
+      offer,
+      rawError: null,
+      announcement: '',
+      restoreVersion: snapshotRef.current.restoreVersion,
+      focusRequest: null,
+    });
     void offer.run().then(() => {
-      if (offerRef.current?.sequence !== offer.sequence) return;
-      expired.current = false;
-      holds.current.clear();
-      offerRef.current = null;
-      setOffer(null);
+      const active = slotRef.current;
+      if (active?.offer.sequence !== offer.sequence || active.generation !== generation) return;
+      retire(offer.sequence, 'Change undone.');
     }, (caught: unknown) => {
-      if (offerRef.current?.sequence !== offer.sequence) return;
-      setError(caught instanceof Error && caught.message
+      const active = slotRef.current;
+      if (active?.offer.sequence !== offer.sequence || active.generation !== generation) return;
+      const cap = parsedDeadline(active.offer.absoluteDeadline);
+      if (cap !== null && cap <= Date.now()) {
+        retire(offer.sequence);
+        return;
+      }
+      const rawError = caught instanceof Error && caught.message
         ? caught.message
-        : 'Undo could not be completed. Try again.');
-      startTimer(offer.sequence);
-    }).finally(() => setRunning(false));
-  }, [clearTimer, offer, running, startTimer]);
+        : UNDO_FAILED_MESSAGE;
+      publish({
+        state: 'failed',
+        offer,
+        rawError,
+        announcement: '',
+        restoreVersion: snapshotRef.current.restoreVersion,
+        focusRequest: null,
+      });
+      armDurationTimer(offer.sequence);
+    });
+  }, [armDurationTimer, pauseDuration, publish, retire, retireIfDurationOverdue]);
 
-  const hold = useCallback((source: 'focus' | 'pointer') => {
-    holds.current.add(source);
+  const hold = useCallback((source: HoldSource) => {
+    const slot = slotRef.current;
+    if (!slot || holdsRef.current.has(source)) return;
+    if (holdsRef.current.size === 0) {
+      const state = snapshotRef.current.state;
+      if (state === 'offered' || state === 'failed') {
+        if (retireIfDurationOverdue(slot)) return;
+        pauseDuration(slot);
+      }
+    }
+    holdsRef.current.add(source);
+  }, [pauseDuration, retireIfDurationOverdue]);
+
+  const release = useCallback((source: HoldSource) => {
+    if (!holdsRef.current.delete(source) || holdsRef.current.size > 0) return;
+    const slot = slotRef.current;
+    const state = snapshotRef.current.state;
+    if (slot && (state === 'offered' || state === 'failed')) {
+      armDurationTimer(slot.offer.sequence);
+    }
+  }, [armDurationTimer]);
+
+  const claimUndoFocus = useCallback((sequence: number) => {
+    const slot = slotRef.current;
+    if (slot?.offer.sequence !== sequence || !slot.focusUndo) return false;
+    slot.focusUndo = false;
+    return true;
   }, []);
 
-  const release = useCallback((source: 'focus' | 'pointer') => {
-    holds.current.delete(source);
-    if (holds.current.size > 0) return;
-    // The window ran out while the host was on the control. Honour the hold rather than
-    // the clock: give the offer back its full window from the moment they leave.
-    if (expired.current) {
-      expired.current = false;
-      const current = sequence.current;
-      startTimer(current);
+  const restoreClosedFocus = useCallback(() => {
+    const fallback = closedFallbackRef.current;
+    closedFallbackRef.current = null;
+    if (fallback?.isConnected) {
+      focusElement(fallback);
+      return;
     }
-  }, [startTimer]);
+    const heading = currentSectionHeading();
+    if (heading) focusElement(heading);
+  }, []);
 
-  useEffect(() => clearTimer, [clearTimer]);
+  useLayoutEffect(() => () => {
+    generationRef.current += 1;
+    clearDurationTimer();
+    clearCapTimer();
+    holdsRef.current.clear();
+    slotRef.current = null;
+  }, [clearCapTimer, clearDurationTimer]);
 
-  return { offer, running, error, present, dismiss, run, hold, release };
+  const controller = useMemo<ManagerUndoController>(() => ({
+    state: snapshot.state,
+    canPresent: snapshot.state !== 'running',
+    present,
+    dismiss,
+    run,
+  }), [dismiss, present, run, snapshot.state]);
+
+  return {
+    controller,
+    snapshot,
+    dismiss,
+    run,
+    hold,
+    release,
+    claimUndoFocus,
+    restoreClosedFocus,
+  };
 }
 
-/**
- * The offer itself. `role="status"` rather than `alert`: an undoable success is not an
- * error, and an assertive interruption on every pick would make bulk work unusable with
- * a screen reader. The message is the live text; the controls are reachable but silent.
- */
-export function UndoBar({
-  controller,
-  live = true,
-  onRestoreFocus,
-}: {
-  controller: UndoController;
-  live?: boolean;
-  onRestoreFocus?: () => void;
+const ManagerUndoContext = createContext<UndoEngine | null>(null);
+
+function ManagerUndoEventProvider({ eventId, children }: {
+  eventId: string;
+  children: ReactNode;
 }) {
-  const { offer, running, error, dismiss, run, hold, release } = controller;
+  const engine = useUndoEngine(eventId);
+  return <ManagerUndoContext.Provider value={engine}>{children}</ManagerUndoContext.Provider>;
+}
+
+export function ManagerUndoProvider({ eventId, children }: {
+  eventId: string;
+  children: ReactNode;
+}) {
+  return <ManagerUndoEventProvider key={eventId} eventId={eventId}>
+    {children}
+  </ManagerUndoEventProvider>;
+}
+
+function useManagerUndoEngine(): UndoEngine {
+  const engine = useContext(ManagerUndoContext);
+  if (engine === null) throw new Error('useManagerUndo must be used within ManagerUndoProvider.');
+  return engine;
+}
+
+export function useManagerUndo(): ManagerUndoController {
+  return useManagerUndoEngine().controller;
+}
+
+function undoWindowSentence(windowMs: number): string {
+  const seconds = Math.round(windowMs / 1_000);
+  const spelled: Record<number, string> = { 9: 'nine', 15: 'fifteen', 30: 'thirty' };
+  return `Undo is available for ${spelled[seconds] ?? String(seconds)} seconds.`;
+}
+
+function managerOfferSentence(offer: PresentedManagerUndoOffer): string {
+  if (parsedDeadline(offer.absoluteDeadline) !== null) {
+    return `Undo for up to ${Math.round(offer.durationMs / 1_000)} seconds, before ${offer.absoluteDeadline}.`;
+  }
+  return undoWindowSentence(offer.durationMs);
+}
+
+function UndoBarView({ engine }: { engine: UndoEngine }) {
+  const { snapshot } = engine;
+  const { offer } = snapshot;
   const barRef = useRef<HTMLDivElement>(null);
+  const undoRef = useRef<HTMLButtonElement>(null);
   const closeFocusOrigin = useRef<HTMLElement | null>(null);
-  const previousOffer = useRef(offer);
+  const previousRestoreVersion = useRef(snapshot.restoreVersion);
 
   const rememberCloseFocus = useCallback(() => {
     const active = document.activeElement;
@@ -156,58 +448,83 @@ export function UndoBar({
       : null;
   }, []);
 
-  useEffect(() => {
-    const previous = previousOffer.current;
-    previousOffer.current = offer;
-    if (!previous || offer) return;
+  useLayoutEffect(() => {
+    if (offer === null || snapshot.focusRequest !== offer.sequence) return;
+    if (engine.claimUndoFocus(offer.sequence)) undoRef.current?.focus({ preventScroll: true });
+  }, [engine, offer, snapshot.focusRequest]);
+
+  useLayoutEffect(() => {
+    if (previousRestoreVersion.current === snapshot.restoreVersion) return;
+    previousRestoreVersion.current = snapshot.restoreVersion;
     const origin = closeFocusOrigin.current;
     closeFocusOrigin.current = null;
-    if (!origin) return;
-    if (document.activeElement === origin || document.activeElement === document.body) {
-      onRestoreFocus?.();
-    }
-  }, [offer, onRestoreFocus]);
+    if (origin === null) return;
+    const active = document.activeElement;
+    if (active !== origin && active !== document.body) return;
+    engine.restoreClosedFocus();
+  }, [engine, snapshot.restoreVersion]);
+
+  const failure = snapshot.state === 'failed'
+    ? UNDO_FAILED_MESSAGE
+    : null;
+  const statusCopy = offer
+    ? `${offer.message} ${managerOfferSentence(offer)}`
+    : snapshot.announcement;
+  const statusPayloadKey = offer
+    ? `offer-${offer.sequence}`
+    : `announcement-${snapshot.restoreVersion}`;
 
   return <div className="album-undo" data-open={offer !== null}>
     <p
       className="sr-only"
-      role={live ? 'status' : undefined}
-      aria-live={live ? 'polite' : undefined}
-      aria-atomic={live ? 'true' : undefined}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
     >
-      {offer ? `${offer.message} Undo is available for nine seconds.` : ''}
+      {/* Keep the live region mounted, but add a fresh payload for every offer so
+          two equal human-readable messages are still announced as two events. */}
+      <span key={statusPayloadKey}>{statusCopy}</span>
     </p>
     {offer && <div
       ref={barRef}
       className="album-undo__bar"
-      onFocusCapture={() => hold('focus')}
-      onBlurCapture={(blur) => {
-        if (!blur.currentTarget.contains(blur.relatedTarget as Node | null)) release('focus');
+      onFocusCapture={() => {
+        rememberCloseFocus();
+        engine.hold('focus');
       }}
-      onPointerEnter={() => hold('pointer')}
-      onPointerLeave={() => release('pointer')}
+      onBlurCapture={(blur) => {
+        if (!blur.currentTarget.contains(blur.relatedTarget as Node | null)) engine.release('focus');
+      }}
+      onPointerEnter={() => engine.hold('pointer')}
+      onPointerLeave={() => engine.release('pointer')}
     >
       <span className="album-undo__message">{offer.message}</span>
-      {error && <small className="album-undo__error" role={live ? 'alert' : undefined}>{error}</small>}
+      {failure && <small className="album-undo__error" role="alert">{failure}</small>}
       <button
+        ref={undoRef}
         type="button"
         className="album-undo__action"
-        disabled={running}
+        disabled={snapshot.state === 'running'}
         onClick={() => {
           rememberCloseFocus();
-          run();
+          engine.run();
         }}
-      >{running ? 'Undoing…' : 'Undo'}</button>
+      >{snapshot.state === 'running' ? 'Undoing…' : 'Undo'}</button>
       <button
         type="button"
         className="album-undo__dismiss"
         aria-label="Dismiss"
-        disabled={running}
+        disabled={snapshot.state === 'running'}
         onClick={() => {
           rememberCloseFocus();
-          dismiss();
+          engine.dismiss();
         }}
       >Dismiss</button>
     </div>}
   </div>;
+}
+
+export function ManagerUndoBar() {
+  const engine = useManagerUndoEngine();
+  return <UndoBarView engine={engine} />;
 }

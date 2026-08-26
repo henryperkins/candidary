@@ -49,7 +49,7 @@ Implementation must extend these existing mechanisms before considering a new ab
 | Public Album rendering | `PublicAlbum`, `ResponsiveEventCover`, Album share projection |
 | Autosave | `createAutosaveQueue`, `AutosaveStatus`, Album generation guard |
 | Navigation settlement | React Router `useBlocker`, `useSearchParams`, `UnsavedSettingsPrompt` |
-| Undo | `useUndo`/`UndoBar` in `src/features/gallery/undo.tsx`, wrapped once at Manager scope |
+| Undo | Convert `useUndo`/`UndoBar` in `src/features/gallery/undo.tsx` into the sole `useManagerUndo`/`ManagerUndoBar` owner at Manager scope |
 | Announcements | Manager/Gallery visible notice and the single Gallery live region |
 | Export cards | `GalleryExportControl`, `AlbumExportControl`, `export-control-status.tsx` |
 | Selection | `selection-state.ts`, `SelectionTray`, the 50-action cap |
@@ -101,7 +101,7 @@ The slices use exactly three new migrations:
 
 Each runs against a fresh D1 database and an upgraded 0018 fixture. No existing migration is edited.
 
-Migration 0019 deliberately refuses to run while any export job is `running`; deployment waits for the existing Workflow to become terminal and retries the all-or-nothing migration. Migration-first compatibility is required while the 0018 Worker is still serving. After the new Worker admits the first trash write or `attempt-v2` export, the release is forward-fix-only: the standard 0018 code rollback is no longer a valid recovery path because it cannot own attempt-v2 execution. The deploy runbook records a pre-write rollback gate and the verification suite proves both that rollback remains safe before the gate and that forward repair completes/release holds after v2 writes.
+Migration 0019 deliberately refuses to run while any export job is `running`; deployment waits for the existing Workflow to become terminal and retries the all-or-nothing migration. Migration-first compatibility is required while the 0018 Worker is still serving. Because its scheduled Ready cleanup deletes R2 before its D1 transition, the exceptional release blocks every production deploy and all `main` merges except its exact reviewed release before switching the existing connected production Build to provenance-checked upload-only mode. That one excepted merge produces an inert version whose full-SHA tag and ID are verified while the deploy and exception-scoped merge freezes remain in force. The owner detaches only the daily lifecycle Cron, observes Cloudflare's complete trigger-propagation plus invocation wall-time drain, and deploys the captured version at 100% through the native versions path. Production status must name only that version before both Crons are restored; the branch remains frozen and Build upload-only until a later daily-lifecycle cleanup record carries the exact Cron expression and version ID. A reviewed forward fix may replace the expected version under that same owner/window, so the proof gate cannot prohibit its own recovery. Only after proof is the routine deploy command restored without replaying the already-handled Build. Pinned old Workflow callbacks remain protected by the database ownership fence. After the new Worker admits the first trash write or `attempt-v2` export, the release is forward-fix-only: the standard 0018 code rollback is no longer a valid recovery path. The verification suite distinguishes callback safety, the forbidden old cleanup path, and current-worker forward repair/hold release.
 
 ## HTTP convention for new routes
 

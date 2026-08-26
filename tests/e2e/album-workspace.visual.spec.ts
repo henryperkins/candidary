@@ -87,19 +87,19 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
 async function selectFirstMoment(page: Page) {
   await page.getByRole('button', { name: 'Select photos' }).click();
   await page.getByRole('button', { name: 'Select this moment' }).first().click();
-  await expect(page.getByRole('region', { name: 'Album' })).toContainText('4 photos selected');
+  await expect(page.getByRole('region', { name: 'Album' })).toContainText('4 of 50 selected');
 }
 
 async function openAlbumFromPicks(page: Page) {
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   await modes.getByRole('button', { name: /^Album/u }).click();
-  await expect(page.getByText('10 photos were favorited before this album existed.')).toBeVisible();
+  await expect(page.getByText('10 photos were picked before this Album existed.')).toBeVisible();
 }
 
 async function startAlbum(page: Page) {
-  await page.getByRole('button', { name: 'Start the album from them' }).click();
-  await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
-  await expect(page.getByText('10 photos in the album')).toBeVisible();
+  await page.getByRole('button', { name: 'Start the Album from them' }).click();
+  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByText('10 photos In Album')).toBeVisible();
 }
 
 async function expectAxeClean(page: Page, state: string) {
@@ -160,13 +160,13 @@ test('captures the seven handoff-aligned manager states at 924 by 540', async ({
   await capture(page, testInfo, 'desktop-05-editor');
 
   await page.getByRole('button', { name: 'Preview album' }).click();
-  await expect(page.getByText('What a guest opening the link sees')).toBeVisible();
+  await expect(page.getByText('What people with the Album link see')).toBeVisible();
   await parkAtTop(page);
   await capture(page, testInfo, 'desktop-06-preview');
 
   await page.getByRole('group', { name: 'Gallery mode' })
-    .getByRole('button', { name: /^Shared/u }).click();
-  await expect(page.getByText(/Publication is a separate axis from the album/u)).toBeVisible();
+    .getByRole('button', { name: /^Guest gallery/u }).click();
+  await expect(page.getByText('Published photos are visible to event guests.')).toBeVisible();
   await parkAtTop(page);
   await capture(page, testInfo, 'desktop-07-shared');
 });
@@ -209,7 +209,7 @@ test('captures and audits the mobile manager states at 390 by 844', async ({ pag
   await capture(page, testInfo, 'mobile-03-editor');
 
   await page.getByRole('button', { name: 'Preview album' }).click();
-  await expect(page.getByText('What a guest opening the link sees')).toBeVisible();
+  await expect(page.getByText('What people with the Album link see')).toBeVisible();
   await parkAtTop(page);
   await expectAxeClean(page, 'mobile preview');
   await expectContained(page, 'mobile preview');
@@ -217,7 +217,7 @@ test('captures and audits the mobile manager states at 390 by 844', async ({ pag
   await capture(page, testInfo, 'mobile-04-preview');
 
   await page.getByRole('group', { name: 'Gallery mode' })
-    .getByRole('button', { name: /^Shared/u }).click();
+    .getByRole('button', { name: /^Guest gallery/u }).click();
   await parkAtTop(page);
   await expectAxeClean(page, 'mobile Shared');
   await expectContained(page, 'mobile Shared');
@@ -236,7 +236,8 @@ test('captures and audits the public album at 390 by 844', async ({ page }, test
   await expect(page.getByRole('heading', { level: 1, name: 'The evening' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Reception' })).toBeVisible();
   await expect(page.getByRole('img', { name: `Cover for The evening` })).toBeVisible();
-  await expect(page.getByRole('img', { name: rows[0]!.caption }).first()).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Album photo 1' }).first()).toBeVisible();
+  await expect(page.getByText(rows[0]!.caption)).toHaveCount(0);
   await expectAxeClean(page, 'mobile public album');
   await expectContained(page, 'mobile public album');
   await capture(page, testInfo, 'mobile-06-public');
@@ -255,10 +256,10 @@ test('album mode is keyboard-operable and respects reduced motion', async ({ pag
   await page.keyboard.press('Enter');
   await expect(albumMode).toHaveAttribute('aria-pressed', 'true');
 
-  const start = page.getByRole('button', { name: 'Start the album from them' });
+  const start = page.getByRole('button', { name: 'Start the Album from them' });
   await start.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
 
   const firstEntry = page.locator('.album-review-grid > li').first();
   const firstEntryName = (await firstEntry.locator('.album-review-grid__meta strong').textContent())!;
@@ -273,7 +274,7 @@ test('album mode is keyboard-operable and respects reduced motion', async ({ pag
   const preview = page.getByRole('button', { name: 'Preview album' });
   await preview.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByText('What a guest opening the link sees')).toBeVisible();
+  await expect(page.getByText('What people with the Album link see')).toBeVisible();
   const backToEditing = page.getByRole('button', { name: 'Back to editing' });
   await expect(backToEditing).toBeFocused();
   await page.keyboard.press('Enter');
@@ -295,7 +296,7 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
   await openGallery(page);
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
 
   for (const viewport of [
     { width: 640, height: 450, label: '200 percent' },
@@ -309,8 +310,9 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
       page.getByLabel('Album title'),
       page.getByLabel('Description'),
       page.getByRole('button', { name: /^Move .* later$/u }).first(),
-      page.getByRole('button', { name: 'Stop sharing album' }),
-      page.getByRole('button', { name: 'Copy album link' }),
+      page.getByRole('button', { name: 'Stop Album link' }),
+      page.getByRole('button', { name: 'Reveal Album link' }),
+      page.getByRole('button', { name: 'Copy Album link' }),
       page.getByRole('button', { name: 'Download album photos' }),
     ];
     for (const control of operableControls) {
@@ -321,5 +323,42 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
       await expect(control, `${viewport.label} control`).toBeFocused();
     }
     await expectContained(page, viewport.label);
+
+    const reveal = page.getByRole('button', { name: 'Reveal Album link' });
+    await expectTargetsAtLeast44(page.getByRole('button', {
+      name: /^(Reveal Album link|Copy Album link|Stop Album link)$/u,
+    }), `${viewport.label} masked Album-link controls`);
+    await reveal.click();
+    const linkField = page.getByRole('textbox', { name: 'Album link' });
+    await expect(linkField).toHaveCount(1);
+    await expect(linkField).toHaveAttribute('readonly', '');
+    await expectContained(page, `${viewport.label} revealed Album link`);
+    await expectTargetsAtLeast44(page.getByRole('button', {
+      name: /^(Hide Album link|Copy Album link|Stop Album link)$/u,
+    }), `${viewport.label} revealed Album-link controls`);
+    await page.getByRole('button', { name: 'Hide Album link' }).click();
+    await expect(linkField).toHaveCount(0);
+    await expectContained(page, `${viewport.label} remasked Album link`);
   }
+});
+
+test('Album-link creation dialog stays operable and contained at 320 pixels', async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  await page.setViewportSize({ width: 320, height: 450 });
+  await stubAlbumWorkspace(page, { saved: true });
+  await openGallery(page);
+  await page.getByRole('group', { name: 'Gallery mode' })
+    .getByRole('button', { name: /^Album/u }).click();
+
+  const createAction = page.getByRole('button', { name: 'Create Album link' });
+  await createAction.click();
+  const dialog = page.getByRole('dialog', { name: 'Create the Album link?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await expectTargetsAtLeast44(dialog.getByRole('button'), '320px Album-link creation dialog');
+  await expectContained(page, '320px Album-link creation dialog');
+
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(createAction).toBeFocused();
 });

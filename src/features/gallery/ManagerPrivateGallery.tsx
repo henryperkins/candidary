@@ -1,5 +1,6 @@
 import { Check, ListChecks, Search, X } from 'lucide-react';
 import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } from 'react';
+import { flushSync } from 'react-dom';
 
 import { api, ClientApiError } from '../../app/api';
 import { ErrorState, LoadingState } from '../../components/States';
@@ -17,8 +18,8 @@ import {
   transitionSelection,
   type GallerySelectionAction,
 } from './selection-state';
-import { SelectionTray } from './SelectionTray';
-import { UndoBar, useUndo } from './undo';
+import { SelectionTray, type SelectionTrayInput } from './SelectionTray';
+import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
 
 const SEARCH_MAX_CODE_POINTS = 120;
 
@@ -31,6 +32,8 @@ interface ManagerPrivateGalleryProps {
   /** Photos and sections share the same persisted album ceiling. */
   albumEntryCount: number;
   onPicksChanged(): void;
+  /** Stable Manager boundary used by mount-independent inverse commands. */
+  invalidateGalleryAfterMutation(): void;
   live?: boolean;
   onAnnouncement?(message: string): void;
 }
@@ -110,6 +113,42 @@ function errorMessage(caught: unknown, fallback: string): string {
   return caught instanceof ClientApiError ? caught.message : fallback;
 }
 
+function createAlbumPicksInverse(
+  eventId: string,
+  changedIds: readonly string[],
+  restorePicked: boolean,
+  invalidateGalleryAfterMutation: () => void,
+): () => Promise<void> {
+  const frozenChangedIds = Object.freeze([...changedIds]);
+  if (restorePicked) {
+    return async () => {
+      try {
+        await setAlbumPicks(eventId, frozenChangedIds, true);
+      } finally {
+        invalidateGalleryAfterMutation();
+      }
+    };
+  }
+  return async () => {
+    try {
+      await setAlbumPicks(eventId, frozenChangedIds, false);
+    } finally {
+      invalidateGalleryAfterMutation();
+    }
+  };
+}
+
+function focusPresentationFallback(target: HTMLElement | null): HTMLElement | null {
+  if (target === null) return null;
+  if (!target.matches('button, a[href], input, select, textarea, [tabindex]')) target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+  return target;
+}
+
+function connectedPresentationFallback(target: HTMLElement | null): HTMLElement | null {
+  return target?.isConnected ? target : null;
+}
+
 export function ManagerPrivateGallery({
   event,
   eventId,
@@ -117,6 +156,7 @@ export function ManagerPrivateGallery({
   pickCount,
   albumEntryCount,
   onPicksChanged,
+  invalidateGalleryAfterMutation,
   live = true,
   onAnnouncement,
 }: ManagerPrivateGalleryProps) {
@@ -143,7 +183,7 @@ export function ManagerPrivateGallery({
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectedIdsRef = useRef<ReadonlySet<string>>(selectedIds);
   const [bulkBusy, setBulkBusy] = useState(false);
-  const undo = useUndo();
+  const undo = useManagerUndo();
   const loadGeneration = useRef(0);
   const loadMoreGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
@@ -151,6 +191,7 @@ export function ManagerPrivateGallery({
   const confirmedEventId = useRef<string | null>(null);
   const hasConfirmedPage = useRef(false);
   const focusResults = useRef(false);
+  const handledResultsFocusEpoch = useRef(0);
   const favoriteRequests = useRef(new Set<string>());
   const viewerOrigin = useRef<HTMLElement | null>(null);
   const restoreFocus = useRef<HTMLElement | null>(null);
@@ -158,19 +199,12 @@ export function ManagerPrivateGallery({
   const restoreSelectionFocus = useRef(false);
   const resultsRef = useRef<HTMLDivElement>(null);
   const emptyRef = useRef<HTMLHeadingElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const rows = rowState.rows;
 
   useEffect(() => {
     if (!live && announcement) onAnnouncement?.(announcement);
   }, [announcement, live, onAnnouncement]);
-  useEffect(() => {
-    if (!live && undo.error) onAnnouncement?.(undo.error);
-  }, [live, onAnnouncement, undo.error]);
-  useEffect(() => {
-    if (!live && undo.offer) {
-      onAnnouncement?.(`${undo.offer.message} Undo is available for nine seconds.`);
-    }
-  }, [live, onAnnouncement, undo.offer]);
 
   const galleryPath = useCallback((
     nextQuery: string,
@@ -239,7 +273,7 @@ export function ManagerPrivateGallery({
       .catch((caught) => {
         if (generation !== loadGeneration.current) return;
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
-        const message = errorMessage(caught, 'The private gallery could not be loaded.');
+        const message = errorMessage(caught, 'Library could not be loaded.');
         if (hadConfirmedPage) {
           setNotice({ message, retry: 'replace' });
         } else {
@@ -257,7 +291,11 @@ export function ManagerPrivateGallery({
   }, [cancelContinuation, eventId, favoritesOnly, galleryPath, order, query, retryEpoch]);
 
   useEffect(() => {
-    if (resultsFocusEpoch === 0) return;
+    if (
+      resultsFocusEpoch === 0
+      || handledResultsFocusEpoch.current === resultsFocusEpoch
+    ) return;
+    handledResultsFocusEpoch.current = resultsFocusEpoch;
     if (rows.length > 0) {
       resultsRef.current?.querySelector<HTMLElement>('h3')?.focus();
     } else {
@@ -377,7 +415,19 @@ export function ManagerPrivateGallery({
         `/api/manage/events/${eventId}/media/${photo.id}/favorite`,
         { method: 'PUT', body: JSON.stringify({ favorite: next }) },
       );
-      if (requestGeneration !== loadGeneration.current) return;
+      if (requestGeneration !== loadGeneration.current) {
+        // The write is authoritative even when its optimistic row belonged to a query
+        // that has since been replaced. Do not project that old row into the new query;
+        // invalidate the shared audience summary and refetch the query on screen.
+        onPicksChanged();
+        setAnnouncement(next
+          ? `${galleryPhotoTitle(photo)} is now In Album. This does not publish it.`
+          : `${galleryPhotoTitle(photo)} was removed from Album. The delivered photo remains.`);
+        beginReplacement();
+        setNotice(null);
+        setRetryEpoch((current) => current + 1);
+        return;
+      }
       if (favoritesOnly && !next) {
         const requestFocus = viewerPhotoId === photo.id;
         dispatchRows({ type: 'remove', id: photo.id, requestFocus });
@@ -390,8 +440,8 @@ export function ManagerPrivateGallery({
       }
       onPicksChanged();
       setAnnouncement(next
-        ? `${galleryPhotoTitle(photo)} added to the album. This does not publish it.`
-        : `${galleryPhotoTitle(photo)} removed from the album. The original is still delivered.`);
+        ? `${galleryPhotoTitle(photo)} is now In Album. This does not publish it.`
+        : `${galleryPhotoTitle(photo)} was removed from Album. The delivered photo remains.`);
     } catch (caught) {
       if (requestGeneration !== loadGeneration.current) return;
       dispatchRows({ type: 'favorite', id: photo.id, favorite: confirmed });
@@ -410,7 +460,7 @@ export function ManagerPrivateGallery({
     beginReplacement();
     setNotice(null);
     // The selection described the previous result set. Carrying it across a search or a
-    // filter change would leave `Add 12 to album` pointed at photos no longer on screen.
+    // filter change would leave a bulk Album action pointed at photos no longer on screen.
     clearSelection();
   }
 
@@ -463,12 +513,15 @@ export function ManagerPrivateGallery({
     if (transition.message !== null) setAnnouncement(transition.message);
   }
 
-  function clearSelection(announce = true) {
+  function clearSelection(announce = true, restoreControl = true) {
     if (
-      document.activeElement instanceof HTMLElement
+      restoreControl
+      && document.activeElement instanceof HTMLElement
       && document.activeElement.closest('.selection-tray')
     ) {
       restoreSelectionFocus.current = true;
+    } else if (!restoreControl) {
+      restoreSelectionFocus.current = false;
     }
     commitSelection({ type: 'clear', announce });
   }
@@ -521,15 +574,37 @@ export function ManagerPrivateGallery({
     });
   }
 
+  function filteredRemovalFallbackId(changedIds: readonly string[]): string | null {
+    const removed = new Set(changedIds);
+    const firstRemovedIndex = rows.findIndex(({ id }) => removed.has(id));
+    if (firstRemovedIndex >= 0) {
+      const next = rows.slice(firstRemovedIndex + 1).find(({ id }) => !removed.has(id));
+      if (next) return next.id;
+      const previous = rows.slice(0, firstRemovedIndex).reverse().find(({ id }) => !removed.has(id));
+      if (previous) return previous.id;
+    }
+    return null;
+  }
+
+  function filteredRemovalFallback(targetId: string | null): HTMLElement | null {
+    if (targetId !== null) {
+      const target = tileForId(targetId);
+      if (target !== null) return target;
+    }
+    return rootRef.current
+      ?.closest<HTMLElement>('.manager-gallery')
+      ?.querySelector<HTMLElement>('#gallery-workspace-title, h2') ?? null;
+  }
+
   /**
    * The tray's two verbs. The write reports which photos it actually changed, and undo
-   * reverses exactly that — so undoing `Add 12 to album` over a page where four were
+   * reverses exactly that — so undoing a bulk Pick over a page where four were
    * already in leaves those four in, which is the only reading of undo that is not a
    * second destructive act.
    */
-  async function applyPicks(picked: boolean) {
+  async function applyPicks(picked: boolean, input: SelectionTrayInput) {
     const ids = [...selectedIdsRef.current];
-    if (ids.length === 0 || bulkBusy) return;
+    if (ids.length === 0 || bulkBusy || !undo.canPresent) return;
     const newPicks = ids.filter((id) => !rows.find((row) => row.id === id)?.isFavorite).length;
     if (picked && albumEntryCount + newPicks > ALBUM_MAX_ENTRIES) {
       setNotice({
@@ -538,39 +613,99 @@ export function ManagerPrivateGallery({
       });
       return;
     }
+    // This accepted forward now owns the Manager's single recovery slot. Retire
+    // the older idle/failed offer before the request can yield, so it cannot
+    // start running and make the confirmed replacement unpresentable.
+    undo.dismiss();
     setBulkBusy(true);
+    const requestGeneration = loadGeneration.current;
     try {
       const result = await setAlbumPicks(eventId, ids, picked);
       const changed = result.changed.map((item) => item.id);
-      for (const id of changed) {
-        dispatchRows({ type: 'favorite', id, favorite: picked });
+      const filteredRemoval = favoritesOnly && !picked;
+      const filteredFallbackId = filteredRemoval && changed.length > 0
+        ? filteredRemovalFallbackId(changed)
+        : null;
+      const resultAnnouncement = changed.length === 0
+        ? picked
+          ? 'Nothing changed — every selected photo was already In Album.'
+          : 'Nothing changed — no selected photo was In Album.'
+        : `${changed.length} photo${changed.length === 1 ? '' : 's'} ${picked ? 'picked for Album' : 'removed from Album'}.`;
+      if (requestGeneration !== loadGeneration.current) {
+        // A replacement query now owns the rendered rows and focus. Preserve the
+        // confirmed inverse, but reconcile that current query instead of applying a
+        // projection calculated from the obsolete result set.
+        onPicksChanged();
+        setAnnouncement(resultAnnouncement);
+        const fallback = connectedPresentationFallback(selectToggleRef.current)
+          ?? filteredRemovalFallback(null);
+        if (changed.length > 0) {
+          undo.present({
+            eventId,
+            message: picked
+              ? `${changed.length} photo${changed.length === 1 ? '' : 's'} picked for Album. Nothing was published.`
+              : `${changed.length} photo${changed.length === 1 ? '' : 's'} removed from Album. The delivered photos remain.`,
+            durationMs: UNDO_WINDOW_MS,
+            input,
+            run: createAlbumPicksInverse(
+              eventId,
+              changed,
+              !picked,
+              invalidateGalleryAfterMutation,
+            ),
+          }, { fallback });
+        }
+        beginReplacement();
+        setNotice(null);
+        setRetryEpoch((current) => current + 1);
+        return;
       }
+      const activeBeforeCommit = document.activeElement;
+      const establishFallbackFocus = activeBeforeCommit === document.body
+        || (activeBeforeCommit instanceof HTMLElement
+          && activeBeforeCommit.closest('.selection-tray') !== null);
+      // The selected card can be the key of its rendered moment. Commit the canonical
+      // removal before resolving focus so React cannot replace the focused survivor in
+      // the same turn and leave focus on <body>.
+      flushSync(() => {
+        for (const id of changed) {
+          dispatchRows(filteredRemoval
+            ? { type: 'remove', id, requestFocus: false }
+            : { type: 'favorite', id, favorite: picked });
+        }
+        clearSelection(false, false);
+        setSelecting(false);
+        setAnnouncement(resultAnnouncement);
+      });
+      const fallback = connectedPresentationFallback(filteredRemoval && changed.length > 0
+        ? filteredRemovalFallback(filteredFallbackId)
+        : selectToggleRef.current);
+      if (establishFallbackFocus) focusPresentationFallback(fallback);
       onPicksChanged();
-      clearSelection(false);
-      setSelecting(false);
-      const verb = picked ? 'added to' : 'removed from';
-      setAnnouncement(changed.length === 0
-        ? `Nothing changed — those photos were already ${picked ? 'in the album' : 'out of the album'}.`
-        : `${changed.length} photo${changed.length === 1 ? '' : 's'} ${verb} the album.`);
       if (changed.length > 0) {
+        const run = createAlbumPicksInverse(
+          eventId,
+          changed,
+          !picked,
+          invalidateGalleryAfterMutation,
+        );
         undo.present({
+          eventId,
           message: picked
-            ? `${changed.length} photo${changed.length === 1 ? '' : 's'} added to the album. Nothing was published.`
-            : `${changed.length} photo${changed.length === 1 ? '' : 's'} removed from the album. The originals are still delivered.`,
-          run: async () => {
-            await setAlbumPicks(eventId, changed, !picked);
-            for (const id of changed) {
-              dispatchRows({ type: 'favorite', id, favorite: !picked });
-            }
-            onPicksChanged();
-            setAnnouncement(`${changed.length} photo${changed.length === 1 ? '' : 's'} ${picked ? 'removed from' : 'returned to'} the album.`);
-            if (favoritesOnly) requestReplacement();
-          },
-        });
+            ? `${changed.length} photo${changed.length === 1 ? '' : 's'} picked for Album. Nothing was published.`
+            : `${changed.length} photo${changed.length === 1 ? '' : 's'} removed from Album. The delivered photos remain.`,
+          durationMs: UNDO_WINDOW_MS,
+          input,
+          run,
+        }, { fallback });
       }
       // The Album picks filter is showing a set the write just changed; refetch rather
       // than leaving rows on screen that no longer match their own filter.
-      if (favoritesOnly) requestReplacement();
+      if (filteredRemoval && changed.length > 0) {
+        beginReplacement();
+        setNotice(null);
+        setRetryEpoch((current) => current + 1);
+      }
     } catch (caught) {
       setNotice({
         message: errorMessage(caught, 'Those photos could not be changed.'),
@@ -599,7 +734,7 @@ export function ManagerPrivateGallery({
 
   let content;
   if (loading && !hasConfirmedPage.current) {
-    content = <LoadingState label="Opening the private gallery…" live={false} />;
+    content = <LoadingState label="Opening Library…" live={false} />;
   } else if (loadFailure) {
     content = <ErrorState
       message={loadFailure}
@@ -620,17 +755,17 @@ export function ManagerPrivateGallery({
       </div>;
     } else if (favoritesOnly) {
       content = <div className="empty-state">
-        <h3 ref={emptyRef} tabIndex={-1}>Nothing is in the album yet.</h3>
+        <h3 ref={emptyRef} tabIndex={-1}>No photos are In Album yet.</h3>
         <p>
-          Choosing <strong>Add to album</strong> on a photo adds it for every host on this event.
-          It does not publish anything to guests.
+          Choosing <strong>Pick</strong> on a photo makes it In Album for every host on this event.
+          It does not publish to the Guest gallery.
         </p>
         <button type="button" className="button button--secondary" onClick={toggleFavorites}>Show every photo</button>
       </div>;
     } else {
       content = <div className="empty-state">
         <h3 ref={emptyRef} tabIndex={-1}>No photos have been delivered yet.</h3>
-        <p>New private deliveries appear in Live Intake as guests send them.</p>
+        <p>New delivered photos appear in Live intake as event guests send them.</p>
       </div>;
     }
   } else {
@@ -657,7 +792,7 @@ export function ManagerPrivateGallery({
     ? null
     : rows.findIndex((photo) => photo.id === viewerPhotoId);
 
-  return <div className="gallery-private">
+  return <div ref={rootRef} className="gallery-private">
     <form className="gallery-search" role="search" onSubmit={submitSearch}>
       <label htmlFor="gallery-search-input">Find photos</label>
       <input
@@ -708,7 +843,7 @@ export function ManagerPrivateGallery({
         type="button"
         className="text-button"
         onClick={() => selectMany(rows, 'these results')}
-      >Select all {rows.length} result{rows.length === 1 ? '' : 's'}</button>}
+      >Select all {rows.length} loaded photo{rows.length === 1 ? '' : 's'}</button>}
     </div>
     {loading && hasConfirmedPage.current && <p className="sr-only" role={live ? 'status' : undefined}>Updating photos…</p>}
     <p
@@ -741,11 +876,11 @@ export function ManagerPrivateGallery({
     {selectedIds.size > 0 && <SelectionTray
       count={selectedIds.size}
       busy={bulkBusy}
-      onAdd={() => void applyPicks(true)}
-      onRemove={() => void applyPicks(false)}
+      mutationLocked={!undo.canPresent}
+      onAdd={(input) => void applyPicks(true, input)}
+      onRemove={(input) => void applyPicks(false, input)}
       onClear={clearSelection}
     />}
-    <UndoBar controller={undo} live={live} onRestoreFocus={restoreSelectionControlFocus} />
     {viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
       photos={rows}
       index={viewerIndex}

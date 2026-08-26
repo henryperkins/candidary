@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, Ref } from 'react';
 
 import type {
@@ -71,6 +71,11 @@ type ThemeField = 'overrides.primaryColor' | 'overrides.accentColor';
 type ThemeErrors = Partial<Record<ThemeField, string>>;
 type ColorKind = 'primaryColor' | 'accentColor';
 
+interface AppearanceQueueOwner {
+  generation: number;
+  queue: AutosaveQueue<EventThemeConfigV1>;
+}
+
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/u;
 const SYNTAX_ERROR = 'Enter a six-digit hex color, such as #245c46.';
 
@@ -126,7 +131,14 @@ export function EventAppearanceEditor({
   const [errors, setErrors] = useState<ThemeErrors>({});
   const [coverError, setCoverError] = useState<string | null>(null);
   const [autosave, setAutosave] = useState<AutosaveState>({ status: 'saved', failure: null });
-  const queueRef = useRef<AutosaveQueue<EventThemeConfigV1> | null>(null);
+  const queueRef = useRef<AppearanceQueueOwner | null>(null);
+  const queueGenerationRef = useRef(0);
+  const sendThemeRef = useRef<((
+    config: EventThemeConfigV1,
+    draft: { key: string; intent: string },
+    generation: number,
+  ) => Promise<AutosaveOutcome>) | null>(null);
+  const describeThemeFailureRef = useRef<((error: unknown) => AutosaveFailure) | null>(null);
   // The queue settles from a promise continuation, so what is on screen has to
   // be readable without waiting for a render.
   const draftRef = useRef<EventThemeConfigV1>(event.theme.config);
@@ -140,7 +152,6 @@ export function EventAppearanceEditor({
   // The queue is built once, so the saved callback is read through a ref rather
   // than closed over from the first render.
   const themeSavedRef = useRef(onThemeSaved);
-  themeSavedRef.current = onThemeSaved;
   const coverAccessFailureRef = useRef(onCoverAccessFailure);
   coverAccessFailureRef.current = onCoverAccessFailure;
   const pendingUnavailableRef = useRef<string | null>(null);
@@ -204,6 +215,14 @@ export function EventAppearanceEditor({
       rawRef.current.primary,
       rawRef.current.accent,
     ]);
+  }
+
+  function ownsQueueGeneration(generation: number): boolean {
+    return queueRef.current?.generation === generation;
+  }
+
+  function currentQueue(): AutosaveQueue<EventThemeConfigV1> | null {
+    return queueRef.current?.queue ?? null;
   }
 
   /* The legibility floors gate persistence, not rendering, so which color a
@@ -289,12 +308,17 @@ export function EventAppearanceEditor({
   async function sendTheme(
     config: EventThemeConfigV1,
     draft: { key: string; intent: string },
+    generation: number,
   ): Promise<AutosaveOutcome> {
     const result = await onEventWrite(() => api<{ event: EventView }>(
       '/api/manage/events/' + event.id + '/theme',
       { method: 'PUT', body: serializeEventThemeConfig(config) },
     ));
     const normalized = result.event.theme;
+    const confirmedKey = serializeEventThemeConfig(normalized.config);
+    if (!ownsQueueGeneration(generation)) {
+      return { status: 'confirmed', key: confirmedKey };
+    }
     /* Normalization is adopted only while the host is still looking at the
        draft it answers. Invalid hex text leaves the canonical config untouched,
        so comparing configs would say nothing changed and would wipe the host's
@@ -310,7 +334,7 @@ export function EventAppearanceEditor({
     themeSavedRef.current(result.event);
     // The Worker canonical form keeps a normalized answer from leaving the
     // draft looking permanently dirty.
-    return { status: 'confirmed', key: serializeEventThemeConfig(normalized.config) };
+    return { status: 'confirmed', key: confirmedKey };
   }
 
   function describeThemeFailure(error: unknown): AutosaveFailure {
@@ -331,41 +355,64 @@ export function EventAppearanceEditor({
       : { message: failure.message, retryable: false, escalation: failure };
   }
 
-  if (queueRef.current === null) {
-    queueRef.current = createAutosaveQueue<EventThemeConfigV1>({
+  // Publish only committed callbacks. Writing these refs during render would
+  // let an abandoned concurrent render replace the live queue's event owner.
+  useLayoutEffect(() => {
+    themeSavedRef.current = onThemeSaved;
+    sendThemeRef.current = sendTheme;
+    describeThemeFailureRef.current = describeThemeFailure;
+  });
+
+  useLayoutEffect(() => {
+    const generation = queueGenerationRef.current + 1;
+    queueGenerationRef.current = generation;
+    const queue = createAutosaveQueue<EventThemeConfigV1>({
       baselineKey: serializeEventThemeConfig(event.theme.config),
-      save: (snapshot, draft) => sendTheme(snapshot, draft),
-      describeFailure: (error) => describeThemeFailure(error),
-      onChange: setAutosave,
+      save: (snapshot, draft) => {
+        const send = sendThemeRef.current;
+        if (!send) return Promise.reject(new Error('The appearance save owner is unavailable.'));
+        return send(snapshot, draft, generation);
+      },
+      describeFailure: (error) => describeThemeFailureRef.current?.(error) ?? {
+        message: 'The event appearance could not be saved.',
+        retryable: true,
+      },
+      onChange: (next) => {
+        if (queueRef.current?.generation === generation) setAutosave(next);
+      },
     });
-  }
-  const queue = queueRef.current;
+    const owner: AppearanceQueueOwner = { generation, queue };
+    queueRef.current = owner;
+    return () => {
+      if (queueRef.current === owner) queueRef.current = null;
+      queue.dispose();
+    };
+  }, [event.id]);
 
   // Contrast and syntax refusals gate persistence, not the preview: the last
   // valid preview stays on screen while the domain reports it cannot save.
   function enqueueTheme(immediate: boolean) {
     const config = draftRef.current;
     const valid = !errorsRef.current['overrides.primaryColor'] && !errorsRef.current['overrides.accentColor'];
-    queue.submit({
+    currentQueue()?.submit({
       key: serializeEventThemeConfig(config),
       intent: themeIntent(),
       snapshot: valid ? config : null,
     }, immediate);
   }
 
-  useEffect(() => () => { queue.dispose(); }, [queue]);
   // A contrast or syntax refusal returned by the Worker is recorded from inside
   // the settle path, which must not re-enter the queue. This tells the queue
   // the domain became unsendable, so it reads as invalid rather than failed.
   const themeBlocked = Boolean(errors['overrides.primaryColor'] || errors['overrides.accentColor']);
   useEffect(() => {
     if (!themeBlocked) return;
-    queue.submit({
+    queueRef.current?.queue.submit({
       key: serializeEventThemeConfig(draftRef.current),
       intent: themeIntent(),
       snapshot: null,
     });
-  }, [themeBlocked, queue]);
+  }, [themeBlocked]);
   const blockingField = errors['overrides.primaryColor']
     ? { label: 'Primary color', message: errors['overrides.primaryColor'] }
     : errors['overrides.accentColor']
@@ -380,7 +427,7 @@ export function EventAppearanceEditor({
       blockingField,
     });
   }, [autosave, blockingField?.label, blockingField?.message, onAutosaveStateChange]);
-  useImperativeHandle(ref, () => ({ flush: () => { queue.flush(); } }), [queue]);
+  useImperativeHandle(ref, () => ({ flush: () => { queueRef.current?.queue.flush(); } }), []);
 
   async function publishCover() {
     setCoverError(null);
@@ -469,7 +516,7 @@ export function EventAppearanceEditor({
   function flushThemeOnEnter(keyEvent: KeyboardEvent) {
     if (keyEvent.key !== 'Enter') return;
     keyEvent.preventDefault();
-    queue.flush();
+    currentQueue()?.flush();
   }
 
   return <section className="event-appearance-editor" aria-label="Event appearance editor">
@@ -492,7 +539,7 @@ export function EventAppearanceEditor({
 
     <form onSubmit={(formEvent) => {
       formEvent.preventDefault();
-      queue.flush();
+      currentQueue()?.flush();
     }}>
       <div className="event-appearance-editor__controls">
         <EventThemePresetSelector
@@ -518,7 +565,7 @@ export function EventAppearanceEditor({
                   aria-invalid={Boolean(primaryError)}
                   aria-describedby={primaryError ? 'event-theme-primary-error' : undefined}
                   onChange={(changeEvent) => changeColor('primaryColor', changeEvent.target.value)}
-                  onBlur={() => queue.flush()}
+                  onBlur={() => currentQueue()?.flush()}
                 />
               </label>
               <label>
@@ -531,7 +578,7 @@ export function EventAppearanceEditor({
                   aria-invalid={Boolean(primaryError)}
                   aria-describedby={primaryError ? 'event-theme-primary-error' : undefined}
                   onChange={(changeEvent) => changeColor('primaryColor', changeEvent.target.value)}
-                  onBlur={() => queue.flush()}
+                  onBlur={() => currentQueue()?.flush()}
                   onKeyDown={flushThemeOnEnter}
                 />
               </label>
@@ -555,7 +602,7 @@ export function EventAppearanceEditor({
                   aria-invalid={Boolean(accentError)}
                   aria-describedby={accentError ? 'event-theme-accent-error' : undefined}
                   onChange={(changeEvent) => changeColor('accentColor', changeEvent.target.value)}
-                  onBlur={() => queue.flush()}
+                  onBlur={() => currentQueue()?.flush()}
                 />
               </label>
               <label>
@@ -568,7 +615,7 @@ export function EventAppearanceEditor({
                   aria-invalid={Boolean(accentError)}
                   aria-describedby={accentError ? 'event-theme-accent-error' : undefined}
                   onChange={(changeEvent) => changeColor('accentColor', changeEvent.target.value)}
-                  onBlur={() => queue.flush()}
+                  onBlur={() => currentQueue()?.flush()}
                   onKeyDown={flushThemeOnEnter}
                 />
               </label>
@@ -611,6 +658,7 @@ export function EventAppearanceEditor({
           ? presetStyleThumbnail(coverSession.selection.source.presetId, effect)
           : coverSession.styleThumbnails[effect]
       )}
+      onStyleStepVisible={coverSession.prefetchStylePreviews}
       onSourceChange={(source) => {
         setCoverError(null);
         coverSession.chooseSource(source);
@@ -634,6 +682,7 @@ export function EventAppearanceEditor({
       onFocusChange={coverSession.setFocus}
       onResetFocus={coverSession.resetFocus}
       onEffectChange={(effect) => { void coverSession.setEffect(effect).catch(() => undefined); }}
+      onEffectRetry={(effect) => { void coverSession.retryEffectPreview(effect).catch(() => undefined); }}
       onPublish={() => { void publishCover(); }}
       onDiscardDraft={async () => {
         await coverSession.discard();

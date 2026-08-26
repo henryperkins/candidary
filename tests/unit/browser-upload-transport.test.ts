@@ -144,6 +144,67 @@ describe('browser upload transport cancellation', () => {
     expect(ControlledXMLHttpRequest.instances).toHaveLength(0);
   });
 
+  /* The reservation answer is an allowlist: three fields about the media row and a relative
+     same-origin place to put the bytes. Everything the response used to carry — the object key, the
+     byte size, the decoded dimensions, the guest name, the publication status, the reservation
+     expiry — was either storage detail the browser had no business reading or the guest's own file
+     being read back to it, and the queue drives the transfer from the file it already holds. */
+  it('reserves from the allowlisted media view and nothing else', async () => {
+    const media = { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'reserved' };
+    expect(Object.keys(media).sort()).toEqual(['id', 'mimeType', 'uploadState']);
+    vi.stubGlobal('fetch', vi.fn(() => response({
+      items: [{
+        idempotencyKey: 'item-a',
+        status: 'accepted',
+        alreadyDelivered: false,
+        media,
+        uploadUrl: '/api/event/alex-jordan/uploads/media-a/content',
+        uploadUrlExpiresAt: '2026-09-14T00:10:00.000Z',
+      }],
+    })));
+
+    const results = await createBrowserTransport('alex-jordan', 'Taylor').reserve([item()]);
+
+    expect(results).toEqual([{
+      id: 'item-a',
+      status: 'accepted',
+      reservation: {
+        mediaId: 'media-a',
+        uploadUrl: '/api/event/alex-jordan/uploads/media-a/content',
+        mimeType: 'image/jpeg',
+      },
+    }]);
+  });
+
+  it('carries a rejection message through and refuses to send a reservation it cannot address', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({
+      items: [
+        {
+          idempotencyKey: 'refused',
+          status: 'rejected',
+          error: { code: 'EVENT_PHOTO_LIMIT', message: 'The event has reached its photo limit.' },
+        },
+        {
+          // Accepted, not already delivered, and with nowhere to put the bytes. It cannot be sent,
+          // so it must not be reported as sent.
+          idempotencyKey: 'unaddressable',
+          status: 'accepted',
+          alreadyDelivered: false,
+          media: { id: 'media-b', mimeType: 'image/jpeg', uploadState: 'reserved' },
+        },
+      ],
+    })));
+
+    const results = await createBrowserTransport('alex-jordan', 'Taylor')
+      .reserve([item('refused'), item('unaddressable')]);
+
+    expect(results).toEqual([
+      { id: 'refused', status: 'rejected', error: 'The event has reached its photo limit.' },
+      { id: 'unaddressable', status: 'rejected', error: 'This photo could not be reserved.' },
+    ]);
+    expect(ControlledXMLHttpRequest.instances).toHaveLength(0);
+  });
+
   it('rejects a pre-aborted XHR without constructing a request', async () => {
     const controller = new AbortController();
     controller.abort();
@@ -214,7 +275,12 @@ describe('browser upload transport cancellation', () => {
           items: [{
             idempotencyKey: 'item-a',
             status: 'accepted',
-            media: { id: reservation.mediaId, mimeType: reservation.mimeType },
+            alreadyDelivered: false,
+            media: {
+              id: reservation.mediaId,
+              mimeType: reservation.mimeType,
+              uploadState: 'reserved',
+            },
             uploadUrl: reservation.uploadUrl,
           }],
         })

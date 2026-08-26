@@ -2,6 +2,7 @@ import type {
   AlbumEntryInput,
   AlbumEntryView,
   AlbumMetadataInput,
+  AlbumRetainedSlotView,
   AlbumView,
   ManagerGalleryMediaView,
 } from '../../shared/contracts';
@@ -88,21 +89,45 @@ function parseMetadata(row: AlbumRow): AlbumMetadataInput {
 }
 
 /**
+ * One album slot's occupant: a photograph the host can still see, or the opaque
+ * stand-in for one they moved to Recently deleted.
+ *
+ * Both are ordered together by the same timeline instant, because a retained
+ * slot is not a gap — it is the photo, still holding its place until Restore
+ * puts it back or cleanup takes it away.
+ */
+export type AlbumPick =
+  | { kind: 'photo'; photo: ManagerGalleryMediaView }
+  | { kind: 'retained'; slot: AlbumRetainedSlotView };
+
+function pickId(pick: AlbumPick): string {
+  return pick.kind === 'photo' ? pick.photo.id : pick.slot.mediaId;
+}
+
+function pickEntry(pick: AlbumPick): AlbumEntryView {
+  return pick.kind === 'photo'
+    ? { kind: 'photo', photo: pick.photo }
+    : { kind: 'photo-retained', slot: pick.slot };
+}
+
+/**
  * Resolves the stored order against the live picked set.
  *
- * Two rules do all the work. A stored photo entry survives only if that photo is
- * still picked, stored and undeleted — so unpicking anywhere, or deleting the photo,
- * removes it from the album with no write here. And a pick the stored order has never
- * heard of is appended in the timeline order the picks arrived in — so picking in
- * Library lands the photo at the end of the album without a second request, which is
- * the whole reason a host can pick liberally and prune later.
+ * Three rules now. A stored photo entry survives only if that photo is still
+ * picked and still owns its slot — so unpicking anywhere, or a guest deleting
+ * the photo, removes it from the album with no write here. A pick the stored
+ * order has never heard of is appended in the timeline order the picks arrived
+ * in, which is what lets picking in Library land the photo at the end of the
+ * album without a second request. And a pick the host trashed resolves to an
+ * opaque marker in its own slot rather than vanishing, because vanishing would
+ * silently rearrange an album around a photo that is still recoverable.
  */
 export function resolveAlbum(
   stored: StoredAlbum,
-  picked: readonly ManagerGalleryMediaView[],
+  picked: readonly AlbumPick[],
   totalBytes = 0,
 ): AlbumView {
-  const byId = new Map(picked.map((photo) => [photo.id, photo]));
+  const byId = new Map(picked.map((pick) => [pickId(pick), pick]));
   const placed = new Set<string>();
   const entries: AlbumEntryView[] = [];
   for (const entry of stored.entries) {
@@ -110,49 +135,68 @@ export function resolveAlbum(
       entries.push({ kind: 'section', id: entry.id, heading: entry.heading });
       continue;
     }
-    const photo = byId.get(entry.mediaId);
-    if (!photo || placed.has(entry.mediaId)) continue;
+    const pick = byId.get(entry.mediaId);
+    if (!pick || placed.has(entry.mediaId)) continue;
     placed.add(entry.mediaId);
-    entries.push({ kind: 'photo', photo });
+    entries.push(pickEntry(pick));
   }
-  for (const photo of picked) {
-    if (placed.has(photo.id)) continue;
-    entries.push({ kind: 'photo', photo });
+  for (const pick of picked) {
+    if (placed.has(pickId(pick))) continue;
+    entries.push(pickEntry(pick));
   }
-  const coverMediaId = stored.coverMediaId !== null && byId.has(stored.coverMediaId)
-    ? stored.coverMediaId
-    : null;
+  const cover = stored.coverMediaId !== null ? byId.get(stored.coverMediaId) : undefined;
+  const coverMediaId = cover ? stored.coverMediaId : null;
   const firstPhoto = entries.find((entry) => entry.kind === 'photo');
+  const visibleCoverId = cover?.kind === 'photo' ? cover.photo.id : null;
   return {
     revision: stored.revision,
     saved: stored.savedAt !== null,
     title: stored.title,
     description: stored.description,
     coverMediaId,
-    effectiveCoverMediaId: coverMediaId ?? (firstPhoto?.kind === 'photo' ? firstPhoto.photo.id : null),
+    // A retained cover keeps its reference but cannot be rendered, so the
+    // effective cover falls through to the first visible photo until Restore.
+    effectiveCoverMediaId: visibleCoverId
+      ?? (firstPhoto?.kind === 'photo' ? firstPhoto.photo.id : null),
+    coverRetained: cover?.kind === 'retained' ? cover.slot : null,
     entries,
     photoCount: entries.filter((entry) => entry.kind === 'photo').length,
+    retainedCount: entries.filter((entry) => entry.kind === 'photo-retained').length,
     sectionCount: entries.filter((entry) => entry.kind === 'section').length,
     totalBytes,
   };
 }
 
 /**
+ * A row that holds an album slot: delivered, or retained in Recently deleted.
+ * Kept as one predicate because every album count, guard, and read has to agree
+ * about which photos are still spending the album's five hundred places.
+ */
+export const ALBUM_SLOT_OWNER_SQL = `(
+  (media.deleted_at IS NULL AND media.trashed_at IS NULL)
+  OR (media.trashed_at IS NOT NULL AND media.deleted_at = media.trashed_at)
+)`;
+
+/**
  * The picked set, in album-tail order. Deliberately not the gallery's `order` toggle:
  * that is a reading preference for the Library, and letting it reach the album would
  * silently reverse a host's arrangement every time they flipped it.
+ *
+ * Retained picks come back in the same stream, ordered by the same instant, so a
+ * trashed photo in the middle of an unmaterialized tail keeps its neighbors.
  */
 export function albumPickQuery(): string {
   return `
     SELECT
       id, original_filename, guest_name, caption, publication_status,
       upload_state, preview_object_key, width, height, created_at, stored_at,
-      captured_at, timeline_at, favorited_at, declared_byte_size, byte_size
+      captured_at, timeline_at, favorited_at, declared_byte_size, byte_size,
+      trashed_at, restore_until
     FROM media
     WHERE event_id = ?
       AND upload_state = 'stored'
-      AND deleted_at IS NULL
       AND favorited_at IS NOT NULL
+      AND ${ALBUM_SLOT_OWNER_SQL}
     ORDER BY timeline_at ASC, id ASC
     LIMIT ?
   `;
@@ -175,8 +219,8 @@ export class AlbumRepository {
     };
   }
 
-  private async picks(eventId: string): Promise<{
-    photos: ManagerGalleryMediaView[];
+  private async picks(eventId: string, now: string): Promise<{
+    picks: AlbumPick[];
     totalBytes: number;
   }> {
     // One over the cap: reading it is how an album that filled up before the cap
@@ -185,43 +229,63 @@ export class AlbumRepository {
       .prepare(albumPickQuery())
       .bind(eventId, ALBUM_MAX_ENTRIES + 1)
       .all<MediaRow>();
-    const photos = result.results.map((row) => managerGalleryMediaView({
-      id: row.id,
-      originalFilename: row.original_filename,
-      guestName: row.guest_name,
-      caption: row.caption,
-      publicationStatus: row.publication_status,
-      uploadState: row.upload_state,
-      width: row.width,
-      height: row.height,
-      createdAt: row.created_at,
-      storedAt: row.stored_at,
-      capturedAt: row.captured_at,
-      timelineAt: row.timeline_at,
-      favoritedAt: row.favorited_at,
-    }));
+    const picks = result.results.map<AlbumPick>((row) => {
+      if (row.trashed_at !== null && row.restore_until !== null) {
+        return {
+          kind: 'retained',
+          slot: {
+            mediaId: row.id,
+            restoreUntil: row.restore_until,
+            // Past the deadline the slot survives, but only because an accepted
+            // export still holds the bytes. It is not an offer of recovery.
+            state: row.restore_until > now ? 'recoverable' : 'expired-cleanup-pending',
+          },
+        };
+      }
+      return {
+        kind: 'photo',
+        photo: managerGalleryMediaView({
+          id: row.id,
+          originalFilename: row.original_filename,
+          guestName: row.guest_name,
+          caption: row.caption,
+          publicationStatus: row.publication_status,
+          uploadState: row.upload_state,
+          width: row.width,
+          height: row.height,
+          createdAt: row.created_at,
+          storedAt: row.stored_at,
+          capturedAt: row.captured_at,
+          timelineAt: row.timeline_at,
+          favoritedAt: row.favorited_at,
+        }),
+      };
+    });
+    // Retained photos are not exportable, so they are not part of what an album
+    // export would weigh. They still hold their slot; they no longer count bytes.
     const totalBytes = result.results.reduce(
-      (sum, row) => sum + (row.byte_size ?? row.declared_byte_size),
+      (sum, row) => (row.trashed_at !== null ? sum : sum + (row.byte_size ?? row.declared_byte_size)),
       0,
     );
-    return { photos, totalBytes };
+    return { picks, totalBytes };
   }
 
-  async get(eventId: string): Promise<AlbumView> {
+  async get(eventId: string, now = new Date().toISOString()): Promise<AlbumView> {
     const [stored, picked] = await Promise.all([
       this.storedAlbum(eventId),
-      this.picks(eventId),
+      this.picks(eventId, now),
     ]);
-    return resolveAlbum(stored, picked.photos, picked.totalBytes);
+    return resolveAlbum(stored, picked.picks, picked.totalBytes);
   }
 
-  /** How many photos are picked right now. The cap is charged against this, not the stored order. */
+  /** How many photos are visibly picked right now. Retained slots are excluded: this is what a host sees. */
   async pickCount(eventId: string): Promise<number> {
     const row = await this.db.prepare(`
       SELECT COUNT(*) AS count FROM media
       WHERE event_id = ?
         AND upload_state = 'stored'
         AND deleted_at IS NULL
+        AND trashed_at IS NULL
         AND favorited_at IS NOT NULL
     `).bind(eventId).first<{ count: number }>();
     return row?.count ?? 0;
@@ -257,12 +321,59 @@ export class AlbumRepository {
     // Capacity and revision are predicates on the same UPDATE. D1 batches execute as
     // one transaction, so this serializes against the guarded favorite UPDATE: a pick
     // and a section save cannot both spend the final album slot.
+    // Every submitted photo entry must still name a row of this event that owns
+    // a slot. A photo that was merely unpicked passes and is dropped at resolve
+    // time as it always was; a missing, foreign, or permanently deleted id is
+    // refused, so an editor cannot save a terminal photograph back into an album.
+    const submittedIds = JSON.stringify(
+      entries.filter((entry) => entry.kind === 'photo').map((entry) => entry.mediaId),
+    );
+    const referenceGuard = `
+      NOT EXISTS (
+        SELECT 1 FROM json_each(?) AS requested
+        WHERE NOT EXISTS (
+          SELECT 1 FROM media
+          WHERE media.id = CAST(requested.value AS TEXT)
+            AND media.event_id = ?
+            AND media.upload_state = 'stored'
+            AND ${ALBUM_SLOT_OWNER_SQL}
+        )
+      )
+    `;
+
+    // And every retained slot must come back.
+    //
+    // An omitted *active* pick is an ordinary edit — the resolver re-appends it in
+    // timeline order and nothing is lost. An omitted retained slot is not: the
+    // photo is invisible, so the host cannot have meant to move it, and letting
+    // the save through would silently relocate it to the tail and send a timely
+    // Restore back to the wrong position. The likeliest source is a client
+    // deployed before `photo-retained` existed, which cannot serialize the marker
+    // at all — exactly the case that must be refused rather than accommodated.
+    // Start empty remains the one operation that clears retained picks.
+    const retainedGuard = `
+      NOT EXISTS (
+        SELECT 1 FROM media
+        WHERE media.event_id = ?
+          AND media.upload_state = 'stored'
+          AND media.favorited_at IS NOT NULL
+          AND media.trashed_at IS NOT NULL
+          AND media.deleted_at = media.trashed_at
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(?) AS requested
+            WHERE CAST(requested.value AS TEXT) = media.id
+          )
+      )
+    `;
+
+    // Retained slots are inside the count. Trash cannot appear to free a place
+    // that a still-timely Restore is entitled to take back.
     const capacityGuard = `
       (SELECT COUNT(*) FROM media
         WHERE media.event_id = ?
           AND media.upload_state = 'stored'
-          AND media.deleted_at IS NULL
-          AND media.favorited_at IS NOT NULL)
+          AND media.favorited_at IS NOT NULL
+          AND ${ALBUM_SLOT_OWNER_SQL})
         + ? <= ?
     `;
 
@@ -284,6 +395,8 @@ export class AlbumRepository {
               updated_at = ?
           WHERE event_id = ? AND revision = ?
             AND (${capacityGuard})
+            AND (${referenceGuard})
+            AND (${retainedGuard})
         `).bind(
           JSON.stringify(entries),
           metadata.title,
@@ -296,6 +409,10 @@ export class AlbumRepository {
           eventId,
           sections,
           ALBUM_MAX_ENTRIES,
+          submittedIds,
+          eventId,
+          eventId,
+          submittedIds,
         )
       : this.db.prepare(`
           UPDATE event_albums
@@ -305,6 +422,8 @@ export class AlbumRepository {
               updated_at = ?
           WHERE event_id = ? AND revision = ?
             AND (${capacityGuard})
+            AND (${referenceGuard})
+            AND (${retainedGuard})
         `).bind(
           JSON.stringify(entries),
           now,
@@ -314,6 +433,10 @@ export class AlbumRepository {
           eventId,
           sections,
           ALBUM_MAX_ENTRIES,
+          submittedIds,
+          eventId,
+          eventId,
+          submittedIds,
         );
     const batch = await this.db.batch([
       this.db.prepare(`
@@ -327,19 +450,46 @@ export class AlbumRepository {
           ((SELECT COUNT(*) FROM media
             WHERE media.event_id = ?
               AND media.upload_state = 'stored'
-              AND media.deleted_at IS NULL
-              AND media.favorited_at IS NOT NULL)
-            + ? > ?) AS album_full
+              AND media.favorited_at IS NOT NULL
+              AND ${ALBUM_SLOT_OWNER_SQL})
+            + ? > ?) AS album_full,
+          (NOT (${referenceGuard})) AS unknown_photo,
+          (NOT (${retainedGuard})) AS dropped_retained
         FROM event_albums
         WHERE event_id = ?
-      `).bind(eventId, sections, ALBUM_MAX_ENTRIES, eventId),
+      `).bind(
+        eventId,
+        sections,
+        ALBUM_MAX_ENTRIES,
+        submittedIds,
+        eventId,
+        eventId,
+        submittedIds,
+        eventId,
+      ),
     ]);
 
     if (batch[1]?.meta.changes !== 1) {
       const diagnostic = batch[2]?.results[0] as {
         revision: number;
         album_full: number;
+        unknown_photo: number;
+        dropped_retained: number;
       } | undefined;
+      if (diagnostic?.revision === expectedRevision && diagnostic.dropped_retained === 1) {
+        throw new ApiError(
+          'MEDIA_STATE_CONFLICT',
+          'A photo in Recently deleted is still holding its place in this album. Reopen Album to see the current order.',
+          409,
+        );
+      }
+      if (diagnostic?.revision === expectedRevision && diagnostic.unknown_photo === 1) {
+        throw new ApiError(
+          'MEDIA_STATE_CONFLICT',
+          'One of these photos is no longer part of this event. Reopen Album to see the current order.',
+          409,
+        );
+      }
       if (diagnostic?.revision === expectedRevision && diagnostic.album_full === 1) {
         throw new ApiError(
           'ALBUM_FULL',
@@ -353,7 +503,7 @@ export class AlbumRepository {
         409,
       );
     }
-    return this.get(eventId);
+    return this.get(eventId, now);
   }
 
   /**
@@ -389,12 +539,12 @@ export class AlbumRepository {
                 '[]'
               )
               FROM (
-                SELECT id FROM media
-                WHERE event_id = ?1
-                  AND upload_state = 'stored'
-                  AND deleted_at IS NULL
-                  AND favorited_at IS NOT NULL
-                ORDER BY timeline_at ASC, id ASC
+                SELECT media.id FROM media
+                WHERE media.event_id = ?1
+                  AND media.upload_state = 'stored'
+                  AND media.favorited_at IS NOT NULL
+                  AND ${ALBUM_SLOT_OWNER_SQL}
+                ORDER BY media.timeline_at ASC, media.id ASC
               ) AS picked
             ),
             saved_at = ?2,
@@ -403,8 +553,8 @@ export class AlbumRepository {
           AND (SELECT COUNT(*) FROM media
             WHERE media.event_id = ?1
               AND media.upload_state = 'stored'
-              AND media.deleted_at IS NULL
-              AND media.favorited_at IS NOT NULL) <= ?3
+              AND media.favorited_at IS NOT NULL
+              AND ${ALBUM_SLOT_OWNER_SQL}) <= ?3
       `).bind(eventId, now, ALBUM_MAX_ENTRIES));
     } else {
       clearedResultIndex = statements.length;
@@ -413,8 +563,8 @@ export class AlbumRepository {
         SET favorited_at = NULL
         WHERE event_id = ?1
           AND upload_state = 'stored'
-          AND deleted_at IS NULL
           AND favorited_at IS NOT NULL
+          AND ${ALBUM_SLOT_OWNER_SQL}
           AND EXISTS (
             SELECT 1 FROM event_albums
             WHERE event_id = ?1 AND saved_at IS NULL
@@ -435,8 +585,8 @@ export class AlbumRepository {
         (SELECT COUNT(*) FROM media
           WHERE media.event_id = event_albums.event_id
             AND media.upload_state = 'stored'
-            AND media.deleted_at IS NULL
-            AND media.favorited_at IS NOT NULL) AS pick_count
+            AND media.favorited_at IS NOT NULL
+            AND ${ALBUM_SLOT_OWNER_SQL}) AS pick_count
       FROM event_albums
       WHERE event_id = ?
     `).bind(eventId));

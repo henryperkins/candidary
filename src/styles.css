@@ -210,7 +210,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .form-note { display: flex; align-items: center; gap: 7px; margin: 15px 0 0; justify-content: center; color: var(--muted); font-size: .8rem; }.form-error { padding: 12px; border-left: 3px solid var(--danger); background: #fff1ee; color: var(--danger); }
 .success-layout { grid-template-columns: 1.2fr .8fr; }.success-copy { max-width: 680px; }.success-copy h1 { font-size: clamp(3rem, 5vw, 5rem); margin: 16px 0; }.success-copy > p { color: var(--muted); font-size: 1.1rem; }.success-icon { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 50%; color: var(--moss); background: var(--moss-soft); font-size: 1.5rem; }
 .warning { display: flex; gap: 13px; padding: 17px; margin: 27px 0; background: var(--denim-soft); border-radius: 8px; }.warning p { margin: 0; }.warning svg { flex: 0 0 auto; }
-.link-card { margin-bottom: 16px; }.link-card > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: .8rem; font-weight: 600; }.link-card > div { min-height: 48px; display: flex; align-items: center; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); overflow: hidden; }.link-card code { padding: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.icon-button { width: 48px; height: 48px; border: 0; border-left: 1px solid var(--border); background: transparent; color: var(--chestnut); cursor: pointer; }.link-card small { color: var(--moss); }
+.link-card { margin-bottom: 16px; }.link-card > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: .8rem; font-weight: 600; }.link-card > div { min-height: 48px; display: flex; align-items: center; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); overflow: hidden; }.link-card code, .link-card input, .link-card__mask { min-width: 0; padding: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.link-card code, .link-card input { font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; }.link-card input { min-height: 48px; border: 0; border-radius: 0; background: transparent; }.link-card__mask { display: flex; min-height: 48px; align-items: center; }.icon-button { width: 48px; height: 48px; border: 0; border-left: 1px solid var(--border); background: transparent; color: var(--chestnut); cursor: pointer; }.link-card small { color: var(--moss); }
 .qr-card { padding: 35px; text-align: center; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; }.qr-card > svg { color: var(--denim); font-size: 2rem; }.qr-card h2 { margin: 10px 0 22px; font-size: 1.6rem; }.qr-card img { width: 260px; margin: 0 auto 22px; }
 .centered-state { min-height: 100svh; padding: 8vw; display: grid; place-content: center; gap: 30px; text-align: center; }.state-card { min-width: min(420px, 90vw); padding: 40px; border: 1px solid var(--border); background: var(--paper); border-radius: 10px; }.state-card svg { color: var(--chestnut); font-size: 1.7rem; }.state-card p { margin: 12px 0 0; }.state-card--error svg, .state-card--error p { color: var(--danger); }
 /* The failure is the alarm; the way out of it is read calmly underneath, inside the caption band. */
@@ -331,11 +331,16 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .manager-autosave-notice { margin: 20px 0; padding: 15px 17px; display: grid; gap: 12px; border-left: 3px solid var(--denim); background: var(--denim-soft); }
 .manager-autosave-notice p { margin: 0; }
 .manager-autosave-notice .button { min-height: 44px; justify-self: start; }
+.manager-export-compact { margin: 0 0 24px; padding: 14px 16px; border-left: 3px solid var(--denim); background: var(--denim-soft); justify-items: start; }
+.manager-export-compact p { margin: 0; color: var(--ink); font-weight: 700; }
+.manager-export-compact > span { color: var(--ink); }
+.manager-export-compact .button { min-height: 44px; }
 .unsaved-settings-prompt { margin: 20px 0; padding: 17px; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
 .unsaved-settings-prompt h2 { margin: 0; font-size: 1.25rem; }
 .unsaved-settings-prompt p { margin: 0; color: var(--muted); }
 .unsaved-settings-prompt:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .unsaved-settings-prompt .button { min-height: 44px; }
+.unsaved-settings-prompt .button[aria-disabled='true'] { opacity: .6; cursor: wait; transform: none; }
 .autosave-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .autosave-status__chip { display: inline-block; width: fit-content; padding: 6px 10px; border-radius: 999px; background: var(--moss-soft); color: #4e5b28; font-size: .75rem; font-weight: 700; }
 .autosave-status__chip--scheduled, .autosave-status__chip--saving { background: var(--denim-soft); color: var(--chestnut); }
@@ -689,10 +694,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .public-album__intro { min-width: 0; display: grid; gap: 20px; align-items: end; }
 .public-album__cover { width: 100%; aspect-ratio: 1.6; object-fit: cover; border-radius: 12px; background: #eee4d8; }
 .public-album__copy { min-width: 0; max-width: 720px; display: grid; gap: 8px; }
-.public-album__copy h1 { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--chestnut); font-family: Manrope, sans-serif; font-size: clamp(2rem, 7vw, 4.5rem); line-height: 1.02; letter-spacing: -.045em; text-wrap: balance; }
+.public-album__copy h1, .public-album__copy h3 { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--chestnut); font-family: Manrope, sans-serif; font-size: clamp(2rem, 7vw, 4.5rem); line-height: 1.02; letter-spacing: -.045em; text-wrap: balance; }
 .public-album__copy p { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 1rem; line-height: 1.65; }
 .public-album__copy > span { color: var(--moss); font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .public-album__blocks { min-width: 0; margin-top: 34px; display: grid; gap: 32px; }
+.public-album__empty { margin: 0; color: var(--muted); }
 .public-album__block { min-width: 0; display: grid; gap: 12px; }
 .public-album__photos { min-width: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr)); gap: 8px; }
 .public-album__section { min-width: 0; margin: 0; padding-bottom: 9px; overflow-wrap: anywhere; border-bottom: 1px solid var(--border); color: var(--chestnut); font-family: Manrope, sans-serif; font-size: 1.35rem; letter-spacing: -.02em; }
@@ -770,6 +776,32 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 /* Live host intake */
+/* Intake shows one of two lists. The toggle is a filter over the same collection,
+   not a destination, so it sits with the search rather than in the nav. */
+.intake-modes { margin: 20px 0 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.intake-modes button { min-height: 44px; padding: 9px 16px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--ink); font: inherit; font-size: .86rem; cursor: pointer; }
+.intake-modes button.active { border-color: var(--denim); background: var(--denim); color: var(--paper); font-weight: 700; }
+.intake-note { margin: 0 0 16px; color: var(--muted); font-size: .86rem; line-height: 1.5; }
+.intake-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+/* A retained photo is deliberately not shown as a photograph. */
+.trash-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.trash-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 9px; }
+.trash-list li > div { display: grid; gap: 2px; min-width: 200px; }
+.trash-list strong { overflow: hidden; font-size: .96rem; text-overflow: ellipsis; white-space: nowrap; }
+.trash-list small { color: var(--muted); font-size: .8rem; }
+.trash-list__state { font-weight: 600; }
+.manager-utility__recoverable { display: block; margin-top: 6px; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+/* One focused confirmation, shared by the destructive Manager actions that need
+   to be read before they are agreed to. */
+.modal-backdrop { position: fixed; inset: 0; z-index: 45; display: grid; place-items: center; padding: 20px; background: rgb(43 29 23 / 55%); }
+.modal-card { width: min(520px, 100%); max-height: 85vh; overflow: auto; padding: 24px; border-radius: 12px; background: var(--paper); box-shadow: 0 20px 50px rgb(43 29 23 / 35%); }
+.modal-card h2 { margin: 0 0 12px; font-size: 1.3rem; }
+.modal-card p { margin: 0 0 12px; color: var(--muted); font-size: .9rem; line-height: 1.55; }
+.modal-card p strong { color: var(--ink); }
+.modal-actions { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+.modal-actions .button { flex: 1 1 180px; }
+.button--danger { border-color: var(--danger); background: var(--danger); color: var(--paper); }
+.button--danger:hover:not(:disabled) { filter: brightness(.94); }
 .intake-search { margin: 24px 0 20px; display: flex; flex-wrap: wrap; align-items: stretch; gap: 9px; }
 .intake-search label { min-width: 100%; flex: 1; position: relative; }
 .intake-search .button { flex: 1 1 auto; }
@@ -797,17 +829,17 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 /* Mobile-first host layout hardening */
 .success-layout { grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); }
-.success-copy, .qr-card, .manager-main, .manager-panel, .share-layout, .share-layout > *, .link-card, .link-card > div, .link-card code { min-width: 0; }
+.success-copy, .qr-card, .manager-main, .manager-panel, .share-layout, .share-layout > *, .link-card, .link-card > div, .link-card code, .link-card input, .link-card__mask { min-width: 0; }
 .success-copy, .manager-panel, .share-layout, .link-card { max-width: 100%; }
 .success-copy h1, .manager-title h1, .workspace-heading h2, .manager-panel h2 { overflow-wrap: anywhere; }
 .link-card > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
-.link-card code { display: block; width: 100%; }
+.link-card code, .link-card input, .link-card__mask { width: 100%; }
 .link-card .icon-button { display: grid; place-items: center; flex: 0 0 48px; }
 .link-card__error { color: var(--danger) !important; }
 /* Revealed, the link is a readable and selectable block instead of a truncated dead end. */
 .link-card--expanded code { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 /* The card clips its own corners, so keep the code focus ring inside them. */
-.link-card code:focus-visible { outline-offset: -3px; }
+.link-card code:focus-visible, .link-card input:focus-visible { outline-offset: -3px; }
 /* The label and the count are styled by their own class, so neither can win the other's font size. */
 .manager-nav__label { margin: 0; color: var(--ink); font-size: .875rem; }
 .manager-nav button.active .manager-nav__label { color: var(--chestnut); }
@@ -824,7 +856,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .success-copy h1 { font-size: clamp(2.5rem, 12vw, 3rem); line-height: 1.02; }
   .qr-card { padding: 26px 18px; }
   .warning { align-items: flex-start; }
-  .link-card code { font-size: .84rem; }
+  .link-card code, .link-card input, .link-card__mask { font-size: .84rem; }
 }
 
 /* Paging, recoverable action errors, and one export presentation shown in one place at a time. */
@@ -882,11 +914,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: var(--chestnut);
 }
-.gallery-shared .moderation-grid article .intake-card-actions button.gallery-shared__hide {
-  color: var(--danger);
-}
+.gallery-shared .moderation-grid article .intake-card-actions .button--primary { background: var(--chestnut); color: white; }
+.gallery-shared .moderation-grid article .intake-card-actions .button--primary:hover:not(:disabled) { background: var(--chestnut-strong); }
+.gallery-shared .moderation-grid article .intake-card-actions .button--approve { background: var(--moss); color: white; }
+.gallery-shared .moderation-grid article .intake-card-actions .button--secondary { border-color: var(--chestnut); background: transparent; color: var(--chestnut); }
 .gallery-export { display: grid; gap: 10px; justify-items: start; }
 .gallery-export__copy { margin: 0; color: var(--muted); font-size: .85rem; }
 .gallery-export .export-state { justify-items: start; }
@@ -916,7 +948,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-moment__count { color: var(--muted); font-size: .8rem; }
 /* The row height tracks the column width — at two columns a tile is (100vw - 40px gutters -
    8px gap) / 2 — so a unit tile stays square instead of flattening as the phone gets wider. */
-.gallery-mosaic { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; grid-auto-rows: clamp(124px, calc(50vw - 24px), 190px); gap: 8px; }
+.gallery-mosaic { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; grid-auto-rows: clamp(156px, calc(50vw - 24px), 190px); gap: 8px; }
 /* The ground a photograph loads onto is warm paper, not Denim Soft: that token means
    "selected / pending" in this system, so every unloaded photo used to read as selected,
    in the coldest value the palette owns. */
@@ -942,14 +974,16 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-moment__heading h3, .gallery-mosaic__open, .gallery-mosaic__favorite, .gallery-moment__toggle {
   scroll-margin-top: 124px;
 }
-.gallery-mosaic__favorite { position: absolute; top: 8px; right: 8px; z-index: 2; width: 44px; height: 44px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--paper); color: var(--chestnut); cursor: pointer; }
+.gallery-mosaic__favorite { position: absolute; right: 8px; bottom: 8px; z-index: 2; width: auto; min-width: 64px; height: 44px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 8px; background: var(--paper); color: var(--chestnut); cursor: pointer; }
 .gallery-mosaic__favorite[aria-pressed="true"] { background: var(--chestnut); color: white; }
 .gallery-mosaic__favorite:disabled, .gallery-viewer__favorite:disabled { opacity: .6; cursor: wait; }
+.gallery-mosaic__favorite span { font-size: .66rem; font-weight: 700; white-space: nowrap; }
+.gallery-mosaic__publication { position: absolute; top: 8px; left: 8px; z-index: 2; max-width: calc(100% - 16px); padding: 4px 6px; border-radius: 5px; background: var(--paper); color: var(--ink); font-size: .62rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; pointer-events: none; }
 /* A solid band, not a ramp. Under a gradient the caption sat on roughly 37% ink, so white text
    over a bright photograph — a dress, a sky, a lit tent — measured near 2.3:1 against a 4.5:1
    floor, and the failure depended on the photograph rather than on anything the code could see.
    At a fixed 88% the ratio is a constant, and both lines clear the system's type floor. */
-.gallery-mosaic__meta { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; padding: 10px 12px; display: grid; gap: 2px; background: rgb(43 29 23 / 88%); color: var(--paper); pointer-events: none; }
+.gallery-mosaic__meta { position: absolute; left: 0; right: 0; bottom: 60px; z-index: 1; padding: 10px 12px; display: grid; gap: 2px; background: rgb(43 29 23 / 88%); color: var(--paper); pointer-events: none; }
 .gallery-mosaic__meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875rem; }
 .gallery-mosaic__meta small { font-size: .76rem; opacity: .88; }
 /* Two columns held all the way to 761px, where the manager is still one full-width workspace, so
@@ -1496,6 +1530,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .cover-style-picker__state { display: block; margin-top: 6px; color: var(--muted); font-size: .75rem; }
 .cover-style-picker__state--error { color: var(--danger); }
 .cover-style-picker__state .button { min-height: 44px; margin-top: 6px; padding-inline: 10px; }
+.cover-style-picker__state .button[aria-disabled='true'] { opacity: .6; cursor: wait; transform: none; }
 .cover-studio__compose-state [role='alert'] { display: grid; gap: 10px; }
 
 /* The responsive reader. Layer order is image, grain, scrim, then content, and
@@ -1554,9 +1589,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-mosaic__item.is-selected { outline: 3px solid var(--denim); outline-offset: -3px; }
 .gallery-mosaic__item.is-selected img { opacity: .82; }
 
-.gallery-mosaic__favorite { gap: 0; }
-.gallery-mosaic__favorite svg { width: 20px; height: 20px; }
-.gallery-mosaic__album-badge { position: absolute; top: 10px; left: 10px; z-index: 2; padding: 4px 8px; border-radius: 999px; background: var(--denim); color: white; font-size: .68rem; font-weight: 700; line-height: 1.3; box-shadow: 0 1px 5px rgb(43 29 23 / 28%); pointer-events: none; }
+.gallery-mosaic__favorite { gap: 4px; }
+.gallery-mosaic__favorite svg { width: 17px; height: 17px; }
 
 /* The tray. Fixed, because the verbs must stay reachable while the host keeps scrolling
    for more to select; it exists only while a selection does, so nothing is ever covered
@@ -1578,9 +1612,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 @keyframes album-undo-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
 .album-undo__message { flex: 1 1 220px; font-size: .84rem; line-height: 1.45; }
 .album-undo__error { flex: 1 0 100%; color: var(--paper); font-size: .76rem; line-height: 1.4; }
-.album-undo__action { min-height: 44px; padding: 8px 16px; border: 1px solid rgb(255 250 243 / 45%); border-radius: 7px; background: transparent; color: var(--paper); font: inherit; font-weight: 700; cursor: pointer; }
+.album-undo__action { min-height: 45px; padding: 8px 16px; border: 1px solid rgb(255 250 243 / 45%); border-radius: 7px; background: transparent; color: var(--paper); font: inherit; font-weight: 700; cursor: pointer; }
 .album-undo__action:hover:not(:disabled) { background: rgb(255 250 243 / 12%); }
-.album-undo__dismiss { min-height: 44px; padding: 8px 10px; border: 0; background: transparent; color: rgb(255 250 243 / 72%); font: inherit; font-size: .8rem; cursor: pointer; }
+.album-undo__dismiss { min-height: 45px; padding: 8px 10px; border: 0; background: transparent; color: rgb(255 250 243 / 72%); font: inherit; font-size: .8rem; cursor: pointer; }
 .album-undo__bar :focus-visible { outline-color: var(--paper); }
 
 /* Album */
@@ -1675,10 +1709,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-exits__controls > .album-export > .export-state { order: 11; flex: 1 0 100%; }
 .album-share { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); }
 .album-share p { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.5; }
-.album-share__link { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.album-share__link code { min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere; font-size: .76rem; }
-.album-share__link .button { min-height: 44px; }
-.album-share__error { color: var(--danger); font-size: .76rem; }
+.album-share .link-card { margin-top: 4px; }
 
 @media (min-width: 561px) {
   .album-review-grid__section { grid-template-columns: 4px minmax(110px, auto) minmax(24px, 1fr) auto; gap: 12px; }
@@ -1689,7 +1720,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 @media (max-width: 760px) {
   .gallery-mode-switch--three { grid-template-columns: 1fr; }
-  .gallery-private:has(.selection-tray) .album-undo__bar { top: calc(112px + env(safe-area-inset-top)); bottom: auto; }
+}
+
+@media (max-width: 899px) {
+  .manager-shell:has(.gallery-private .selection-tray) .album-undo__bar { top: calc(112px + env(safe-area-inset-top)); bottom: auto; }
 }
 
 @media (min-width: 761px) {
@@ -1698,7 +1732,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .selection-tray__inner { grid-template-columns: minmax(0, 1fr); }
   .selection-tray__actions .button { flex: 1 1 150px; }
   .gallery-private:has(.selection-tray) .gallery-timeline { padding-bottom: 190px; }
-  .gallery-private:has(.selection-tray) .album-undo__bar { right: auto; bottom: 24px; left: 24px; max-width: min(42vw, 390px); }
+}
+
+@media (min-width: 900px) {
+  .manager-shell:has(.gallery-private .selection-tray) .album-undo__bar { right: auto; bottom: 24px; left: 24px; max-width: min(42vw, 390px); }
 }
 
 @media (prefers-reduced-motion: reduce) {

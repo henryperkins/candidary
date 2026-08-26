@@ -17,6 +17,8 @@ export interface EventRow {
   stored_media_count: number;
   reserved_bytes: number;
   stored_bytes: number;
+  recoverable_media_count: number;
+  recoverable_bytes: number;
   guest_access_expires_at: string;
   management_access_expires_at: string;
   purge_after: string;
@@ -70,6 +72,8 @@ export function mapEvent(row: EventRow): EventRecord {
     storedMediaCount: row.stored_media_count,
     reservedBytes: row.reserved_bytes,
     storedBytes: row.stored_bytes,
+    recoverableMediaCount: row.recoverable_media_count,
+    recoverableBytes: row.recoverable_bytes,
     guestAccessExpiresAt: row.guest_access_expires_at,
     managementAccessExpiresAt: row.management_access_expires_at,
     purgeAfter: row.purge_after,

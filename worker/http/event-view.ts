@@ -58,6 +58,8 @@ export function eventView(
     storedMediaCount: event.storedMediaCount,
     reservedBytes: event.reservedBytes,
     storedBytes: event.storedBytes,
+    recoverableMediaCount: event.recoverableMediaCount,
+    recoverableBytes: event.recoverableBytes,
     guestAccessExpiresAt: event.guestAccessExpiresAt,
     managementAccessExpiresAt: event.managementAccessExpiresAt,
     purgeAfter: event.purgeAfter,

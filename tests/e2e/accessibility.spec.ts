@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
 import type { EventView } from '../../shared/contracts';
+import type { ExportView } from '../../src/app/types';
 import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
 import { buildGuestbookHtml } from '../../worker/export/guestbook-html';
 import { EVENT_THEME_PRESETS } from '../../shared/event-theme';
@@ -687,8 +688,11 @@ test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and
   });
   expect(backgroundContained, 'the manager shell is inert behind the viewer').toBe(true);
   const liveHost = page.locator('[data-gallery-live-host="true"]');
+  await expect(liveHost).toHaveCount(1);
   await expect(liveHost).not.toHaveAttribute('inert', '');
   await expect(liveHost.getByRole('status')).toHaveCount(1);
+  expect(await liveHost.evaluate((element) => element.parentElement === document.body),
+    'the persistent gallery live owner is a body-level sibling of the inert shell').toBe(true);
 
   // Closing is half of containment. The shell is inert while the dialog is open, so a
   // restoration that runs before the dialog is torn down calls `focus()` on an element
@@ -699,6 +703,118 @@ test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and
     await page.evaluate(() => document.activeElement?.classList.contains('gallery-mosaic__open') ?? false),
     'focus returns to the tile the viewer was opened from',
   ).toBe(true);
+});
+
+test('narrow Manager export progress has one scoped live owner and remains axe-clean', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 320, height: 844 });
+  const job: ExportView = {
+    id: 'accessible-running-export',
+    kind: 'complete',
+    state: 'running',
+    snapshotAt: '2026-09-20T09:00:00Z',
+    createdAt: '2026-09-20T09:00:00Z',
+    startedAt: '2026-09-20T09:00:01Z',
+    completedAt: null,
+    mediaCount: 2,
+    totalBytes: 256,
+    processedMediaCount: 1,
+    processedBytes: 128,
+    progressUpdatedAt: '2026-09-20T09:00:02Z',
+    attempt: 1,
+    partCount: 0,
+    expiresAt: null,
+    guestbookEntryCount: 1,
+    guestbookSharedCount: 1,
+    guestbookEventName: EVENT_FIXTURE.name,
+    guestbookEventDate: EVENT_FIXTURE.eventDate,
+    guestbookEventTimezone: EVENT_FIXTURE.eventTimezone,
+    guestbookPrompt: EVENT_FIXTURE.guestbookPrompt,
+    guestbookGalleryVisible: EVENT_FIXTURE.galleryVisible,
+    errorCode: null,
+  };
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(2), nextCursor: null } },
+    event: { storedMediaCount: 2, storedBytes: 256 },
+    exports: [job],
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+  const compact = page.getByRole('region', { name: 'Export progress' });
+  await expect(compact).toContainText('Complete export · Running');
+  await expect(compact).toContainText('1 of 2 photos processed');
+  expect(await measureContrast(compact.locator(':scope > span')),
+    'compact export progress text contrast').toBeGreaterThanOrEqual(4.5);
+  const action = compact.getByRole('button', { name: 'Open Gallery' });
+  const target = await measureTarget(action);
+  expect(target.width, 'compact export action width').toBeGreaterThanOrEqual(44);
+  expect(target.height, 'compact export action height').toBeGreaterThanOrEqual(44);
+
+  const liveHost = page.locator('[data-gallery-live-host="true"]');
+  await expect(liveHost).toHaveCount(1);
+  await expect(liveHost.getByRole('status')).toHaveCount(1);
+  expect(await liveHost.evaluate((element) => element.parentElement === document.body),
+    'the one live owner stays outside Manager section churn').toBe(true);
+  await expect(page.locator('.manager-shell [data-gallery-live-host]')).toHaveCount(0);
+
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth, 'narrow export progress stays inside the viewport')
+    .toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  await expectNoAxeViolations(page, 'narrow Manager export progress');
+});
+
+test('manager Album Preview and the public Album keep their heading hierarchy axe-clean', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const rows = makeMedia(2, 'published').map((photo, index) => ({
+    ...photo,
+    caption: index === 0 ? 'First dance' : 'Night portraits',
+  }));
+  const shareToken = 'accessible-album-id.accessible-album-secret';
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length },
+    album: {
+      pickedMediaIds: rows.map(({ id }) => id),
+      title: 'The evening',
+      description: 'The photographs we kept together.',
+      entries: [
+        { kind: 'section', id: 'ceremony', heading: 'Ceremony' },
+        ...rows.map(({ id }) => ({ kind: 'photo' as const, mediaId: id })),
+      ],
+      shareActive: false,
+      shareToken,
+    },
+  });
+
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
+  await expect(page.getByRole('heading', { level: 2, name: 'Gallery', exact: true })).toHaveCount(1);
+  await page.getByRole('group', { name: 'Gallery mode' })
+    .getByRole('button', { name: /^Album/u }).click();
+  const createAction = page.getByRole('button', { name: 'Create Album link' });
+  await createAction.click();
+  const createDialog = page.getByRole('dialog', { name: 'Create the Album link?' });
+  await expect(createDialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await expectNoAxeViolations(page, 'Manager Album-link creation dialog');
+  await page.keyboard.press('Shift+Tab');
+  await expect(createDialog.getByRole('button', { name: 'Create Album link' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(createDialog).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Copy Album link' })).toBeFocused();
+  await page.getByRole('button', { name: 'Preview album' }).click();
+
+  const preview = page.getByRole('region', { name: 'What people with the Album link see' });
+  await expect(preview.getByRole('heading', { level: 3, name: 'The evening' })).toBeVisible();
+  await expect(preview.getByRole('heading', { level: 4, name: 'Ceremony' })).toBeVisible();
+  await expectNoAxeViolations(page, 'Manager Album Preview heading hierarchy');
+
+  await page.goto(`/album#${shareToken}`);
+  await expect(page.getByRole('heading', { level: 1, name: 'The evening' })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 2, name: 'Ceremony' })).toBeVisible();
+  await expectNoAxeViolations(page, 'public Album heading hierarchy');
 });
 
 test('reduced motion opens the terminal Guestbook without smooth scrolling or moving focus into the textarea', async ({ page }) => {

@@ -58,7 +58,7 @@ const event: EventView = {
   reservedMediaCount: 0,
   storedMediaCount: 0,
   reservedBytes: 0,
-  storedBytes: 0,
+  storedBytes: 0, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-12-18T00:00:00Z',
   purgeAfter: '2027-01-17T00:00:00Z',
@@ -588,7 +588,7 @@ describe('Manager Guestbook', () => {
     expect(window.scrollY).toBe(640);
   });
 
-  it('explains gallery-off Shared captions, opens Settings, and labels suppressed published captions exactly', async () => {
+  it('explains Guest-gallery-off captions, opens Settings, and labels suppressed published captions exactly', async () => {
     const onOpenSettings = vi.fn();
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = new URL(String(input), 'https://candidary.test');
@@ -596,11 +596,11 @@ describe('Manager Guestbook', () => {
     }));
     const user = userEvent.setup();
     render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, galleryVisible: false, hiddenCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={onOpenSettings} settingsBlocked={false} />);
-    expect(await screen.findByText('Photo captions are not visible to guests while the gallery is off.')).toBeVisible();
+    expect(await screen.findByText('Photo captions with a saved Published state are not currently visible to event guests while the Guest gallery is off.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole('button', { name: /Hidden/i }));
-    expect(await screen.findByText('Published · gallery off')).toBeVisible();
+    expect(await screen.findByText('Not currently visible to event guests')).toBeVisible();
     expect(screen.getByText('Private to contributor')).toBeVisible();
     expect(screen.getByText('Sep 19, 2026, 5:00 PM CDT')).toBeVisible();
     const preview = screen.getByRole('presentation');

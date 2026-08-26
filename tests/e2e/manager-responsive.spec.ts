@@ -3,6 +3,7 @@ import type { Page } from '@playwright/test';
 
 import { MANAGER_MEDIA_PAGE_SIZE, MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
 import type { ManagerGuestbookItem } from '../../shared/contracts';
+import type { ExportView } from '../../src/app/types';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { LONG_FILENAME, UNBROKEN_NOTE, makeMedia } from './fixtures/ui-data';
 import {
@@ -363,8 +364,11 @@ test('manager cards keep the whole photo name reachable', async ({ page }) => {
 });
 
 test('every manager control the host can touch measures at least 44 by 44', async ({ page }) => {
-  const job = {
+  const job: ExportView = {
     id: 'export-a', kind: 'complete', state: 'ready', snapshotAt: '2026-09-20T09:00:00Z',
+    createdAt: '2026-09-20T09:00:00Z', startedAt: '2026-09-20T09:00:01Z',
+    completedAt: '2026-09-20T09:00:03Z', processedMediaCount: 2, processedBytes: 256,
+    progressUpdatedAt: '2026-09-20T09:00:03Z', errorCode: null,
     mediaCount: 2, totalBytes: 256, attempt: 1, partCount: 1, expiresAt: '2026-09-27T09:00:00Z',
     guestbookEntryCount: 1, guestbookSharedCount: 1, guestbookEventName: 'Maya & Theo',
     guestbookEventDate: '2026-09-19', guestbookEventTimezone: 'America/Chicago',
@@ -400,7 +404,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions button', `intake card control at ${width}`);
 
     await destination(page, 'Gallery').click();
-    await page.getByRole('button', { name: 'Shared' }).click();
+    await page.getByRole('button', { name: 'Guest gallery' }).click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
     await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
@@ -438,7 +442,57 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
   }
 });
 
-test('the mobile Library tray, reopened Undo, Album, and Shared stay reachable and contained', async ({ page }) => {
+test('active export progress stays reachable and contained outside Gallery on narrow screens', async ({ page }) => {
+  const job: ExportView = {
+    id: 'running-complete-export',
+    kind: 'complete',
+    state: 'running',
+    snapshotAt: '2026-09-20T09:00:00Z',
+    createdAt: '2026-09-20T09:00:00Z',
+    startedAt: '2026-09-20T09:00:01Z',
+    completedAt: null,
+    mediaCount: 2,
+    totalBytes: 256,
+    processedMediaCount: 1,
+    processedBytes: 128,
+    progressUpdatedAt: '2026-09-20T09:00:02Z',
+    attempt: 1,
+    partCount: 0,
+    expiresAt: null,
+    guestbookEntryCount: 1,
+    guestbookSharedCount: 1,
+    guestbookEventName: EVENT_FIXTURE.name,
+    guestbookEventDate: EVENT_FIXTURE.eventDate,
+    guestbookEventTimezone: EVENT_FIXTURE.eventTimezone,
+    guestbookPrompt: EVENT_FIXTURE.guestbookPrompt,
+    guestbookGalleryVisible: EVENT_FIXTURE.galleryVisible,
+    errorCode: null,
+  };
+  await stubManagerRoutes(page, { ...managerFixture, exports: [job] });
+  await page.goto(managerUrl);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+  const compact = page.getByRole('region', { name: 'Export progress' });
+  await expect(compact).toContainText('Complete export · Running');
+  await expect(compact).toContainText('1 of 2 photos processed');
+  await expect(page.locator('[data-gallery-live-host="true"]')).toHaveCount(1);
+
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expectTouchTargets(page, '.manager-export-compact .button', `compact export action at ${width}`);
+    const compactSize = await measureOverflow(compact);
+    expect(compactSize.scrollWidth, `compact export status at ${width}`)
+      .toBeLessThanOrEqual(compactSize.clientWidth + 1);
+    await expectContained(page, width);
+  }
+
+  await compact.getByRole('button', { name: 'Open Gallery' }).click();
+  await expect(compact).toHaveCount(0);
+  await expect(page.locator('.gallery-export .export-state').getByText('Running', { exact: true }))
+    .toBeVisible();
+});
+
+test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reachable and contained', async ({ page }) => {
   const rows = makeMedia(4, 'unpublished');
   await stubManagerRoutes(page, {
     mediaPages: { first: { media: rows, nextCursor: null } },
@@ -494,7 +548,7 @@ test('the mobile Library tray, reopened Undo, Album, and Shared stay reachable a
     exact: true,
   }).click();
   const tray = page.getByRole('region', { name: 'Album' });
-  await tray.getByRole('button', { name: 'Add 1 to album' }).click();
+  await tray.getByRole('button', { name: 'Pick for Album (1)' }).click();
   const undo = page.locator('.album-undo__bar');
   await expect(undo).toBeVisible();
   await page.getByRole('button', { name: 'Select photos' }).click();
@@ -504,22 +558,30 @@ test('the mobile Library tray, reopened Undo, Album, and Shared stay reachable a
     exact: true,
   }).click();
   await expect(tray).toBeVisible();
-  const reopenedTray = await tray.boundingBox();
-  const undoBounds = await undo.boundingBox();
-  if (!reopenedTray || !undoBounds) throw new Error('Undo geometry missing at 390');
-  const separated = reopenedTray.y + reopenedTray.height <= undoBounds.y + 1
-    || undoBounds.y + undoBounds.height <= reopenedTray.y + 1;
-  expect(separated, 'Undo does not cover the reopened tray at 390').toBe(true);
-  await expectTouchTargets(page, '.album-undo__bar button', 'Undo controls at 390');
+  // The persistent Manager-owned Undo is a sibling of the Gallery workspace.
+  // Prove its shared-shell collision rule at both sides of the layout breakpoint.
+  for (const width of [761, 768, 840, 899, 900, 1024, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    const reopenedTray = await tray.boundingBox();
+    const undoBounds = await undo.boundingBox();
+    if (!reopenedTray || !undoBounds) throw new Error(`Undo geometry missing at ${width}`);
+    const separated = reopenedTray.y + reopenedTray.height <= undoBounds.y + 1
+      || undoBounds.y + undoBounds.height <= reopenedTray.y + 1
+      || reopenedTray.x + reopenedTray.width <= undoBounds.x + 1
+      || undoBounds.x + undoBounds.width <= reopenedTray.x + 1;
+    expect(separated, `Undo does not cover the reopened tray at ${width}`).toBe(true);
+    await expectTouchTargets(page, '.album-undo__bar button', `Undo controls at ${width}`);
+  }
 
   await page.getByRole('button', { name: 'Clear selection' }).click();
   await page.getByRole('button', { name: /^Album \(1\)$/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
   await expectTouchTargets(page, '.gallery-album button', 'Album controls at 390');
 
-  await page.getByRole('button', { name: 'Shared' }).click();
-  await expect(page.getByText(/Publication is a separate axis from the album/u)).toBeVisible();
-  await expectTouchTargets(page, '.gallery-shared button', 'Shared controls at 390');
+  await page.getByRole('button', { name: 'Guest gallery' }).click();
+  await expect(page.getByText(/Publish and Hide change what event guests see/u)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Shared' })).toHaveCount(0);
+  await expectTouchTargets(page, '.gallery-shared button', 'Guest-gallery controls at 390');
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth, 'Gallery document at 390')
     .toBeLessThanOrEqual(documentSize.clientWidth + 1);
@@ -599,7 +661,7 @@ test('keyboard-only Manager moderation keeps focus and scroll stable after confi
   expect(await page.evaluate(() => window.scrollY)).toBe(scrollDuringRequest);
 });
 
-test('gallery-off keeps published captions out of Shared and labels them in Hidden', async ({ page }) => {
+test('gallery-off keeps published captions out of Shared and labels them precisely in Hidden', async ({ page }) => {
   const caption: ManagerGuestbookItem = {
     id: 'caption-gallery-off',
     source: 'photo_caption',
@@ -618,9 +680,9 @@ test('gallery-off keeps published captions out of Shared and labels them in Hidd
   });
   await page.goto(managerUrl);
   await destination(page, 'Guestbook').click();
-  await expect(page.getByText('Photo captions are not visible to guests while the gallery is off.')).toBeVisible();
+  await expect(page.getByText('Photo captions with a saved Published state are not currently visible to event guests while the Guest gallery is off.')).toBeVisible();
   await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(0);
   await page.getByRole('button', { name: /Hidden/u }).click();
-  await expect(page.getByText('Published · gallery off')).toBeVisible();
+  await expect(page.getByText('Not currently visible to event guests')).toBeVisible();
   await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(1);
 });

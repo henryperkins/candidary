@@ -309,20 +309,26 @@ async function openGallery(page: Page) {
 
 async function openSharedGallery(page: Page) {
   await openGallery(page);
-  await page.getByRole('button', { name: 'Shared' }).click();
+  await page.getByRole('button', { name: 'Guest gallery' }).click();
   await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Shared' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Guest gallery' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.moderation-grid article')).toHaveCount(2);
 }
 
-// The notice has to be readable, dismissible by thumb, and contained — and everything it interrupted
-// has to still be there underneath it.
-async function expectRecoverableNotice(page: Page, survivingHeading: string) {
+// The notice has to be readable, actionable by thumb, and contained — and everything it interrupted
+// has to still be there underneath it. Manager actions are dismissible; Guest gallery owns an exact retry.
+async function expectRecoverableNotice(
+  page: Page,
+  survivingHeading: string,
+  control: 'dismiss' | 'retry' = 'dismiss',
+) {
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
   // The notice is caption-weight prose, so it lives in the design system's 12–14 px band like every
   // other status line. No axe pass renders this failed state, so its resolved pairing is checked here.
-  const noticeText = notice.locator('span');
+  const noticeText = control === 'retry'
+    ? notice.getByText(RETRY_HINT, { exact: true })
+    : notice.locator('span').first();
   const fontSize = await noticeText.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
   expect(fontSize, 'notice text size').toBeGreaterThanOrEqual(CAPTION_TEXT_RANGE.min);
   expect(fontSize, 'notice text size').toBeLessThanOrEqual(CAPTION_TEXT_RANGE.max);
@@ -331,36 +337,54 @@ async function expectRecoverableNotice(page: Page, survivingHeading: string) {
   await expect(page.locator('.moderation-grid article'), 'the cards the host was working on survive')
     .toHaveCount(2);
 
-  const dismiss = page.getByRole('button', { name: 'Dismiss error', exact: true });
-  const dismissSize = await measureTarget(dismiss);
-  expect(dismissSize.width, 'dismiss target width').toBeGreaterThanOrEqual(44);
-  expect(dismissSize.height, 'dismiss target height').toBeGreaterThanOrEqual(44);
+  const recoveryControl = page.getByRole('button', {
+    name: control === 'dismiss' ? 'Dismiss error' : 'Try again',
+    exact: true,
+  });
+  const recoverySize = await measureTarget(recoveryControl);
+  expect(recoverySize.width, 'recovery target width').toBeGreaterThanOrEqual(44);
+  expect(recoverySize.height, 'recovery target height').toBeGreaterThanOrEqual(44);
   await expectContained(page);
 
-  await dismiss.click();
-  await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: survivingHeading })).toBeVisible();
+  if (control === 'dismiss') {
+    await recoveryControl.click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: survivingHeading })).toBeVisible();
+  }
 }
 
 test('a refused bulk publish keeps the gallery, its filter, and the selection', async ({ page }) => {
   await openSharedGallery(page);
-  await page.route(`${MANAGER_BASE}/media/bulk`, (route) => route.fulfill({
-    status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
-  }));
+  const bulkPayloads: unknown[] = [];
+  await page.route(`${MANAGER_BASE}/media/bulk`, (route) => {
+    bulkPayloads.push(route.request().postDataJSON());
+    return bulkPayloads.length === 1
+      ? route.fulfill({ status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' } })
+      : route.fallback();
+  });
 
   const first = page.locator('.moderation-grid article').first();
   await first.getByRole('checkbox').check();
-  await expect(page.locator('#bulk-selection-status')).toHaveText('1 selected');
+  await expect(page.locator('#bulk-selection-status')).toHaveText('1 of 50 selected');
   await page.getByRole('button', { name: 'Publish selected' }).click();
 
-  await expectRecoverableNotice(page, 'Gallery');
+  await expectRecoverableNotice(page, 'Gallery', 'retry');
   // The filter the host had chosen and the selection they had made are both still true.
   await expect(page.locator('.filter-tabs button.active')).toHaveText('Unpublished');
-  await expect(page.locator('#bulk-selection-status')).toHaveText('1 selected');
+  await expect(page.locator('#bulk-selection-status')).toHaveText('1 of 50 selected');
   await expect(first.getByRole('checkbox')).toBeChecked();
+
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await expect.poll(() => bulkPayloads.length).toBe(2);
+  expect(bulkPayloads[0]).toMatchObject({ action: 'publish', expectedStatus: 'unpublished' });
+  expect(bulkPayloads[1]).toEqual(bulkPayloads[0]);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('#bulk-selection-status'))
+    .toHaveText('0 of 50 selected');
+  await expect(page.locator('.moderation-grid article')).toHaveCount(1);
 });
 
-test('a refused delete in Live Intake leaves the photo and the card it was deleted from', async ({ page }) => {
+test('a refused move to Recently deleted leaves the photo and its Intake card', async ({ page }) => {
   await stubManagerRoutes(page, {
     mediaPages: { first: { media: makeMedia(2, 'unpublished'), nextCursor: null } },
     event: { storedMediaCount: 2 },
@@ -368,14 +392,20 @@ test('a refused delete in Live Intake leaves the photo and the card it was delet
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await page.route(new RegExp(`/api/manage/events/${EVENT_FIXTURE.id}/media/[^/]+$`, 'u'), (route) => route.fulfill({
-    status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' },
-  }));
+  let trashRequests = 0;
+  await page.route(`${MANAGER_BASE}/media/*/trash`, (route) => {
+    trashRequests += 1;
+    return route.fulfill({ status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' } });
+  });
 
   const first = page.locator('.moderation-grid article').first();
-  await first.getByRole('button', { name: `Delete ${LONG_FILENAME}` }).click();
+  await first.getByRole('button', { name: `Move ${LONG_FILENAME} to Recently deleted` }).click();
+  await expect(page.getByRole('dialog', { name: 'Move this photo to Recently deleted?' })).toBeVisible();
+  expect(trashRequests).toBe(0);
+  await page.getByRole('dialog').getByRole('button', { name: 'Move to Recently deleted' }).click();
 
   await expectRecoverableNotice(page, 'Live intake');
+  expect(trashRequests).toBe(1);
   // A refused delete that removed the card anyway would be the worst possible lie about a photo.
   await expect(first.locator('strong')).toHaveText(LONG_FILENAME);
 });
@@ -457,7 +487,11 @@ test('an inline expired-session notice preserves the manager and exposes both re
 
   await expect(page.getByRole('alert')).toContainText('This session has expired.');
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await expect(page.locator('.moderation-grid article')).toHaveCount(1);
+  // A query owns its rows and cursor. The unfiltered page must not masquerade as the failed Avery
+  // result, but the chosen filter and the rest of the Manager remain available for recovery.
+  await expect(page.getByLabel('Filter by guest name')).toHaveValue('Avery');
+  await expect(page.locator('.moderation-grid article')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'No matching photos.' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Sign in' })).toHaveAttribute(
     'href',
     `/host/login?returnTo=%2Fmanage%2Fevent%2F${RECOVERY_EVENT_ID}&adopt=${RECOVERY_EVENT_ID}`,

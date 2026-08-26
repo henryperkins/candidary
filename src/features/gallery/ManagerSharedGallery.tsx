@@ -3,14 +3,18 @@ import { useState, type Dispatch, type SetStateAction } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { MediaView } from '../../app/types';
-import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
-import type { EventView, PublicationStatus } from '../../../shared/contracts';
+import type { PublicationStatus } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
-import { sharedSelectionCapacityMessage } from './selection-state';
+import {
+  selectionCapacityMessage,
+  selectionCountMessage,
+  transitionSelection,
+  type GallerySelectionAction,
+} from './selection-state';
 
 export type GallerySharedStatus = 'all' | PublicationStatus;
 
-const SHARED_STATUS_LABELS: Record<PublicationStatus, string> = {
+export const PUBLICATION_LABELS: Record<PublicationStatus, string> = {
   unpublished: 'Unpublished',
   published: 'Published',
   hidden: 'Hidden',
@@ -23,24 +27,24 @@ const SHARED_STATUS_LABELS: Record<PublicationStatus, string> = {
 const SHARED_EMPTY_COPY: Record<GallerySharedStatus, { title: string; body: string }> = {
   all: {
     title: 'No photos.',
-    body: 'New private deliveries appear here.',
+    body: 'New delivered photos appear here.',
   },
   unpublished: {
     title: 'No unpublished photos.',
-    body: 'New private deliveries appear here.',
+    body: 'New delivered photos appear here.',
   },
   published: {
     title: 'No published photos.',
-    body: 'Publish a photo to share a preview with guests.',
+    body: 'Publish a photo to show it in the Guest gallery.',
   },
   hidden: {
     title: 'No hidden photos.',
-    body: 'Photos you hide from guests will appear here.',
+    body: 'Photos Hidden from event guests appear here.',
   },
 };
 
 interface ManagerSharedGalleryProps {
-  event: EventView;
+  guestGalleryVisible: boolean;
   media: MediaView[];
   status: GallerySharedStatus;
   selected: string[];
@@ -77,11 +81,11 @@ function SharedPhotoPreview({ item, title }: { item: MediaView; title: string })
 /**
  * The existing publication workspace extracted from the Manager shell: the
  * unpublished / published / hidden filters and batch publish or hide. Gallery
- * does not become a deletion surface, so the Live Intake delete and individual
+ * does not become a deletion surface, so the Live intake delete and individual
  * original download controls are deliberately absent.
  */
 export function ManagerSharedGallery({
-  event,
+  guestGalleryVisible,
   media,
   status,
   selected,
@@ -102,8 +106,14 @@ export function ManagerSharedGallery({
 
   function changeStatus(next: GallerySharedStatus) {
     if (next === status) return;
-    onSelectedChange([]);
+    commitSelection({ type: 'clear' });
     onStatusChange(next);
+  }
+
+  function commitSelection(action: GallerySelectionAction) {
+    const transition = transitionSelection(new Set(selected), action);
+    onSelectedChange([...transition.next]);
+    if (transition.message !== null) onAnnouncement?.(transition.message);
   }
 
   async function runBulk(action: 'publish' | 'hide') {
@@ -114,9 +124,8 @@ export function ManagerSharedGallery({
     onAnnouncement?.(`${progressive} ${count} selected photo${count === 1 ? '' : 's'}…`);
     try {
       await onBulk(action);
-      onAnnouncement?.(`${progressive} finished.`);
     } catch {
-      onAnnouncement?.(`${progressive} could not be completed.`);
+      // The workspace sees confirmed groups and owns the one complete terminal outcome.
     } finally {
       setActiveBulk(null);
     }
@@ -124,7 +133,9 @@ export function ManagerSharedGallery({
 
   return <div className="gallery-shared">
     <p className="gallery-shared__lede">
-      Publication is a separate axis from the album. A photo is delivered privately whether or not it is published, and an album pick never publishes anything.
+      {guestGalleryVisible
+        ? 'Published photos are visible to event guests.'
+        : 'Publication choices are saved, but the Guest gallery is off.'}
     </p>
     <div className="filter-tabs" role="group" aria-label="Publication status">
       {(['unpublished', 'published', 'hidden'] as const).map((value) => (
@@ -134,11 +145,10 @@ export function ManagerSharedGallery({
           aria-pressed={status === value}
           key={value}
           onClick={() => changeStatus(value)}
-        >{SHARED_STATUS_LABELS[value]}</button>
+        >{PUBLICATION_LABELS[value]}</button>
       ))}
     </div>
-    {!event.galleryVisible && <div className="manager-notice">
-      <span>The optional shared gallery is off. Publishing choices are saved until you turn it on.</span>
+    {!guestGalleryVisible && <div className="manager-notice">
       <button
         type="button"
         className="text-button"
@@ -151,21 +161,19 @@ export function ManagerSharedGallery({
         id="bulk-selection-status"
       >
         {selectionAtLimit
-          ? sharedSelectionCapacityMessage()
-          : selected.length
-            ? `${selected.length} selected`
-            : 'Select photos to update the optional gallery'}
+          ? selectionCapacityMessage()
+          : selectionCountMessage(selected.length)}
       </span>
       <button
         type="button"
-        className="button button--approve"
+        className={`button ${status === 'published' ? 'button--secondary' : 'button--approve'}`}
         disabled={!selected.length || activeBulk !== null}
         aria-busy={activeBulk === 'publish' || undefined}
         onClick={() => void runBulk('publish')}
       ><Eye aria-hidden="true" /> {activeBulk === 'publish' ? 'Publishing…' : 'Publish selected'}</button>
       <button
         type="button"
-        className="button button--danger-outline"
+        className={`button ${status === 'published' ? 'button--primary' : 'button--secondary'}`}
         disabled={!selected.length || activeBulk !== null}
         aria-busy={activeBulk === 'hide' || undefined}
         onClick={() => void runBulk('hide')}
@@ -179,7 +187,7 @@ export function ManagerSharedGallery({
               const isSelected = selected.includes(item.id);
               const selectionUnavailable = !isSelected && selectionAtLimit;
               // The card names the photo the way the private timeline does. Its controls keep naming
-              // the file, because Live Intake's identical cards act on files — download, delete — and
+              // the file, because Live intake's identical cards act on files — download, delete — and
               // the two grids must not disagree about what a control is pointed at.
               const title = galleryPhotoTitle(item);
               return <article className={isSelected ? 'selected' : ''} key={item.id}>
@@ -190,22 +198,21 @@ export function ManagerSharedGallery({
                     aria-describedby={selectionUnavailable ? 'bulk-selection-status' : undefined}
                     checked={isSelected}
                     disabled={selectionUnavailable}
-                    onChange={(change) => onSelectedChange((current) => {
-                      if (!change.target.checked) return current.filter((id) => id !== item.id);
-                      if (current.includes(item.id) || current.length >= MANAGER_BULK_SELECTION_MAX) return current;
-                      return [...current, item.id];
-                    })}
+                    onChange={() => commitSelection({ type: 'toggle', id: item.id, label: title })}
                   /></label>
                   <SharedPhotoPreview item={item} title={title} />
                 </div>
                 <div>
-                  <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
+                  <span className={`publication publication--${item.publicationStatus}`}>
+                    {PUBLICATION_LABELS[item.publicationStatus]}
+                  </span>
                   <strong title={title}>{title}</strong>
                   <small>From {item.guestName}</small>
                   <div className="intake-card-actions">
                     {item.publicationStatus !== 'published' && (
                       <button
                         type="button"
+                        className="button button--approve"
                         aria-label={`Publish ${item.originalFilename}`}
                         onClick={() => void onChangePublication(item, 'publish')}
                       ><Eye aria-hidden="true" /> Publish</button>
@@ -213,7 +220,7 @@ export function ManagerSharedGallery({
                     {item.publicationStatus !== 'hidden' && (
                       <button
                         type="button"
-                        className="gallery-shared__hide"
+                        className={`button ${item.publicationStatus === 'published' ? 'button--primary' : 'button--secondary'} gallery-shared__hide`}
                         aria-label={`Hide ${item.originalFilename}`}
                         onClick={() => void onChangePublication(item, 'hide')}
                       ><EyeOff aria-hidden="true" /> Hide</button>

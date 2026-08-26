@@ -3,6 +3,7 @@ import { applyD1Migrations, reset } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_EVENT_THEME_CONFIG, serializeEventThemeConfig } from '../../shared/event-theme';
+import { AlbumRepository } from '../../worker/db/album';
 import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
@@ -19,6 +20,11 @@ const TIMELINE_CONTEXT = {
   eventTimezone: 'America/Chicago',
 };
 const SENTINEL = '1970-01-01T00:00:00.000Z';
+// Recovery is a real interval, not an instant: both ends of it stay inside the
+// seeded event's management access and purge deadlines so the transitions under
+// test are the only thing that can refuse.
+const TRASHED_AT = '2026-09-20T00:00:00.000Z';
+const RESTORED_AT = '2026-09-20T01:00:00.000Z';
 
 async function seedEvent(id = 'event-a', slug = 'maya-theo') {
   const events = new EventsRepository(env.DB);
@@ -119,7 +125,7 @@ async function insertStoredRow(row: {
       published_at, preview_object_key, deleted_at, stored_at,
       object_bucket_generation, captured_at, timeline_at, favorited_at
     ) VALUES (?, ?, 'session-a', ?, ?, 'image/jpeg', 1024, 1024, 32, 32, ?, ?,
-      'stored', 'unpublished', ?, ?, ?, NULL, NULL, ?, ?, 'canonical', ?, ?, ?)
+      ?, 'unpublished', ?, ?, ?, NULL, NULL, ?, ?, 'canonical', ?, ?, ?)
   `).bind(
     row.id,
     row.eventId,
@@ -127,6 +133,7 @@ async function insertStoredRow(row: {
     row.filename ?? `${row.id}.jpg`,
     row.guestName ?? 'Jose',
     row.caption ?? null,
+    row.deletedAt === null || row.deletedAt === undefined ? 'stored' : 'deleted',
     `idem-${row.id}`,
     EVENT_START,
     row.createdAt ?? EVENT_START,
@@ -376,6 +383,81 @@ describe('host private gallery repository', () => {
     // The filters compose with either direction rather than pinning one.
     expect((await repository.listGalleryTimeline('event-a', { favorites: true }))
       .media.map((media) => media.id)).toEqual(['g3', 'g1']);
+  });
+
+  it('withholds a trashed photo from the timeline, search, and album picks until it is restored', async () => {
+    await seedEvent();
+    await seedGuestSession();
+    await insertStoredRow({
+      id: 'g1',
+      eventId: 'event-a',
+      guestName: 'Jose',
+      timelineAt: '2026-09-19T22:10:00.000Z',
+    });
+    await insertStoredRow({
+      id: 'g2',
+      eventId: 'event-a',
+      guestName: 'Maya',
+      timelineAt: '2026-09-19T22:15:00.000Z',
+    });
+    // These rows are written straight into the table, so the event's capacity
+    // counters have to be stated too. Trashing moves a photo's count and bytes
+    // from the active bucket to the recoverable one, and neither may go below
+    // zero on the way.
+    await env.DB.prepare(`
+      UPDATE events SET stored_media_count = 2, stored_bytes = 2048 WHERE id = 'event-a'
+    `).run();
+
+    const repository = new MediaRepository(env.DB);
+    await repository.setFavorite('event-a', 'g1', '2026-09-19T23:00:00.000Z');
+    await repository.setFavorite('event-a', 'g2', '2026-09-19T23:00:00.000Z');
+    const albums = new AlbumRepository(env.DB);
+    expect(await albums.get('event-a', TRASHED_AT)).toMatchObject({
+      photoCount: 2,
+      retainedCount: 0,
+    });
+
+    expect((await repository.trashStored('event-a', 'g1', TRASHED_AT)).trashedAt).toBe(TRASHED_AT);
+
+    expect((await repository.listGalleryTimeline('event-a', { order: 'earliest' })).media
+      .map((media) => media.id)).toEqual(['g2']);
+    expect((await repository.listGalleryTimeline('event-a', { query: 'jose' })).media).toEqual([]);
+    // The album loses the photograph and keeps the place it was standing in. A
+    // slot that closed up would rearrange the album behind the host's back, and
+    // then rearrange it again when they restored the photo.
+    expect(await albums.get('event-a', TRASHED_AT)).toMatchObject({
+      photoCount: 1,
+      retainedCount: 1,
+    });
+    expect(await env.DB.prepare(`
+      SELECT stored_media_count, stored_bytes, recoverable_media_count, recoverable_bytes
+      FROM events WHERE id = 'event-a'
+    `).first()).toEqual({
+      stored_media_count: 1,
+      stored_bytes: 1024,
+      recoverable_media_count: 1,
+      recoverable_bytes: 1024,
+    });
+
+    await repository.restoreTrashed('event-a', 'g1', RESTORED_AT);
+
+    expect((await repository.listGalleryTimeline('event-a', { order: 'earliest' })).media
+      .map((media) => media.id)).toEqual(['g1', 'g2']);
+    expect((await repository.listGalleryTimeline('event-a', { query: 'jose' })).media
+      .map((media) => media.id)).toEqual(['g1']);
+    expect(await albums.get('event-a', RESTORED_AT)).toMatchObject({
+      photoCount: 2,
+      retainedCount: 0,
+    });
+    expect(await env.DB.prepare(`
+      SELECT stored_media_count, stored_bytes, recoverable_media_count, recoverable_bytes
+      FROM events WHERE id = 'event-a'
+    `).first()).toEqual({
+      stored_media_count: 2,
+      stored_bytes: 2048,
+      recoverable_media_count: 0,
+      recoverable_bytes: 0,
+    });
   });
 
   it('sets and clears a favorite idempotently and returns the gallery view', async () => {

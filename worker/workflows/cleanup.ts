@@ -6,6 +6,7 @@ import {
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_PURGE_FENCES_PER_PASS,
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
+  MEDIA_RECOVERY_CLEANUP_BATCH,
   GUEST_NOTE_WINDOW_MS,
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
@@ -18,7 +19,10 @@ import {
   workerIngressEnabled,
 } from '../media-upload-release';
 import { legacyMediaScannerContract } from '../legacy-media-scanner-contract';
-import { ExportsRepository } from '../db/exports';
+import {
+  ExportsRepository,
+  type ExpiredArtifactInventoryCandidate,
+} from '../db/exports';
 import { AlbumSharesRepository } from '../db/album-shares';
 import {
   LegacyMediaScanRepository,
@@ -35,6 +39,7 @@ import {
   cleanupInactiveMediaPromotion,
   cleanupPendingMediaPromotion,
   promoteLegacyStoredMediaObject,
+  retireMediaObjects,
 } from '../storage/media';
 import {
   BACKFILL_RESTART_WINDOW_MS,
@@ -94,20 +99,35 @@ export async function cleanupExpiredReservations(env: AppEnv, now = new Date()):
 export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Promise<number> {
   const repository = new ExportsRepository(env.DB);
   const timestamp = now.toISOString();
+  const deleteInventory = async (candidate: ExpiredArtifactInventoryCandidate) => {
+    const keys = [
+      candidate.inventory.objectKey,
+      candidate.inventory.manifestObjectKey,
+      ...candidate.inventory.parts.map(({ objectKey }) => objectKey),
+      candidate.inventory.guestbookHtmlObjectKey,
+      candidate.inventory.guestbookCsvObjectKey,
+    ].filter((key): key is string => Boolean(key));
+    for (let offset = 0; offset < keys.length; offset += 1_000) {
+      await env.MEDIA_BUCKET.delete(keys.slice(offset, offset + 1_000));
+    }
+    await repository.clearExpiredInventory(candidate);
+  };
+
+  // A prior R2 failure leaves the exact Expired inventory durable. Retry a
+  // bounded set before selecting new Ready rows so cleanup does not depend on
+  // reconstructing keys from mutable state.
+  const retained = await repository.listExpiredWithInventory(100);
+  for (const candidate of retained) {
+    await deleteInventory(candidate).catch(() => undefined);
+  }
+
   const expired = await repository.listExpiredReady(timestamp);
   let cleaned = 0;
-  for (const job of expired) {
-    const parts = await repository.listParts(job.id);
-    const keys = [
-      job.objectKey,
-      job.manifestObjectKey,
-      ...parts.map(({ objectKey }) => objectKey),
-      job.guestbookHtmlObjectKey,
-      job.guestbookCsvObjectKey,
-    ]
-      .filter((key): key is string => Boolean(key));
-    if (keys.length) await env.MEDIA_BUCKET.delete(keys);
-    if (await repository.markExpired(job.id, timestamp)) cleaned += 1;
+  for (const candidate of expired) {
+    const result = await repository.markExpired(candidate, timestamp);
+    if (!result.changed) continue;
+    cleaned += 1;
+    await deleteInventory(result.cleanup).catch(() => undefined);
   }
   return cleaned;
 }
@@ -128,6 +148,51 @@ export async function cleanupExpiredAlbumShareSessions(
     if (changes < ALBUM_SHARE_SESSION_CLEANUP_BATCH) break;
   }
   return cleaned;
+}
+
+/**
+ * End recovery for photos whose deadline has passed.
+ *
+ * Bounded, and deliberately not a drain: D1 selects at most one batch of
+ * releasable rows without letting any number of held rows occupy that window.
+ * `held` is a capped diagnostic sample. Held rows stay visible as `Recovery
+ * expired · cleanup pending`; Restore has already stopped being offered for
+ * them — the deadline is the host's contract, the hold is the export's.
+ *
+ * The permanent transition and the R2 claim are separate steps on purpose. The
+ * claim can only win keys nothing else owns, so a partial pass leaves bytes for
+ * the existing tombstone janitor rather than orphaning them.
+ */
+export async function cleanupExpiredRecoverableMedia(
+  env: AppEnv,
+  now = new Date(),
+): Promise<{ terminalized: number; held: number }> {
+  const repository = new MediaRepository(env.DB);
+  const timestamp = now.toISOString();
+  let terminalized = 0;
+  let held = await repository.countExpiredTrashedHeld(
+    timestamp,
+    MEDIA_RECOVERY_CLEANUP_BATCH,
+  );
+  const expired = await repository.listExpiredTrashed(timestamp, MEDIA_RECOVERY_CLEANUP_BATCH);
+  for (const media of expired) {
+    const deleted = await repository.permanentlyDeleteTrashed(media.id, timestamp);
+    if (!deleted) {
+      // A hold acquired after selection lost the commit-time race. Keep the
+      // diagnostic bounded even when its pre-read sample was already full.
+      held = Math.min(MEDIA_RECOVERY_CLEANUP_BATCH, held + 1);
+      continue;
+    }
+    terminalized += 1;
+    await retireMediaObjects(
+      env.MEDIA_BUCKET,
+      env.CANONICAL_MEDIA_BUCKET,
+      repository,
+      deleted,
+      timestamp,
+    ).catch(() => undefined);
+  }
+  return { terminalized, held };
 }
 
 export const LEGACY_STORED_MEDIA_PROMOTION_LIMIT = 25;
@@ -2126,8 +2191,15 @@ export async function reconcileEventCoverPurge(
     // its Workflow claims it. A running export remains the owner of its attempt
     // cleanup; the purge waits below until that owner records a terminal state.
     env.DB.prepare(`
-      UPDATE export_jobs SET state = 'failed', error_code = 'EXPORT_EVENT_DELETED'
-      WHERE event_id = ? AND state = 'queued'
+      UPDATE export_jobs
+      SET state = 'failed', error_code = 'EXPORT_EVENT_DELETED'
+      WHERE event_id = ? AND state = 'queued' AND execution_protocol = 'legacy'
+    `).bind(eventId),
+    env.DB.prepare(`
+      UPDATE export_jobs
+      SET state = 'failed', error_code = 'EXPORT_EVENT_DELETED',
+        execution_transition = execution_transition + 1
+      WHERE event_id = ? AND state = 'queued' AND execution_protocol = 'attempt-v2'
     `).bind(eventId),
     // Timestamp equality is not proof: a0ee's age escape hatch wrote the exact
     // same shape after unknown + failed termination. Before publishing the v2
@@ -2338,6 +2410,17 @@ export async function reconcileEventCoverPurge(
     return { ...summary, phase: 'fences', remainder: true };
   }
 
+  // Recovery ends here, and it ends in D1 before a single object is swept. A
+  // recoverable row whose bytes were deleted by the prefix sweep while it still
+  // claimed to be restorable would be a lie the schema itself was telling.
+  if (!await terminalizeRecoverableMedia(env, eventId, timestamp)) {
+    await env.DB.prepare(`
+      UPDATE event_cover_purge_progress
+      SET phase = 'fences', updated_at = ? WHERE event_id = ?
+    `).bind(timestamp, eventId).run();
+    return { ...summary, phase: 'fences', remainder: true };
+  }
+
   if (phase === 'fences') {
     await env.DB.prepare(`
       UPDATE event_cover_purge_progress SET phase = 'r2', updated_at = ? WHERE event_id = ?
@@ -2369,6 +2452,97 @@ export async function reconcileEventCoverPurge(
 
   await purgeEventRelationalRows(env, eventId, timestamp);
   return { ...summary, phase: 'complete', remainder: false };
+}
+
+/**
+ * End recovery for a purging event, before anything physical happens.
+ *
+ * Every remaining recoverable row becomes permanently deleted, its retained
+ * Album slot and cover reference go with it under one revision advance, and the
+ * event's recoverable counters are recomputed from what actually remains rather
+ * than decremented by hand — so a row this pass could not take, because an
+ * accepted export still holds its exact source, leaves an honest counter behind.
+ *
+ * Returns false in exactly that case. The purge stays in its waiting phase and
+ * tries again; holds are never released by age.
+ */
+async function terminalizeRecoverableMedia(
+  env: AppEnv,
+  eventId: string,
+  timestamp: string,
+): Promise<boolean> {
+  const heldSourceSql = `
+    EXISTS (
+      SELECT 1 FROM export_media_entries AS e
+      JOIN export_jobs AS j ON j.id = e.export_job_id
+      WHERE e.media_id = media.id
+        AND e.object_bucket_generation = media.object_bucket_generation
+        AND e.object_key = media.object_key
+        AND j.state IN ('queued', 'running')
+    )
+  `;
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE media
+      SET upload_state = 'deleted', deleted_at = ?1, trashed_at = NULL, restore_until = NULL
+      WHERE event_id = ?2
+        AND upload_state = 'stored'
+        AND trashed_at IS NOT NULL
+        AND deleted_at = trashed_at
+        AND NOT (${heldSourceSql})
+    `).bind(timestamp, eventId),
+    env.DB.prepare(`
+      UPDATE event_albums
+      SET entries = (
+            SELECT COALESCE(json_group_array(json(entry.value)), '[]')
+            FROM json_each(
+              CASE WHEN json_valid(event_albums.entries) THEN event_albums.entries ELSE '[]' END
+            ) AS entry
+            WHERE json_extract(entry.value, '$.kind') <> 'photo'
+              OR EXISTS (
+                SELECT 1 FROM media
+                WHERE media.id = json_extract(entry.value, '$.mediaId')
+                  AND media.event_id = event_albums.event_id
+                  AND media.upload_state = 'stored'
+              )
+          ),
+          cover_media_id = (
+            SELECT media.id FROM media
+            WHERE media.id = event_albums.cover_media_id
+              AND media.event_id = event_albums.event_id
+              AND media.upload_state = 'stored'
+          ),
+          revision = revision + 1,
+          updated_at = ?1
+      WHERE event_id = ?2
+    `).bind(timestamp, eventId),
+    // Recomputed, not decremented: this is the one place where "whatever is
+    // actually still recoverable" is the only defensible number.
+    env.DB.prepare(`
+      UPDATE events
+      SET recoverable_media_count = (
+            SELECT count(*) FROM media
+            WHERE media.event_id = events.id AND media.trashed_at IS NOT NULL
+          ),
+          recoverable_bytes = COALESCE((
+            SELECT sum(COALESCE(media.byte_size, 0)) FROM media
+            WHERE media.event_id = events.id AND media.trashed_at IS NOT NULL
+          ), 0)
+      WHERE id = ?
+    `).bind(eventId),
+  ]);
+
+  const remaining = await env.DB.prepare(`
+    SELECT
+      (SELECT count(*) FROM media WHERE event_id = ?1 AND trashed_at IS NOT NULL) AS owners,
+      (SELECT recoverable_media_count + recoverable_bytes FROM events WHERE id = ?1) AS counters,
+      (SELECT count(*) FROM export_media_entries AS e
+        JOIN export_jobs AS j ON j.id = e.export_job_id
+        WHERE j.event_id = ?1 AND j.state IN ('queued', 'running')) AS holds
+  `).bind(eventId).first<{ owners: number; counters: number | null; holds: number }>();
+  return (remaining?.owners ?? 0) === 0
+    && (remaining?.counters ?? 0) === 0
+    && (remaining?.holds ?? 0) === 0;
 }
 
 /**
@@ -2496,6 +2670,10 @@ export async function scheduledCleanup(
   await cleanupGuestMessageRateEvents(env, now);
   await cleanupExpiredAlbumShareSessions(env, now);
   await cleanupExpiredReservations(env, now);
+  // Before the promoter and the janitor, because a row whose recovery just ended
+  // is a row those two are now allowed to act on. Its own bound means a large
+  // backlog drains across passes rather than making one run unbounded.
+  await cleanupExpiredRecoverableMedia(env, now);
   const mediaPromotionPromise = legacyMediaCopyEnabled()
     ? promoteLegacyStoredMedia(env, now)
     : new MediaRepository(env.DB).countPromotions().then((pending) => ({

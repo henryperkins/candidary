@@ -4,7 +4,9 @@ import { applyD1Migrations, reset } from 'cloudflare:test';
 import { createApp } from '../../worker/app';
 import { AuthService } from '../../worker/auth/service';
 import { AccountsRepository } from '../../worker/db/accounts';
+import { ExportsRepository } from '../../worker/db/exports';
 import type { AppEnv } from '../../worker/env';
+import { processExport as processExportAttempt } from '../../worker/workflows/export';
 import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 
 const cloudflareTestEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
@@ -19,6 +21,31 @@ export const testEnv = new Proxy(cloudflareTestEnv, {
   },
 });
 export const origin = env.APP_ORIGIN;
+
+/**
+ * Test convenience for direct Workflow execution. Production callers must
+ * carry the attempt in their durable payload; tests resolve the row explicitly
+ * here so old fixtures stay readable without weakening that production API.
+ */
+export async function processExport(
+  appEnv: AppEnv,
+  jobId: string,
+  now = new Date(),
+  maxPartBytes?: number,
+  executionStartedAt?: string,
+  clock: () => Date = () => now,
+) {
+  const job = await new ExportsRepository(appEnv.DB).getById(jobId);
+  if (!job) return null;
+  return processExportAttempt(
+    appEnv,
+    { jobId, attempt: job.attempt },
+    now,
+    maxPartBytes,
+    executionStartedAt,
+    clock,
+  );
+}
 
 /**
  * Miniflare does not instantiate Workers Rate Limiting bindings. Keep the
@@ -450,12 +477,39 @@ export function png(width = 800, height = 600, size = 64) {
   return bytes;
 }
 
-export async function resetDatabase() {
+export async function resetDatabaseWithExportProtocolLegacyOpen() {
   await reset();
   await applyD1Migrations(env.DB, [{
     name: '0001_core.sql',
     queries: JSON.parse(testEnv.TEST_MIGRATION_QUERIES) as string[],
   }]);
+}
+
+export async function resetDatabaseWithExportProtocolClosed() {
+  await resetDatabaseWithExportProtocolLegacyOpen();
+  const closed = await env.DB.prepare(`
+    UPDATE export_protocol_admission
+    SET state = 'closed', closed_at = ?
+    WHERE singleton = 1 AND state = 'legacy-open'
+  `).bind('2026-08-25T00:00:00.000Z').run();
+  if ((closed.meta.changes ?? 0) !== 1) {
+    throw new Error('Current-schema test setup could not close export protocol admission.');
+  }
+}
+
+export async function resetDatabase() {
+  await resetDatabaseWithExportProtocolClosed();
+  const admitted = await env.DB.prepare(`
+    UPDATE export_protocol_admission
+    SET state = 'open', worker_version_id = ?, admitted_at = ?
+    WHERE singleton = 1 AND state = 'closed'
+  `).bind(
+    '123e4567-e89b-42d3-a456-426614174000',
+    '2026-08-25T00:00:01.000Z',
+  ).run();
+  if ((admitted.meta.changes ?? 0) !== 1) {
+    throw new Error('Current-schema test setup could not admit the export protocol.');
+  }
 }
 
 const PHASE_3_COVER_TRIGGER_NAMES = [
@@ -638,5 +692,143 @@ export async function uploadPending(
     },
     body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   }, testEnv);
-  return (await finalized.json<any>()).data.media;
+  if (finalized.status !== 200) {
+    throw new Error(`Upload fixture failed: ${finalized.status} ${await finalized.text()}`);
+  }
+  // The wire response is a deliberate allowlist — id, MIME, state — so fixtures
+  // read the durable row for everything else they need. Tests that assert on the
+  // response shape do so against the response, not against this record.
+  const row = await testEnv.DB.prepare('SELECT * FROM media WHERE id = ?')
+    .bind(media.id).first<Record<string, unknown>>();
+  if (!row) throw new Error('Upload fixture did not persist a media row.');
+  return {
+    id: row.id as string,
+    eventId: row.event_id as string,
+    uploaderSessionId: row.uploader_session_id as string,
+    objectKey: row.object_key as string,
+    objectBucketGeneration: row.object_bucket_generation as 'legacy' | 'canonical',
+    originalFilename: row.original_filename as string,
+    mimeType: row.mime_type as string,
+    declaredByteSize: row.declared_byte_size as number,
+    byteSize: row.byte_size as number | null,
+    width: row.width as number | null,
+    height: row.height as number | null,
+    guestName: row.guest_name as string,
+    caption: row.caption as string | null,
+    uploadState: row.upload_state as string,
+    publicationStatus: row.publication_status as string,
+    idempotencyKey: row.idempotency_key as string,
+    reservationExpiresAt: row.reservation_expires_at as string,
+    createdAt: row.created_at as string,
+    storedAt: row.stored_at as string | null,
+    capturedAt: row.captured_at as string | null,
+    timelineAt: row.timeline_at as string,
+    favoritedAt: row.favorited_at as string | null,
+    publishedAt: row.published_at as string | null,
+    previewObjectKey: row.preview_object_key as string | null,
+    deletedAt: row.deleted_at as string | null,
+    trashedAt: row.trashed_at as string | null,
+    restoreUntil: row.restore_until as string | null,
+  };
+}
+
+/**
+ * Seed one entry-backed export job directly, for tests that need a specific job
+ * state rather than a specific collection.
+ *
+ * Entry-backed on purpose: migration 0019 forbids a queued complete job with no
+ * frozen `export_media_entries`, and the frozen count and byte sum must match
+ * the job before the queued -> running fence will let it start. Passing the real
+ * media rows keeps both true, so a seeded job behaves exactly like one intake
+ * produced.
+ */
+export async function seedExportJob(input: {
+  id: string;
+  eventId: string;
+  snapshotAt: string;
+  createdAt?: string;
+  state?: 'queued' | 'running' | 'ready' | 'failed' | 'expired';
+  kind?: 'complete' | 'album';
+  media?: ReadonlyArray<Awaited<ReturnType<typeof uploadPending>>>;
+  attempt?: number;
+  executionProtocol?: 'legacy' | 'attempt-v2';
+}): Promise<void> {
+  const media = input.media ?? [];
+  const totalBytes = media.reduce((sum, row) => sum + (row.byteSize ?? row.declaredByteSize), 0);
+  const kind = input.kind ?? 'complete';
+  const createdAt = input.createdAt ?? input.snapshotAt;
+  const state = input.state ?? 'queued';
+  const executionProtocol = input.executionProtocol
+    ?? (state === 'queued' || state === 'running' ? 'attempt-v2' : 'legacy');
+  await testEnv.DB.prepare(`
+    INSERT INTO export_jobs (
+      id, event_id, kind, album_entries_json, state, snapshot_at, media_count,
+      total_bytes, attempt, created_at, guestbook_entry_count, guestbook_shared_count,
+      execution_protocol
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+  `).bind(
+    input.id,
+    input.eventId,
+    kind,
+    kind === 'album' ? '[]' : null,
+    state,
+    input.snapshotAt,
+    media.length,
+    totalBytes,
+    input.attempt ?? 1,
+    createdAt,
+    kind === 'album' ? null : 0,
+    kind === 'album' ? null : 0,
+    executionProtocol,
+  ).run();
+  for (const [index, row] of media.entries()) {
+    await testEnv.DB.prepare(`
+      INSERT INTO export_media_entries (
+        export_job_id, media_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, byte_size, width, height,
+        guest_name, caption, publication_status, created_at, published_at,
+        album_tail_position
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    `).bind(
+      input.id,
+      row.id,
+      row.objectKey,
+      row.objectBucketGeneration,
+      row.originalFilename,
+      row.mimeType,
+      row.declaredByteSize,
+      row.byteSize,
+      row.width,
+      row.height,
+      row.guestName,
+      row.caption,
+      row.publicationStatus,
+      row.createdAt,
+      row.publishedAt,
+      kind === 'album' ? index + 1 : null,
+    ).run();
+  }
+}
+
+/** Move one delivered photo to Recently deleted through the Manager route. */
+export async function trashMedia(
+  access: Awaited<ReturnType<typeof eventAccess>>,
+  mediaId: string,
+) {
+  const response = await createApp().request(
+    `/api/manage/events/${access.event.id}/media/${mediaId}/trash`,
+    { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+    testEnv,
+  );
+  if (response.status !== 200) {
+    throw new Error(`Trash fixture failed: ${response.status} ${await response.text()}`);
+  }
+  return (await response.json<any>()).data.media as {
+    id: string;
+    originalFilename: string;
+    guestName: string;
+    caption: string | null;
+    trashedAt: string;
+    restoreUntil: string;
+  };
 }

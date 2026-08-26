@@ -136,8 +136,13 @@ Library **Download all** creates a `complete` export: every stored, non-deleted 
 photo manifest and printable/private Guestbook artifacts frozen at creation. Album **Download album
 photos** creates an `album` export from the album's immutable ordered photo snapshot; it omits
 Guestbook artifacts and never expands when the album later changes. Both kinds write manifest/ZIP
-artifacts with a 24-hour Ready window. The daily cleanup deletes expired objects before marking the
-job expired; immutable snapshot rows remain available for an authorized retry until event purge.
+artifacts with a 24-hour Ready window. The pre-0020 daily cleanup deletes expired objects before
+marking the job expired; that legacy ordering is an explicit release hazard covered by the 0020
+admission gate below. Current cleanup first wins the exact Ready-to-Expired transition and captures
+that winner's complete top-level and part inventory atomically, then deletes only those keys and
+clears only that same expired inventory. An R2 failure leaves the inventory on the Expired row for a
+bounded later recovery pass. Immutable snapshot rows remain available for an authorized retry until
+event purge.
 
 ## Public pages, crawlers, and agents
 
@@ -179,8 +184,9 @@ Each retry increments `attempt`, uses a new deterministic Workflow ID/prefix, an
 Post-cutover exports also freeze Guestbook snapshot metadata and entries. They produce a guest-visible
 printable HTML keepsake and a separate private CSV archive; the private CSV may include author-only
 content and is never a guest download. Both objects share the 24-hour Ready expiry and are deleted
-from the durable object inventory before the job becomes Expired. Event purge removes the objects,
-dependent snapshot rows, notes/captions, and finally the event in that order.
+only after the exact job becomes Expired with its inventory retained for recovery; successful R2
+deletion then clears the exact expired inventory. Event purge removes the objects, dependent snapshot
+rows, notes/captions, and finally the event in that order.
 
 Investigate:
 
@@ -328,7 +334,7 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `MESSAGE_PURGED` — a permanently deleted note was retried with its original key; it cannot be restored or recreated.
 - `MESSAGE_EVENT_LIMIT` — the event has reached its retained standalone-note cap. Existing Guestbook content remains readable and manageable.
 - `EVENT_PHASE_CONFLICT` — the event phase no longer accepts a new note. Preserve the draft and keep the existing book readable.
-- `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh the affected surface. For a stale Manager Guestbook action, refetch the row or first page instead of replaying the mutation.
+- `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh the affected surface. For a stale Manager Guestbook action, refetch the row or first page instead of replaying the mutation. On the recovery routes this is also the ordinary answer to a repeated `trash`, a `restore` past `restore_until`, a `restore` that lost to permanent cleanup, and a `cancel-reservation` aimed at a delivered photo. Every one of those changes no counter.
 - `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
@@ -348,6 +354,174 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `RATE_LIMITED` on an album-share exchange — 2,000 unexpired sessions already exist for that share. Honor the exact `Retry-After`, which reaches the earliest active expiry; expired rows do not count.
 - `EXPORT_MEDIA_UPGRADE_REQUIRED` — one or more stored originals still point at the legacy bucket. Copy-only may already have verified the canonical bytes, but export remains closed until the reviewed canonical-live pointer cutover completes. Never bypass the canonical-generation snapshot rule.
 - `EXPORT_ALREADY_ACTIVE`, `EXPORT_EMPTY`, `EXPORT_FAILED`, `EXPORT_LIMIT_EXCEEDED`, `EXPORT_SNAPSHOT_CHANGED` — inspect the active job, immutable Guestbook snapshot metadata, and persisted object inventory.
+- `EXPORT_SOURCE_REMOVED` — a frozen export source is gone for good, so this job can never run again. It is produced by the guarded retry transition in `worker/db/exports.ts` and stored by migration `0019_media_recovery.sql` when it validates existing queued jobs; it is never passed through from an arbitrary stored string. Causes, in the order worth checking: the photo was permanently deleted (by its guest, by recovery expiry, or by purge); its pointer moved and the frozen key is no longer current; or that exact key's `media_object_write_tombstones` row already entered suppression. A photo the host merely moved to Recently deleted does **not** produce this — its bytes are retained and its job stays retryable. The only action is to prepare the current collection; there is nothing to repair on the old job, and no `HEAD` loop will change the answer.
+
+### Recoverable host deletion (0019)
+
+Moving a photo to Recently deleted is a D1 state change and nothing else. The bytes, the object
+inventory, the publication status, the album position, and the favorite all stay exactly as they were;
+`media.trashed_at` and `media.restore_until` are set together, and `deleted_at` is set to the same
+instant as `trashed_at`. That equality is the whole discriminator:
+
+| Shape | Meaning |
+| --- | --- |
+| `trashed_at IS NULL AND deleted_at IS NULL` | active, delivered |
+| `trashed_at IS NOT NULL AND deleted_at = trashed_at` | recoverable |
+| `upload_state = 'deleted' AND trashed_at IS NULL` | permanently deleted |
+
+`deleted_at = trashed_at` is also a deliberate compatibility marker: an 0018 Worker reads it as
+ordinary deletion, filters the row out of every read, and refuses its own delete path before touching
+R2 — which is what makes migration-first deployment safe up to the first trash write.
+
+A retained photo still spends the event's capacity. `events.recoverable_media_count` and
+`events.recoverable_bytes` carry it, reservation and finalization count `reserved + stored +
+recoverable`, and a database trigger enforces that sum against the same 10,000-photo and 100-GiB caps
+on every counter write — including one issued by the older Worker. Trash that appeared to free space
+would make a later Restore fail for want of room, and a UI that promised recovery would have lied.
+
+`restore_until` is `min(now + 30 days, management_access_expires_at, purge_after)`, computed inside the
+transition from the event's own live values. Recovery never outlives the authorization needed to
+perform it, and the exact deadline does not exist until the server accepts the transition.
+
+Diagnosing a stuck row:
+
+```sql
+SELECT id, upload_state, trashed_at, deleted_at, restore_until
+FROM media WHERE event_id = ? AND trashed_at IS NOT NULL
+ORDER BY restore_until;
+```
+
+An expired row that is still listed is not a bug. `MediaRepository.permanentlyDeleteTrashed` refuses
+while an accepted export still holds that exact `(object_bucket_generation, object_key)` through an
+`export_media_entries` row of a `queued` or `running` job — the host sees **Recovery expired · cleanup
+pending**, Restore is already gone, and the next pass after that job becomes terminal removes it. To
+see the hold:
+
+```sql
+SELECT j.id, j.state FROM export_media_entries e
+JOIN export_jobs j ON j.id = e.export_job_id
+WHERE e.media_id = ?
+  AND e.object_bucket_generation = ?
+  AND e.object_key = ?
+  AND j.state IN ('queued', 'running');
+```
+
+Supply the media id, bucket generation, and object key from the expired row's current pointer. A job
+that froze a different generation or key is not a hold on the bytes cleanup is trying to remove.
+
+Physical deletion is a separate claim. `MediaRepository.claimMediaObjectDeletion` wins the suppression
+transition for the exact aliases nothing else owns and returns them as a `MediaObjectDeletionClaim`;
+`deleteMediaObjectAliases` deletes only those keys. A key an active export holds, or a recoverable
+photo owns, never appears in a claim, and its bytes stay for the existing tombstone janitor. Never
+delete a media object by assembling key sets by hand — that is exactly the bypass the source hold
+exists to close.
+
+Applying `0019` is all-or-nothing and refuses while any export job is `running`. Wait for the existing
+Workflow to become terminal and apply it again; the migration cannot reason about a job that is
+reading R2 right now. Inside its transaction it also fails every queued job it cannot vouch for —
+`EXPORT_SOURCE_REMOVED` — which is expected and needs no repair beyond preparing the collection again.
+After the new Worker admits the first trash write or `attempt-v2` export, the release is
+forward-fix-only: the standard 0018 code rollback is no longer a valid recovery path.
+
+### Export execution ownership (0020)
+
+Migration `0020_export_progress.sql` is additive and deliberately differs from 0019's application
+gate. It may be applied while a `legacy` export is running: every existing row receives
+`execution_protocol = 'legacy'`, `execution_transition = 0`, null execution/progress fields, and its
+state, attempt, `started_at`, and artifact inventory remain untouched. Old Worker SQL continues to
+operate on those legacy rows. New code opts in only a pristine queued job, or one exact terminal Retry,
+to `attempt-v2`. The migration installs the immutable singleton `export_protocol_admission` in
+`legacy-open`, so old HTTP remains usable after the additive migration. D1 gates every active job
+INSERT and terminal-to-active Retry by protocol: `legacy-open` admits only `legacy`, `closed` admits
+neither protocol, and `open` admits only `attempt-v2`. Closing and opening both require zero queued or
+running legacy rows. A successful close serializes against racing old writes and cannot be reversed.
+Once the candidate owns HTTP, closed admission returns a safe 503 and cannot leave a job, delete an
+artifact, or dispatch a Workflow.
+
+For a v2 row, D1 owns the exact state, attempt, execution start, transition counter, and durable
+whole-part progress tuple. A pinned old Workflow callback cannot claim, complete, fail, retry, or
+expire that row: its old statement loses at the D1 trigger before it reaches the callback's R2 work.
+That protection does **not** make the old scheduled cleanup safe. The old daily path deletes R2
+artifacts before its `Ready -> Expired` D1 update, so it can destroy a v2 winner's bytes and only then
+discover that its update lost.
+
+Worker HTTP traffic and Workflow definitions change separately. Treat the first v2/trash-capable
+production release as an exclusive admission, not as the routine automatic-deploy path:
+
+First cut over the isolated preview environment. Freeze all preview uploads, apply 0020 and verify
+`legacy-open`, then upload and inspect one exact reviewed version while it is inert. Drain active legacy
+work and atomically close. Prove the full preview config has the expected Workers.dev identity and no
+route, Cron, queue, event-trigger, or address side effects; promote the captured version alone, update
+and inspect its three Workflow definitions, verify safe 503 while closed, then open with that exact
+lowercase UUID and canonical timestamps. If the control-plane proof or any later check fails, keep
+admission non-open, record hosted export conformance as unavailable, and ship only a reviewed forward
+fix. The canonical preview commands are in [deployment.md](deployment.md).
+
+1. Name one release owner, record the UTC start, freeze every production deployment and every merge
+   except the exact immutable reviewed release, and prove no build or deployment is in flight.
+2. Before applying 0020, prove the sole active production version is at 100% and its tag is the exact
+   frozen old source `df2b66510ccee6893ca91ab752337df8e52c6207`. Stop and freeze/review the actual
+   deployed source if it differs.
+3. Before the reviewed merge, change the connected production Build deploy command to the repository's
+   upload-only production-version command. The Build must upload an inert version tagged with the
+   exact merged full SHA; it must not promote traffic or mutate triggers.
+4. Apply and verify 0020 while the old Worker remains active. Unlike 0019, do not wait for a running
+   legacy export merely to apply 0020. Prove the admission singleton is exactly `legacy-open` with null
+   audit fields; old create/Retry remains legal at this stage.
+5. Merge only the reviewed SHA under the recorded exception. Capture the inert Build version ID and
+   prove its tag equals the merged SHA. From that clean `main`, use the existing deploy helper to emit
+   `wrangler.cron-only.json` and `wrangler.workflows-only.json`; never run `triggers deploy` against the
+   full production config during this cutover.
+6. With the Cron-only config, detach daily `17 3 * * *` while retaining hourly `47 * * * *`. Record the
+   successful detach time and wait at least 30 minutes; extend the drain through any old daily invocation
+   observed to finish later. A Workflow drain or timing guess is not proof that old scheduled cleanup is
+   gone.
+7. After that daily drain, wait for every legacy queued/running export to become terminal and atomically
+   close only while that count remains zero. A racing old active INSERT/Retry either blocks the close or
+   loses after it. Closing is the one-way export-availability cutover: old writes cannot be re-enabled.
+8. Immediately promote the one verified inert Worker version alone at 100% and prove it is sole. The
+   candidate returns safe 503 while closed. Promotion remains the separate trash/data rollback point:
+   from here a pre-0020 Worker is forbidden.
+9. With the Workflow-only config and no `--triggers` flag, update the exact three production Workflow
+   definitions and inspect each expected script/class mapping. New export HTTP remains paused, so there
+   is no old-HTTP/new-Workflow or new-HTTP/old-Workflow payload window.
+10. Open `export_protocol_admission` exactly once with that active lowercase UUID Worker version ID,
+    preserved canonical close time, and an exact canonical UTC admission time. The trigger rechecks zero
+    active legacy rows. Require one changed row and read back the exact open row.
+11. Restore both Crons with the Cron-only config only after that proof. Keep the merge/deploy freeze
+   until a later `cleanup_completed` record from the daily Cron has
+   `cleanupKind = 'daily-lifecycle'`, exact cron `17 3 * * *`, and the active Worker version ID. An
+   hourly maintenance record is not substitute evidence. Restore the connected Build command only after
+   this proof and verify the settings change itself started no build or deployment.
+
+The old unsafe ordering is why steps 6–11 are hard gates:
+
+- Detaching Cron with the full production config would also PUT every Workflow definition in pinned
+  Wrangler 4.123.0.
+- Updating Workflows before the new Worker is sole would expose incompatible legacy payloads.
+- Promoting the new Worker before Workflow update is safe only because D1 admission is still closed.
+- The admission row cannot be deleted, replaced, returned to `legacy-open`, reclosed, or retargeted.
+
+The exact commands and expected control-plane config keys are canonical in
+[deployment.md](deployment.md).
+
+Closing is already a forward-only export-availability decision because legacy admission cannot be
+restored. The ordinary previous-version code rollback remains permitted only before the new Worker is
+promoted and before the first admitted trash or v2 write. Promotion is the broader trash/data rollback
+point. After promotion, never promote a pre-0020 Worker. Keep Build upload-only and the freeze in place,
+independently review a current forward fix, verify its inert version/tag, promote only that version, and
+match its Worker/Workflow protocol to the existing gate state. If admission is still closed, continue
+the original one-time open after the fix passes. If admission is already open, preserve it and deploy
+only `attempt-v2`-compatible forward changes; never reclose or rerun admission. Repeat the applicable
+Workflow/version/Cron proof. Remote Build settings, migration application, Cron changes, merge,
+admission, and version promotion require a
+separately authorized production operation; this repository work does none of them.
+
+Platform behavior references: [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/),
+[build branches](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/),
+[GitHub integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/),
+[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/), and
+[versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/).
 
 Production secret provisioning and remote D1 migration are explicit durable-state operations, not
 steps hidden inside routine code deployment. Follow [deployment.md](deployment.md), and never rotate

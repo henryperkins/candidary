@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
-import type { PublicationStatus } from '../../shared/contracts';
+import type { GalleryAudienceSummaryView, PublicationStatus } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import {
   assertOverridesLegible,
@@ -13,8 +13,15 @@ import {
 import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
-import { managerGalleryMediaView, managerMediaView, MediaRepository } from '../db/media';
+import {
+  managerGalleryMediaView,
+  managerMediaView,
+  managerTrashedMediaView,
+  MediaRepository,
+  uploadMediaView,
+} from '../db/media';
 import { AlbumRepository } from '../db/album';
+import { AlbumSharesRepository } from '../db/album-shares';
 import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { requestOrigin } from '../origins';
@@ -40,11 +47,13 @@ import {
 } from '../../shared/constants';
 import { decodeGalleryCursor, encodeGalleryCursor } from '../http/gallery-cursor';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
+import { decodeTrashCursor, encodeTrashCursor } from '../http/trash-cursor';
 import { resolveEventSchedule } from '../http/event-schedule';
 import { eventStartTime, selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { deleteEventData } from '../workflows/cleanup';
-import { deleteMediaObjectAliases } from '../storage/media';
+import { privateJson } from '../http/private-json';
+import { retireMediaObjects } from '../storage/media';
 
 const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 
@@ -78,10 +87,16 @@ const settingsSchema = z.object({
 const photoIntakeSchema = z.object({
   action: z.enum(['open_early', 'return_to_schedule', 'pause', 'reopen']),
 });
+// Publication only. Removing a delivered photo is its own explicit, confirmed
+// transition with its own recovery contract — it stopped being a third value in
+// a moderation enum the moment it stopped being irreversible.
 const actionSchema = z.object({
-  action: z.enum(['publish', 'hide', 'delete']),
+  action: z.enum(['publish', 'hide']),
   expectedStatus: z.enum(['unpublished', 'published', 'hidden']).default('unpublished'),
 });
+const emptyBodySchema = z.object({}).strict();
+const trashLimitSchema = z.coerce.number().int().min(1).max(MANAGER_MEDIA_MAX_PAGE_SIZE)
+  .default(MANAGER_MEDIA_PAGE_SIZE);
 const bulkActionSchema = z.object({
   ids: z.array(z.uuid())
     .min(1)
@@ -161,7 +176,37 @@ function publicationTarget(action: 'publish' | 'hide'): PublicationStatus {
   return action === 'publish' ? 'published' : 'hidden';
 }
 
+/**
+ * A destructive transition whose only inputs are its path.
+ *
+ * An absent or whitespace body counts as `{}`; anything with a key in it is a
+ * client sending a parameter this route does not have, which is worth failing on
+ * rather than ignoring.
+ */
+async function assertEmptyBody(context: Context<AppBindings>): Promise<void> {
+  const raw = (await context.req.text().catch(() => '')).trim();
+  let body: unknown = {};
+  if (raw.length > 0) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      throw new ApiError('VALIDATION_FAILED', 'This action takes no options.', 422);
+    }
+  }
+  if (!emptyBodySchema.safeParse(body).success) {
+    throw new ApiError('VALIDATION_FAILED', 'This action takes no options.', 422);
+  }
+}
+
 export const manageRoutes = new Hono<AppBindings>();
+
+// Recovery bodies name a photograph, its guest, and a deadline. None of that is
+// shared, and none of it may sit in a cache keyed on the URL alone.
+manageRoutes.use('/manage/events/:eventId/media/trash', privateJson);
+manageRoutes.use('/manage/events/:eventId/media/:mediaId/trash', privateJson);
+manageRoutes.use('/manage/events/:eventId/media/:mediaId/restore', privateJson);
+manageRoutes.use('/manage/events/:eventId/media/:mediaId/cancel-reservation', privateJson);
+manageRoutes.use('/manage/events/:eventId/gallery/summary', privateJson);
 
 // Re-displays the printed credential for a host who lost the card. There is no
 // replacement action beside it on purpose: a new link would not be on the signs
@@ -500,6 +545,23 @@ manageRoutes.get('/manage/events/:eventId/album', async (context) => {
   return context.json({ data: { album }, requestId: context.get('requestId') });
 });
 
+manageRoutes.get('/manage/events/:eventId/gallery/summary', async (context) => {
+  const auth = await requireManager(context);
+  const [album, albumLink, guestGalleryPublishedCount] = await Promise.all([
+    new AlbumRepository(context.env.DB).get(auth.event.id),
+    new AlbumSharesRepository(context.env.DB).audienceStatus(auth.event.id),
+    new MediaRepository(context.env.DB).countPublishedForGallerySummary(auth.event.id),
+  ]);
+  const summary: GalleryAudienceSummaryView = {
+    albumPhotoCount: album.photoCount,
+    albumEntryCount: album.entries.length,
+    albumLink,
+    guestGalleryVisible: auth.event.galleryVisible,
+    guestGalleryPublishedCount,
+  };
+  return context.json({ data: { summary }, requestId: context.get('requestId') });
+});
+
 /**
  * Replaces the album's order. Reorder, add a section, rename one, and remove one are all
  * this request — the client composes the list it wants and sends it whole, so there is no
@@ -597,23 +659,113 @@ manageRoutes.patch('/manage/events/:eventId/media/:mediaId', async (context) => 
   if (!media || media.eventId !== context.req.param('eventId')) {
     throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
   }
-  const changedAt = new Date().toISOString();
-  const result = parsed.data.action === 'delete'
-    ? await repository.delete(media.id, changedAt)
-    : await repository.setPublication(media.id, parsed.data.expectedStatus, publicationTarget(parsed.data.action), changedAt);
-  if (parsed.data.action === 'delete') {
-    await deleteMediaObjectAliases(
-      context.env.MEDIA_BUCKET,
-      context.env.CANONICAL_MEDIA_BUCKET,
-      repository,
-      media,
-    ).catch(() => undefined);
-  }
-  const item = parsed.data.action === 'delete'
-    ? null
-    : await new GuestbookRepository(context.env.DB).captionItemById(result.id);
+  const result = await repository.setPublication(
+    media.id,
+    parsed.data.expectedStatus,
+    publicationTarget(parsed.data.action),
+    new Date().toISOString(),
+  );
+  const item = await new GuestbookRepository(context.env.DB).captionItemById(result.id);
   return context.json({
     data: { media: managerMediaView(result), item },
+    requestId: context.get('requestId'),
+  });
+});
+
+/**
+ * Move one delivered photo to Recently deleted.
+ *
+ * The body is strictly empty. Everything that decides the outcome — which photo,
+ * which event, and how long recovery lasts — is either in the path or computed
+ * by the server from the event's own expiry values, so there is nothing a client
+ * could usefully send and nothing it could get wrong.
+ */
+manageRoutes.post('/manage/events/:eventId/media/:mediaId/trash', async (context) => {
+  await managerForEvent(context, true);
+  await assertEmptyBody(context);
+  const media = await new MediaRepository(context.env.DB).trashStored(
+    context.req.param('eventId'),
+    context.req.param('mediaId'),
+    new Date().toISOString(),
+  );
+  return context.json({
+    data: { media: managerTrashedMediaView(media) },
+    requestId: context.get('requestId'),
+  });
+});
+
+manageRoutes.post('/manage/events/:eventId/media/:mediaId/restore', async (context) => {
+  await managerForEvent(context, true);
+  await assertEmptyBody(context);
+  const media = await new MediaRepository(context.env.DB).restoreTrashed(
+    context.req.param('eventId'),
+    context.req.param('mediaId'),
+    new Date().toISOString(),
+  );
+  return context.json({
+    data: { media: managerMediaView(media) },
+    requestId: context.get('requestId'),
+  });
+});
+
+manageRoutes.get('/manage/events/:eventId/media/trash', async (context) => {
+  await managerForEvent(context);
+  const limit = trashLimitSchema.safeParse(context.req.query('limit'));
+  if (!limit.success) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      `Ask for between 1 and ${MANAGER_MEDIA_MAX_PAGE_SIZE} photos per page.`,
+      422,
+    );
+  }
+  const rawCursor = context.req.query('cursor');
+  const page = await new MediaRepository(context.env.DB).listTrashed(context.req.param('eventId'), {
+    cursor: rawCursor === undefined ? undefined : decodeTrashCursor(rawCursor),
+    limit: limit.data,
+  });
+  return context.json({
+    data: {
+      media: page.media,
+      nextCursor: page.nextCursor ? encodeTrashCursor(page.nextCursor) : null,
+    },
+    requestId: context.get('requestId'),
+  });
+});
+
+/**
+ * Cancel one reservation that never became a photograph.
+ *
+ * Recovery is for delivered originals. A reserved or failed row has no bytes a
+ * host could want back, so this is permanent — and it is a separate route rather
+ * than a value in the publication enum, so nothing can reach it by sending the
+ * wrong word to the wrong photo.
+ */
+manageRoutes.post('/manage/events/:eventId/media/:mediaId/cancel-reservation', async (context) => {
+  await managerForEvent(context, true);
+  await assertEmptyBody(context);
+  const repository = new MediaRepository(context.env.DB);
+  const media = await repository.getById(context.req.param('mediaId'));
+  if (!media || media.eventId !== context.req.param('eventId')) {
+    throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
+  }
+  if (media.uploadState === 'stored') {
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'This photo was delivered. Move it to Recently deleted instead.',
+      409,
+    );
+  }
+  const cancelledAt = new Date().toISOString();
+  const cancelled = await repository.delete(media.id, cancelledAt);
+  await retireMediaObjects(
+    context.env.MEDIA_BUCKET,
+    context.env.CANONICAL_MEDIA_BUCKET,
+    repository,
+    media,
+    cancelledAt,
+  ).catch(() => undefined);
+  return context.json({
+    data: { media: uploadMediaView(cancelled) },
     requestId: context.get('requestId'),
   });
 });
