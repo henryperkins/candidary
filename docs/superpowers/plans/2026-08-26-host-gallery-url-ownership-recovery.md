@@ -247,6 +247,7 @@ git commit -m "fix: preserve manager destinations through recovery"
 
 **Files:**
 - Modify: `src/features/gallery/ManagerGalleryWorkspace.tsx`
+- Modify: `src/pages/ManagerPage.tsx`
 - Modify: `tests/ui/album-workspace.test.tsx`
 - Modify: `tests/ui/app.test.tsx`
 - Modify: `tests/ui/host-private-gallery.test.tsx`
@@ -263,6 +264,7 @@ onModeChange(mode: GalleryMode): void;
 - The mode button requests a change; it does not render the requested mode until the parent supplies that prop.
 - The existing imperative `ManagerGalleryWorkspaceHandle` remains unchanged and reports Album preparation from the controlled mode.
 - Replace the private `shared` mode value with canonical `guest-gallery` throughout production code; compatibility remains only at URL parsing.
+- During this intermediate refactor commit, `ManagerPage` temporarily owns one `GalleryMode` state and adopts mode requests through its existing Album-leave coordinator. Task 4 removes that transitional state and derives the value from Router location; no second or optional workspace owner is permitted.
 
 - [ ] **Step 1: Write the failing controlled-mode regression**
 
@@ -282,7 +284,9 @@ Expected: FAIL because `mode` and `onModeChange` are not production props and th
 
 - [ ] **Step 3: Convert the workspace to controlled mode**
 
-Remove the local `useState<GalleryMode>('library')` and local mode-leave destination owner. Mode buttons call `onModeChange(value)`. Keep external Album settlement methods and `externalLeaveActive` ownership. On an adopted transition away from Guest gallery, clear its selection once; do not add Slice 4 anchor or intent behavior in this checkpoint.
+Remove the workspace's local `useState<GalleryMode>('library')` and local mode-leave destination owner. Mode buttons call `onModeChange(value)`. Keep external Album settlement methods and `externalLeaveActive` ownership. On an adopted transition away from Guest gallery, clear its selection once; do not add Slice 4 anchor or intent behavior in this checkpoint.
+
+Move the single temporary mode owner to `ManagerPage`, pass it through both required props, and extend `ManagerLeaveDestination` with `{ kind: 'gallery-mode'; mode: GalleryMode }`. A non-Album request may adopt the parent value directly. A request away from controlled Album must enter the existing `beginAlbumLeave()` generation and adopt only after its exact outcome is ready; retry, stay, and discard keep using the existing Manager prompt. This is a compile-safe migration bridge, not URL ownership: do not call `navigate()` or read search state here. Task 4 replaces this temporary state and rewires the already-centralized destination commit to Router navigation.
 
 Update all test render helpers with small test-owned controlled wrappers where a test clicks modes:
 
@@ -315,7 +319,7 @@ npm run typecheck:e2e
 Commit:
 
 ```bash
-git add src/features/gallery/ManagerGalleryWorkspace.tsx tests/ui/album-workspace.test.tsx tests/ui/app.test.tsx tests/ui/host-private-gallery.test.tsx
+git add src/features/gallery/ManagerGalleryWorkspace.tsx src/pages/ManagerPage.tsx tests/ui/album-workspace.test.tsx tests/ui/app.test.tsx tests/ui/host-private-gallery.test.tsx
 git commit -m "refactor: control gallery mode from its owner"
 ```
 
@@ -329,7 +333,7 @@ git commit -m "refactor: control gallery mode from its owner"
 - Modify: `docs/superpowers/host-gallery-verification-matrix.md`
 
 **Interfaces:**
-- Consumes: `parseManagerLocation()`, `managerHref()`, `ManagerLocation`, and controlled Gallery props.
+- Consumes: `parseManagerLocation()`, `managerHref()`, `ManagerLocation`, and Task 3's transitional controlled Gallery owner.
 - Produces URL-controlled section/mode rendering, canonical `replace`, user-navigation `push`, recovery links retaining `pathname + canonicalSearch`, and unchanged Album settlement behavior.
 - Existing `openRecentlyDeleted` and Settings-repair paths remain local transient actions until the later intent checkpoint; their side effects occur only when the authorized destination is committed.
 - The Router blocker predicate covers both unconfirmed work and leaving the current canonical Album location. An exact programmatic target authorized by a completed Album preparation bypasses only the Album-location part of that predicate, never unrelated unsaved-work guards.
@@ -374,7 +378,7 @@ Run the exact new test names with:
 npx vitest run --config vitest.config.ts tests/ui/app.test.tsx tests/ui/manager-recovery.test.tsx -t "canonical Manager location|traverses Manager work in history|keeps Album rendered until URL settlement|preserves the Manager destination in recovery"
 ```
 
-Expected: failures showing current initial-only section parsing, local Gallery mode, Back exiting work, and queryless recovery links.
+Expected: failures showing current initial-only section parsing, transitional local Gallery mode, Back exiting work, and queryless recovery links.
 
 - [ ] **Step 4: Derive section and mode from Router**
 
@@ -390,9 +394,9 @@ const galleryMode = parsedLocation.location.section === 'gallery'
   : 'library';
 ```
 
-Canonicalize in a layout effect only when `needsReplace`, preserving `routerLocation.state` and hash. Remove `initialSection()` and the independent `section` state. Initialize Settings' retained mount from the parsed section. Split destination request, settlement, and adoption cleanup so selection/error resets and top scrolling happen after the URL is adopted, while Settings/Appearance flush still happens when leaving is requested.
+Canonicalize in a layout effect only when `needsReplace`, preserving `routerLocation.state` and hash. Remove `initialSection()`, the independent `section` state, and Task 3's transitional `galleryMode` state. Initialize Settings' retained mount from the parsed section. Split destination request, settlement, and adoption cleanup so selection/error resets and top scrolling happen after the URL is adopted, while Settings/Appearance flush still happens when leaving is requested.
 
-Extend the local destination union with `{ kind: 'gallery-mode'; mode: GalleryMode }`. Its commit serializes the target and calls `navigate(target)` only after the current Album preparation generation is ready. Record that exact authorized target in a ref until adoption so the Router blocker does not repeat the Album preparation; the authorization bypasses only the Album-location condition and is retired on adoption, cancellation, or replacement. Pass `galleryMode` and the request callback to `ManagerGalleryWorkspace`.
+Reuse the local `{ kind: 'gallery-mode'; mode: GalleryMode }` destination added in Task 3. Replace its temporary state commit with serialization and `navigate(target)` only after the current Album preparation generation is ready. Record that exact authorized target in a ref until adoption so the Router blocker does not repeat the Album preparation; the authorization bypasses only the Album-location condition and is retired on adoption, cancellation, or replacement. Pass Router-derived `galleryMode` and the request callback to `ManagerGalleryWorkspace`.
 
 Change `useBlocker` from the current boolean to a function. It returns true when ordinary `shouldBlockNavigation` is true or when the current pathname/event and parsed location are the canonical Gallery Album and the next location is anything else. Browser Back/Forward therefore enters the existing destination-keyed `beginAlbumLeave({ kind: 'router' })` generation and calls `blocker.proceed()` only after ready settlement. Hide the Album prompt while a clean Album check is merely waiting with no unconfirmed domains; show the existing prompt for invalid/failed Album outcomes or actual unconfirmed work.
 
