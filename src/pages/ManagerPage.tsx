@@ -2,7 +2,13 @@ import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon,
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useBlocker, useLocation, useNavigate, useParams } from 'react-router-dom';
+import {
+  useBlocker,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+  useParams,
+} from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import {
@@ -11,6 +17,16 @@ import {
   type GalleryMode,
   type ManagerLocation,
 } from '../app/manager-location';
+import {
+  consumeManagerIntent,
+  sanitizeManagerHistoryState,
+  withGalleryAnchor,
+  withManagerIntent,
+  type GalleryAnchor,
+  type ManagerNavigationIntent,
+  type PublicationFilter,
+  type RouterHistoryState,
+} from '../app/manager-history-state';
 import { eventDateTimeDisplay, formatRetentionDate, TIME_UNAVAILABLE } from '../app/event-date-time';
 import { useDeadlineClock } from '../app/use-deadline-clock';
 import { formatBytes } from '../app/format';
@@ -86,8 +102,16 @@ type IntakeMode = 'active' | 'trash';
 
 type ManagerSectionDestination =
   | { kind: 'section'; section: Section }
-  | { kind: 'recently-deleted' }
-  | { kind: 'settings-repair' };
+  | { kind: 'complete-export' }
+  | { kind: 'recently-deleted'; focusMediaId: string }
+  | { kind: 'settings-repair' }
+  | { kind: 'guest-gallery-settings'; publicationFilter: PublicationFilter }
+  | { kind: 'guest-gallery-return'; publicationFilter: PublicationFilter };
+
+type GuestGalleryReturn = Extract<
+ManagerNavigationIntent,
+{ kind: 'edit-guest-gallery-availability' }
+>['returnTo'];
 
 type ManagerLeaveDestination =
   | { kind: 'router'; locationKey: string }
@@ -103,6 +127,45 @@ type ManagerLeaveAttempt = {
 type PendingManagerAdoption = {
   destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>;
   target: string;
+  state: RouterHistoryState;
+};
+
+type PendingManagerStateCleanup = {
+  generation: number;
+  ownerEventId: string;
+  ownerEventGeneration: number;
+  sourceIdentity: string;
+  sourceKey: string;
+  sourceTarget: string;
+  target: string;
+  cleanupLocation: { pathname: string; search: string; hash: string };
+  cleanupState: RouterHistoryState;
+  initial: boolean;
+  anchor: GalleryAnchor | null;
+  intent: ManagerNavigationIntent | null;
+  destination: Exclude<ManagerLeaveDestination, { kind: 'router' }> | null;
+};
+
+type PendingGalleryAnchorCapture = {
+  ownerEventId: string;
+  ownerEventGeneration: number;
+  sourceKey: string;
+  sourceTarget: string;
+  state: RouterHistoryState;
+  outcome: 'pending' | 'committed' | 'retired';
+};
+
+type BrowserPopObservation = {
+  currentTarget: string;
+  nextTarget: string;
+  nextKey: string | null;
+};
+
+type PendingGalleryRestoration = {
+  generation: number;
+  mode: GalleryMode;
+  anchor: GalleryAnchor;
+  frameScheduled: boolean;
 };
 
 function sameManagerDestination(
@@ -118,6 +181,15 @@ function sameManagerDestination(
   }
   if (left.kind === 'section' && right.kind === 'section') {
     return left.section === right.section;
+  }
+  if (left.kind === 'recently-deleted' && right.kind === 'recently-deleted') {
+    return left.focusMediaId === right.focusMediaId;
+  }
+  if (
+    (left.kind === 'guest-gallery-settings' || left.kind === 'guest-gallery-return')
+    && (right.kind === 'guest-gallery-settings' || right.kind === 'guest-gallery-return')
+  ) {
+    return left.publicationFilter === right.publicationFilter;
   }
   return true;
 }
@@ -162,8 +234,14 @@ type EntryAction = 'rotate' | 'disable';
  * and no original to download.
  */
 type IntakePageState =
-  | { mode: 'active'; rows: MediaView[]; cursor: string | null }
-  | { mode: 'trash'; rows: TrashedMediaView[]; cursor: string | null };
+  | {
+      mode: 'active'; rows: MediaView[]; cursor: string | null;
+      firstPageIds: ReadonlySet<string>;
+    }
+  | {
+      mode: 'trash'; rows: TrashedMediaView[]; cursor: string | null;
+      firstPageIds: ReadonlySet<string>;
+    };
 
 interface EventEntryLoad {
   // Null once the printed entry has been disabled. There is no replacement to
@@ -233,6 +311,7 @@ export function ManagerPage() {
 function ManagerEventPage({ eventId }: { eventId: string }) {
   const routerLocation = useLocation();
   const navigate = useNavigate();
+  const navigationType = useNavigationType();
   const parsedLocation = parseManagerLocation(routerLocation.search);
   const section = parsedLocation.location.section;
   const galleryMode = parsedLocation.location.section === 'gallery'
@@ -240,30 +319,34 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     : 'library';
   const canonicalManagerHref = managerHref(eventId, parsedLocation.location);
   const recoveryReturnTo = routerLocation.pathname + parsedLocation.canonicalSearch;
-  useLayoutEffect(() => {
-    if (!parsedLocation.needsReplace) return;
-    void navigate({
-      pathname: routerLocation.pathname,
-      search: parsedLocation.canonicalSearch,
-      hash: routerLocation.hash,
-    }, {
-      replace: true,
-      state: routerLocation.state,
-    });
-  }, [
-    navigate,
-    parsedLocation.canonicalSearch,
-    parsedLocation.needsReplace,
-    routerLocation.hash,
-    routerLocation.pathname,
-    routerLocation.state,
-  ]);
   // A route can change while a confirmation, Undo, or write from the previous
   // event is still settling.  Resource controllers reject that stale work; this
   // scope does the same for Manager-local UI state and imperative workspace refs.
   const eventScope = useRef({ eventId, generation: 0 });
   if (eventScope.current.eventId !== eventId) {
     eventScope.current = { eventId, generation: eventScope.current.generation + 1 };
+  }
+  const managerMounted = useRef(true);
+  const managerAdoptionGeneration = useRef(0);
+  const pendingManagerStateCleanup = useRef<PendingManagerStateCleanup | null>(null);
+  const suspendedManagerStateCleanup = useRef<PendingManagerStateCleanup | null>(null);
+  const managerCleanupInvocation = useRef<PendingManagerStateCleanup | null>(null);
+  const pendingGalleryAnchorCapture = useRef<PendingGalleryAnchorCapture | null>(null);
+  const activeGalleryAnchorCapture = useRef<PendingGalleryAnchorCapture | null>(null);
+  const galleryAnchorCaptureInvocation = useRef<PendingGalleryAnchorCapture | null>(null);
+  const [managerAdoptionEpoch, setManagerAdoptionEpoch] = useState(0);
+
+  function retireGalleryAnchorCapture(capture: PendingGalleryAnchorCapture) {
+    capture.outcome = 'retired';
+    if (pendingGalleryAnchorCapture.current === capture) {
+      pendingGalleryAnchorCapture.current = null;
+    }
+    if (activeGalleryAnchorCapture.current === capture) {
+      activeGalleryAnchorCapture.current = null;
+    }
+    if (galleryAnchorCaptureInvocation.current === capture) {
+      galleryAnchorCaptureInvocation.current = null;
+    }
   }
   // Every Manager resource is loaded by its own controller below. The event is
   // the only shell-critical one: it decides identity and lifecycle, and there is
@@ -310,7 +393,12 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // in-flight write, and an unsaved draft all survive a destination change.
   const [settingsMounted, setSettingsMounted] = useState(section === 'settings');
   const [settingsFocusEpoch, setSettingsFocusEpoch] = useState(0);
+  const [galleryVisibilityFocusEpoch, setGalleryVisibilityFocusEpoch] = useState(0);
+  const [guestGallerySettingsReturn, setGuestGallerySettingsReturn] = useState<
+    GuestGalleryReturn | null
+  >(null);
   const settingsFocusRequested = useRef(false);
+  const guestGallerySettingsFocusRequested = useRef<PublicationFilter | null>(null);
   const settingsHeading = useRef<HTMLHeadingElement>(null);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
@@ -325,10 +413,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const trashKeepButton = useRef<HTMLButtonElement>(null);
   const trashOrigin = useRef<HTMLElement | null>(null);
   const intakeHeading = useRef<HTMLHeadingElement>(null);
-  const trashHeading = useRef<HTMLHeadingElement>(null);
+  const trashHeading = useRef<HTMLParagraphElement>(null);
+  const trashRestoreButtons = useRef(new Map<string, HTMLButtonElement>());
   const [recoveryAnnouncement, setRecoveryAnnouncement] = useState('');
   const managerUndo = useManagerUndo();
-  const recentlyDeletedFocusRequested = useRef(false);
+  const completeExportFocusRequested = useRef(false);
+  const recentlyDeletedFocusRequested = useRef<string | null>(null);
+  const [recentlyDeletedIntentGuidance, setRecentlyDeletedIntentGuidance] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
   const [coverAccessFailure, setCoverAccessFailure] = useState<LoadFailure | null>(null);
   const [albumAccessFailure, setAlbumAccessFailure] = useState<LoadFailure | null>(null);
@@ -344,12 +435,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const [rsvpDraftDirty, setRsvpDraftDirty] = useState(false);
   const [rsvpCommitPending, setRsvpCommitPending] = useState(false);
   const [rsvpDiscardEpoch, setRsvpDiscardEpoch] = useState(0);
-  const [pendingSection, setPendingSection] = useState<Section | null>(null);
+  const [pendingSection, setPendingSection] = useState<ManagerSectionDestination | null>(null);
   const [pendingRsvpClose, setPendingRsvpClose] = useState(false);
-  const [pendingSettingsRepair, setPendingSettingsRepair] = useState(false);
   const pendingWorkPrompt = useRef<HTMLElement>(null);
   const managerNotice = useRef<HTMLElement>(null);
   const galleryWorkspace = useRef<ManagerGalleryWorkspaceHandle>(null);
+  const galleryRestorationGeneration = useRef(0);
+  const pendingGalleryRestoration = useRef<PendingGalleryRestoration | null>(null);
   const [galleryMutationEpoch, setGalleryMutationEpoch] = useState(0);
   const [galleryAnnouncement, setGalleryAnnouncement] = useState('');
   const [galleryLiveHost] = useState(() => {
@@ -394,14 +486,33 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // unmounts the old session rather than letting it render into the new one.
   // Retire its imperative owners too: a held write can otherwise resume after
   // unmount and start an event-A reconciliation read even though B is visible.
-  useLayoutEffect(() => () => {
-    eventScope.current.generation += 1;
-    const more = loadMoreOwner.current;
-    loadMoreOwner.current = null;
-    more?.abort();
-    const poll = intakePollOwner.current;
-    intakePollOwner.current = null;
-    poll?.abort();
+  useLayoutEffect(() => {
+    managerMounted.current = true;
+    const suspendedCleanup = suspendedManagerStateCleanup.current;
+    suspendedManagerStateCleanup.current = null;
+    if (suspendedCleanup && suspendedCleanup.ownerEventId === eventId) {
+      suspendedCleanup.ownerEventGeneration = eventScope.current.generation;
+      pendingManagerStateCleanup.current = suspendedCleanup;
+    }
+    return () => {
+      managerMounted.current = false;
+      eventScope.current.generation += 1;
+      suspendedManagerStateCleanup.current = pendingManagerStateCleanup.current;
+      pendingManagerStateCleanup.current = null;
+      managerCleanupInvocation.current = null;
+      const pendingCapture = pendingGalleryAnchorCapture.current;
+      const activeCapture = activeGalleryAnchorCapture.current;
+      if (pendingCapture) retireGalleryAnchorCapture(pendingCapture);
+      if (activeCapture && activeCapture !== pendingCapture) {
+        retireGalleryAnchorCapture(activeCapture);
+      }
+      const more = loadMoreOwner.current;
+      loadMoreOwner.current = null;
+      more?.abort();
+      const poll = intakePollOwner.current;
+      intakePollOwner.current = null;
+      poll?.abort();
+    };
   }, []);
   // Leaving Settings flushes a valid scheduled write without waiting for its
   // response. The subtree remains mounted, so an in-flight request finishes.
@@ -444,19 +555,84 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     || rsvpDraftDirty
     || rsvpCommitPending;
   const authorizedAlbumTarget = useRef<string | null>(null);
+  const authorizedGalleryTarget = useRef<string | null>(null);
+  const blockedGalleryCaptureKey = useRef<string | null>(null);
   const pendingManagerAdoption = useRef<PendingManagerAdoption | null>(null);
-  const blocker = useBlocker(({ currentLocation, nextLocation }) => {
-    if (shouldBlockNavigation) return true;
+  const browserPopObservation = useRef<BrowserPopObservation | null>(null);
+  const routerLocationRef = useRef(routerLocation);
+  useLayoutEffect(() => {
+    routerLocationRef.current = routerLocation;
+  }, [routerLocation]);
+  useLayoutEffect(() => {
+    const observeBrowserPop = (event: PopStateEvent) => {
+      const currentTarget = locationTarget(routerLocationRef.current);
+      const nextTarget = locationTarget(window.location);
+      const eventState = event.state;
+      const nextKey = eventState !== null
+        && typeof eventState === 'object'
+        && !Array.isArray(eventState)
+        && typeof (eventState as Record<string, unknown>).key === 'string'
+        ? (eventState as Record<string, unknown>).key as string
+        : null;
+      // React Router reverses a blocked POP before it publishes the blocker.
+      // A same-target event is the original request when it names a different
+      // entry key; the compensating return names the committed current key.
+      const committedKey = routerLocationRef.current.key;
+      const namesCommittedEntry = nextKey === committedKey
+        || (committedKey === 'default' && nextKey === null);
+      if (nextTarget === currentTarget && namesCommittedEntry) return;
+      browserPopObservation.current = { currentTarget, nextTarget, nextKey };
+    };
+    window.addEventListener('popstate', observeBrowserPop, { capture: true });
+    return () => {
+      window.removeEventListener('popstate', observeBrowserPop, { capture: true });
+    };
+  }, []);
+  function managerOwnerIsLive(owner: {
+    ownerEventId: string;
+    ownerEventGeneration: number;
+  }): boolean {
+    return managerMounted.current
+      && eventScope.current.eventId === owner.ownerEventId
+      && eventScope.current.generation === owner.ownerEventGeneration;
+  }
+
+  const blocker = useBlocker(({ currentLocation, nextLocation, historyAction }) => {
     const currentManagerLocation = parseManagerLocation(currentLocation.search);
-    const currentIsCanonicalAlbum = currentLocation.pathname === `/manage/event/${eventId}`
+    const currentIsCanonicalGallery = currentLocation.pathname === `/manage/event/${eventId}`
       && !currentManagerLocation.needsReplace
-      && currentManagerLocation.location.section === 'gallery'
-      && currentManagerLocation.location.mode === 'album';
-    if (!currentIsCanonicalAlbum) return false;
+      && currentManagerLocation.location.section === 'gallery';
     const currentTarget = locationTarget(currentLocation);
     const nextTarget = locationTarget(nextLocation);
-    if (nextTarget === currentTarget) return false;
-    return authorizedAlbumTarget.current !== nextTarget;
+    const cleanupInvocation = managerCleanupInvocation.current;
+    if (
+      historyAction === 'REPLACE'
+      && cleanupInvocation
+      && managerOwnerIsLive(cleanupInvocation)
+      && currentLocation.key === cleanupInvocation.sourceKey
+      && currentTarget === cleanupInvocation.sourceTarget
+      && nextTarget === cleanupInvocation.target
+      && nextLocation.state === cleanupInvocation.cleanupState
+    ) {
+      return false;
+    }
+    const anchorInvocation = galleryAnchorCaptureInvocation.current;
+    if (
+      historyAction === 'REPLACE'
+      && anchorInvocation
+      && managerOwnerIsLive(anchorInvocation)
+      && currentLocation.key === anchorInvocation.sourceKey
+      && currentTarget === anchorInvocation.sourceTarget
+      && nextTarget === anchorInvocation.sourceTarget
+      && nextLocation.state === anchorInvocation.state
+    ) {
+      return false;
+    }
+    if (shouldBlockNavigation) return true;
+    if (!currentIsCanonicalGallery) return false;
+    if (nextTarget === currentTarget) return true;
+    return authorizedGalleryTarget.current !== nextTarget
+      && authorizedAlbumTarget.current !== nextTarget;
   });
   const blockedNavigationKey = blocker.state === 'blocked'
     ? blocker.location.key
@@ -479,6 +655,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
 
   function clearPendingManagerAdoption() {
     authorizedAlbumTarget.current = null;
+    authorizedGalleryTarget.current = null;
     pendingManagerAdoption.current = null;
   }
 
@@ -498,6 +675,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   function cancelBlockedNavigation() {
     if (blocker.state === 'blocked') blocker.reset();
     blockerStateRef.current = 'unblocked';
+    blockedGalleryCaptureKey.current = null;
+    browserPopObservation.current = null;
     retireAlbumLeaveAttempt();
   }
 
@@ -527,7 +706,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // A Router request that arrived while a section was settling owns the page.
     if (blockerStateRef.current === 'blocked') return;
     finishAlbumLeavePreparation();
-    commitManagerLeaveDestination(destination);
+    await commitManagerLeaveDestination(destination);
   }
 
   // Values below belong to one event, not to a revision of the next one.  Clear
@@ -561,13 +740,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setRsvpDiscardEpoch(0);
     setPendingSection(null);
     setPendingRsvpClose(false);
-    setPendingSettingsRepair(false);
+    setGuestGallerySettingsReturn(null);
+    guestGallerySettingsFocusRequested.current = null;
     retireAlbumLeaveAttempt();
-    recentlyDeletedFocusRequested.current = false;
   }, [eventId]);
 
   useEffect(() => {
     if (blockedNavigationKey === null) {
+      blockedGalleryCaptureKey.current = null;
+      browserPopObservation.current = null;
       if (albumLeaveAttemptRef.current?.destination.kind === 'router') {
         retireAlbumLeaveAttempt();
       }
@@ -598,7 +779,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       && unconfirmedDomains.length === 0
       && !rsvpDraftDirty
       && !rsvpCommitPending
-    ) blocker.proceed();
+    ) void proceedBlockedNavigation();
   }, [albumLeaveAttempt, blockedNavigationKey, blockedNavigationTarget, blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
   useEffect(() => {
     if (unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) return;
@@ -683,10 +864,20 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     load: useCallback(async (signal: AbortSignal) => {
       if (intakeMode === 'trash') {
         const page = await api<ManagerTrashPage>(intakePath(), { signal });
-        return { mode: 'trash' as const, rows: page.media, cursor: page.nextCursor ?? null };
+        return {
+          mode: 'trash' as const,
+          rows: page.media,
+          cursor: page.nextCursor ?? null,
+          firstPageIds: new Set(page.media.map(({ id }) => id)),
+        };
       }
       const page = await api<ManagerMediaPage>(intakePath(), { signal });
-      return { mode: 'active' as const, rows: page.media, cursor: page.nextCursor ?? null };
+      return {
+        mode: 'active' as const,
+        rows: page.media,
+        cursor: page.nextCursor ?? null,
+        firstPageIds: new Set(page.media.map(({ id }) => id)),
+      };
     }, [intakeMode, intakePath]),
   });
   const intakePage = intakeResource.state.value;
@@ -696,6 +887,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const media = intakePage?.mode === 'active' ? intakePage.rows : [];
   const trashRows = intakePage?.mode === 'trash' ? intakePage.rows : [];
   const nextMediaCursor = intakePage?.cursor ?? null;
+  const showRecentlyDeletedIntentGuidance = recentlyDeletedIntentGuidance
+    && intakePage?.mode === 'trash'
+    && intakePage.cursor !== null;
   // Recently deleted does not need a poll just to cross a known server deadline.
   // The shared hook caps long waits at the browser timer maximum and re-evaluates,
   // so a 30-day recovery window cannot turn into an immediate-loop timeout.
@@ -900,12 +1094,18 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           mode: 'active' as const,
           rows: firstPage.media,
           cursor: firstPage.nextCursor ?? null,
+          firstPageIds: new Set(firstPage.media.map(({ id }) => id)),
         };
         if (!current || current.mode !== 'active') return fresh;
         const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
         const retained = current.rows.filter(({ id }) => !refreshedIds.has(id));
         if (current.rows.length === 0 || retained.length === current.rows.length) return fresh;
-        return { mode: 'active', rows: [...firstPage.media, ...retained], cursor: current.cursor };
+        return {
+          mode: 'active',
+          rows: [...firstPage.media, ...retained],
+          cursor: current.cursor,
+          firstPageIds: fresh.firstPageIds,
+        };
       });
     }).catch((caught) => {
       if (!ownsPoll() || (caught instanceof DOMException && caught.name === 'AbortError')) return;
@@ -947,12 +1147,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               mode: 'trash',
               rows: [...current.rows, ...(appended as TrashedMediaView[])],
               cursor: page.nextCursor ?? null,
+              firstPageIds: current.firstPageIds,
             }
           : {
               mode: 'active',
               rows: [...current.rows, ...(appended as MediaView[])],
               cursor: page.nextCursor ?? null,
-          };
+              firstPageIds: current.firstPageIds,
+            };
       });
       // A newer query, poll, or confirmed mutation owns any panel notice it
       // installed. An old successful page must not erase that newer feedback
@@ -1156,6 +1358,158 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     return () => { current = false; };
   }, [eventLink]);
 
+  function currentGalleryStateWithAnchor(): RouterHistoryState {
+    const currentLocation = parsedLocation.location;
+    const clean = sanitizeManagerHistoryState(routerLocation.state, eventId, currentLocation).state;
+    if (currentLocation.section !== 'gallery') return clean;
+    const anchor = galleryWorkspace.current?.captureAnchor(currentLocation.mode) ?? null;
+    return withGalleryAnchor(clean, eventId, currentLocation.mode, anchor);
+  }
+
+  async function replaceCurrentGalleryEntryWithAnchor(): Promise<RouterHistoryState | null> {
+    const state = currentGalleryStateWithAnchor();
+    if (parsedLocation.location.section !== 'gallery') return state;
+    const currentTarget = locationTarget(routerLocation);
+    const previousActiveCapture = activeGalleryAnchorCapture.current;
+    const previousPendingCapture = pendingGalleryAnchorCapture.current;
+    if (previousActiveCapture) retireGalleryAnchorCapture(previousActiveCapture);
+    if (previousPendingCapture && previousPendingCapture !== previousActiveCapture) {
+      retireGalleryAnchorCapture(previousPendingCapture);
+    }
+    const capture: PendingGalleryAnchorCapture = {
+      ownerEventId: eventId,
+      ownerEventGeneration: eventScope.current.generation,
+      sourceKey: routerLocation.key,
+      sourceTarget: currentTarget,
+      state,
+      outcome: 'pending',
+    };
+    pendingGalleryAnchorCapture.current = capture;
+    activeGalleryAnchorCapture.current = capture;
+    galleryAnchorCaptureInvocation.current = capture;
+    let navigation: void | Promise<void>;
+    try {
+      navigation = navigate({
+        pathname: routerLocation.pathname,
+        search: routerLocation.search,
+        hash: routerLocation.hash,
+      }, { replace: true, state });
+    } finally {
+      if (galleryAnchorCaptureInvocation.current === capture) {
+        galleryAnchorCaptureInvocation.current = null;
+      }
+    }
+    try {
+      await navigation;
+    } catch {
+      retireGalleryAnchorCapture(capture);
+      return null;
+    }
+    const mayContinue = managerOwnerIsLive(capture)
+      && activeGalleryAnchorCapture.current === capture
+      && (
+        capture.outcome === 'committed'
+        || (
+          capture.outcome === 'pending'
+          && pendingGalleryAnchorCapture.current === capture
+        )
+      );
+    if (activeGalleryAnchorCapture.current === capture) {
+      activeGalleryAnchorCapture.current = null;
+    }
+    if (!mayContinue) {
+      retireGalleryAnchorCapture(capture);
+      return null;
+    }
+    return state;
+  }
+
+  function prepareAdoptedManagerState(consumeGalleryAnchor = true): {
+    anchor: GalleryAnchor | null;
+    intent: ManagerNavigationIntent | null;
+    state: RouterHistoryState;
+    needsReplace: boolean;
+  } {
+    const clean = sanitizeManagerHistoryState(
+      routerLocation.state,
+      eventId,
+      parsedLocation.location,
+    );
+    const anchor = consumeGalleryAnchor && parsedLocation.location.section === 'gallery'
+      ? clean.envelope?.anchors?.[parsedLocation.location.mode] ?? null
+      : null;
+    const stateWithoutAnchor = anchor && parsedLocation.location.section === 'gallery'
+      ? withGalleryAnchor(clean.state, eventId, parsedLocation.location.mode, null)
+      : clean.state;
+    const consumed = consumeManagerIntent(
+      stateWithoutAnchor,
+      eventId,
+      parsedLocation.location,
+    );
+    return {
+      anchor,
+      intent: consumed.intent,
+      state: consumed.state,
+      needsReplace: parsedLocation.needsReplace
+        || anchor !== null
+        || clean.needsReplace
+        || consumed.intent !== null,
+    };
+  }
+
+  async function proceedBlockedNavigation() {
+    if (blocker.state !== 'blocked') return;
+    const navigationKey = blocker.location.key;
+    if (blockedGalleryCaptureKey.current === navigationKey) return;
+    blockedGalleryCaptureKey.current = navigationKey;
+    const target = locationTarget(blocker.location);
+    let proceeded = false;
+    try {
+      const state = currentGalleryStateWithAnchor();
+      authorizedGalleryTarget.current = target;
+      authorizedAlbumTarget.current = target;
+      const observation = browserPopObservation.current;
+      const targetKeyMatches = observation?.nextKey === navigationKey
+        || (navigationKey === 'default' && observation?.nextKey === null);
+      const isObservedBrowserPop = pendingManagerAdoption.current?.target !== target
+        && observation?.currentTarget === locationTarget(routerLocation)
+        && observation.nextTarget === target
+        && targetKeyMatches;
+      const rawHistoryState = window.history.state;
+      const historyState = rawHistoryState !== null
+        && typeof rawHistoryState === 'object'
+        && !Array.isArray(rawHistoryState)
+        ? rawHistoryState as Record<string, unknown>
+        : null;
+      const historyKey = historyState?.key;
+      const ownsCurrentBrowserEntry = historyState !== null
+        && typeof historyState.idx === 'number'
+        && Number.isFinite(historyState.idx)
+        && (
+          historyKey === routerLocation.key
+          || (
+            routerLocation.key === 'default'
+            && historyKey === undefined
+            && historyState.idx === 0
+          )
+        );
+      if (
+        isObservedBrowserPop
+        && locationTarget(window.location) === locationTarget(routerLocation)
+        && ownsCurrentBrowserEntry
+      ) {
+        window.history.replaceState({ ...historyState, usr: state }, '');
+      }
+      browserPopObservation.current = null;
+      blocker.proceed();
+      proceeded = true;
+    } finally {
+      if (!proceeded && blockedGalleryCaptureKey.current === navigationKey) {
+        blockedGalleryCaptureKey.current = null;
+      }
+    }
+  }
+
   function managerLocationForDestination(
     destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
   ): ManagerLocation {
@@ -1163,66 +1517,378 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       return { section: 'gallery', mode: destination.mode };
     }
     if (destination.kind === 'settings-repair') return { section: 'settings' };
+    if (destination.kind === 'guest-gallery-settings') return { section: 'settings' };
+    if (destination.kind === 'guest-gallery-return') {
+      return { section: 'gallery', mode: 'guest-gallery' };
+    }
     if (destination.kind === 'recently-deleted') return { section: 'intake' };
+    if (destination.kind === 'complete-export') return { section: 'gallery', mode: 'library' };
     return destination.section === 'gallery'
       ? { section: 'gallery', mode: 'library' }
       : { section: destination.section };
   }
 
-  function commitManagerLeaveDestination(
+  async function commitManagerLeaveDestination(
     destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
   ) {
+    const departureState = parsedLocation.location.section === 'gallery'
+      ? await replaceCurrentGalleryEntryWithAnchor()
+      : currentGalleryStateWithAnchor();
+    if (departureState === null) return;
     const target = managerHref(eventId, managerLocationForDestination(destination));
-    pendingManagerAdoption.current = { destination, target };
+    const cleanTargetState = sanitizeManagerHistoryState(
+      departureState,
+      eventId,
+      managerLocationForDestination(destination),
+    ).state;
+    const targetState = destination.kind === 'complete-export'
+      ? withManagerIntent(cleanTargetState, eventId, { kind: 'focus-complete-export' })
+      : destination.kind === 'recently-deleted'
+        ? withManagerIntent(cleanTargetState, eventId, {
+            kind: 'open-recently-deleted',
+            focusMediaId: destination.focusMediaId,
+          })
+        : destination.kind === 'guest-gallery-settings'
+          || destination.kind === 'guest-gallery-return'
+          ? withManagerIntent(cleanTargetState, eventId, {
+              kind: 'edit-guest-gallery-availability',
+              returnTo: {
+                section: 'gallery',
+                mode: 'guest-gallery',
+                publicationFilter: destination.publicationFilter,
+              },
+            })
+        : cleanTargetState;
+    pendingManagerAdoption.current = { destination, target, state: targetState };
     authorizedAlbumTarget.current = target;
-    void navigate(target);
+    authorizedGalleryTarget.current = target;
+    await navigate(target, { state: targetState });
   }
 
   function adoptManagerDestination(
     destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
   ) {
-    if (destination.kind === 'recently-deleted') {
-      recentlyDeletedFocusRequested.current = true;
-      setIntakeMode('trash');
-    } else if (destination.kind === 'settings-repair') {
+    if (destination.kind === 'settings-repair') {
       settingsFocusRequested.current = true;
       setSettingsFocusEpoch((current) => current + 1);
     }
   }
 
-  function cleanUpAdoptedManagerLocation() {
+  function adoptManagerIntent(intent: ManagerNavigationIntent | null) {
+    if (intent?.kind === 'edit-guest-gallery-availability') {
+      if (section === 'settings') {
+        setGuestGallerySettingsReturn({ ...intent.returnTo });
+        setGalleryVisibilityFocusEpoch((current) => current + 1);
+        return;
+      }
+      if (section === 'gallery' && galleryMode === 'guest-gallery') {
+        guestGallerySettingsFocusRequested.current = intent.returnTo.publicationFilter;
+        settleGuestGallerySettingsIntentFocus();
+      }
+      return;
+    }
+    if (intent?.kind === 'focus-complete-export') {
+      completeExportFocusRequested.current = true;
+      if (
+        section === 'gallery'
+        && galleryMode === 'library'
+        && galleryWorkspace.current !== null
+      ) {
+        completeExportFocusRequested.current = false;
+        galleryWorkspace.current.focusCompleteExport();
+      }
+      return;
+    }
+    if (intent?.kind === 'open-recently-deleted') {
+      recentlyDeletedFocusRequested.current = intent.focusMediaId;
+      setIntakeMode('trash');
+      settleRecentlyDeletedIntentFocus();
+    }
+  }
+
+  function settleGuestGallerySettingsIntentFocus(): boolean {
+    const requestedFilter = guestGallerySettingsFocusRequested.current;
+    if (
+      requestedFilter === null
+      || section !== 'gallery'
+      || galleryMode !== 'guest-gallery'
+      || galleryWorkspace.current === null
+    ) return false;
+    galleryWorkspace.current.setGuestGalleryFilter(requestedFilter);
+    galleryWorkspace.current.focusGuestGallerySettingsAction();
+    guestGallerySettingsFocusRequested.current = null;
+    return true;
+  }
+
+  function retireRetainedIntentFocus() {
+    recentlyDeletedFocusRequested.current = null;
+    setRecentlyDeletedIntentGuidance(false);
+  }
+
+  function retireManagerIntentFocus() {
+    completeExportFocusRequested.current = false;
+    galleryWorkspace.current?.retireCompleteExportFocus();
+    guestGallerySettingsFocusRequested.current = null;
+    galleryWorkspace.current?.retireGuestGallerySettingsFocus();
+    retireRetainedIntentFocus();
+  }
+
+  function chooseIntakeMode(mode: IntakeMode) {
+    retireRetainedIntentFocus();
+    setIntakeMode(mode);
+  }
+
+  const scheduleGalleryAnchorRestoration = useCallback((generation: number) => {
+    const requested = pendingGalleryRestoration.current;
+    if (requested?.generation !== generation || requested.frameScheduled) return;
+    requested.frameScheduled = true;
+    requestAnimationFrame(() => {
+      const pending = pendingGalleryRestoration.current;
+      if (
+        generation !== galleryRestorationGeneration.current
+        || pending?.generation !== generation
+      ) return;
+      pending.frameScheduled = false;
+      const outcome = galleryWorkspace.current?.restoreAnchor(pending.mode, pending.anchor)
+        ?? 'pending';
+      if (outcome !== 'pending') pendingGalleryRestoration.current = null;
+    });
+  }, []);
+
+  function cleanUpAdoptedManagerLocation(anchor: GalleryAnchor | null) {
     if (section === 'settings') setSettingsMounted(true);
+    setGuestGallerySettingsReturn(null);
     setSelected([]);
     setActionError(null);
     setEntryAction(null);
     setEntryConfirm('');
+    retireManagerIntentFocus();
     if (section === 'intake') setStatus('all');
     // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
     // or under the sticky header. Restore the top once the new section has actually been laid out, and
     // only when there is something to restore. `instant` rather than `auto`, because the document
     // carries `scroll-behavior: smooth` and `auto` would defer to it.
+    const generation = ++galleryRestorationGeneration.current;
+    pendingGalleryRestoration.current = null;
+    if (anchor && parsedLocation.location.section === 'gallery') {
+      pendingGalleryRestoration.current = {
+        generation,
+        mode: parsedLocation.location.mode,
+        anchor,
+        frameScheduled: false,
+      };
+      scheduleGalleryAnchorRestoration(generation);
+      return;
+    }
     requestAnimationFrame(() => {
+      if (generation !== galleryRestorationGeneration.current) return;
       if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'instant' });
     });
   }
 
-  const adoptedManagerHref = useRef(canonicalManagerHref);
+  const handleGalleryAnchorReady = useCallback((mode: GalleryMode) => {
+    const pending = pendingGalleryRestoration.current;
+    if (pending?.mode !== mode) return;
+    scheduleGalleryAnchorRestoration(pending.generation);
+  }, [scheduleGalleryAnchorRestoration]);
+
+  const managerEntryIdentity = `${routerLocation.key}\u0000${canonicalManagerHref}`;
+  const adoptedManagerEntry = useRef<string | null>(null);
+  const initialManagerAdoptionPending = useRef(true);
+
+  function finishCommittedManagerAdoption(adopted: PendingManagerStateCleanup) {
+    if (!adopted.initial) {
+      if (adopted.destination) adoptManagerDestination(adopted.destination);
+      finishAlbumLeavePreparation();
+      cleanUpAdoptedManagerLocation(adopted.anchor);
+    }
+    adoptManagerIntent(adopted.intent);
+  }
+
+  function managerIdentityFor(location: typeof routerLocation): string {
+    const parsed = parseManagerLocation(location.search);
+    return `${location.key}\u0000${managerHref(eventId, parsed.location)}`;
+  }
+
+  function clearPendingManagerCleanup(staged: PendingManagerStateCleanup) {
+    if (pendingManagerStateCleanup.current === staged) {
+      pendingManagerStateCleanup.current = null;
+    }
+    if (managerCleanupInvocation.current === staged) {
+      managerCleanupInvocation.current = null;
+    }
+  }
+
+  function committedLocationMatchesCleanup(staged: PendingManagerStateCleanup): boolean {
+    const committed = routerLocationRef.current;
+    return managerOwnerIsLive(staged)
+      && staged.generation === managerAdoptionGeneration.current
+      && committed.key !== staged.sourceKey
+      && locationTarget(committed) === staged.target
+      && committed.state === staged.cleanupState;
+  }
+
+  function finishExactManagerCleanup(staged: PendingManagerStateCleanup) {
+    if (!committedLocationMatchesCleanup(staged)) return;
+    const committed = routerLocationRef.current;
+    clearPendingManagerCleanup(staged);
+    adoptedManagerEntry.current = managerIdentityFor(committed);
+    finishCommittedManagerAdoption(staged);
+  }
+
+  function runManagerCleanup(staged: PendingManagerStateCleanup, attempt = 0) {
+    if (
+      !managerOwnerIsLive(staged)
+      || managerIdentityFor(routerLocationRef.current) !== staged.sourceIdentity
+    ) return;
+    if (attempt > 0) {
+      // A rejected attempt retires its state-object capability. The one
+      // bounded retry gets a distinct object so a late attempt-0 commit cannot
+      // be mistaken for the retry's exact successor.
+      staged.cleanupState = { ...staged.cleanupState };
+    }
+    pendingManagerStateCleanup.current = staged;
+    managerCleanupInvocation.current = staged;
+    let navigation: void | Promise<void>;
+    try {
+      navigation = navigate(staged.cleanupLocation, {
+        replace: true,
+        state: staged.cleanupState,
+      });
+    } catch {
+      navigation = Promise.reject(new Error('Manager cleanup navigation failed.'));
+    } finally {
+      if (managerCleanupInvocation.current === staged) {
+        managerCleanupInvocation.current = null;
+      }
+    }
+    void Promise.resolve(navigation).then(() => {
+      if (pendingManagerStateCleanup.current !== staged || !managerOwnerIsLive(staged)) return;
+      if (committedLocationMatchesCleanup(staged)) {
+        finishExactManagerCleanup(staged);
+        return;
+      }
+      // Router navigation completion can precede the React commit that
+      // publishes its location. Keep the exact cleanup pending while the
+      // source entry is still what this component has committed; the location
+      // effect below will finish only the matching successor.
+      if (managerIdentityFor(routerLocationRef.current) !== staged.sourceIdentity) {
+        clearPendingManagerCleanup(staged);
+        adoptedManagerEntry.current = null;
+        setManagerAdoptionEpoch((current) => current + 1);
+      }
+    }).catch(() => {
+      if (pendingManagerStateCleanup.current !== staged || !managerOwnerIsLive(staged)) return;
+      clearPendingManagerCleanup(staged);
+      adoptedManagerEntry.current = null;
+      if (
+        attempt === 0
+        && managerIdentityFor(routerLocationRef.current) === staged.sourceIdentity
+      ) runManagerCleanup(staged, 1);
+    });
+  }
+
   useLayoutEffect(() => {
-    if (adoptedManagerHref.current === canonicalManagerHref) return;
-    adoptedManagerHref.current = canonicalManagerHref;
-    const pending = pendingManagerAdoption.current;
-    if (pending?.target === canonicalManagerHref) adoptManagerDestination(pending.destination);
+    if (adoptedManagerEntry.current === managerEntryIdentity) return;
+
+    const pendingCleanup = pendingManagerStateCleanup.current;
+    if (pendingCleanup) {
+      const isExactCleanupSuccessor = managerOwnerIsLive(pendingCleanup)
+        && pendingCleanup.generation === managerAdoptionGeneration.current
+        && navigationType === 'REPLACE'
+        && routerLocation.key !== pendingCleanup.sourceKey
+        && locationTarget(routerLocation) === pendingCleanup.target
+        && routerLocation.state === pendingCleanup.cleanupState;
+      // The exact state object is created for one cleanup call and retained by
+      // Router on its committed Location. Equal foreign state from a different
+      // REPLACE cannot claim the cleanup's intent or anchor side effects.
+      if (isExactCleanupSuccessor) {
+        finishExactManagerCleanup(pendingCleanup);
+        return;
+      }
+      clearPendingManagerCleanup(pendingCleanup);
+      adoptedManagerEntry.current = null;
+    }
+
+    const pendingAnchorCapture = pendingGalleryAnchorCapture.current;
+    if (pendingAnchorCapture) {
+      const isExactAnchorCapture = managerOwnerIsLive(pendingAnchorCapture)
+        && navigationType === 'REPLACE'
+        && routerLocation.key !== pendingAnchorCapture.sourceKey
+        && locationTarget(routerLocation) === pendingAnchorCapture.sourceTarget
+        && routerLocation.state === pendingAnchorCapture.state;
+      if (isExactAnchorCapture) {
+        // Capturing the departing Gallery anchor replaces this same browser
+        // entry before the actual navigation. Leave the stored anchor for the
+        // later POP that returns to this exact entry.
+        pendingAnchorCapture.outcome = 'committed';
+        pendingGalleryAnchorCapture.current = null;
+        adoptedManagerEntry.current = managerEntryIdentity;
+        return;
+      }
+      retireGalleryAnchorCapture(pendingAnchorCapture);
+    }
+
+    // Exact commit classification clears the pending slot before the Router
+    // Promise necessarily settles. A newer entry must still retire that
+    // committed capture's awaiting destination continuation.
+    const activeAnchorCapture = activeGalleryAnchorCapture.current;
+    if (activeAnchorCapture) {
+      retireGalleryAnchorCapture(activeAnchorCapture);
+    }
+
+    // Any entry other than the staged REPLACE successor is a newer adoption.
+    // Retire the old task before decoding the new one so late resources cannot
+    // focus hidden/abandoned work.
+    const generation = ++managerAdoptionGeneration.current;
+    adoptedManagerEntry.current = managerEntryIdentity;
+    browserPopObservation.current = null;
+    retireManagerIntentFocus();
+    setGuestGallerySettingsReturn(null);
+    const initial = initialManagerAdoptionPending.current;
+    initialManagerAdoptionPending.current = false;
+    const adopted = prepareAdoptedManagerState(!initial);
+    const pending = pendingManagerAdoption.current?.target === canonicalManagerHref
+      && pendingManagerAdoption.current.state === routerLocation.state
+      ? pendingManagerAdoption.current.destination
+      : null;
     clearPendingManagerAdoption();
-    finishAlbumLeavePreparation();
-    cleanUpAdoptedManagerLocation();
-  }, [canonicalManagerHref]);
+    const sourceTarget = locationTarget(routerLocation);
+    const cleanupLocation = {
+      pathname: routerLocation.pathname,
+      search: parsedLocation.canonicalSearch,
+      hash: routerLocation.hash,
+    };
+    const target = locationTarget(cleanupLocation);
+    const staged: PendingManagerStateCleanup = {
+      generation,
+      ownerEventId: eventId,
+      ownerEventGeneration: eventScope.current.generation,
+      sourceIdentity: managerEntryIdentity,
+      sourceKey: routerLocation.key,
+      sourceTarget,
+      target,
+      cleanupLocation,
+      cleanupState: adopted.state,
+      initial,
+      anchor: adopted.anchor,
+      intent: adopted.intent,
+      destination: pending,
+    };
+    if (!adopted.needsReplace) {
+      finishCommittedManagerAdoption(staged);
+      return;
+    }
+
+    runManagerCleanup(staged);
+  }, [managerAdoptionEpoch, managerEntryIdentity, navigationType]);
 
   function requestGalleryMode(mode: GalleryMode) {
     if (mode === galleryMode) return;
+    if (mode !== 'library') galleryWorkspace.current?.retireCompleteExportFocus();
     if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
       clearPendingManagerAdoption();
-      commitManagerLeaveDestination({ kind: 'gallery-mode', mode });
-      authorizedAlbumTarget.current = null;
+      void commitManagerLeaveDestination({ kind: 'gallery-mode', mode });
       return;
     }
     clearPendingManagerAdoption();
@@ -1234,7 +1900,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       ? destination.section
       : destination.kind === 'recently-deleted'
         ? 'intake'
-        : 'settings';
+        : destination.kind === 'complete-export'
+          || destination.kind === 'guest-gallery-return'
+          ? 'gallery'
+          : 'settings';
     if (section === 'settings' && next !== 'settings') {
       // Leaving flushes the newest valid drafts. It deliberately does not wait
       // for their responses: the subtree stays mounted, so they finish anyway.
@@ -1243,9 +1912,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (next === section) {
       if (destination.kind === 'recently-deleted') {
-        recentlyDeletedFocusRequested.current = true;
+        recentlyDeletedFocusRequested.current = destination.focusMediaId;
+        setRecentlyDeletedIntentGuidance(false);
         setIntakeMode('trash');
+      } else if (destination.kind === 'complete-export') {
+        completeExportFocusRequested.current = true;
+        galleryWorkspace.current?.focusCompleteExport();
+        completeExportFocusRequested.current = false;
       } else if (destination.kind === 'settings-repair') {
+        setGuestGallerySettingsReturn(null);
         settingsFocusRequested.current = true;
         setSettingsFocusEpoch((current) => current + 1);
       }
@@ -1259,15 +1934,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (rsvpCommitPending && next !== 'rsvp') return;
     if (rsvpDraftDirty && next !== 'rsvp') {
-      setPendingSection(next);
-      setPendingSettingsRepair(destination.kind === 'settings-repair');
+      setPendingSection(destination);
       return;
     }
     if (section === 'gallery') {
       if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
         clearPendingManagerAdoption();
-        commitManagerLeaveDestination(destination);
-        authorizedAlbumTarget.current = null;
+        void commitManagerLeaveDestination(destination);
         return;
       }
       clearPendingManagerAdoption();
@@ -1275,26 +1948,40 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       return;
     }
     clearPendingManagerAdoption();
-    commitManagerLeaveDestination(destination);
-    authorizedAlbumTarget.current = null;
+    void commitManagerLeaveDestination(destination);
   }
 
   function openSection(next: Section) {
     requestSectionDestination({ kind: 'section', section: next });
   }
 
-  function openRecentlyDeleted() {
-    requestSectionDestination({ kind: 'recently-deleted' });
+  function openCompleteExport() {
+    requestSectionDestination({ kind: 'complete-export' });
+  }
+
+  function openRecentlyDeleted(mediaId: string) {
+    requestSectionDestination({ kind: 'recently-deleted', focusMediaId: mediaId });
   }
 
   function openSettingsForRepair() {
     if (rsvpCommitPending) return;
     if (rsvpDraftDirty) {
-      setPendingSection('settings');
-      setPendingSettingsRepair(true);
+      setPendingSection({ kind: 'settings-repair' });
       return;
     }
     requestSectionDestination({ kind: 'settings-repair' });
+  }
+
+  function openGuestGallerySettings(publicationFilter: PublicationFilter) {
+    requestSectionDestination({ kind: 'guest-gallery-settings', publicationFilter });
+  }
+
+  function returnToGuestGallery() {
+    if (section !== 'settings' || guestGallerySettingsReturn === null) return;
+    requestSectionDestination({
+      kind: 'guest-gallery-return',
+      publicationFilter: guestGallerySettingsReturn.publicationFilter,
+    });
   }
 
   function retryAlbumLeave() {
@@ -1331,12 +2018,12 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         return;
       }
       retireAlbumLeaveAttempt();
-      blocker.proceed();
+      void proceedBlockedNavigation();
       return;
     }
     if (blockerStateRef.current === 'blocked') return;
     retireAlbumLeaveAttempt();
-    commitManagerLeaveDestination(destination);
+    void commitManagerLeaveDestination(destination);
   }
 
   // Initial focus is Keep photo, every time the dialog opens.
@@ -1349,11 +2036,45 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     settingsFocusRequested.current = false;
     settingsHeading.current?.focus();
   }, [section, settingsFocusEpoch]);
-  useEffect(() => {
-    if (!recentlyDeletedFocusRequested.current || section !== 'intake' || intakeMode !== 'trash') return;
-    recentlyDeletedFocusRequested.current = false;
-    window.requestAnimationFrame(() => intakeHeading.current?.focus());
-  }, [intakeMode, section]);
+  useLayoutEffect(() => {
+    settleGuestGallerySettingsIntentFocus();
+  }, [event, galleryMode, section]);
+  useLayoutEffect(() => {
+    if (
+      !completeExportFocusRequested.current
+      || section !== 'gallery'
+      || galleryMode !== 'library'
+      || galleryWorkspace.current === null
+    ) return;
+    completeExportFocusRequested.current = false;
+    galleryWorkspace.current.focusCompleteExport();
+  }, [event, galleryMode, section]);
+  function settleRecentlyDeletedIntentFocus(): boolean {
+    const requestedId = recentlyDeletedFocusRequested.current;
+    if (
+      !requestedId
+      || section !== 'intake'
+      || intakeMode !== 'trash'
+      || intakePage?.mode !== 'trash'
+      || intakeResource.state.status !== 'ready'
+    ) return false;
+    const restore = intakePage.firstPageIds.has(requestedId)
+      ? trashRestoreButtons.current.get(requestedId) ?? null
+      : null;
+    recentlyDeletedFocusRequested.current = null;
+    if (restore) {
+      setRecentlyDeletedIntentGuidance(false);
+      restore.focus();
+      return true;
+    }
+    setRecentlyDeletedIntentGuidance(intakePage.cursor !== null);
+    intakeHeading.current?.focus();
+    return true;
+  }
+
+  useLayoutEffect(() => {
+    settleRecentlyDeletedIntentFocus();
+  }, [intakeMode, intakePage, intakeResource.state.status, nextMediaCursor, section]);
 
   function adoptPublicationRows(changed: MediaView[]) {
     const changedById = new Map(changed.map((item) => [item.id, item]));
@@ -1743,8 +2464,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           {/* No Restore past the deadline. An accepted export may still be holding
               the bytes, which is why the row is here at all, but recovery is over. */}
           {!expired && <button
+            ref={(button) => {
+              if (button) trashRestoreButtons.current.set(row.id, button);
+              else trashRestoreButtons.current.delete(row.id);
+            }}
             type="button"
             className="button button--secondary"
+            aria-label={`Restore ${row.originalFilename}`}
+            data-restore-media-id={row.id}
             onClick={() => void restoreFromTrashRow(row)}
           ><RotateCcw aria-hidden="true" /> Restore</button>}
         </li>;
@@ -1992,13 +2719,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             type="button"
             aria-pressed={intakeMode === 'active'}
             className={intakeMode === 'active' ? 'active' : ''}
-            onClick={() => setIntakeMode('active')}
+            onClick={() => chooseIntakeMode('active')}
           >Live intake</button>
           <button
             type="button"
             aria-pressed={intakeMode === 'trash'}
             className={intakeMode === 'trash' ? 'active' : ''}
-            onClick={() => setIntakeMode('trash')}
+            onClick={() => chooseIntakeMode('trash')}
           >Recently deleted{event.recoverableMediaCount > 0 ? ` (${event.recoverableMediaCount})` : ''}</button>
         </div>
         {intakeMode === 'trash'
@@ -2007,6 +2734,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
                 These photos still use this event's capacity until they are restored or their
                 recovery ends.
               </p>
+              {showRecentlyDeletedIntentGuidance && <p className="intake-note">
+                The retained photo may be under Load more.
+              </p>}
               {intakeResource.state.failure && <ErrorState
                 message={intakeResource.state.failure.message}
                 recoveryHint={intakeResource.state.failure.recoveryHint}
@@ -2058,10 +2788,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         shared={{
           onPublicationChanged: adoptPublicationRows,
           onOpenRecentlyDeleted: openRecentlyDeleted,
-          // Same route the stuck-autosave notice takes: it honours the guest-list guards and puts
-          // focus on the Settings heading, so the host does not land on `body` when the notice they
-          // pressed unmounts with the Gallery.
-          onOpenSettings: openSettingsForRepair,
+          // The filter travels through Manager's one-use Settings intent after
+          // the same guest-list, autosave, Album, and anchor settlement gates.
+          onOpenSettings: openGuestGallerySettings,
           settingsBlocked: rsvpCommitPending,
         }}
         onResourceEscalate={escalate}
@@ -2071,6 +2800,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           activeJob: activeExport,
           download: completeExport ? exportDownloads[completeExport.id] : undefined,
           albumDownload: albumExport ? exportDownloads[albumExport.id] : undefined,
+          status: exportsResource.state.status,
           onPrepare: (kind = 'complete') => runManagerAction(() => prepareExport(kind)),
           onDownload: (job) => runManagerAction(() => downloadExport(job)),
           onRetry: (job) => runManagerAction(() => retryExport(job)),
@@ -2084,6 +2814,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         }}
         onAlbumAutosaveStateChange={recordAutosaveState}
         onAlbumAccessFailure={setAlbumAccessFailure}
+        onAnchorReady={handleGalleryAnchorReady}
       />}
 
       {section === 'share' && <section className="manager-panel">
@@ -2129,7 +2860,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         </section>}
         <section className="manager-export-route">
           <p>Prepare or retrieve the complete collection from the Gallery.</p>
-          <button type="button" className="button button--secondary" onClick={() => { void openSection('gallery'); }}>Open Gallery</button>
+          <button type="button" className="button button--secondary" onClick={openCompleteExport}>Open Gallery</button>
         </section>
       </section>}
 
@@ -2147,10 +2878,18 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
         <p className="section-label">Event controls</p>
         <h2 ref={settingsHeading} tabIndex={-1}>Settings</h2>
+        {guestGallerySettingsReturn && (
+          <button
+            type="button"
+            className="button button--secondary"
+            onClick={returnToGuestGallery}
+          >Return to Guest gallery</button>
+        )}
         <EventSettingsEditor
           key={'settings-' + event.id}
           ref={settingsAutosave}
           event={event}
+          galleryVisibilityFocusEpoch={galleryVisibilityFocusEpoch}
           onEventWrite={eventWrite}
           onEventRead={eventRead}
           onSettingsSaved={(updated, { scheduleChanged }) => {
@@ -2230,27 +2969,20 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             setRsvpDraftDirty(false);
             setRsvpDiscardEpoch((current) => current + 1);
             if (blocker.state === 'blocked') {
-              blocker.proceed();
+              void proceedBlockedNavigation();
             } else if (pendingSection) {
-              const next = pendingSection;
-              const destination: ManagerSectionDestination = next === 'settings' && pendingSettingsRepair
-                ? { kind: 'settings-repair' }
-                : { kind: 'section', section: next };
+              const destination = pendingSection;
               setPendingSection(null);
               setPendingRsvpClose(false);
-              setPendingSettingsRepair(false);
               clearPendingManagerAdoption();
-              commitManagerLeaveDestination(destination);
-              authorizedAlbumTarget.current = null;
+              void commitManagerLeaveDestination(destination);
             } else {
               setPendingRsvpClose(false);
-              setPendingSettingsRepair(false);
             }
           }}>Discard draft</button>
           <button type="button" className="button button--primary" onClick={() => {
             setPendingSection(null);
             setPendingRsvpClose(false);
-            setPendingSettingsRepair(false);
             if (blocker.state === 'blocked') cancelBlockedNavigation();
           }}>Stay</button>
         </div>
@@ -2294,7 +3026,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
                 && activeAlbumLeaveAttempt.outcome.status === 'ready'
               )
             )
-          ) blocker.proceed();
+          ) void proceedBlockedNavigation();
         }}
         onRetryAlbum={retryAlbumLeave}
         onDiscardAlbum={discardAlbumAndLeave}
@@ -2305,10 +3037,23 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               const pending = pendingManagerAdoption.current;
               if (
                 blocker.state === 'blocked'
-                && pending?.destination.kind === 'settings-repair'
+                && pending?.destination.kind === 'guest-gallery-return'
                 && pending.target === blockedNavigationTarget
               ) {
-                blocker.proceed();
+                cancelBlockedNavigation();
+                settingsFocusRequested.current = true;
+                setSettingsFocusEpoch((current) => current + 1);
+                return;
+              }
+              if (
+                blocker.state === 'blocked'
+                && (
+                  pending?.destination.kind === 'settings-repair'
+                  || pending?.destination.kind === 'guest-gallery-settings'
+                )
+                && pending.target === blockedNavigationTarget
+              ) {
+                void proceedBlockedNavigation();
                 return;
               }
               if (blocker.state === 'blocked') cancelBlockedNavigation();

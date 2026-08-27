@@ -1,5 +1,5 @@
 import { Check, ListChecks, Search, X } from 'lucide-react';
-import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 
 import { api, ClientApiError } from '../../app/api';
@@ -20,6 +20,12 @@ import {
 } from './selection-state';
 import { SelectionTray, type SelectionTrayInput } from './SelectionTray';
 import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
+import type { GalleryAnchor } from '../../app/manager-history-state';
+import {
+  captureRenderedGalleryAnchor,
+  restoreRenderedGalleryAnchor,
+  type GalleryAnchorRestoreOutcome,
+} from './gallery-anchor';
 
 const SEARCH_MAX_CODE_POINTS = 120;
 
@@ -36,6 +42,12 @@ interface ManagerPrivateGalleryProps {
   invalidateGalleryAfterMutation(): void;
   live?: boolean;
   onAnnouncement?(message: string): void;
+  onAnchorReady?(): void;
+}
+
+export interface ManagerPrivateGalleryHandle {
+  captureAnchor(effectiveVisibleTop: number): GalleryAnchor | null;
+  restoreAnchor(anchor: GalleryAnchor, effectiveVisibleTop: number): GalleryAnchorRestoreOutcome;
 }
 
 interface GalleryPage {
@@ -149,7 +161,7 @@ function connectedPresentationFallback(target: HTMLElement | null): HTMLElement 
   return target?.isConnected ? target : null;
 }
 
-export function ManagerPrivateGallery({
+export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, ManagerPrivateGalleryProps>(function ManagerPrivateGallery({
   event,
   eventId,
   active = true,
@@ -159,7 +171,8 @@ export function ManagerPrivateGallery({
   invalidateGalleryAfterMutation,
   live = true,
   onAnnouncement,
-}: ManagerPrivateGalleryProps) {
+  onAnchorReady,
+}, ref) {
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -201,6 +214,22 @@ export function ManagerPrivateGallery({
   const emptyRef = useRef<HTMLHeadingElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = rowState.rows;
+
+  useImperativeHandle(ref, () => ({
+    captureAnchor: (effectiveVisibleTop) => rootRef.current
+      ? captureRenderedGalleryAnchor(rootRef.current, 'media', effectiveVisibleTop)
+      : null,
+    restoreAnchor: (anchor, effectiveVisibleTop) => {
+      const root = rootRef.current;
+      if ((loading && !hasConfirmedPage.current) || root === null) return 'pending';
+      return restoreRenderedGalleryAnchor(root, anchor, effectiveVisibleTop);
+    },
+  }), [loading]);
+
+  useLayoutEffect(() => {
+    if (!active || loading || rootRef.current === null) return;
+    onAnchorReady?.();
+  }, [active, loading, onAnchorReady]);
 
   useEffect(() => {
     if (!live && announcement) onAnnouncement?.(announcement);
@@ -894,4 +923,4 @@ export function ManagerPrivateGallery({
       onAnnouncement={onAnnouncement}
     />}
   </div>;
-}
+});

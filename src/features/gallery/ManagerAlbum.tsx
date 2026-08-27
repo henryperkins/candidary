@@ -72,6 +72,12 @@ import {
   type DomainAutosaveState,
 } from '../settings/autosave-queue';
 import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
+import type { GalleryAnchor } from '../../app/manager-history-state';
+import {
+  captureRenderedGalleryAnchor,
+  restoreRenderedGalleryAnchor,
+  type GalleryAnchorRestoreOutcome,
+} from './gallery-anchor';
 
 interface ManagerAlbumProps {
   eventId: string;
@@ -95,7 +101,7 @@ interface ManagerAlbumProps {
    * Album never stores that destination itself: the retained slot is a marker in
    * this document, and where Recently deleted lives is the Manager's business.
    */
-  onOpenRecentlyDeleted?(): void;
+  onOpenRecentlyDeleted?(mediaId: string): void;
   exportJob?: ExportView;
   exportSource: ExportCurrentSource;
   activeExport?: ExportView;
@@ -106,6 +112,7 @@ interface ManagerAlbumProps {
   onAutosaveStateChange?(state: DomainAutosaveState): void;
   onAccessFailure?(failure: LoadFailure | null): void;
   onAnnouncement?(message: string): void;
+  onAnchorReady?(): void;
 }
 
 export type AlbumLeavePreparation =
@@ -119,6 +126,8 @@ export interface ManagerAlbumHandle {
   retryPendingAlbumChanges(): Promise<AlbumLeavePreparation>;
   discardPendingAlbumChanges(): void;
   restoreLeaveFocus(outcome: AlbumLeavePreparation): void;
+  captureAnchor(effectiveVisibleTop: number): GalleryAnchor | null;
+  restoreAnchor(anchor: GalleryAnchor, effectiveVisibleTop: number): GalleryAnchorRestoreOutcome;
 }
 
 type AlbumDraft = {
@@ -842,6 +851,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   onAutosaveStateChange,
   onAccessFailure,
   onAnnouncement,
+  onAnchorReady,
 }, ref) {
   const [album, setAlbum] = useState<AlbumView | null>(null);
   const [draft, setDraft] = useState<AlbumDraft>(INITIAL_DRAFT);
@@ -1615,7 +1625,20 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     retryPendingAlbumChanges,
     discardPendingAlbumChanges,
     restoreLeaveFocus,
-  }), [discardPendingAlbumChanges, restoreLeaveFocus, retryPendingAlbumChanges, settleDraft]);
+    captureAnchor: (effectiveVisibleTop) => rootRef.current
+      ? captureRenderedGalleryAnchor(rootRef.current, 'album-entry', effectiveVisibleTop)
+      : null,
+    restoreAnchor: (anchor, effectiveVisibleTop) => {
+      const root = rootRef.current;
+      if ((loading && !hasLoaded.current) || root === null) return 'pending';
+      return restoreRenderedGalleryAnchor(root, anchor, effectiveVisibleTop);
+    },
+  }), [discardPendingAlbumChanges, loading, restoreLeaveFocus, retryPendingAlbumChanges, settleDraft]);
+
+  useLayoutEffect(() => {
+    if (!active || loading || rootRef.current === null) return;
+    onAnchorReady?.();
+  }, [active, loading, onAnchorReady]);
 
   useEffect(() => {
     const key = refocusKey.current;
@@ -2400,6 +2423,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                         return <li
                           key={key}
                           data-entry-key={key}
+                          data-gallery-anchor-id={key}
                           className={entry.kind === 'section'
                             ? 'album-review-grid__section'
                             : entry.kind === 'photo-retained'
@@ -2486,7 +2510,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                 {!retainedExpired && onOpenRecentlyDeleted && <button
                                   type="button"
                                   className="text-button album-entry__retained-open"
-                                  onClick={onOpenRecentlyDeleted}
+                                  onClick={() => onOpenRecentlyDeleted(entry.slot.mediaId)}
                                 >Restore in Recently deleted</button>}
                               </>
                             : <>

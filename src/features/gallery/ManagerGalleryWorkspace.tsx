@@ -18,17 +18,22 @@ import type { EventView, ExportKind, GalleryAudienceSummaryView } from '../../..
 import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
 import type { LoadFailure } from '../../components/States';
 import type { DomainAutosaveState } from '../settings/autosave-queue';
-import { GalleryExportControl } from './GalleryExportControl';
+import {
+  GalleryExportControl,
+  type GalleryExportControlHandle,
+} from './GalleryExportControl';
 import { galleryPhotoTitle } from './gallery-timeline';
 import {
   ManagerAlbum,
   type AlbumLeavePreparation,
   type ManagerAlbumHandle,
 } from './ManagerAlbum';
-import { ManagerPrivateGallery } from './ManagerPrivateGallery';
-import { ManagerSharedGallery, type GallerySharedStatus } from './ManagerSharedGallery';
+import { ManagerPrivateGallery, type ManagerPrivateGalleryHandle } from './ManagerPrivateGallery';
+import { ManagerSharedGallery, type GallerySharedStatus, type ManagerSharedGalleryHandle } from './ManagerSharedGallery';
 import type { Dispatch, SetStateAction } from 'react';
 import type { ExportCurrentSource } from './export-control-status';
+import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
+import type { GalleryAnchorRestoreOutcome } from './gallery-anchor';
 
 /**
  * Keyed by the mode union rather than matched with a fallback, so a fourth mode is a
@@ -114,8 +119,8 @@ export interface ManagerGalleryWorkspaceProps {
     /** Reflect a server-returned publication projection into the active Intake page. */
     onPublicationChanged?(changed: MediaView[]): void;
     /** Recently deleted remains Intake-owned, even when Album renders its retained marker. */
-    onOpenRecentlyDeleted?(): void;
-    onOpenSettings(): void;
+    onOpenRecentlyDeleted?(mediaId: string): void;
+    onOpenSettings(status: PublicationFilter): void;
     settingsBlocked: boolean;
   };
   exports: {
@@ -124,6 +129,7 @@ export interface ManagerGalleryWorkspaceProps {
     activeJob?: ExportView;
     download?: ExportDownloadView;
     albumDownload?: ExportDownloadView;
+    status: 'idle' | 'loading' | 'ready' | 'failed';
     onPrepare(kind?: ExportKind): Promise<void>;
     onDownload(job: ExportView): Promise<void>;
     onRetry(job: ExportView): Promise<void>;
@@ -135,6 +141,7 @@ export interface ManagerGalleryWorkspaceProps {
   onAlbumAutosaveStateChange?(state: DomainAutosaveState): void;
   onAlbumAccessFailure?(failure: LoadFailure | null): void;
   onResourceEscalate?(failure: LoadFailure): void;
+  onAnchorReady?(mode: GalleryMode): void;
 }
 
 export interface ManagerGalleryWorkspaceHandle {
@@ -144,6 +151,18 @@ export interface ManagerGalleryWorkspaceHandle {
   discardPendingAlbumChanges(): void;
   retireAlbumLeavePreparation(): void;
   restoreAlbumLeaveFocus(outcome: AlbumLeavePreparation): void;
+  focusCompleteExport(): void;
+  retireCompleteExportFocus(): void;
+  focusGuestGallerySettingsAction(): void;
+  retireGuestGallerySettingsFocus(): void;
+  setGuestGalleryFilter(filter: PublicationFilter): void;
+  captureAnchor(mode: GalleryMode): GalleryAnchor | null;
+  restoreAnchor(mode: GalleryMode, anchor: GalleryAnchor): GalleryAnchorRestoreOutcome;
+}
+
+interface GuestGallerySettingsRequest {
+  filter: PublicationFilter;
+  focus: boolean;
 }
 
 /**
@@ -173,6 +192,7 @@ ManagerGalleryWorkspaceProps
   onAlbumAutosaveStateChange,
   onAlbumAccessFailure,
   onResourceEscalate,
+  onAnchorReady,
 }, ref) {
   // Ordinary publication writes still own a narrow, workspace-local Library
   // refresh. The Manager epoch is additive: inverse commands use it to retire
@@ -217,6 +237,10 @@ ManagerGalleryWorkspaceProps
   const sharedContinuationOperation = useRef(0);
   const sharedContinuationFailureOwner = useRef<number | null>(null);
   const albumRef = useRef<ManagerAlbumHandle>(null);
+  const completeExportRef = useRef<GalleryExportControlHandle>(null);
+  const privateGalleryRef = useRef<ManagerPrivateGalleryHandle>(null);
+  const sharedGalleryRef = useRef<ManagerSharedGalleryHandle>(null);
+  const guestGallerySettingsRequest = useRef<GuestGallerySettingsRequest | null>(null);
   const [externalLeaveActive, setExternalLeaveActive] = useState(false);
 
   // A confirmed local Event/Settings projection wins synchronously over a retained
@@ -265,6 +289,23 @@ ManagerGalleryWorkspaceProps
   const sharedPage = sharedResource.state.value ?? (legacySharedSnapshot
     ? { media: shared.media ?? [], nextCursor: shared.hasMore ? 'legacy-cursor' : null }
     : null);
+  const sharedAnchorPending = !legacySharedSnapshot
+    && sharedResource.state.value === null
+    && sharedResource.state.failure === null
+    && !sharedResource.state.terminal;
+  const reportAnchorReady = useCallback((readyMode: GalleryMode) => {
+    if (mode === readyMode) onAnchorReady?.(readyMode);
+  }, [mode, onAnchorReady]);
+  const reportLibraryAnchorReady = useCallback(() => {
+    reportAnchorReady('library');
+  }, [reportAnchorReady]);
+  const reportAlbumAnchorReady = useCallback(() => {
+    reportAnchorReady('album');
+  }, [reportAnchorReady]);
+  useLayoutEffect(() => {
+    if (mode !== 'guest-gallery' || sharedAnchorPending || sharedGalleryRef.current === null) return;
+    reportAnchorReady('guest-gallery');
+  }, [mode, reportAnchorReady, sharedAnchorPending, sharedResource.state.generation]);
   const audienceSummary = audience.summary;
   const invalidateAudienceSummary = audience.invalidate;
   const pickCount = audienceSummary?.albumPhotoCount ?? 0;
@@ -629,6 +670,55 @@ ManagerGalleryWorkspaceProps
       discardPendingAlbumChanges,
       retireAlbumLeavePreparation,
       restoreAlbumLeaveFocus,
+      focusCompleteExport: () => completeExportRef.current?.focusIntendedAction(),
+      retireCompleteExportFocus: () => completeExportRef.current?.cancelIntendedAction(),
+      setGuestGalleryFilter: (filter) => {
+        const request: GuestGallerySettingsRequest = { filter, focus: false };
+        guestGallerySettingsRequest.current = request;
+        setSharedStatus((current) => (
+          guestGallerySettingsRequest.current === request ? filter : current
+        ));
+      },
+      focusGuestGallerySettingsAction: () => {
+        const request = guestGallerySettingsRequest.current
+          ?? { filter: sharedStatus, focus: false };
+        request.focus = true;
+        guestGallerySettingsRequest.current = request;
+        if (mode === 'guest-gallery' && sharedStatus === request.filter) {
+          guestGallerySettingsRequest.current = null;
+          sharedGalleryRef.current?.focusSettingsAction();
+        }
+      },
+      retireGuestGallerySettingsFocus: () => {
+        guestGallerySettingsRequest.current = null;
+      },
+      captureAnchor: (requestedMode) => {
+        const effectiveVisibleTop = Math.max(
+          0,
+          document.querySelector<HTMLElement>('.manager-nav')?.getBoundingClientRect().bottom ?? 0,
+        );
+        switch (requestedMode) {
+          case 'library': return privateGalleryRef.current?.captureAnchor(effectiveVisibleTop) ?? null;
+          case 'album': return albumRef.current?.captureAnchor(effectiveVisibleTop) ?? null;
+          case 'guest-gallery': return sharedGalleryRef.current?.captureAnchor(effectiveVisibleTop) ?? null;
+        }
+      },
+      restoreAnchor: (requestedMode, anchor) => {
+        const effectiveVisibleTop = Math.max(
+          0,
+          document.querySelector<HTMLElement>('.manager-nav')?.getBoundingClientRect().bottom ?? 0,
+        );
+        switch (requestedMode) {
+          case 'library': return privateGalleryRef.current?.restoreAnchor(anchor, effectiveVisibleTop)
+            ?? 'pending';
+          case 'album': return albumRef.current?.restoreAnchor(anchor, effectiveVisibleTop)
+            ?? 'pending';
+          case 'guest-gallery': {
+            if (sharedAnchorPending) return 'pending';
+            return sharedGalleryRef.current?.restoreAnchor(anchor, effectiveVisibleTop) ?? 'pending';
+          }
+        }
+      },
     }),
     [
       discardPendingAlbumChanges,
@@ -637,8 +727,33 @@ ManagerGalleryWorkspaceProps
       retireAlbumLeavePreparation,
       restoreAlbumLeaveFocus,
       retryPendingAlbumChanges,
+      sharedAnchorPending,
+      sharedStatus,
     ],
   );
+
+  useLayoutEffect(() => {
+    const request = guestGallerySettingsRequest.current;
+    if (
+      request === null
+      || !request.focus
+      || mode !== 'guest-gallery'
+      || request.filter !== sharedStatus
+    ) return;
+    guestGallerySettingsRequest.current = null;
+    sharedGalleryRef.current?.focusSettingsAction();
+  }, [mode, sharedStatus]);
+
+  useLayoutEffect(() => () => {
+    guestGallerySettingsRequest.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (mode !== 'library') completeExportRef.current?.cancelIntendedAction();
+    if (mode !== 'guest-gallery') {
+      guestGallerySettingsRequest.current = null;
+    }
+  }, [mode]);
 
   const adoptedMode = useRef(mode);
   useEffect(() => {
@@ -694,9 +809,11 @@ ManagerGalleryWorkspaceProps
           onRetry={exports.onRetryLoad}
         />}
         <GalleryExportControl
+          ref={completeExportRef}
           job={exports.job}
           activeJob={exports.activeJob}
           download={exports.download}
+          resourceStatus={exports.status}
           eventTimezone={event.eventTimezone}
           currentSource={exports.currentSource}
           onPrepare={exports.onPrepare}
@@ -706,6 +823,7 @@ ManagerGalleryWorkspaceProps
         />
       </div>
       <ManagerPrivateGallery
+        ref={privateGalleryRef}
         key={`library:${galleryMutationEpoch}:${libraryEpoch}`}
         event={event}
         eventId={eventId}
@@ -716,6 +834,7 @@ ManagerGalleryWorkspaceProps
         onPicksChanged={invalidateAudienceSummary}
         live={false}
         onAnnouncement={setAnnouncement}
+        onAnchorReady={reportLibraryAnchorReady}
       />
     </div>
 
@@ -747,6 +866,7 @@ ManagerGalleryWorkspaceProps
         onAutosaveStateChange={onAlbumAutosaveStateChange}
         onAccessFailure={onAlbumAccessFailure}
         onAnnouncement={setAnnouncement}
+        onAnchorReady={reportAlbumAnchorReady}
       />
     </div>}
 
@@ -767,12 +887,16 @@ ManagerGalleryWorkspaceProps
         onRetry={() => void sharedResource.reload()}
       />}
       <ManagerSharedGallery
+        ref={sharedGalleryRef}
         guestGalleryVisible={guestGalleryVisible}
         media={sharedPage?.media ?? []}
         status={sharedStatus}
         selected={sharedSelected}
         selectionAtLimit={sharedSelected.length >= MANAGER_BULK_SELECTION_MAX}
-        onStatusChange={setSharedStatus}
+        onStatusChange={(nextStatus) => {
+          guestGallerySettingsRequest.current = null;
+          setSharedStatus(nextStatus);
+        }}
         onSelectedChange={setSharedSelected}
         onBulk={legacySharedSnapshot && shared.onBulk
           ? async (action) => {

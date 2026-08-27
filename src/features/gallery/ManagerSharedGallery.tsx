@@ -1,5 +1,5 @@
 import { Eye, EyeOff, Image as ImageIcon, ImageOff } from 'lucide-react';
-import { useState, type Dispatch, type SetStateAction } from 'react';
+import { forwardRef, useImperativeHandle, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { MediaView } from '../../app/types';
@@ -11,13 +11,20 @@ import {
   transitionSelection,
   type GallerySelectionAction,
 } from './selection-state';
+import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
+import { captureRenderedGalleryAnchor, restoreRenderedGalleryAnchor } from './gallery-anchor';
 
-export type GallerySharedStatus = 'all' | PublicationStatus;
+export type GallerySharedStatus = PublicationFilter;
 
 export const PUBLICATION_LABELS: Record<PublicationStatus, string> = {
   unpublished: 'Unpublished',
   published: 'Published',
   hidden: 'Hidden',
+};
+
+const PUBLICATION_FILTER_LABELS: Record<GallerySharedStatus, string> = {
+  all: 'All',
+  ...PUBLICATION_LABELS,
 };
 
 /**
@@ -53,13 +60,19 @@ interface ManagerSharedGalleryProps {
   onSelectedChange: Dispatch<SetStateAction<string[]>>;
   onBulk(action: 'publish' | 'hide'): Promise<void>;
   onChangePublication(item: MediaView, action: 'publish' | 'hide'): Promise<void>;
-  onOpenSettings(): void;
+  onOpenSettings(status: PublicationFilter): void;
   /** True while a guest-list commit holds every destination, matching the Manager's own guard. */
   settingsBlocked: boolean;
   loadingMore: boolean;
   hasMore: boolean;
   onLoadMore(): Promise<void>;
   onAnnouncement?(message: string): void;
+}
+
+export interface ManagerSharedGalleryHandle {
+  captureAnchor(effectiveVisibleTop: number): GalleryAnchor | null;
+  restoreAnchor(anchor: GalleryAnchor, effectiveVisibleTop: number): 'item' | 'fallback';
+  focusSettingsAction(): void;
 }
 
 function SharedPhotoPreview({ item, title }: { item: MediaView; title: string }) {
@@ -84,7 +97,7 @@ function SharedPhotoPreview({ item, title }: { item: MediaView; title: string })
  * does not become a deletion surface, so the Live intake delete and individual
  * original download controls are deliberately absent.
  */
-export function ManagerSharedGallery({
+export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, ManagerSharedGalleryProps>(function ManagerSharedGallery({
   guestGalleryVisible,
   media,
   status,
@@ -100,9 +113,23 @@ export function ManagerSharedGallery({
   hasMore,
   onLoadMore,
   onAnnouncement,
-}: ManagerSharedGalleryProps) {
+}, ref) {
   const empty = SHARED_EMPTY_COPY[status];
   const [activeBulk, setActiveBulk] = useState<'publish' | 'hide' | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const settingsActionRef = useRef<HTMLButtonElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    captureAnchor: (effectiveVisibleTop) => rootRef.current
+      ? captureRenderedGalleryAnchor(rootRef.current, 'media', effectiveVisibleTop)
+      : null,
+    restoreAnchor: (anchor, effectiveVisibleTop) => restoreRenderedGalleryAnchor(
+      rootRef.current ?? document.createElement('div'),
+      anchor,
+      effectiveVisibleTop,
+    ),
+    focusSettingsAction: () => settingsActionRef.current?.focus(),
+  }), []);
 
   function changeStatus(next: GallerySharedStatus) {
     if (next === status) return;
@@ -114,6 +141,11 @@ export function ManagerSharedGallery({
     const transition = transitionSelection(new Set(selected), action);
     onSelectedChange([...transition.next]);
     if (transition.message !== null) onAnnouncement?.(transition.message);
+  }
+
+  function openSettings() {
+    commitSelection({ type: 'clear' });
+    onOpenSettings(status);
   }
 
   async function runBulk(action: 'publish' | 'hide') {
@@ -131,29 +163,30 @@ export function ManagerSharedGallery({
     }
   }
 
-  return <div className="gallery-shared">
+  return <div className="gallery-shared" ref={rootRef}>
     <p className="gallery-shared__lede">
       {guestGalleryVisible
         ? 'Published photos are visible to event guests.'
         : 'Publication choices are saved, but the Guest gallery is off.'}
     </p>
     <div className="filter-tabs" role="group" aria-label="Publication status">
-      {(['unpublished', 'published', 'hidden'] as const).map((value) => (
+      {(['all', 'unpublished', 'published', 'hidden'] as const).map((value) => (
         <button
           type="button"
           className={status === value ? 'active' : ''}
           aria-pressed={status === value}
           key={value}
           onClick={() => changeStatus(value)}
-        >{PUBLICATION_LABELS[value]}</button>
+        >{PUBLICATION_FILTER_LABELS[value]}</button>
       ))}
     </div>
     {!guestGalleryVisible && <div className="manager-notice">
       <button
         type="button"
         className="text-button"
+        ref={settingsActionRef}
         disabled={settingsBlocked}
-        onClick={onOpenSettings}
+        onClick={openSettings}
       >Open settings</button>
     </div>}
     <div className="bulk-bar" aria-busy={activeBulk !== null}>
@@ -190,7 +223,11 @@ export function ManagerSharedGallery({
               // the file, because Live intake's identical cards act on files — download, delete — and
               // the two grids must not disagree about what a control is pointed at.
               const title = galleryPhotoTitle(item);
-              return <article className={isSelected ? 'selected' : ''} key={item.id}>
+              return <article
+                className={isSelected ? 'selected' : ''}
+                data-gallery-anchor-id={item.id}
+                key={item.id}
+              >
                 <div className="intake-photo">
                   <label className="intake-select"><input
                     type="checkbox"
@@ -240,4 +277,4 @@ export function ManagerSharedGallery({
           </div>}
         </>}
   </div>;
-}
+});

@@ -1,7 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useCallback, useLayoutEffect, useState, type ReactElement } from 'react';
+import {
+  createRef,
+  startTransition,
+  useCallback,
+  useLayoutEffect,
+  useState,
+  type ReactElement,
+} from 'react';
 import { createPortal } from 'react-dom';
 
 import type { EventView, ManagerGalleryMediaView } from '../../shared/contracts';
@@ -10,6 +17,7 @@ import { resolveEventTheme } from '../../shared/event-theme';
 import {
   ManagerGalleryWorkspace,
   type GalleryAudienceAuthority,
+  type ManagerGalleryWorkspaceHandle,
   type ManagerGalleryWorkspaceProps,
 } from '../../src/features/gallery/ManagerGalleryWorkspace';
 import type { GalleryMode } from '../../src/app/manager-location';
@@ -282,6 +290,7 @@ function renderGalleryWithFetch(
           onLoadMore: noop,
         }}
         exports={{
+          status: 'ready',
           job: overrides.exportJob,
           download: overrides.exportDownload,
           onPrepare,
@@ -1293,9 +1302,24 @@ describe('host private gallery', () => {
     expect(screen.getByText(/easier to finish on a computer than on a phone/)).toBeVisible();
   });
 
-  it('uses titled publication filters and labeled hide actions in the shared workspace', async () => {
-    const onOpenSettings = vi.fn();
-    vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));
+  it('Guest gallery Settings exposes every filter and All requests the unfiltered collection', async () => {
+    const sharedRequests: string[] = [];
+    const base = managerFetch({ guestGalleryVisible: false });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/media' && method === 'GET') {
+        sharedRequests.push(url.pathname + url.search);
+        const requestedStatus = url.searchParams.get('status');
+        return success({
+          media: rows.filter((item) => requestedStatus === null
+            || item.publicationStatus === requestedStatus),
+          nextCursor: null,
+        });
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
     renderWorkspaceWithUndo(<ControlledGalleryWorkspace
       event={{ ...event, galleryVisible: false }}
       eventId="event-a"
@@ -1303,6 +1327,53 @@ describe('host private gallery', () => {
       invalidateGalleryAfterMutation={vi.fn()}
       audience={audienceAuthority(rows, false)}
       onAnnouncement={vi.fn()}
+      shared={{
+        onPublicationChanged: vi.fn(),
+        onOpenSettings: vi.fn(),
+        settingsBlocked: false,
+      }}
+      exports={{
+        status: 'ready',
+        onPrepare: noop,
+        onDownload: noop,
+        onRetry: noop,
+        currentSource: { count: event.storedMediaCount, freshness: 'fresh' },
+      }}
+    />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+
+    const filters = screen.getByRole('group', { name: 'Publication status' });
+    const all = within(filters).getByRole('button', { name: 'All' });
+    const unpublished = within(filters).getByRole('button', { name: 'Unpublished' });
+    const published = within(filters).getByRole('button', { name: 'Published' });
+    const hidden = within(filters).getByRole('button', { name: 'Hidden' });
+    expect(all).toHaveAttribute('aria-pressed', 'false');
+    expect(unpublished).toHaveAttribute('aria-pressed', 'true');
+    expect(published).toHaveAttribute('aria-pressed', 'false');
+    expect(hidden).toHaveAttribute('aria-pressed', 'false');
+    await waitFor(() => expect(sharedRequests.at(-1))
+      .toBe('/api/manage/events/event-a/media?status=unpublished'));
+
+    await user.click(all);
+
+    await waitFor(() => expect(sharedRequests.at(-1))
+      .toBe('/api/manage/events/event-a/media'));
+    expect(all).toHaveAttribute('aria-pressed', 'true');
+    expect(unpublished).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('Guest gallery Settings passes Hidden after clearing selection and announcing it', async () => {
+    const onOpenSettings = vi.fn();
+    const onAnnouncement = vi.fn();
+    vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));
+    renderWorkspaceWithUndo(<ControlledGalleryWorkspace
+      event={{ ...event, galleryVisible: false }}
+      eventId="event-a"
+      galleryMutationEpoch={0}
+      invalidateGalleryAfterMutation={vi.fn()}
+      audience={audienceAuthority(rows, false)}
+      onAnnouncement={onAnnouncement}
       shared={{
         media: [{
           id: 'p1',
@@ -1326,6 +1397,7 @@ describe('host private gallery', () => {
         onLoadMore: noop,
       }}
       exports={{
+        status: 'ready',
         onPrepare: noop,
         onDownload: noop,
         onRetry: noop,
@@ -1336,6 +1408,7 @@ describe('host private gallery', () => {
     await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
 
     const filters = screen.getByRole('group', { name: 'Publication status' });
+    expect(within(filters).getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'false');
     expect(within(filters).getByRole('button', { name: 'Unpublished' })).toHaveAttribute('aria-pressed', 'true');
     expect(within(filters).getByRole('button', { name: 'Published' })).toHaveAttribute('aria-pressed', 'false');
     expect(within(filters).getByRole('button', { name: 'Hidden' })).toHaveAttribute('aria-pressed', 'false');
@@ -1346,8 +1419,135 @@ describe('host private gallery', () => {
     expect(screen.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
     expect(screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.')).toBeVisible();
+    await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
+    const selected = screen.getByRole('checkbox', { name: 'Select toast.jpg' });
+    await user.click(selected);
+    expect(selected).toBeChecked();
     await user.click(screen.getByRole('button', { name: 'Open settings' }));
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+    expect(onOpenSettings).toHaveBeenCalledWith('hidden');
+    expect(selected).not.toBeChecked();
+    expect(onAnnouncement).toHaveBeenLastCalledWith('Selection cleared.');
+  });
+
+  it('focuses Open settings immediately when the requested publication filter is already current', async () => {
+    const workspace = createRef<ManagerGalleryWorkspaceHandle>();
+    vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));
+    renderWorkspaceWithUndo(<>
+      <button type="button">Focus sentinel</button>
+      <ManagerGalleryWorkspace
+        ref={workspace}
+        event={{ ...event, galleryVisible: false }}
+        eventId="event-a"
+        mode="guest-gallery"
+        onModeChange={vi.fn()}
+        galleryMutationEpoch={0}
+        invalidateGalleryAfterMutation={vi.fn()}
+        audience={audienceAuthority(rows, false)}
+        onAnnouncement={vi.fn()}
+        shared={{
+          media: rows,
+          status: 'hidden',
+          selected: [],
+          selectionAtLimit: false,
+          onStatusChange: vi.fn(),
+          onSelectedChange: vi.fn(),
+          onBulk: noop,
+          onChangePublication: noop,
+          onOpenSettings: vi.fn(),
+          settingsBlocked: false,
+          loadingMore: false,
+          hasMore: false,
+          onLoadMore: noop,
+        }}
+        exports={{
+          status: 'ready',
+          onPrepare: noop,
+          onDownload: noop,
+          onRetry: noop,
+          currentSource: { count: event.storedMediaCount, freshness: 'fresh' },
+        }}
+      />
+    </>);
+    const openSettings = await screen.findByRole('button', { name: 'Open settings' });
+    screen.getByRole('button', { name: 'Focus sentinel' }).focus();
+
+    act(() => {
+      workspace.current?.setGuestGalleryFilter('hidden');
+      workspace.current?.focusGuestGallerySettingsAction();
+    });
+
+    expect(within(screen.getByRole('group', { name: 'Publication status' }))
+      .getByRole('button', { name: 'Hidden' })).toHaveAttribute('aria-pressed', 'true');
+    expect(openSettings).toHaveFocus();
+  });
+
+  it('cancels a pending publication filter and focus when the host chooses a newer filter', async () => {
+    const workspace = createRef<ManagerGalleryWorkspaceHandle>();
+    vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));
+    renderWorkspaceWithUndo(<>
+      <button type="button">Focus sentinel</button>
+      <ManagerGalleryWorkspace
+        ref={workspace}
+        event={{ ...event, galleryVisible: false }}
+        eventId="event-a"
+        mode="guest-gallery"
+        onModeChange={vi.fn()}
+        galleryMutationEpoch={0}
+        invalidateGalleryAfterMutation={vi.fn()}
+        audience={audienceAuthority(rows, false)}
+        onAnnouncement={vi.fn()}
+        shared={{
+          media: rows,
+          status: 'unpublished',
+          selected: [],
+          selectionAtLimit: false,
+          onStatusChange: vi.fn(),
+          onSelectedChange: vi.fn(),
+          onBulk: noop,
+          onChangePublication: noop,
+          onOpenSettings: vi.fn(),
+          settingsBlocked: false,
+          loadingMore: false,
+          hasMore: false,
+          onLoadMore: noop,
+        }}
+        exports={{
+          status: 'ready',
+          onPrepare: noop,
+          onDownload: noop,
+          onRetry: noop,
+          currentSource: { count: event.storedMediaCount, freshness: 'fresh' },
+        }}
+      />
+    </>);
+    const filters = await screen.findByRole('group', { name: 'Publication status' });
+    const user = userEvent.setup();
+    const sentinel = screen.getByRole('button', { name: 'Focus sentinel' });
+    const openSettings = screen.getByRole('button', { name: 'Open settings' });
+    sentinel.focus();
+
+    act(() => {
+      startTransition(() => {
+        workspace.current?.setGuestGalleryFilter('hidden');
+        workspace.current?.focusGuestGallerySettingsAction();
+      });
+      fireEvent.click(within(filters).getByRole('button', { name: 'Published' }));
+    });
+
+    await waitFor(() => expect(within(filters).getByRole('button', { name: 'Published' }))
+      .toHaveAttribute('aria-pressed', 'true'));
+    expect(within(filters).getByRole('button', { name: 'Hidden' }))
+      .toHaveAttribute('aria-pressed', 'false');
+    expect(openSettings).not.toHaveFocus();
+    expect(sentinel).toHaveFocus();
+
+    const hidden = within(filters).getByRole('button', { name: 'Hidden' });
+    await user.click(hidden);
+
+    await waitFor(() => expect(hidden).toHaveAttribute('aria-pressed', 'true'));
+    expect(hidden).toHaveFocus();
+    expect(openSettings).not.toHaveFocus();
   });
 
   it('explains an empty published filter without promising new deliveries', async () => {
@@ -1455,6 +1655,7 @@ describe('host private gallery', () => {
         onLoadMore: noop,
       }}
       exports={{
+        status: 'ready',
         onPrepare: noop,
         onDownload: noop,
         onRetry: noop,

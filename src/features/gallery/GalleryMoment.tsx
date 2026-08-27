@@ -48,6 +48,7 @@ function GalleryTile({
   return <div
     className={selected ? 'gallery-mosaic__item is-selected' : 'gallery-mosaic__item'}
     data-photo-id={photo.id}
+    data-gallery-anchor-id={photo.id}
     style={mosaicStyleVars(position) as CSSProperties}
   >
     {/* The covering button carries this tile's accessible name, so the image, the visible caption,

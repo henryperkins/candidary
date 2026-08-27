@@ -575,11 +575,11 @@ describe('Recently deleted', () => {
     const { calls, fetchMock } = managerFetch({ trash: [TRASHED] });
     await openManager(fetchMock);
     await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
-    await screen.findByRole('button', { name: 'Restore' });
+    await screen.findByRole('button', { name: 'Restore first-dance.jpg' });
     const count = (suffix: string) => calls.filter((call) => call.endsWith(suffix)).length;
     const mediaReadsBeforeRestore = calls.filter((call) => call.startsWith('GET ') && call.includes('/media')).length;
 
-    await user.click(screen.getByRole('button', { name: 'Restore' }));
+    await user.click(screen.getByRole('button', { name: 'Restore first-dance.jpg' }));
 
     await waitFor(() => {
       expect(count('/api/manage/events/event-a')).toBe(2);

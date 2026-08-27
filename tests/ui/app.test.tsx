@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { startTransition, useLayoutEffect, useState } from 'react';
+import { StrictMode, startTransition, useLayoutEffect, useState } from 'react';
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useNavigate, useParams } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import type * as ManagementLinkModule from '../../src/app/management-link';
 import type { ExportView, MediaView } from '../../src/app/types';
@@ -30,6 +30,11 @@ import { resolveEventTheme } from '../../shared/event-theme';
 import { mediaPreview } from '../../src/app/api';
 import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
+import type {
+  GalleryAnchor,
+  ManagerNavigationIntent,
+  RouterHistoryState,
+} from '../../src/app/manager-history-state';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
 import { EventPage } from '../../src/pages/EventPage';
@@ -916,6 +921,165 @@ function managerLocationFetch() {
   });
 }
 
+function managerHistoryFetch(
+  library: MediaView[],
+  guestGallery: MediaView[],
+  galleryRequests: string[] = [],
+) {
+  const base = managerLocationFetch();
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (method === 'GET' && url.includes('/gallery?')) {
+      galleryRequests.push(url);
+      return json({ media: library, nextCursor: null });
+    }
+    if (method === 'GET' && url.includes('/media?')) {
+      return json({ media: guestGallery, nextCursor: null });
+    }
+    return base(input, init);
+  });
+}
+
+function historyMedia(ids: string[], publicationStatus: MediaView['publicationStatus'] = 'published') {
+  return makeMedia(ids.length, publicationStatus).map((item, index) => ({
+    ...item,
+    id: ids[index]!,
+    previewAvailable: true,
+    receivedAt: item.createdAt,
+    timelineAt: item.createdAt,
+    timelineSource: 'received' as const,
+    isFavorite: false,
+  }));
+}
+
+function guestGallerySettingsFetch(options: { deferSettings?: boolean } = {}) {
+  const event = { ...MANAGED_EVENT, galleryVisible: false };
+  const hiddenRow = historyMedia(['guest-settings-hidden'], 'hidden')[0]!;
+  const base = managerLocationFetch();
+  let releaseGate!: () => void;
+  const settingsGate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  let markSettingsStarted!: () => void;
+  const settingsStarted = new Promise<void>((resolve) => { markSettingsStarted = resolve; });
+  let started = false;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'https://candidary.test');
+    const method = String(init?.method ?? 'GET').toUpperCase();
+    if (url.pathname === `/api/manage/events/${MANAGED_EVENT.id}` && method === 'GET') {
+      return json({ event });
+    }
+    if (url.pathname === `/api/manage/events/${MANAGED_EVENT.id}/gallery/summary` && method === 'GET') {
+      return json({ summary: {
+        ...EMPTY_GALLERY_AUDIENCE_SUMMARY,
+        guestGalleryVisible: false,
+      } });
+    }
+    if (url.pathname === `/api/manage/events/${MANAGED_EVENT.id}/media` && method === 'GET') {
+      const requestedStatus = url.searchParams.get('status');
+      return json({
+        media: requestedStatus === null || requestedStatus === 'hidden' ? [hiddenRow] : [],
+        nextCursor: null,
+      });
+    }
+    if (url.pathname === `/api/manage/events/${MANAGED_EVENT.id}/settings` && method === 'PATCH') {
+      if (!started) {
+        started = true;
+        markSettingsStarted();
+      }
+      if (options.deferSettings) await settingsGate;
+      const payload = JSON.parse(String(init?.body)) as Partial<EventView>;
+      return json({ event: { ...event, ...payload } });
+    }
+    return base(input, init);
+  });
+  return {
+    fetchMock,
+    hiddenRow,
+    settingsStarted,
+    releaseSettings: releaseGate,
+  };
+}
+
+function historyRect(top: number, height = 40): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    left: 0,
+    right: 0,
+    width: 0,
+    height,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  };
+}
+
+function installHistoryAnchorRects(
+  rootSelector: string,
+  documentTops: Record<string, number>,
+  readScrollY: () => number,
+) {
+  const root = document.querySelector<HTMLElement>(rootSelector)!;
+  for (const [id, documentTop] of Object.entries(documentTops)) {
+    const item = root.querySelector<HTMLElement>(`[data-gallery-anchor-id="${id}"]`)!;
+    vi.spyOn(item, 'getBoundingClientRect').mockImplementation(() => (
+      historyRect(documentTop - readScrollY())
+    ));
+  }
+}
+
+function managerHistoryState(anchor: GalleryAnchor, mode: GalleryMode): RouterHistoryState {
+  return {
+    __candidaryManager: {
+      version: 1,
+      eventId: MANAGED_EVENT.id,
+      anchors: { [mode]: anchor },
+    },
+  };
+}
+
+function managerIntentState(
+  intent: ManagerNavigationIntent,
+  eventId = MANAGED_EVENT.id,
+): RouterHistoryState {
+  return {
+    source: 'task-4-test',
+    __candidaryManager: { version: 1, eventId, intent },
+  };
+}
+
+function exportJobFixture(
+  kind: ExportView['kind'],
+  state: ExportView['state'],
+): ExportView {
+  const terminal = state === 'ready' || state === 'failed' || state === 'expired';
+  return {
+    id: `${kind}-${state}`,
+    kind,
+    state,
+    snapshotAt: '2026-09-20T00:00:00.000Z',
+    createdAt: '2026-09-20T00:00:01.000Z',
+    startedAt: state === 'queued' ? null : '2026-09-20T00:00:02.000Z',
+    completedAt: terminal ? '2026-09-20T00:00:03.000Z' : null,
+    mediaCount: 3,
+    totalBytes: 1_024,
+    processedMediaCount: state === 'queued' ? null : state === 'running' ? 1 : 3,
+    processedBytes: state === 'queued' ? null : state === 'running' ? 256 : 1_024,
+    progressUpdatedAt: state === 'queued' ? null : '2026-09-20T00:00:02.500Z',
+    attempt: 1,
+    partCount: state === 'ready' ? 1 : 0,
+    expiresAt: state === 'ready' ? '2026-09-21T00:00:03.000Z' : null,
+    guestbookEntryCount: kind === 'complete' ? 0 : null,
+    guestbookSharedCount: kind === 'complete' ? 0 : null,
+    guestbookEventName: kind === 'complete' ? 'Maya & Theo' : null,
+    guestbookEventDate: kind === 'complete' ? '2026-09-19' : null,
+    guestbookEventTimezone: kind === 'complete' ? 'America/Chicago' : null,
+    guestbookPrompt: kind === 'complete' ? DEFAULT_GUESTBOOK_PROMPT : null,
+    guestbookGalleryVisible: kind === 'complete' ? true : null,
+    errorCode: state === 'failed' ? 'EXPORT_FAILED' : null,
+  };
+}
+
 function deferredAlbumSaveFetch() {
   const base = managerLocationFetch();
   let release: (() => void) | null = null;
@@ -1121,6 +1285,1858 @@ describe('canonical Manager location ownership', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Library' }))
       .toHaveAttribute('aria-pressed', 'true'));
   });
+
+  it('captures a Library anchor before Guest gallery and restores it after Back', async () => {
+    const library = historyMedia(Array.from({ length: 30 }, (_, index) => `p${index + 1}`));
+    vi.stubGlobal('fetch', managerHistoryFetch(library, historyMedia(['guest-1'], 'unpublished')));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 600;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Show more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(library.length));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    const documentTops = Object.fromEntries(library.map(({ id }, index) => [
+      id,
+      index < 20 ? 400 + index * 4 : 780 + (index - 20) * 40,
+    ]));
+    installHistoryAnchorRects('.gallery-private', documentTops, () => scrollY);
+    const tile = document.querySelector<HTMLElement>('[data-photo-id="p21"]')!;
+    const effectiveTop = () => Math.max(
+      0,
+      document.querySelector<HTMLElement>('.manager-nav')!.getBoundingClientRect().bottom,
+    );
+    const before = tile.getBoundingClientRect().top - effectiveTop();
+
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    expect((router.state.location.state as RouterHistoryState)
+      .__candidaryManager?.anchors?.library).toMatchObject({ kind: 'media', mediaId: 'p21' });
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+    expect(scrollY).toBe(0);
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+    expect(tile.getBoundingClientRect().top - effectiveTop()).toBe(before);
+  });
+
+  it('waits for a delayed Library return before restoring a cross-section Back anchor', async () => {
+    const library = historyMedia(['library-return']);
+    let releaseLibrary!: () => void;
+    const libraryGate = new Promise<void>((resolve) => { releaseLibrary = resolve; });
+    let libraryGets = 0;
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url.includes('/gallery?')) {
+        libraryGets += 1;
+        await libraryGate;
+        return json({ media: library, nextCursor: null });
+      }
+      return base(input, init);
+    }));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 400;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const anchor: GalleryAnchor = {
+      kind: 'media',
+      mediaId: 'library-return',
+      viewportOffset: 30,
+      fallbackScrollY: 700,
+      before: [],
+      after: [],
+    };
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerHistoryState(anchor, 'library'),
+    }, `/manage/event/${MANAGED_EVENT.id}?section=share`]);
+    render(<RouterProvider router={router} />);
+    await screen.findByRole('heading', { name: 'Share your event' });
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(libraryGets).toBe(1);
+
+    await act(async () => { releaseLibrary(); });
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', { 'library-return': 700 }, () => scrollY);
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 570, behavior: 'instant' });
+    expect(libraryGets).toBe(1);
+  });
+
+  it('waits for a delayed Album return before restoring its Back anchor', async () => {
+    const albumPhoto = historyMedia(['album-return'])[0]!;
+    let releaseAlbum!: () => void;
+    const albumGate = new Promise<void>((resolve) => { releaseAlbum = resolve; });
+    let albumGets = 0;
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album') && method === 'GET') {
+        albumGets += 1;
+        await albumGate;
+        return json({ album: {
+          revision: 1,
+          saved: true,
+          title: 'Album',
+          description: '',
+          coverMediaId: null,
+          effectiveCoverMediaId: null,
+          entries: [{ kind: 'photo', photo: albumPhoto }],
+          photoCount: 1,
+          sectionCount: 0,
+          totalBytes: 0,
+        } });
+      }
+      return base(input, init);
+    }));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 450;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const anchor: GalleryAnchor = {
+      kind: 'album-entry',
+      entryId: 'photo:album-return',
+      viewportOffset: 40,
+      fallbackScrollY: 760,
+      before: [],
+      after: [],
+    };
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=album',
+      state: managerHistoryState(anchor, 'album'),
+    }, `/manage/event/${MANAGED_EVENT.id}?section=share`]);
+    render(<RouterProvider router={router} />);
+    await screen.findByRole('heading', { name: 'Share your event' });
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery&mode=album'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(albumGets).toBe(1);
+
+    await act(async () => { releaseAlbum(); });
+    await waitFor(() => expect(document.querySelector(
+      '[data-gallery-anchor-id="photo:album-return"]',
+    )).not.toBeNull());
+    const row = document.querySelector<HTMLElement>(
+      '[data-gallery-anchor-id="photo:album-return"]',
+    )!;
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    vi.spyOn(row, 'getBoundingClientRect').mockImplementation(() => historyRect(820 - scrollY));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 680, behavior: 'instant' });
+    expect(albumGets).toBe(1);
+  });
+
+  it('clears a pending delayed restoration before a later ready signal', async () => {
+    const library = historyMedia(['stale-library']);
+    const guest = historyMedia(['guest-current'], 'unpublished');
+    let releaseLibrary!: () => void;
+    const libraryGate = new Promise<void>((resolve) => { releaseLibrary = resolve; });
+    let libraryGets = 0;
+    const base = managerHistoryFetch([], guest);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url.includes('/gallery?')) {
+        libraryGets += 1;
+        await libraryGate;
+        return json({ media: library, nextCursor: null });
+      }
+      return base(input, init);
+    }));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 400;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const anchor: GalleryAnchor = {
+      kind: 'media',
+      mediaId: 'stale-library',
+      viewportOffset: 20,
+      fallbackScrollY: 700,
+      before: [],
+      after: [],
+    };
+    const guestPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`;
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerHistoryState(anchor, 'library'),
+    }, guestPath]);
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(document.querySelectorAll('.gallery-shared [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+    await waitFor(() => expect(libraryGets).toBe(1));
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    await router.navigate(1);
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    scrollY = 0;
+    act(() => { frames.shift()?.(0); });
+    expect(frames).toHaveLength(0);
+
+    await act(async () => { releaseLibrary(); });
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+    expect(frames).toHaveLength(0);
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    expect(frames).toHaveLength(1);
+    act(() => { frames.shift()?.(0); });
+
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(libraryGets).toBe(1);
+  });
+
+  it('uses nearby rendered IDs then clamped scroll without fetching', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 300;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    vi.spyOn(document.documentElement, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(document.body, 'scrollHeight', 'get').mockReturnValue(800);
+    vi.stubGlobal('innerHeight', 300);
+
+    const candidateAnchor: GalleryAnchor = {
+      kind: 'media', mediaId: 'missing', viewportOffset: 25, fallbackScrollY: 1200,
+      before: ['before-first', 'before-second'], after: ['after-missing', 'after-second'],
+    };
+    const candidateRequests: string[] = [];
+    vi.stubGlobal('fetch', managerHistoryFetch(
+      historyMedia(['before-first', 'after-second']),
+      [],
+      candidateRequests,
+    ));
+    const guestPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`;
+    const candidateRouter = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerHistoryState(candidateAnchor, 'library'),
+    }, guestPath]);
+    const candidateView = render(<RouterProvider router={candidateRouter} />);
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(2));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', {
+      'before-first': 725,
+      'after-second': 1_000,
+    }, () => scrollY);
+    await candidateRouter.navigate(-1);
+    await waitFor(() => expect(candidateRouter.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    const candidateRequestCount = candidateRequests.length;
+    act(() => { frames.shift()?.(0); });
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 600, behavior: 'instant' });
+    expect(candidateRequests).toHaveLength(candidateRequestCount);
+
+    candidateView.unmount();
+    frames.length = 0;
+    scrollTo.mockClear();
+    scrollY = 300;
+    const fallbackAnchor: GalleryAnchor = {
+      kind: 'media', mediaId: 'gone', viewportOffset: 0, fallbackScrollY: 1200,
+      before: ['also-gone'], after: ['still-gone'],
+    };
+    const fallbackRequests: string[] = [];
+    vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['other']), [], fallbackRequests));
+    const fallbackRouter = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerHistoryState(fallbackAnchor, 'library'),
+    }, guestPath]);
+    render(<RouterProvider router={fallbackRouter} />);
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', { other: 500 }, () => scrollY);
+    await fallbackRouter.navigate(-1);
+    await waitFor(() => expect(fallbackRouter.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    const fallbackRequestCount = fallbackRequests.length;
+    act(() => { frames.shift()?.(0); });
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 600, behavior: 'instant' });
+    expect(fallbackRequests).toHaveLength(fallbackRequestCount);
+  });
+
+  it('leaves the browser history wrapper untouched for a blocked memory-router departure', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['library-1']), []));
+    const originalHistoryState = window.history.state;
+    const originalHref = window.location.href;
+    const browserWrapper = {
+      usr: { outsideRouter: 'untouched' },
+      key: 'default',
+      idx: 41,
+      foreignSentinel: 'memory-router-does-not-own-this',
+    };
+    window.history.replaceState(browserWrapper, '', window.location.href);
+    onTestFinished(() => {
+      window.history.replaceState(originalHistoryState, '', originalHref);
+    });
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+
+    await router.navigate('/terms');
+    await waitFor(() => expect(router.state.location.pathname).toBe('/terms'));
+
+    expect(window.history.state).toEqual(browserWrapper);
+  });
+
+  it('leaves the browser history wrapper untouched for a blocked in-app Manager target', async () => {
+    let releaseSettings!: () => void;
+    const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve; });
+    let settingsStarted = false;
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/settings') && method === 'PATCH') {
+        settingsStarted = true;
+        await settingsGate;
+        return json({ event: { ...MANAGED_EVENT, galleryVisible: false } });
+      }
+      return base(input, init);
+    }));
+    const originalHistoryState = window.history.state;
+    const originalHref = window.location.href;
+    const browserWrapper = {
+      usr: { outsideRouter: 'untouched' },
+      key: 'default',
+      idx: 23,
+      foreignSentinel: 'in-app-navigation-does-not-own-this',
+    };
+    window.history.replaceState(browserWrapper, '', window.location.href);
+    onTestFinished(() => {
+      releaseSettings();
+      window.history.replaceState(originalHistoryState, '', originalHref);
+    });
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=settings`]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
+    await user.click(screen.getByLabelText('Show the optional shared gallery'));
+    await waitFor(() => expect(settingsStarted).toBe(true));
+
+    await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+
+    expect(window.history.state).toEqual(browserWrapper);
+  });
+
+  it('captures Library and Guest-gallery anchors before Back or Forward adopts another location', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch(
+      historyMedia(['library-1', 'library-2']),
+      historyMedia(['guest-1', 'guest-2'], 'unpublished'),
+    ));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 500;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const libraryPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery`;
+    const guestPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`;
+    const originalHistoryState = window.history.state;
+    const originalHref = window.location.href;
+    const libraryWrapper = {
+      usr: null,
+      key: 'library-entry',
+      idx: 0,
+      foreignSentinel: 'keep-library-wrapper',
+    };
+    const guestWrapper = {
+      usr: null,
+      key: 'guest-entry',
+      idx: 1,
+      foreignSentinel: 'keep-guest-wrapper',
+    };
+    window.history.replaceState(libraryWrapper, '', libraryPath);
+    window.history.pushState(guestWrapper, '', guestPath);
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+    const router = createAppRouter();
+    onTestFinished(() => {
+      router.dispose();
+      window.history.replaceState(originalHistoryState, '', originalHref);
+    });
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(document.querySelectorAll('[data-gallery-anchor-id]')).toHaveLength(4));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', {
+      'library-1': 450,
+      'library-2': 680,
+    }, () => scrollY);
+    installHistoryAnchorRects('.gallery-shared', {
+      'guest-1': 450,
+      'guest-2': 700,
+    }, () => scrollY);
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    const capturedGuestWrite = replaceState.mock.calls.find(([next]) => {
+      const wrapper = next as Record<string, unknown>;
+      const usr = wrapper.usr as RouterHistoryState | undefined;
+      return wrapper.foreignSentinel === guestWrapper.foreignSentinel
+        && usr?.__candidaryManager?.anchors?.['guest-gallery'] !== undefined;
+    })?.[0] as Record<string, unknown> | undefined;
+    expect(capturedGuestWrite).toEqual({
+      ...guestWrapper,
+      usr: expect.objectContaining({
+        __candidaryManager: expect.objectContaining({
+          anchors: expect.objectContaining({
+            'guest-gallery': expect.objectContaining({ kind: 'media' }),
+          }),
+        }),
+      }),
+    });
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => { frames.shift()?.(0); });
+    scrollY = 500;
+    await router.navigate(1);
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    const capturedLibraryWrite = replaceState.mock.calls.find(([next]) => {
+      const wrapper = next as Record<string, unknown>;
+      const usr = wrapper.usr as RouterHistoryState | undefined;
+      return wrapper.foreignSentinel === libraryWrapper.foreignSentinel
+        && usr?.__candidaryManager?.anchors?.library !== undefined;
+    })?.[0] as Record<string, unknown> | undefined;
+    expect(capturedLibraryWrite).toEqual({
+      ...libraryWrapper,
+      usr: expect.objectContaining({
+        __candidaryManager: expect.objectContaining({
+          anchors: expect.objectContaining({
+            library: expect.objectContaining({ kind: 'media' }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  it('captures and consumes a distinct same-href browser POP exactly once', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['same-href-row']), []));
+    let scrollY = 500;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const managerPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery`;
+    const originalHistoryState = window.history.state;
+    const originalHref = window.location.href;
+    const targetWrapper = {
+      usr: managerIntentState({ kind: 'focus-complete-export' }),
+      key: 'same-href-target',
+      idx: 0,
+      foreignSentinel: 'keep-target-wrapper',
+    };
+    const currentWrapper = {
+      usr: { currentEntry: 'preserve' },
+      key: 'same-href-current',
+      idx: 1,
+      foreignSentinel: 'keep-current-wrapper',
+    };
+    window.history.replaceState(targetWrapper, '', managerPath);
+    window.history.pushState(currentWrapper, '', managerPath);
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+    const router = createAppRouter();
+    onTestFinished(() => {
+      router.dispose();
+      window.history.replaceState(originalHistoryState, '', originalHref);
+    });
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', { 'same-href-row': 700 }, () => scrollY);
+
+    window.history.back();
+    const download = await screen.findByRole('button', { name: 'Download all' });
+    await waitFor(() => expect(download).toHaveFocus());
+    await waitFor(() => expect(router.state.location.state).toEqual({ source: 'task-4-test' }));
+    const capturedCurrentWrite = replaceState.mock.calls.find(([next]) => {
+      const wrapper = next as Record<string, unknown>;
+      const usr = wrapper.usr as RouterHistoryState | undefined;
+      return wrapper.foreignSentinel === currentWrapper.foreignSentinel
+        && usr?.__candidaryManager?.anchors?.library !== undefined;
+    })?.[0] as Record<string, unknown> | undefined;
+    expect(capturedCurrentWrite).toEqual({
+      ...currentWrapper,
+      usr: expect.objectContaining({
+        currentEntry: 'preserve',
+        __candidaryManager: expect.objectContaining({
+          anchors: expect.objectContaining({
+            library: expect.objectContaining({ kind: 'media' }),
+          }),
+        }),
+      }),
+    });
+
+    window.history.forward();
+    await waitFor(() => expect(window.history.state?.foreignSentinel)
+      .toBe(currentWrapper.foreignSentinel));
+    await waitFor(() => expect(router.state.location.state).toEqual({ currentEntry: 'preserve' }));
+    const library = screen.getByRole('button', { name: 'Library' });
+    library.focus();
+    window.history.back();
+    await waitFor(() => expect(router.state.location.state).toEqual({ source: 'task-4-test' }));
+    expect(download).not.toHaveFocus();
+  });
+
+  it('captures a keyless default entry before a distinct same-href Forward exactly once', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['keyless-forward-row']), []));
+    let scrollY = 500;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const managerPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery`;
+    const originalHistoryState = window.history.state;
+    const originalHref = window.location.href;
+    const initialWrapper = {
+      usr: { initialEntry: 'preserve' },
+      idx: 0,
+      foreignSentinel: 'keep-keyless-initial-wrapper',
+    };
+    const forwardWrapper = {
+      usr: managerIntentState({ kind: 'focus-complete-export' }),
+      key: 'same-href-forward-target',
+      idx: 1,
+      foreignSentinel: 'keep-forward-wrapper',
+    };
+    window.history.replaceState(initialWrapper, '', managerPath);
+    window.history.pushState(forwardWrapper, '', managerPath);
+    const returnedToInitial = new Promise<void>((resolve) => {
+      window.addEventListener('popstate', () => resolve(), { once: true });
+    });
+    window.history.back();
+    await returnedToInitial;
+    expect(window.history.state).toEqual(initialWrapper);
+    const replaceState = vi.spyOn(window.history, 'replaceState');
+    const router = createAppRouter();
+    onTestFinished(() => {
+      router.dispose();
+      window.history.replaceState(originalHistoryState, '', originalHref);
+    });
+    expect(router.state.location.key).toBe('default');
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(1));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', { 'keyless-forward-row': 700 }, () => scrollY);
+
+    window.history.forward();
+    const download = await screen.findByRole('button', { name: 'Download all' });
+    await waitFor(() => expect(download).toHaveFocus());
+    await waitFor(() => expect(router.state.location.state).toEqual({ source: 'task-4-test' }));
+    const capturedInitialWrite = replaceState.mock.calls.find(([next]) => {
+      const wrapper = next as Record<string, unknown>;
+      const usr = wrapper.usr as RouterHistoryState | undefined;
+      return wrapper.foreignSentinel === initialWrapper.foreignSentinel
+        && usr?.__candidaryManager?.anchors?.library !== undefined;
+    })?.[0] as Record<string, unknown> | undefined;
+    expect(capturedInitialWrite).toEqual({
+      ...initialWrapper,
+      usr: expect.objectContaining({
+        initialEntry: 'preserve',
+        __candidaryManager: expect.objectContaining({
+          anchors: expect.objectContaining({
+            library: expect.objectContaining({ kind: 'media' }),
+          }),
+        }),
+      }),
+    });
+
+    window.history.back();
+    await waitFor(() => expect(router.state.location.state).toEqual({ initialEntry: 'preserve' }));
+    screen.getByRole('button', { name: 'Library' }).focus();
+    window.history.forward();
+    await waitFor(() => expect(router.state.location.state).toEqual({ source: 'task-4-test' }));
+    expect(download).not.toHaveFocus();
+  });
+
+  it('cancels queued Gallery restoration after a newer adoption', async () => {
+    const returningAnchor: GalleryAnchor = {
+      kind: 'media', mediaId: 'library-1', viewportOffset: 30, fallbackScrollY: 700,
+      before: [], after: [],
+    };
+    vi.stubGlobal('fetch', managerHistoryFetch(
+      historyMedia(['library-1']),
+      historyMedia(['guest-1'], 'unpublished'),
+    ));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 400;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+    const guestPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`;
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerHistoryState(returningAnchor, 'library'),
+    }, guestPath]);
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(document.querySelectorAll('[data-gallery-anchor-id]')).toHaveLength(2));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    installHistoryAnchorRects('.gallery-private', { 'library-1': 700 }, () => scrollY);
+    installHistoryAnchorRects('.gallery-shared', { 'guest-1': 720 }, () => scrollY);
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    const staleRestoration = frames.shift();
+    expect(staleRestoration).toBeTypeOf('function');
+    await router.navigate(1);
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    act(() => { staleRestoration?.(0); });
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('keeps a complete export intent on the labelled region while export status is loading', async () => {
+    let releaseExports!: () => void;
+    const exportsGate = new Promise<void>((resolve) => { releaseExports = resolve; });
+    onTestFinished(releaseExports);
+    const base = managerHistoryFetch([], []);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/exports')) {
+        await exportsGate;
+        return json({ exports: [] });
+      }
+      return base(input, init);
+    }));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    render(<RouterProvider router={router} />);
+
+    await screen.findByRole('heading', { name: 'Gallery' });
+    expect(await screen.findByRole('region', { name: 'Complete export' })).toHaveFocus();
+  });
+
+  it('retires a loading complete export focus request when Library is no longer active', async () => {
+    let releaseExports!: () => void;
+    const exportsGate = new Promise<void>((resolve) => { releaseExports = resolve; });
+    onTestFinished(releaseExports);
+    const base = managerHistoryFetch([], []);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/exports')) {
+        await exportsGate;
+        return json({ exports: [] });
+      }
+      return base(input, init);
+    }));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findByRole('region', { name: 'Complete export' })).toHaveFocus();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    const published = await screen.findByRole('button', { name: 'Published' });
+    published.focus();
+
+    await act(async () => { releaseExports(); });
+    expect(published).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Library' }));
+    expect(await screen.findByRole('button', { name: 'Download all' })).not.toHaveFocus();
+  });
+
+  it('keeps a complete export intent on the labelled region when export status fails', async () => {
+    const base = managerHistoryFetch([], []);
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).endsWith('/exports')
+        ? errorJson({ code: 'INTERNAL_ERROR', message: 'Export status unavailable.', requestId: 'r' }, 503)
+        : base(input, init)
+    )));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Export status unavailable.');
+    expect(screen.getByRole('region', { name: 'Complete export' })).toHaveFocus();
+  });
+
+  it('keeps a complete export intent on the labelled region for a trusted empty collection', async () => {
+    const base = managerHistoryFetch([], []);
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).endsWith(`/api/manage/events/${MANAGED_EVENT.id}`)
+        ? json({ event: { ...MANAGED_EVENT, storedMediaCount: 0, storedBytes: 0 } })
+        : base(input, init)
+    )));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    render(<RouterProvider router={router} />);
+
+    await screen.findByText('Deliver a photo before preparing the current collection.');
+    expect(screen.getByRole('region', { name: 'Complete export' })).toHaveFocus();
+  });
+
+  it('keeps a complete export intent on the labelled region while another job is active', async () => {
+    const base = managerHistoryFetch([], []);
+    const activeAlbum = exportJobFixture('album', 'running');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).endsWith('/exports')
+        ? json({ exports: [activeAlbum] })
+        : base(input, init)
+    )));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    render(<RouterProvider router={router} />);
+
+    await screen.findByText('Album export is Running. Prepare and retry actions will be available when it finishes.');
+    expect(screen.getByRole('region', { name: 'Complete export' })).toHaveFocus();
+  });
+
+  it('uses a Share complete export intent once, focuses its enabled action, and preserves foreign state', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    const shareEntry = {
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=share',
+      state: { source: 'share-entry' },
+    };
+    const router = createAppRouter([shareEntry]);
+    const view = render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    const share = await screen.findByRole('heading', { name: 'Share your event' });
+
+    await user.click(within(share.closest('section')!).getByRole('button', { name: 'Open Gallery' }));
+
+    const action = await screen.findByRole('button', { name: 'Download all' });
+    expect(action).toHaveFocus();
+    await waitFor(() => expect(router.state.location.state).toEqual({ source: 'share-entry' }));
+
+    screen.getByRole('button', { name: 'Guest gallery' }).focus();
+    await router.navigate(-1);
+    await screen.findByRole('heading', { name: 'Share your event' });
+    await router.navigate(1);
+    const returnedAction = await screen.findByRole('button', { name: 'Download all' });
+    expect(returnedAction).not.toHaveFocus();
+
+    view.unmount();
+    const reload = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
+    render(<RouterProvider router={reload} />);
+    expect(await screen.findByRole('button', { name: 'Download all' })).not.toHaveFocus();
+  });
+
+  it('commits one canonical clean entry before a complete export intent focuses under StrictMode', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=share`]);
+    const focusSnapshots: Array<{ search: string; state: unknown }> = [];
+    const recordFocus = (event: FocusEvent) => {
+      if ((event.target as HTMLElement | null)?.textContent?.includes('Download all')) {
+        focusSnapshots.push({
+          search: router.state.location.search,
+          state: router.state.location.state,
+        });
+      }
+    };
+    document.addEventListener('focusin', recordFocus);
+    onTestFinished(() => document.removeEventListener('focusin', recordFocus));
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+    await screen.findByRole('heading', { name: 'Share your event' });
+
+    await router.navigate({
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=discard-me',
+    }, {
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    });
+
+    await waitFor(() => expect(focusSnapshots).toHaveLength(1));
+    expect(focusSnapshots[0]).toEqual({
+      search: '?section=gallery',
+      state: { source: 'task-4-test' },
+    });
+    expect(router.state.location.search).toBe('?section=gallery');
+    expect(router.state.location.state).toEqual({ source: 'task-4-test' });
+  });
+
+  it('retires a superseded cleanup before adopting a different same-target REPLACE', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=old-entry',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    const originalNavigate = router.navigate.bind(router);
+    let releaseCleanup!: () => void;
+    const cleanupStarted = new Promise<void>((resolveStarted) => {
+      vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+        if (options?.replace && releaseCleanup === undefined) {
+          return new Promise<void>((resolveCleanup) => {
+            releaseCleanup = resolveCleanup;
+            resolveStarted();
+          });
+        }
+        return originalNavigate(to, options);
+      });
+    });
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+    await cleanupStarted;
+
+    await originalNavigate({
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+    }, { replace: true, state: { source: 'newer-same-target-entry' } });
+    await waitFor(() => expect(router.state.location.state)
+      .toEqual({ source: 'newer-same-target-entry' }));
+    await act(async () => { releaseCleanup(); });
+
+    const action = await screen.findByRole('button', { name: 'Download all' });
+    expect(action).not.toHaveFocus();
+    expect(router.state.location.search).toBe('?section=gallery');
+    expect(router.state.location.state).toEqual({ source: 'newer-same-target-entry' });
+  });
+
+  it('retries one rejected cleanup and focuses only after the exact clean successor commits', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=retry-once',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    const originalNavigate = router.navigate.bind(router);
+    let cleanupCalls = 0;
+    const cleanupStates: unknown[] = [];
+    vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+      if (options?.replace) {
+        cleanupCalls += 1;
+        cleanupStates.push(options.state);
+        if (cleanupCalls === 1) return Promise.reject(new Error('cleanup rejected once'));
+      }
+      return originalNavigate(to, options);
+    });
+    const focusSnapshots: Array<{ search: string; state: unknown }> = [];
+    const recordFocus = (event: FocusEvent) => {
+      if ((event.target as HTMLElement | null)?.textContent?.includes('Download all')) {
+        focusSnapshots.push({
+          search: router.state.location.search,
+          state: router.state.location.state,
+        });
+      }
+    };
+    document.addEventListener('focusin', recordFocus);
+    onTestFinished(() => document.removeEventListener('focusin', recordFocus));
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+
+    await waitFor(() => expect(focusSnapshots).toHaveLength(1));
+    expect(cleanupCalls).toBe(2);
+    expect(cleanupStates[1]).not.toBe(cleanupStates[0]);
+    expect(focusSnapshots[0]).toEqual({
+      search: '?section=gallery',
+      state: { source: 'task-4-test' },
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(cleanupCalls).toBe(2);
+  });
+
+  it('does not assign an equal-state independent REPLACE to a held cleanup invocation', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    let getterReads = 0;
+    const makeForeignState = () => {
+      const value: Record<string, unknown> = {};
+      Object.defineProperty(value, 'stable', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          getterReads += 1;
+          return 'preserved';
+        },
+      });
+      return value;
+    };
+    const makeCyclicState = () => {
+      const value: Record<string, unknown> = {};
+      value.self = value;
+      return value;
+    };
+    const initialCyclic = makeCyclicState();
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=held-cleanup',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    // Memory history stringifies initial entry objects while validating their
+    // pathname. Add valid foreign values to the already-created entry so the
+    // assertion measures Manager ownership rather than that harness detail.
+    Object.assign(router.state.location.state as RouterHistoryState, {
+      foreign: makeForeignState(),
+      cyclic: initialCyclic,
+    });
+    const originalNavigate = router.navigate.bind(router);
+    let releaseCleanup!: () => void;
+    const cleanupStarted = new Promise<void>((resolveStarted) => {
+      vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+        if (options?.replace && releaseCleanup === undefined) {
+          return new Promise<void>((resolveCleanup) => {
+            releaseCleanup = resolveCleanup;
+            resolveStarted();
+          });
+        }
+        return originalNavigate(to, options);
+      });
+    });
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+    await cleanupStarted;
+
+    const winnerCyclic = makeCyclicState();
+    await originalNavigate({
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery',
+    }, {
+      replace: true,
+      state: {
+        source: 'task-4-test',
+        foreign: makeForeignState(),
+        cyclic: winnerCyclic,
+      },
+    });
+    await act(async () => { releaseCleanup(); });
+
+    const action = await screen.findByRole('button', { name: 'Download all' });
+    expect(action).not.toHaveFocus();
+    expect(router.state.location.state).toMatchObject({ source: 'task-4-test' });
+    expect((router.state.location.state as RouterHistoryState).cyclic).toBe(winnerCyclic);
+    expect(getterReads).toBe(0);
+  });
+
+  it('retires a held cleanup before a late rejection after unmount', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=late-rejection',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    const originalNavigate = router.navigate.bind(router);
+    let rejectCleanup!: (reason: Error) => void;
+    let cleanupCalls = 0;
+    const cleanupStarted = new Promise<void>((resolveStarted) => {
+      vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+        if (options?.replace) {
+          cleanupCalls += 1;
+          if (cleanupCalls === 1) {
+            return new Promise<void>((_resolve, reject) => {
+              rejectCleanup = reject;
+              resolveStarted();
+            });
+          }
+          return Promise.resolve();
+        }
+        return originalNavigate(to, options);
+      });
+    });
+    const view = render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+    await cleanupStarted;
+
+    view.unmount();
+    await originalNavigate('/terms');
+    await act(async () => {
+      rejectCleanup(new Error('late cleanup rejection'));
+      await Promise.resolve();
+    });
+
+    expect(cleanupCalls).toBe(1);
+    expect(router.state.location.pathname).toBe('/terms');
+  });
+
+  it('allows a later genuine traversal after both cleanup attempts reject', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch([], []));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=two-rejections',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    const originalNavigate = router.navigate.bind(router);
+    let cleanupCalls = 0;
+    vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+      if (options?.replace) {
+        cleanupCalls += 1;
+        if (cleanupCalls <= 2) return Promise.reject(new Error(`cleanup rejected ${cleanupCalls}`));
+      }
+      return originalNavigate(to, options);
+    });
+    const focusSnapshots: Array<{ search: string; state: unknown }> = [];
+    const recordFocus = (event: FocusEvent) => {
+      if ((event.target as HTMLElement | null)?.textContent?.includes('Download all')) {
+        focusSnapshots.push({
+          search: router.state.location.search,
+          state: router.state.location.state,
+        });
+      }
+    };
+    document.addEventListener('focusin', recordFocus);
+    onTestFinished(() => document.removeEventListener('focusin', recordFocus));
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+    await waitFor(() => expect(cleanupCalls).toBe(2));
+
+    await originalNavigate(`/manage/event/${MANAGED_EVENT.id}?section=share`);
+    await screen.findByRole('heading', { name: 'Share your event' });
+    await originalNavigate(-1);
+
+    await waitFor(() => expect(focusSnapshots).toHaveLength(1));
+    expect(cleanupCalls).toBe(3);
+    expect(focusSnapshots[0]).toEqual({
+      search: '?section=gallery',
+      state: { source: 'task-4-test' },
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(cleanupCalls).toBe(3);
+  });
+
+  it('keeps an anchor capture distinct from a cleanup awaiting completion', async () => {
+    const library = historyMedia(Array.from({ length: 30 }, (_, index) => `p${index + 1}`));
+    vi.stubGlobal('fetch', managerHistoryFetch(library, historyMedia(['guest-1'], 'unpublished')));
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    let scrollY = 600;
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
+    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
+      scrollY = options?.top ?? scrollY;
+    });
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=library&unknown=held-completion',
+      state: managerIntentState({ kind: 'focus-complete-export' }),
+    }]);
+    const originalNavigate = router.navigate.bind(router);
+    let releaseCleanup!: () => void;
+    const cleanupCompletion = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    let cleanupCommitted!: () => void;
+    const committed = new Promise<void>((resolve) => { cleanupCommitted = resolve; });
+    let heldCleanup = false;
+    vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+      if (options?.replace && !heldCleanup) {
+        heldCleanup = true;
+        return originalNavigate(to, options).then(() => {
+          cleanupCommitted();
+          return cleanupCompletion;
+        });
+      }
+      return originalNavigate(to, options);
+    });
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+    const user = userEvent.setup();
+    await committed;
+    await user.click(await screen.findByRole('button', { name: 'Show more photos' }));
+    await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
+      .toHaveLength(library.length));
+    vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
+      .mockReturnValue(historyRect(0, 100));
+    const documentTops = Object.fromEntries(library.map(({ id }, index) => [
+      id,
+      index < 20 ? 400 + index * 4 : 780 + (index - 20) * 40,
+    ]));
+    installHistoryAnchorRects('.gallery-private', documentTops, () => scrollY);
+    const tile = document.querySelector<HTMLElement>('[data-photo-id="p21"]')!;
+    const effectiveTop = () => Math.max(
+      0,
+      document.querySelector<HTMLElement>('.manager-nav')!.getBoundingClientRect().bottom,
+    );
+    const before = tile.getBoundingClientRect().top - effectiveTop();
+
+    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    await act(async () => { releaseCleanup(); });
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => {
+      while (frames.length > 0) frames.shift()?.(0);
+    });
+    expect(scrollY).toBe(0);
+
+    await router.navigate(-1);
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => {
+      while (frames.length > 0) frames.shift()?.(0);
+    });
+    expect(tile.getBoundingClientRect().top - effectiveTop()).toBe(before);
+  });
+
+  it('cancels a successful held anchor capture after its Manager owner unmounts', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['capture-owner']), []));
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
+    const originalNavigate = router.navigate.bind(router);
+    let releaseCapture!: () => void;
+    const captureGate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    onTestFinished(() => releaseCapture());
+    let markCaptureCommitted!: () => void;
+    const captureCommitted = new Promise<void>((resolve) => { markCaptureCommitted = resolve; });
+    const destinationTargets: string[] = [];
+    let heldCapture = false;
+    vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+      if (!options?.replace) {
+        destinationTargets.push(typeof to === 'string' ? to : String(to));
+      }
+      if (options?.replace && !heldCapture) {
+        heldCapture = true;
+        return originalNavigate(to, options).then(async () => {
+          markCaptureCommitted();
+          await captureGate;
+        });
+      }
+      return originalNavigate(to, options);
+    });
+    const view = render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await captureCommitted;
+    view.unmount();
+    await originalNavigate('/terms');
+    render(<RouterProvider router={router} />);
+    const winner = await screen.findByRole('heading', { name: 'Terms' });
+    winner.tabIndex = -1;
+    winner.focus();
+
+    await act(async () => {
+      releaseCapture();
+      await Promise.resolve();
+    });
+
+    expect(router.state.location.pathname).toBe('/terms');
+    expect(router.state.location.search).toBe('');
+    expect(destinationTargets).not.toContain(
+      `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`,
+    );
+    expect(winner).toHaveFocus();
+  });
+
+  it('cancels a held anchor capture when a newer same-event destination wins', async () => {
+    vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['capture-winner']), []));
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
+    const originalNavigate = router.navigate.bind(router);
+    let releaseCapture!: () => void;
+    const captureGate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    onTestFinished(() => releaseCapture());
+    let markCaptureCommitted!: () => void;
+    const captureCommitted = new Promise<void>((resolve) => { markCaptureCommitted = resolve; });
+    const destinationTargets: string[] = [];
+    let heldCapture = false;
+    vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+      if (!options?.replace) {
+        destinationTargets.push(typeof to === 'string' ? to : String(to));
+      }
+      if (options?.replace && !heldCapture) {
+        heldCapture = true;
+        return originalNavigate(to, options).then(async () => {
+          markCaptureCommitted();
+          await captureGate;
+        });
+      }
+      return originalNavigate(to, options);
+    });
+    render(<StrictMode><RouterProvider router={router} /></StrictMode>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await captureCommitted;
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    const winner = await screen.findByRole('heading', { name: 'Share your event' });
+    await waitFor(() => expect(router.state.location.search).toBe('?section=share'));
+    winner.tabIndex = -1;
+    winner.focus();
+
+    await act(async () => {
+      releaseCapture();
+      await Promise.resolve();
+    });
+
+    expect(router.state.location.search).toBe('?section=share');
+    expect(destinationTargets).not.toContain(
+      `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`,
+    );
+    expect(winner).toHaveFocus();
+  });
+
+  it('uses a retained marker intent once, focuses its first-page Restore, and does not replay on Back or reload', async () => {
+    const retainedId = 'retained-first-page';
+    const retainedRow = {
+      id: retainedId,
+      originalFilename: 'retained-photo.jpg',
+      guestName: 'Avery',
+      caption: 'Held moment',
+      trashedAt: '2026-09-20T01:00:00.000Z',
+      restoreUntil: '2099-10-19T00:00:00.000Z',
+    };
+    let trashGets = 0;
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith(`/api/manage/events/${MANAGED_EVENT.id}`)) {
+        return json({ event: { ...MANAGED_EVENT, recoverableMediaCount: 1 } });
+      }
+      if (url.endsWith('/media/trash') && method === 'GET') {
+        trashGets += 1;
+        return json({ media: [retainedRow], nextCursor: null });
+      }
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        coverRetained: null,
+        entries: [{
+          kind: 'photo-retained',
+          slot: { mediaId: retainedId, restoreUntil: retainedRow.restoreUntil, state: 'recoverable' },
+        }],
+        photoCount: 0,
+        retainedCount: 1,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      return base(input, init);
+    }));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=album',
+      state: { source: 'album-entry' },
+    }]);
+    const view = render(<RouterProvider router={router} />);
+
+    await userEvent.setup().click(await screen.findByRole('button', {
+      name: 'Restore in Recently deleted',
+    }));
+
+    const restore = await screen.findByRole('button', { name: 'Restore retained-photo.jpg' });
+    expect(restore).toHaveFocus();
+    expect(trashGets).toBe(1);
+    await waitFor(() => expect(router.state.location.state).toEqual({ source: 'album-entry' }));
+
+    screen.getByRole('button', { name: /^Recently deleted/ }).focus();
+    await router.navigate(-1);
+    await screen.findByLabelText('Album title');
+    await router.navigate(1);
+    expect(await screen.findByRole('button', { name: 'Restore retained-photo.jpg' })).not.toHaveFocus();
+    expect(trashGets).toBe(1);
+
+    view.unmount();
+    const reload = createAppRouter([`/manage/event/${MANAGED_EVENT.id}`]);
+    render(<RouterProvider router={reload} />);
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Recently deleted/ }));
+    expect(await screen.findByRole('button', { name: 'Restore retained-photo.jpg' })).not.toHaveFocus();
+  });
+
+  it('clears settled retained guidance when the host exhausts Load more', async () => {
+    const requested: string[] = [];
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/media/trash')) {
+        requested.push(url);
+        return url.includes('cursor=')
+          ? json({ media: [], nextCursor: null })
+          : json({ media: [{
+              id: 'unrelated-first-page',
+              originalFilename: 'unrelated-first-page.jpg',
+              guestName: 'Avery',
+              caption: 'Another retained photo',
+              trashedAt: '2026-09-20T01:00:00.000Z',
+              restoreUntil: '2099-10-19T00:00:00.000Z',
+            }], nextCursor: 'later-trash-page' });
+      }
+      return base(input, init);
+    }));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      state: managerIntentState({
+        kind: 'open-recently-deleted',
+        focusMediaId: 'retained-on-later-page',
+      }),
+    }]);
+    render(<RouterProvider router={router} />);
+
+    const heading = await screen.findByRole('heading', { name: 'Recently deleted' });
+    await screen.findByText(/may be under Load more/u);
+    expect(heading).toHaveFocus();
+    expect(requested).toHaveLength(1);
+    expect(requested[0]).not.toContain('cursor=');
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Load more' }));
+
+    await waitFor(() => expect(requested).toHaveLength(2));
+    expect(requested[1]).toContain('cursor=later-trash-page');
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
+  });
+
+  it('keeps a preloaded page-2 retained target outside the bounded intent search', async () => {
+    const retainedId = 'retained-only-on-page-2';
+    const restoreUntil = '2099-10-19T00:00:00.000Z';
+    const requested: string[] = [];
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith(`/api/manage/events/${MANAGED_EVENT.id}`)) {
+        return json({ event: { ...MANAGED_EVENT, recoverableMediaCount: 2 } });
+      }
+      if (url.includes('/media/trash') && method === 'GET') {
+        requested.push(url);
+        if (!url.includes('cursor=')) return json({ media: [{
+          id: 'first-page-trash', originalFilename: 'first-page.jpg', guestName: 'Avery',
+          caption: 'First page', trashedAt: '2026-09-20T01:00:00.000Z', restoreUntil,
+        }], nextCursor: 'trash-page-2' });
+        return json({ media: [{
+          id: retainedId, originalFilename: 'page-two.jpg', guestName: 'Jamie',
+          caption: 'Second page', trashedAt: '2026-09-20T02:00:00.000Z', restoreUntil,
+        }], nextCursor: 'trash-page-3' });
+      }
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, coverRetained: null,
+        entries: [{ kind: 'photo-retained', slot: {
+          mediaId: retainedId, restoreUntil, state: 'recoverable',
+        } }],
+        photoCount: 0, retainedCount: 1, sectionCount: 0, totalBytes: 0,
+      } });
+      return base(input, init);
+    }));
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}`]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /^Recently deleted/ }));
+    await screen.findByRole('button', { name: 'Restore first-page.jpg' });
+    await user.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('button', { name: 'Restore page-two.jpg' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore in Recently deleted' }));
+
+    const heading = await screen.findByRole('heading', { name: 'Recently deleted' });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByText(/may be under Load more/u)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Restore page-two.jpg' })).not.toHaveFocus();
+    expect(requested).toHaveLength(2);
+    expect(requested[0]).not.toContain('cursor=');
+    expect(requested[1]).toContain('cursor=trash-page-2');
+  });
+
+  it('omits retained Load-more guidance after the host exhausts the continuation', async () => {
+    const retainedId = 'retained-on-exhausted-page-2';
+    const restoreUntil = '2099-10-19T00:00:00.000Z';
+    const requested: string[] = [];
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith(`/api/manage/events/${MANAGED_EVENT.id}`)) {
+        return json({ event: { ...MANAGED_EVENT, recoverableMediaCount: 2 } });
+      }
+      if (url.includes('/media/trash') && method === 'GET') {
+        requested.push(url);
+        if (!url.includes('cursor=')) return json({ media: [{
+          id: 'exhausted-first-page', originalFilename: 'exhausted-first.jpg', guestName: 'Avery',
+          caption: 'First page', trashedAt: '2026-09-20T01:00:00.000Z', restoreUntil,
+        }], nextCursor: 'exhausted-page-2' });
+        return json({ media: [{
+          id: retainedId, originalFilename: 'exhausted-second.jpg', guestName: 'Jamie',
+          caption: 'Last page', trashedAt: '2026-09-20T02:00:00.000Z', restoreUntil,
+        }], nextCursor: null });
+      }
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 1, saved: true, title: 'Album', description: '', coverMediaId: null,
+        effectiveCoverMediaId: null, coverRetained: null,
+        entries: [{ kind: 'photo-retained', slot: {
+          mediaId: retainedId, restoreUntil, state: 'recoverable',
+        } }],
+        photoCount: 0, retainedCount: 1, sectionCount: 0, totalBytes: 0,
+      } });
+      return base(input, init);
+    }));
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}`]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /^Recently deleted/ }));
+    await screen.findByRole('button', { name: 'Restore exhausted-first.jpg' });
+    await user.click(await screen.findByRole('button', { name: 'Load more' }));
+    const secondPageRestore = await screen.findByRole('button', {
+      name: 'Restore exhausted-second.jpg',
+    });
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await user.click(await screen.findByRole('button', { name: 'Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore in Recently deleted' }));
+
+    const heading = await screen.findByRole('heading', { name: 'Recently deleted' });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(secondPageRestore).not.toHaveFocus();
+    expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
+    expect(requested).toHaveLength(2);
+    expect(requested[0]).not.toContain('cursor=');
+    expect(requested[1]).toContain('cursor=exhausted-page-2');
+  });
+
+  it('abandons a delayed retained intent when the host manually returns to Live intake', async () => {
+    const retainedId = 'delayed-retained-row';
+    const restoreUntil = '2099-10-19T00:00:00.000Z';
+    let releaseFirstTrash!: () => void;
+    let trashGets = 0;
+    const base = managerLocationFetch();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/media/trash')) {
+        trashGets += 1;
+        if (trashGets === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirstTrash = () => void json({ media: [{
+              id: retainedId, originalFilename: 'delayed.jpg', guestName: 'Avery',
+              caption: 'Delayed row', trashedAt: '2026-09-20T01:00:00.000Z', restoreUntil,
+            }], nextCursor: 'never-requested' }).then(resolve);
+          });
+        }
+        return json({ media: [{
+          id: retainedId, originalFilename: 'delayed.jpg', guestName: 'Avery',
+          caption: 'Delayed row', trashedAt: '2026-09-20T01:00:00.000Z', restoreUntil,
+        }], nextCursor: 'still-not-requested' });
+      }
+      return base(input, init);
+    }));
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      state: managerIntentState({ kind: 'open-recently-deleted', focusMediaId: retainedId }),
+    }]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+    await waitFor(() => expect(releaseFirstTrash).toBeTypeOf('function'));
+
+    await user.click(screen.getByRole('button', { name: 'Live intake' }));
+    await screen.findByRole('heading', { name: 'Live intake' });
+    await act(async () => { releaseFirstTrash(); });
+    await user.click(screen.getByRole('button', { name: 'Recently deleted' }));
+
+    const restore = await screen.findByRole('button', { name: 'Restore delayed.jpg' });
+    expect(restore).not.toHaveFocus();
+    expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
+    expect(trashGets).toBe(2);
+  });
+
+  it('Guest gallery Settings round trip cleans each intent, waits for save, and restores Hidden focus once', async () => {
+    const fixture = guestGallerySettingsFetch({ deferSettings: true });
+    onTestFinished(fixture.releaseSettings);
+    vi.stubGlobal('fetch', fixture.fetchMock);
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=guest-gallery',
+      state: { source: 'guest-settings-entry' },
+    }]);
+    const view = render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+
+    const filters = await screen.findByRole('group', { name: 'Publication status' });
+    await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
+    const selected = await screen.findByRole('checkbox', { name: /Select /u });
+    await user.click(selected);
+    expect(selected).toBeChecked();
+
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
+
+    const availability = await screen.findByLabelText('Show the optional shared gallery');
+    const returnAction = await screen.findByRole('button', { name: 'Return to Guest gallery' });
+    expect(availability).toHaveFocus();
+    await waitFor(() => expect(
+      (router.state.location.state as RouterHistoryState | null)
+        ?.__candidaryManager?.intent,
+    ).toBeUndefined());
+    expect(router.state.location.state).toMatchObject({ source: 'guest-settings-entry' });
+    expect(router.state.location.state).not.toHaveProperty('selection');
+    expect((router.state.location.state as RouterHistoryState)
+      .__candidaryManager ?? {}).not.toHaveProperty('selection');
+
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
+    await fixture.settingsStarted;
+    await user.click(returnAction);
+
+    expect(router.state.location.search).toBe('?section=settings');
+    expect(returnAction).toBeVisible();
+
+    await act(async () => {
+      fixture.releaseSettings();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    const restoredFilters = await screen.findByRole('group', { name: 'Publication status' });
+    expect(within(restoredFilters).getByRole('button', { name: 'Hidden' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    const openSettings = screen.getByRole('button', { name: 'Open settings' });
+    await waitFor(() => expect(openSettings).toHaveFocus());
+    expect(screen.getByText('Selection cleared.')).toBeInTheDocument();
+    expect(screen.getByText(`0 of ${MANAGER_BULK_SELECTION_MAX} selected`)).toBeVisible();
+    expect((router.state.location.state as RouterHistoryState)
+      .__candidaryManager?.intent).toBeUndefined();
+    expect(router.state.location.state).toMatchObject({ source: 'guest-settings-entry' });
+    expect(router.state.location.state).not.toHaveProperty('selection');
+
+    await router.navigate(-1);
+    await screen.findByRole('heading', { name: 'Settings' });
+    expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+      .not.toBeInTheDocument();
+    expect(screen.getByLabelText('Show the optional shared gallery')).not.toHaveFocus();
+
+    await router.navigate(1);
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    expect(await screen.findByRole('button', { name: 'Open settings' })).not.toHaveFocus();
+
+    await router.navigate(-1);
+    await screen.findByRole('heading', { name: 'Settings' });
+    const reloadTarget = router.state.location.pathname + router.state.location.search;
+    view.unmount();
+    const reloaded = createAppRouter([reloadTarget]);
+    render(<RouterProvider router={reloaded} />);
+
+    await screen.findByRole('heading', { name: 'Settings' });
+    expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+      .not.toBeInTheDocument();
+    expect(screen.getByLabelText('Show the optional shared gallery')).not.toHaveFocus();
+  });
+
+  it('retires a live Guest gallery Return token before a newer same-Settings cleanup settles', async () => {
+    const fixture = guestGallerySettingsFetch();
+    vi.stubGlobal('fetch', fixture.fetchMock);
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=guest-gallery',
+    }]);
+    const originalNavigate = router.navigate.bind(router);
+    let holdNewerCleanup = false;
+    let cleanupCalls = 0;
+    let rejectFirstCleanup!: (reason: Error) => void;
+    let rejectSecondCleanup!: (reason: Error) => void;
+    let markFirstCleanupStarted!: () => void;
+    let markSecondCleanupStarted!: () => void;
+    const firstCleanupStarted = new Promise<void>((resolve) => {
+      markFirstCleanupStarted = resolve;
+    });
+    const secondCleanupStarted = new Promise<void>((resolve) => {
+      markSecondCleanupStarted = resolve;
+    });
+    vi.spyOn(router, 'navigate').mockImplementation((to, options) => {
+      if (holdNewerCleanup && options?.replace) {
+        cleanupCalls += 1;
+        return new Promise<void>((_resolve, reject) => {
+          if (cleanupCalls === 1) {
+            rejectFirstCleanup = reject;
+            markFirstCleanupStarted();
+          } else {
+            rejectSecondCleanup = reject;
+            markSecondCleanupStarted();
+          }
+        });
+      }
+      return originalNavigate(to, options);
+    });
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+
+    const filters = await screen.findByRole('group', { name: 'Publication status' });
+    await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
+    const oldReturn = await screen.findByRole('button', { name: 'Return to Guest gallery' });
+    holdNewerCleanup = true;
+
+    act(() => {
+      void originalNavigate({
+        pathname: `/manage/event/${MANAGED_EVENT.id}`,
+        search: '?section=settings',
+      }, {
+        state: managerIntentState({
+          kind: 'edit-guest-gallery-availability',
+          returnTo: {
+            section: 'gallery',
+            mode: 'guest-gallery',
+            publicationFilter: 'published',
+          },
+        }),
+      });
+    });
+    await firstCleanupStarted;
+
+    expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+      .not.toBeInTheDocument();
+    expect(oldReturn.isConnected).toBe(false);
+    expect(router.state.location.search).toBe('?section=settings');
+    expect((router.state.location.state as RouterHistoryState)
+      .__candidaryManager?.intent).toMatchObject({
+        kind: 'edit-guest-gallery-availability',
+        returnTo: { publicationFilter: 'published' },
+      });
+
+    await act(async () => {
+      rejectFirstCleanup(new Error('newer Settings cleanup rejected once'));
+      await secondCleanupStarted;
+    });
+    expect(cleanupCalls).toBe(2);
+    expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+      .not.toBeInTheDocument();
+
+    await act(async () => {
+      rejectSecondCleanup(new Error('newer Settings cleanup rejected twice'));
+      await Promise.resolve();
+    });
+    expect(router.state.location.search).toBe('?section=settings');
+    expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+      .not.toBeInTheDocument();
+  });
+
+  it('keeps the Guest gallery Return token when Stay and fix settings cancels an invalid return', async () => {
+    const fixture = guestGallerySettingsFetch();
+    vi.stubGlobal('fetch', fixture.fetchMock);
+    const router = createAppRouter([{
+      pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&mode=guest-gallery',
+    }]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+
+    const filters = await screen.findByRole('group', { name: 'Publication status' });
+    await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
+    const returnAction = await screen.findByRole('button', { name: 'Return to Guest gallery' });
+    const name = screen.getByLabelText('Event name');
+    await user.clear(name);
+    fireEvent.blur(name);
+    expect(name).toHaveAttribute('aria-invalid', 'true');
+
+    await user.click(returnAction);
+    const prompt = await screen.findByRole('region', { name: /not saved yet/iu });
+    expect(router.state.location.search).toBe('?section=settings');
+    expect(fixture.fetchMock.mock.calls.filter(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/settings')
+      && String(init?.method ?? 'GET').toUpperCase() === 'PATCH'
+    ))).toHaveLength(0);
+
+    await user.click(within(prompt).getByRole('button', { name: 'Stay and fix settings' }));
+
+    expect(await screen.findByRole('button', { name: 'Return to Guest gallery' })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Settings' })).toHaveFocus());
+    expect(router.state.location.search).toBe('?section=settings');
+    expect(fixture.fetchMock.mock.calls.filter(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/settings')
+      && String(init?.method ?? 'GET').toUpperCase() === 'PATCH'
+    ))).toHaveLength(0);
+
+    await user.type(name, 'Maya & Theo repaired');
+    fireEvent.blur(name);
+    await waitFor(() => expect(fixture.fetchMock.mock.calls.filter(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/settings')
+      && String(init?.method ?? 'GET').toUpperCase() === 'PATCH'
+    ))).toHaveLength(1));
+    await waitFor(() => expect(name).not.toHaveAttribute('aria-invalid', 'true'));
+
+    let openSettingsFocusCount = 0;
+    const recordOpenSettingsFocus = (event: FocusEvent) => {
+      if ((event.target as HTMLElement | null)?.textContent === 'Open settings') {
+        openSettingsFocusCount += 1;
+      }
+    };
+    document.addEventListener('focusin', recordOpenSettingsFocus);
+    onTestFinished(() => document.removeEventListener('focusin', recordOpenSettingsFocus));
+    await user.click(screen.getByRole('button', { name: 'Return to Guest gallery' }));
+
+    await waitFor(() => expect(router.state.location.search)
+      .toBe('?section=gallery&mode=guest-gallery'));
+    const restoredFilters = await screen.findByRole('group', { name: 'Publication status' });
+    expect(within(restoredFilters).getByRole('button', { name: 'Hidden' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open settings' }))
+      .toHaveFocus());
+    expect(openSettingsFocusCount).toBe(1);
+  });
+
+  it('Guest gallery Settings drops its return token after unrelated navigation', async () => {
+    const fixture = guestGallerySettingsFetch();
+    vi.stubGlobal('fetch', fixture.fetchMock);
+    const router = createAppRouter([
+      `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`,
+    ]);
+    render(<RouterProvider router={router} />);
+    const user = userEvent.setup();
+
+    const filters = await screen.findByRole('group', { name: 'Publication status' });
+    await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
+    expect(await screen.findByRole('button', { name: 'Return to Guest gallery' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await screen.findByRole('heading', { name: 'Share your event' });
+    await router.navigate(-1);
+
+    await screen.findByRole('heading', { name: 'Settings' });
+    expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+      .not.toBeInTheDocument();
+    expect(screen.getByLabelText('Show the optional shared gallery')).not.toHaveFocus();
+  });
+
+  it.each([
+    ['malformed', {
+      source: 'malformed-settings-intent',
+      __candidaryManager: {
+        version: 1,
+        eventId: MANAGED_EVENT.id,
+        intent: {
+          kind: 'edit-guest-gallery-availability',
+          returnTo: { section: 'gallery', mode: 'guest-gallery', publicationFilter: 'future' },
+        },
+      },
+    }],
+    ['cross-event', managerIntentState({
+      kind: 'edit-guest-gallery-availability',
+      returnTo: { section: 'gallery', mode: 'guest-gallery', publicationFilter: 'hidden' },
+    }, 'event-b')],
+  ] as const)(
+    'Guest gallery Settings rejects a %s return token without availability focus',
+    async (_kind, state) => {
+      const fixture = guestGallerySettingsFetch();
+      vi.stubGlobal('fetch', fixture.fetchMock);
+      const router = createAppRouter([{
+        pathname: `/manage/event/${MANAGED_EVENT.id}`,
+        search: '?section=settings',
+        state,
+      }]);
+      render(<RouterProvider router={router} />);
+
+      await screen.findByRole('heading', { name: 'Settings' });
+      expect(screen.queryByRole('button', { name: 'Return to Guest gallery' }))
+        .not.toBeInTheDocument();
+      expect(screen.getByLabelText('Show the optional shared gallery')).not.toHaveFocus();
+      await waitFor(() => expect(router.state.location.state).toEqual({ source: state.source }));
+    },
+  );
+
+  it.each([
+    ['malformed', {
+      source: 'malformed',
+      __candidaryManager: {
+        version: 1,
+        eventId: MANAGED_EVENT.id,
+        intent: { kind: 'open-recently-deleted', focusMediaId: '' },
+      },
+    }],
+    ['cross-event', managerIntentState(
+      { kind: 'open-recently-deleted', focusMediaId: 'retained-first-page' },
+      'event-b',
+    )],
+  ] as const)(
+    'sanitizes a %s retained marker intent without focus side effects',
+    async (_kind, state) => {
+      vi.stubGlobal('fetch', managerLocationFetch());
+      const router = createAppRouter([{
+        pathname: `/manage/event/${MANAGED_EVENT.id}`,
+        state,
+      }]);
+      render(<RouterProvider router={router} />);
+
+      const heading = await screen.findByRole('heading', { name: 'Live intake' });
+      expect(heading).not.toHaveFocus();
+      expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
+      await waitFor(() => expect(router.state.location.state).toEqual({ source: state.source }));
+    },
+  );
 });
 
 describe('manager resource ownership', () => {
@@ -1464,7 +3480,9 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
     await user.click(await screen.findByRole('button', { name: /Recently deleted/ }));
-    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+    await user.click(await screen.findByRole('button', {
+      name: 'Restore restore-summary-row.jpg',
+    }));
     await waitFor(() => expect(restoreStarted).toBe(true));
 
     fireEvent.click(within(navigation).getByRole('button', { name: /gallery/i }));
@@ -2158,7 +4176,7 @@ describe('manager experience', () => {
       'Gallery',
     );
     await user.click(screen.getByRole('button', { name: 'Library' }));
-    await user.click(screen.getByRole('button', { name: 'Download all' }));
+    await user.click(await screen.findByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
     expect(screen.getByRole('heading', { name: 'Gallery' }), 'export').toBeVisible();
 
@@ -3837,7 +5855,7 @@ describe('manager experience', () => {
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
-    await user.click(screen.getByRole('checkbox', { name: /The toast/i }));
+    await user.click(await screen.findByRole('checkbox', { name: /The toast/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/manage/events/event-a/media/bulk',
@@ -3918,10 +5936,11 @@ describe('manager experience', () => {
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
 
-    expect(screen.getByText('Published photos are visible to event guests.')).toBeVisible();
+    await waitFor(() => expect(screen.getByText('Published photos are visible to event guests.'))
+      .toBeVisible());
     const shared = document.querySelector('.gallery-shared') as HTMLElement;
+    await waitFor(() => expect(shared.querySelectorAll('.intake-photo img')).toHaveLength(2));
     const images = shared.querySelectorAll<HTMLImageElement>('.intake-photo img');
-    expect(images).toHaveLength(2);
     fireEvent.error(images[0]!);
     expect(within(shared).getByText('Preview unavailable')).toBeVisible();
     expect(images[1]).toBeVisible();
@@ -4122,6 +6141,7 @@ describe('manager experience', () => {
           settingsBlocked: false,
         }}
         exports={{
+          status: 'ready',
           onPrepare: async () => {},
           onDownload: async () => {},
           onRetry: async () => {},
@@ -4192,6 +6212,7 @@ describe('manager experience', () => {
         settingsBlocked: false,
       }}
       exports={{
+        status: 'ready',
         onPrepare: async () => {},
         onDownload: async () => {},
         onRetry: async () => {},
@@ -4272,6 +6293,7 @@ describe('manager experience', () => {
         settingsBlocked: false,
       }}
       exports={{
+        status: 'ready',
         onPrepare: async () => {},
         onDownload: async () => {},
         onRetry: async () => {},
@@ -4352,6 +6374,7 @@ describe('manager experience', () => {
         settingsBlocked: false,
       }}
       exports={{
+        status: 'ready',
         onPrepare: async () => {},
         onDownload: async () => {},
         onRetry: async () => {},
@@ -4478,6 +6501,7 @@ describe('manager experience', () => {
         settingsBlocked: false,
       }}
       exports={{
+        status: 'ready',
         onPrepare: async () => {},
         onDownload: async () => {},
         onRetry: async () => {},

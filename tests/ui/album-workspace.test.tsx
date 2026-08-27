@@ -55,7 +55,7 @@ import { useDeadlineClock } from '../../src/app/use-deadline-clock';
 import { api } from '../../src/app/api';
 import type { LoadFailure } from '../../src/components/States';
 import { UnsavedSettingsPrompt } from '../../src/components/UnsavedSettingsPrompt';
-import type { ExportDownloadView, ExportView } from '../../src/app/types';
+import type { ExportDownloadView, ExportView, MediaView } from '../../src/app/types';
 import { useManagerResource } from '../../src/features/manager/resources';
 import type { GalleryMode } from '../../src/app/manager-location';
 import {
@@ -137,13 +137,16 @@ const event: EventView = {
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
 };
 
-function photo(id: string, timelineAt: string, overrides: Partial<ManagerGalleryMediaView> = {}): ManagerGalleryMediaView {
+type GalleryFixtureMedia = ManagerGalleryMediaView & Pick<MediaView, 'uploadState'>;
+
+function photo(id: string, timelineAt: string, overrides: Partial<GalleryFixtureMedia> = {}): GalleryFixtureMedia {
   return {
     id,
     originalFilename: `${id}.jpg`,
     guestName: 'Jose',
     caption: null,
     publicationStatus: 'unpublished',
+    uploadState: 'stored',
     previewAvailable: true,
     width: null,
     height: null,
@@ -632,10 +635,12 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
     sharedStatus?: 'all' | 'unpublished' | 'published' | 'hidden';
     strictMode?: boolean;
     resourceBackedShared?: boolean;
+    legacySharedMedia?: MediaView[];
     eventOverride?: Partial<EventView>;
     legacyOnBulk?: (action: 'publish' | 'hide') => Promise<void>;
     mode?: GalleryMode;
     onModeChange?: (mode: GalleryMode) => void;
+    onAnchorReady?: (mode: GalleryMode) => void;
 } = {}) {
   vi.stubGlobal('fetch', fetchMock);
   const onPrepare = exportOverrides.onPrepare ?? vi.fn(noop);
@@ -762,6 +767,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
         audience={audience}
         onAnnouncement={setAnnouncement}
         onAlbumAccessFailure={workspaceOverrides.onAlbumAccessFailure}
+        onAnchorReady={workspaceOverrides.onAnchorReady}
         mode={workspaceOverrides.mode === undefined ? ownedMode : currentMode}
         onModeChange={requestMode}
         shared={workspaceOverrides.resourceBackedShared ? {
@@ -770,7 +776,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
           onOpenSettings: vi.fn(),
           settingsBlocked: false,
         } : {
-          media: [],
+          media: workspaceOverrides.legacySharedMedia ?? [],
           status: 'unpublished',
           selected: workspaceOverrides.sharedSelected ?? [],
           selectionAtLimit: workspaceOverrides.sharedSelectionAtLimit ?? false,
@@ -785,6 +791,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
           onLoadMore: noop,
         }}
         exports={{
+          status: 'ready',
           ...exportOverrides,
           onPrepare,
           onDownload: noop,
@@ -841,7 +848,7 @@ async function openAlbum(user = userEvent.setup()) {
 function renderAlbum(fetchMock: ReturnType<typeof vi.fn>, overrides: {
   eventId?: string;
   eventTimezone?: string;
-  onOpenRecentlyDeleted?: () => void;
+  onOpenRecentlyDeleted?: (mediaId: string) => void;
 } = {}) {
   vi.stubGlobal('fetch', fetchMock);
   const onAnnouncement = vi.fn();
@@ -925,6 +932,10 @@ async function retainedMarker() {
   return (await screen.findByText('Recently deleted photo')).closest('li')!;
 }
 
+function anchorRect(top: number): DOMRect {
+  return { top, bottom: top + 40, left: 0, right: 0, width: 0, height: 40, x: 0, y: top, toJSON: () => ({}) };
+}
+
 describe('gallery modes', () => {
   it('waits for the controlled Gallery mode to be adopted', async () => {
     const { fetchMock } = harness();
@@ -941,6 +952,208 @@ describe('gallery modes', () => {
 
     workspace.rerenderMode('album');
     expect(await screen.findByRole('heading', { name: 'The Album is empty.' })).toBeVisible();
+  });
+
+  it('captures and restores the real requested Library, Album, and Guest-gallery roots', async () => {
+    const anchoredPhoto = photo('anchor-p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const { fetchMock } = harness({
+      galleryRows: [anchoredPhoto],
+      album: {
+        revision: 2,
+        saved: true,
+        entries: [{ kind: 'photo', photo: anchoredPhoto }],
+      },
+    });
+    const workspace = renderWorkspace(fetchMock, {}, { mode: 'library', resourceBackedShared: true });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    await screen.findByRole('button', { name: 'Open anchor-p1.jpg, from Jose' });
+    const libraryTile = document.querySelector<HTMLElement>('[data-gallery-anchor-id="anchor-p1"]')!;
+    expect(libraryTile).toHaveClass('gallery-mosaic__item');
+    const libraryRect = vi.spyOn(libraryTile, 'getBoundingClientRect').mockReturnValue(anchorRect(100));
+    expect(workspace.galleryRef.current?.captureAnchor('library')).toMatchObject({
+      kind: 'media', mediaId: 'anchor-p1', viewportOffset: 100,
+    });
+    libraryRect.mockReturnValue(anchorRect(350));
+    expect(workspace.galleryRef.current?.restoreAnchor('library', {
+      kind: 'media', mediaId: 'anchor-p1', viewportOffset: 100, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('item');
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 250, behavior: 'instant' });
+
+    workspace.rerenderMode('album');
+    const albumItem = await waitFor(() => {
+      const item = document.querySelector<HTMLElement>('[data-gallery-anchor-id="photo:anchor-p1"]');
+      expect(item).not.toBeNull();
+      return item!;
+    });
+    expect(albumItem.tagName).toBe('LI');
+    const albumRect = vi.spyOn(albumItem, 'getBoundingClientRect').mockReturnValue(anchorRect(150));
+    expect(workspace.galleryRef.current?.captureAnchor('album')).toMatchObject({
+      kind: 'album-entry', entryId: 'photo:anchor-p1', viewportOffset: 150,
+    });
+    albumRect.mockReturnValue(anchorRect(260));
+    expect(workspace.galleryRef.current?.restoreAnchor('album', {
+      kind: 'album-entry', entryId: 'photo:anchor-p1', viewportOffset: 150, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('item');
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 110, behavior: 'instant' });
+
+    workspace.rerenderMode('guest-gallery');
+    const sharedItem = await waitFor(() => {
+      const item = document.querySelector<HTMLElement>('.gallery-shared article[data-gallery-anchor-id="anchor-p1"]');
+      expect(item).not.toBeNull();
+      return item!;
+    });
+    expect(sharedItem.tagName).toBe('ARTICLE');
+    const sharedRect = vi.spyOn(sharedItem, 'getBoundingClientRect').mockReturnValue(anchorRect(200));
+    expect(workspace.galleryRef.current?.captureAnchor('guest-gallery')).toMatchObject({
+      kind: 'media', mediaId: 'anchor-p1', viewportOffset: 200,
+    });
+    sharedRect.mockReturnValue(anchorRect(260));
+    expect(workspace.galleryRef.current?.restoreAnchor('guest-gallery', {
+      kind: 'media', mediaId: 'anchor-p1', viewportOffset: 200, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('item');
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 60, behavior: 'instant' });
+  });
+
+  it('keeps an unmounted Album pending instead of searching retained Library or Guest-gallery roots', async () => {
+    const anchoredPhoto = photo('unmounted-anchor', '2026-08-15T22:42:00.000Z');
+    const { fetchMock } = harness({ galleryRows: [anchoredPhoto] });
+    const workspace = renderWorkspace(fetchMock, {}, {
+      mode: 'library',
+      legacySharedMedia: [anchoredPhoto],
+    });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    await screen.findByRole('button', { name: 'Open unmounted-anchor.jpg, from Jose' });
+    const libraryTile = document.querySelector<HTMLElement>('[data-gallery-anchor-id="unmounted-anchor"]')!;
+    const sharedItem = document.querySelector<HTMLElement>('.gallery-shared article[data-gallery-anchor-id="unmounted-anchor"]')!;
+    vi.spyOn(libraryTile, 'getBoundingClientRect').mockReturnValue(anchorRect(300));
+    vi.spyOn(sharedItem, 'getBoundingClientRect').mockReturnValue(anchorRect(500));
+
+    expect(workspace.galleryRef.current?.restoreAnchor('album', {
+      kind: 'album-entry', entryId: 'unmounted-anchor', viewportOffset: 0,
+      fallbackScrollY: 0, before: [], after: [],
+    })).toBe('pending');
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('defers Library anchor restoration until its initial rows commit', async () => {
+    const initialLoad = deferred();
+    const controlled = harness();
+    const originalFetch = controlled.fetchMock.getMockImplementation()!;
+    controlled.fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET') {
+        await initialLoad.promise;
+      }
+      return originalFetch(input, init);
+    });
+    const onAnchorReady = vi.fn();
+    const workspace = renderWorkspace(controlled.fetchMock, {}, { mode: 'library', onAnchorReady });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    await waitFor(() => expect(controlled.fetchMock.mock.calls.some(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/gallery')
+      && (init?.method ?? 'GET') === 'GET'
+    ))).toBe(true));
+    expect(workspace.galleryRef.current?.restoreAnchor('library', {
+      kind: 'media', mediaId: 'p1', viewportOffset: 0, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('pending');
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(onAnchorReady).not.toHaveBeenCalled();
+
+    await act(async () => { initialLoad.resolve(); });
+    const tile = await waitFor(() => {
+      const item = document.querySelector<HTMLElement>('[data-gallery-anchor-id="p1"]');
+      expect(item).not.toBeNull();
+      return item!;
+    });
+    vi.spyOn(tile, 'getBoundingClientRect').mockReturnValue(anchorRect(200));
+    await waitFor(() => expect(onAnchorReady).toHaveBeenCalledWith('library'));
+    expect(workspace.galleryRef.current?.restoreAnchor('library', {
+      kind: 'media', mediaId: 'p1', viewportOffset: 0, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('item');
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 200, behavior: 'instant' });
+    expect(controlled.fetchMock.mock.calls.filter(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/gallery')
+      && (init?.method ?? 'GET') === 'GET'
+    ))).toHaveLength(1);
+  });
+
+  it('defers Album anchor restoration until its initial rows commit', async () => {
+    const initialLoad = deferred();
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const controlled = harness({
+      galleryRows: [p1],
+      album: { revision: 1, saved: true, entries: [{ kind: 'photo', photo: p1 }] },
+      albumReadGates: [initialLoad.promise],
+    });
+    const onAnchorReady = vi.fn();
+    const workspace = renderWorkspace(controlled.fetchMock, {}, { mode: 'album', onAnchorReady });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    await waitFor(() => expect(controlled.state.albumReads).toBe(1));
+    expect(workspace.galleryRef.current?.restoreAnchor('album', {
+      kind: 'album-entry', entryId: 'photo:p1', viewportOffset: 0, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('pending');
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(onAnchorReady).not.toHaveBeenCalled();
+
+    await act(async () => { initialLoad.resolve(); });
+    const item = await waitFor(() => {
+      const entry = document.querySelector<HTMLElement>('[data-gallery-anchor-id="photo:p1"]');
+      expect(entry).not.toBeNull();
+      return entry!;
+    });
+    vi.spyOn(item, 'getBoundingClientRect').mockReturnValue(anchorRect(220));
+    await waitFor(() => expect(onAnchorReady).toHaveBeenCalledWith('album'));
+    expect(workspace.galleryRef.current?.restoreAnchor('album', {
+      kind: 'album-entry', entryId: 'photo:p1', viewportOffset: 0, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('item');
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 220, behavior: 'instant' });
+    expect(controlled.state.albumReads).toBe(1);
+  });
+
+  it('defers Guest-gallery anchor restoration until its current initial query settles', async () => {
+    const initialLoad = deferred();
+    const controlled = harness({ galleryRows: [] });
+    const originalFetch = controlled.fetchMock.getMockImplementation()!;
+    controlled.fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname.endsWith('/media') && (init?.method ?? 'GET') === 'GET') {
+        await initialLoad.promise;
+      }
+      return originalFetch(input, init);
+    });
+    const onAnchorReady = vi.fn();
+    const workspace = renderWorkspace(controlled.fetchMock, {}, {
+      mode: 'guest-gallery',
+      resourceBackedShared: true,
+      onAnchorReady,
+    });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    await waitFor(() => expect(controlled.fetchMock.mock.calls.some(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/media')
+      && (init?.method ?? 'GET') === 'GET'
+    ))).toBe(true));
+    expect(workspace.galleryRef.current?.restoreAnchor('guest-gallery', {
+      kind: 'media', mediaId: 'missing', viewportOffset: 0, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('pending');
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(onAnchorReady).not.toHaveBeenCalled();
+
+    await act(async () => { initialLoad.resolve(); });
+    await screen.findByText('No unpublished photos.');
+    await waitFor(() => expect(onAnchorReady).toHaveBeenCalledWith('guest-gallery'));
+    expect(workspace.galleryRef.current?.restoreAnchor('guest-gallery', {
+      kind: 'media', mediaId: 'missing', viewportOffset: 0, fallbackScrollY: 0, before: [], after: [],
+    })).toBe('fallback');
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: 'instant' });
+    expect(controlled.fetchMock.mock.calls.filter(([input, init]) => (
+      new URL(String(input), 'https://candidary.test').pathname.endsWith('/media')
+      && (init?.method ?? 'GET') === 'GET'
+    ))).toHaveLength(1);
   });
 
   it.each([
@@ -5419,7 +5632,7 @@ describe('recently deleted photos in the album', () => {
     expect(marker.querySelector('time')).toBeNull();
   });
 
-  it('hands Recently deleted back to whoever owns the navigation', async () => {
+  it('hands the retained marker intent and opaque media ID to the navigation owner', async () => {
     const onOpenRecentlyDeleted = vi.fn();
     const { state, fetchMock } = albumWithRetainedSlot(retainedSlot('p9', RECOVERABLE_UNTIL));
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago', onOpenRecentlyDeleted });
@@ -5429,7 +5642,7 @@ describe('recently deleted photos in the album', () => {
       within(marker).getByRole('button', { name: 'Restore in Recently deleted' }),
     );
 
-    expect(onOpenRecentlyDeleted).toHaveBeenCalledOnce();
+    expect(onOpenRecentlyDeleted).toHaveBeenCalledExactlyOnceWith('p9');
     // Album routed nowhere and kept nothing: it is still the editor, unsaved and unread.
     expect(screen.getByLabelText('Album title')).toHaveValue('The evening');
     expect(await retainedMarker()).toBeInTheDocument();

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { createElement } from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { createElement, createRef } from 'react';
 
 import type { ExportView } from '../../src/app/types';
 import { AlbumExportControl } from '../../src/features/gallery/AlbumExportControl';
@@ -8,7 +8,10 @@ import {
   EXPORT_STATE_LABELS,
   coarseExportElapsed,
 } from '../../src/features/gallery/export-control-status';
-import { GalleryExportControl } from '../../src/features/gallery/GalleryExportControl';
+import {
+  GalleryExportControl,
+  type GalleryExportControlHandle,
+} from '../../src/features/gallery/GalleryExportControl';
 import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
 import { buildGuestbookPrivateCsv } from '../../worker/export/guestbook-csv';
 import { buildGuestbookHtml } from '../../worker/export/guestbook-html';
@@ -64,6 +67,7 @@ const CONTROL_CONTEXT = {
   eventTimezone: 'America/Chicago',
   currentSource: { count: 2, freshness: 'fresh' as const },
   now: Date.parse('2026-11-01T07:34:30.000Z'),
+  resourceStatus: 'ready' as const,
 };
 
 function legacyCompleteExport(state: ExportView['state']) {
@@ -174,6 +178,64 @@ describe('Guestbook export renderers', () => {
 });
 
 describe('Manager Guestbook export downloads', () => {
+  it('advances semantic complete export focus only after loading becomes ready', () => {
+    const ref = createRef<GalleryExportControlHandle>();
+    const callbacks = {
+      onPrepare: async () => undefined,
+      onDownload: async () => undefined,
+      onRetry: async () => undefined,
+    };
+    const view = render(createElement(GalleryExportControl, {
+      ...CONTROL_CONTEXT,
+      ...callbacks,
+      resourceStatus: 'loading',
+      ref,
+    }));
+
+    act(() => ref.current?.focusIntendedAction());
+    expect(screen.getByRole('region', { name: 'Complete export' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Download all' })).not.toHaveFocus();
+
+    view.rerender(createElement(GalleryExportControl, {
+      ...CONTROL_CONTEXT,
+      ...callbacks,
+      resourceStatus: 'ready',
+      ref,
+    }));
+    expect(screen.getByRole('button', { name: 'Download all' })).toHaveFocus();
+  });
+
+  it('prioritizes a resolved semantic download over terminal retry and prepare actions', () => {
+    const ref = createRef<GalleryExportControlHandle>();
+    render(createElement(GalleryExportControl, {
+      ...CONTROL_CONTEXT,
+      job: exportView('expired', 'complete'),
+      download: {
+        manifest: { url: 'https://signed.test/manifest', expiresAt: 'later', filename: 'manifest.csv' },
+        parts: [{
+          partNumber: 1,
+          url: 'https://signed.test/photos-1',
+          expiresAt: 'later',
+          filename: 'photos-1.zip',
+          mediaCount: 2,
+          sourceBytes: 1_024,
+        }],
+        printableGuestbook: { url: 'https://signed.test/print', expiresAt: 'later', filename: 'guestbook.html' },
+        privateGuestbook: null,
+      },
+      onPrepare: async () => undefined,
+      onDownload: async () => undefined,
+      onRetry: async () => undefined,
+      ref,
+    }));
+
+    act(() => ref.current?.focusIntendedAction());
+
+    expect(screen.getByRole('link', { name: 'Photo manifest' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Retry this prepared export' })).not.toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Prepare current collection' })).not.toHaveFocus();
+  });
+
   it('separates printable and private downloads while conditionally omitting absent photo artifacts', () => {
     render(createElement(GalleryExportControl, {
       ...CONTROL_CONTEXT,

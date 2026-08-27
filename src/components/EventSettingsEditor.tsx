@@ -152,6 +152,7 @@ function rebaseDraft(
 
 interface EventSettingsEditorProps {
   event: EventView;
+  galleryVisibilityFocusEpoch: number;
   onSettingsSaved(event: EventView, metadata: { scheduleChanged: boolean }): void;
   onAutosaveStateChange(state: DomainAutosaveState): void;
   // Brackets a write so a whole-event read cannot be adopted across it.
@@ -163,7 +164,13 @@ interface EventSettingsEditorProps {
 }
 
 export function EventSettingsEditor({
-  event, onSettingsSaved, onAutosaveStateChange, onEventWrite, onEventRead, ref,
+  event,
+  galleryVisibilityFocusEpoch,
+  onSettingsSaved,
+  onAutosaveStateChange,
+  onEventWrite,
+  onEventRead,
+  ref,
 }: EventSettingsEditorProps) {
   const [state, setState] = useState<EditorState>(() => initialState(event));
   const [autosave, setAutosave] = useState<AutosaveState>({ status: 'saved', failure: null });
@@ -192,6 +199,8 @@ export function EventSettingsEditor({
   // One automatic race retry per intent. A roster that keeps moving becomes a
   // visible failure rather than a loop.
   const raceRef = useRef<{ intent: string; races: number } | null>(null);
+  const galleryVisibilityControl = useRef<HTMLInputElement>(null);
+  const adoptedGalleryVisibilityFocusEpoch = useRef(0);
   // Event id and date are fixed for a mounted editor: the manager keys it by id.
   const eventId = event.id;
   const eventDate = event.eventDate;
@@ -430,6 +439,15 @@ export function EventSettingsEditor({
 
   useImperativeHandle(ref, () => ({ flush: () => { queueRef.current?.queue.flush(); } }), []);
 
+  useLayoutEffect(() => {
+    if (
+      galleryVisibilityFocusEpoch <= 0
+      || galleryVisibilityFocusEpoch <= adoptedGalleryVisibilityFocusEpoch.current
+    ) return;
+    adoptedGalleryVisibilityFocusEpoch.current = galleryVisibilityFocusEpoch;
+    galleryVisibilityControl.current?.focus();
+  }, [galleryVisibilityFocusEpoch]);
+
   function describedBy(field: EventSettingsField) {
     return errors[field] ? 'settings-' + field + '-error' : undefined;
   }
@@ -586,6 +604,7 @@ export function EventSettingsEditor({
           <input
             type="checkbox"
             name={field}
+            ref={field === 'galleryVisible' ? galleryVisibilityControl : undefined}
             checked={state.draft[field]}
             aria-invalid={Boolean(errors[field])}
             aria-describedby={describedBy(field)}
