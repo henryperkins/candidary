@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use test-driven development, preserve all existing Slice 1–4 work, and do not commit unless the user asks.
 
-**Goal:** Make Pause mean one thing on every guest surface, make an empty Intake say what is actually true, and close the six deterministic-polish findings that make the Manager read like two products.
+**Goal:** Make Pause mean one thing on every guest surface, finish the safety ladder by naming its last rung after what it actually pauses, make an empty Intake say what is actually true, and close the deterministic-polish findings that make the Manager read like two products.
 
-**Architecture:** The server already gates guest uploads and nothing else after the first Slice 5 checkpoint; this checkpoint makes the guest *surfaces* agree, including the fullscreen route, which currently follows a different rule. Everything else here is subtraction: one canonical event-zone formatter replaces four component-local locale calls, one deterministic Guestbook default replaces a count-dependent one, and the Cover upload's byte progress lands in the session hook that already owns the raw transfer rather than in a second controller.
+**Architecture:** The server already gates guest uploads and nothing else after the first Slice 5 checkpoint; this checkpoint makes the guest *surfaces* agree, including the fullscreen route, whose Gallery availability currently resolves by a different rule than the main page's. Renaming the pause controls is what finally lets the safety ladder's last rung be asserted, which is why C-16 closes here rather than in the checkpoint that built the other nine. Everything else here is subtraction: one canonical event-zone formatter replaces four component-local locale calls, one deterministic Guestbook default replaces a count-dependent one, and the Cover upload's byte progress lands in the session hook that already owns the raw transfer rather than in a second controller.
 
 **Tech Stack:** TypeScript, Hono on Cloudflare Workers, React 19, Vitest with `vitest-pool-workers` and Testing Library, Playwright.
 
@@ -13,6 +13,7 @@
 ## Global constraints and preflight rulings
 
 - Work only in `/home/henry/candidary/.worktrees/gallery-roadmap-remediation` on branch `codex/gallery-roadmap-remediation`. Do not push, deploy, merge, migrate a remote database, mutate a pull request, or change secrets.
+- **Depends on** `2026-08-27-host-gallery-account-lifecycle-and-rotation.md` for the safety ladder's nine asserted rungs and its typed and focused confirmation components. This checkpoint adds the tenth rung and closes C-16; it does not rebuild the ladder or restate the other nine contracts.
 - **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md` for the server-side pause split, and on `2026-08-27-host-gallery-manager-upload-dialog.md` for two things: the Intake **Add photos** trigger that the true-empty secondary action reuses, and the same-origin credential-header helper that checkpoint extracts from `src/app/api.ts`, which Task 6's XHR raw upload reuses rather than re-deriving.
 - No migration, no new Worker route, and no new client route belong to this checkpoint.
 - **Formatter scope ruling.** C-61 and the slice spec name exactly four surfaces: Intake schedule, Manager header and retention, the upload flow, and Host Events. Convert those and no others. `src/features/gallery/gallery-timeline.ts` keeps its own tested moment formatter, and `src/components/EventAppearanceCanvas.tsx` and `src/components/GuestEventHero.tsx` render artwork and guest hero copy that Slice 5 does not own. Record this ruling in the checkpoint report; do not opportunistically convert them.
@@ -20,13 +21,16 @@
 - Equal upload-time endpoints already collapse inside `formatEventTimeRange`. Route the affected callers through it rather than adding a second equality check at a call site.
 - Paused copy names only new uploads. It may never imply the event or any other guest surface is offline.
 - The main guest page and the fullscreen route must use the **same** availability rules and the same projection. Do not add a fullscreen-specific rule.
+- **Fullscreen-scope ruling.** "Same projection" is about the Gallery, not about the page. The specification lists what an event guest retains while paused — the event shell and receipt, My deliveries, Guestbook, the Guest gallery when its own setting is on, and "fullscreen Gallery **through the same projection**" — and then says the two routes "use the same availability rules." It does not say the fullscreen route renders the main page's panels, and it never has: `/event/:slug/fullscreen` deliberately renders a screen-reader `h1`, a compact bar with the close control, and the gallery grid, and nothing else. That is the whole point of the route. Requiring Guestbook and My deliveries there would not close C-08; it would replace a deliberate design with a duplicated page, and the test asserting it would be asserting the wrong thing. Parity is asserted where it exists: **which photos the Gallery shows, and whether it is available at all**, must be identical on both routes for every cell of the matrix. The main route additionally keeps its secondary panels. Record this ruling in the checkpoint report.
 - Guest gallery availability remains an independent setting. Pause must not switch it, and Settings remains its sole owner.
 - Every behavior change follows RED → GREEN → REFACTOR.
 - Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-pause-scope-and-first-run/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
 
 ## Checkpoint boundary
 
-This is the final Slice 5 checkpoint. It owns C-08 (guest surfaces), C-50, C-53, C-55, C-56, C-57, C-58, and C-61, and it closes the Slice 5 matrix section. It does **not** own anything in Slice 6.
+This is the final Slice 5 checkpoint. It owns C-08 (guest surfaces), C-16, C-50, C-53, C-55, C-56, C-57, C-58, and C-61, and it closes the Slice 5 matrix section. It does **not** own anything in Slice 6.
+
+C-16 arrives here by the account checkpoint's ladder-ownership ruling. That checkpoint builds the safety ladder and asserts nine of its ten rungs; the tenth — **Pause / Resume guest uploads** — could not be asserted there because its control still read *Pause photo delivery* / *Reopen photo delivery* and the rename is Task 2 of this checkpoint. This checkpoint therefore asserts that last rung against the renamed control and writes C-16's single matrix row naming both halves.
 
 ---
 
@@ -47,7 +51,11 @@ This is the final Slice 5 checkpoint. It owns C-08 (guest surfaces), C-50, C-53,
 
 - [ ] **Step 1: Write the failing guest-surface matrix**
 
-Build one table driven over `{ paused, guestGalleryOn, guestbookState }` and, for each cell, assert what the main guest page renders **and** what `/event/:slug/fullscreen` renders. The two must agree for every cell. Assert specifically that with `paused: true, guestGalleryOn: true` the Guest gallery, Guestbook, and My deliveries are all present on both routes, and only the composer is absent.
+Build one table driven over `{ paused, guestGalleryOn, guestbookState }` and, for each cell, assert both routes against the scope the fullscreen-scope ruling fixes.
+
+*On the main guest page,* assert the full retained set: with `paused: true, guestGalleryOn: true` the Guest gallery, Guestbook, and My deliveries are all present, and **only** the composer is absent. Assert the absence of the composer specifically rather than the absence of an upload heading, so a panel that merely lost its title still fails.
+
+*On `/event/:slug/fullscreen`,* assert **Gallery projection parity** — the contract the specification actually states. For every cell: the route is reachable exactly when the Guest gallery is available on the main page and refuses exactly when it is not; the photo set it renders is identical to the main page's Guest gallery for that cell, item for item and in the same order; and pausing changes neither, because pause is not a gallery setting. Also assert what the route legitimately does not have: it renders no upload composer, and its close control still returns to the main page. Do **not** assert Guestbook or My deliveries there — they have never been on that route, and the ruling above explains why requiring them would be asserting a different product.
 
 Assert the paused copy string names new uploads and contains no phrasing that the event, gallery, or Guestbook is closed or offline.
 
@@ -58,11 +66,13 @@ npx vitest run --config vitest.worker.config.ts tests/worker/photo-intake-api.te
 npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'fullscreen'
 ```
 
-Expected: FAIL — pause currently removes the secondary panels on the main page, and fullscreen follows a different rule.
+Expected: FAIL — pause currently removes the secondary panels on the main page, and fullscreen resolves its gallery availability by a different rule than the main page does.
 
 - [ ] **Step 3: Implement**
 
-Make one projection serve both routes. If `resolveGuestEventPhase` conflates "photos open" with "surfaces available," separate the two there and keep `photosOpen` meaning exactly what `UploadService` already relies on.
+Make one projection serve both routes. If `resolveGuestEventPhase` conflates "photos open" with "surfaces available," separate the two there and keep `photosOpen` meaning exactly what `UploadService` already relies on. The fullscreen branch in `EventPage` reads gallery availability and the gallery list from that same projection instead of deciding for itself; its rendered structure is otherwise untouched.
+
+**Do not add panels to the fullscreen route.** If a change to it grows past the availability check and the gallery list, the fullscreen-scope ruling has been misread.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -80,7 +90,7 @@ git commit -m "fix: pause only guest uploads"
 
 ---
 
-### Task 2: Pause and Resume, by name
+### Task 2: Pause and Resume, by name — and the ladder's last rung
 
 **Files:**
 - Modify: `src/components/ManagerPhotoIntakePanel.tsx`
@@ -90,24 +100,35 @@ git commit -m "fix: pause only guest uploads"
 
 **Interfaces:**
 - Controls and status read **Pause guest uploads** and **Resume guest uploads**. The status line says what is paused and what is not. Pause and Resume remain an explicit reversible state change on the safety ladder's first rung.
+- At `153d05f` the four states in `ManagerPhotoIntakePanel` read *Open photo delivery now*, *Pause until the event starts*, *Pause photo delivery*, and *Reopen photo delivery*. All four labels and their status lines are in scope; renaming only the paired pause/resume labels would leave one panel saying two different things about one setting.
 
 - [ ] **Step 1: Write the failing copy tests**
 
 Assert the exact accessible names in both states, that the word **Reopen** no longer appears, that the status names guest uploads rather than "photo delivery" in the ambiguous sense, and that the control is reachable and at least 44 px at 390 px and 320 px.
 
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Write the failing ladder row**
+
+This is the tenth rung the account lifecycle checkpoint deferred, and it is asserted here against the renamed control, using **that checkpoint's reversible contract verbatim** rather than a second one invented for pause. Add to `tests/ui/app.test.tsx`, beside the existing nine-rung table:
+
+- activating **Pause guest uploads** issues **exactly one** request immediately, renders no confirmation and puts no dialog in the tree, and its feedback names guest uploads specifically;
+- activating **Resume guest uploads** does the same;
+- neither control ever renders a typed event-name field or a focused confirmation — a Pause that grew a confirmation fails this row, because immediacy is the rung's definition;
+- with the rung asserted, the ladder table names all ten actions and no row is marked deferred.
+
+- [ ] **Step 3: Run and verify RED**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/ui/manager-photo-intake.test.tsx -t 'Resume guest uploads'
+npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'safety ladder'
 ```
 
-- [ ] **Step 3: Implement and verify GREEN**
+- [ ] **Step 4: Implement and verify GREEN**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/ui/manager-photo-intake.test.tsx tests/ui/app.test.tsx
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/components/ManagerPhotoIntakePanel.tsx tests/ui/manager-photo-intake.test.tsx tests/ui/app.test.tsx tests/e2e/accessibility.spec.ts
@@ -352,7 +373,9 @@ Add gated Axe states for true-empty Intake, paused guest main page, paused guest
 
 - [ ] **Step 2: Record the remaining Slice 5 findings**
 
-**Write** C-08's row — it does not exist yet, by the row-completeness ruling the first checkpoint recorded: no earlier checkpoint wrote a partial C-08 row, and its server half was recorded as progress prose instead. C-08 closes here, so its single row must name all three halves and their tests: the server pause split and its authority-selected intake predicate from the first checkpoint, the always-available Intake trigger from the dialog checkpoint, and this checkpoint's guest-surface and fullscreen parity.
+**Write** C-08's row — it does not exist yet, by the row-completeness ruling the first checkpoint recorded: no earlier checkpoint wrote a partial C-08 row, and its server half was recorded as progress prose instead. C-08 closes here, so its single row must name all three halves and their tests: the server pause split and its authority-selected intake predicate from the first checkpoint, the always-available Intake trigger from the dialog checkpoint, and this checkpoint's guest-surface and fullscreen-Gallery parity. State the fullscreen-scope ruling in that row — that the route's parity obligation is Gallery availability and projection, not panel duplication — so a later reader does not read its absent Guestbook and My deliveries panels as an unfinished half of C-08.
+
+**Write** C-16's row for the same reason. The account lifecycle checkpoint built the ladder and asserted nine rungs, recording that as progress prose rather than a row, because its tenth rung named copy that did not exist yet. C-16 closes here, so its single row names both halves: that checkpoint's nine-rung table and its per-rung request-timing contracts, and this checkpoint's renamed Pause / Resume controls with the tenth rung asserted against them — naming the owning test files from both.
 
 Then add C-50, C-53, C-55, C-56, C-57, C-58, and C-61. State the formatter-scope ruling in the C-61 row so a later reader does not read the surviving `Intl` call sites as an unfinished conversion, and state in the same row that `validInstant` now requires an explicit offset and a calendar-valid date, so the fail-closed promise is recorded as proved rather than assumed.
 

@@ -4,7 +4,7 @@
 
 **Goal:** Stop telling a host a false "before Albums" story about picks they made minutes ago, and make Album capacity honest about the retained slots a timely Restore depends on.
 
-**Architecture:** Provenance is a durable per-row fact (`media.album_pick_version`) and an event-owned counter (`events.album_pick_generation`), both installed by migration `0021` in the first Slice 5 checkpoint. The Worker never increments the generation; the migration's triggers do, so a predecessor Worker's writes are counted exactly once. `AlbumView` gains a computed `reconciliation` category and the generation, never the raw version fields. `POST /album/start` gains an expectation pair so a same-count substitution conflicts as loudly as a category change. The existing `AlbumRepository.start` guarded transaction, `ALBUM_MAX_ENTRIES`, the Slice 1 retained-slot markers, the revision guard, and the autosave queue are reuse boundaries.
+**Architecture:** Provenance is a durable per-row fact (`media.album_pick_version`) and an event-owned counter (`events.album_pick_generation`), both installed by migration `0021` in the first Slice 5 checkpoint. The Worker never increments the generation; the migration's triggers do, so a predecessor Worker's writes are counted exactly once. `AlbumView` gains a computed `reconciliation` category and the generation, never the raw version fields. `POST /album/start` gains an expectation triple so a same-count substitution conflicts as loudly as a category change, and a successful Start advances the album revision so the editor a cohost was already holding cannot write over it. The existing `AlbumRepository.start` guarded transaction, `ALBUM_MAX_ENTRIES`, the Slice 1 retained-slot markers, the revision guard, and the autosave queue are reuse boundaries.
 
 **Tech Stack:** TypeScript, Hono on Cloudflare Workers, D1, React 19, Vitest with `vitest-pool-workers` and Testing Library, Playwright.
 
@@ -23,6 +23,7 @@
 - Retained slots count toward `ALBUM_MAX_ENTRIES`. A timely Restore is unconditional because Slice 1 reserved both event and Album capacity; no code path may make Restore conditional on free space.
 - Public and Preview projections continue to omit retained entries. Do not change what a link holder sees.
 - The existing revision guard applies unchanged to every new Start and reset path.
+- **Start-advances-revision ruling.** Matching `expectedRevision` is only half of a revision guard; the other half is that a successful write moves it. At `153d05f` `AlbumRepository.start` writes `entries`, `saved_at`, and `updated_at` and never touches `revision` — the only two `revision = revision + 1` sites in `worker/db/album.ts` are on the save and metadata paths. Adding the expectation without the increment leaves the real hazard open: a cohost who read the album before the Start still holds a revision the server accepts afterwards, so their `PUT /album` — composed against the pre-Start entries — succeeds and silently replaces everything the Start just materialized. **Every successful new-client Start increments `revision` in the same guarded statement that sets `saved_at`**, on both `from-picks` and `empty`. A Start that conflicts must not increment. The legacy branch is unchanged, which is one more reason the compatibility window is one release and not more.
 - Every behavior change follows RED → GREEN → REFACTOR.
 - Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-album-era-reconciliation/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
 
@@ -127,6 +128,8 @@ git commit -m "feat: project album pick provenance"
 
 The three expectations answer three different questions and none substitutes for another: `expectedPickGeneration` catches a changed *pick cohort*, `expectedReconciliation` catches a changed *category*, and `expectedRevision` catches a concurrent *album write* — a cohost saving entries, metadata, or order between the read and the start. All three mismatches produce the same canonical conflict.
 
+`expectedRevision` is also the field a successful Start must *advance*, per the start-advances-revision ruling. Reading it and not writing it protects the Start from a concurrent save but leaves the save unprotected from the Start, which is the direction that actually loses a host's work: the entries a Start materializes are the ones an unaware cohost's in-flight `PUT` would overwrite. The increment belongs in the same statement as `saved_at = ?`, so a conflicting Start cannot advance it and a succeeding one cannot fail to.
+
 The guarded D1 transaction matches `expectedRevision` and `expectedPickGeneration`, then the expected category, count, and cap, then rechecks provenance, saved state, and the complete retained picked cohort — all inside the same batch. Guard the first statement and check `results[0].meta.changes === 1`; `changes() = 1` chaining is only valid here for dependents that always change exactly one row, which the `Start empty` pick-clearing statement is not.
 
 - [ ] **Step 1: Write the failing conflict table**
@@ -143,6 +146,10 @@ The guarded D1 transaction matches `expectedRevision` and `expectedPickGeneratio
 - `start: 'from-picks'` materializes both active and retained-trash picked IDs in timeline order, so a retained slot keeps its position;
 - a legacy `{ start }` body still works with the existing manual semantics and never auto-starts;
 - a stale `expectedRevision` — a concurrent `PUT /album` landed between the read and the start — returns the canonical conflict and writes nothing, on both `from-picks` and `empty`;
+- **a successful Start advances the revision.** For each of `from-picks` and `empty`: read the album, run a successful new-client Start, and assert the returned `AlbumView.revision` is strictly greater than the one sent. Then replay a `PUT /album` carrying the **pre-Start** revision and assert it returns the canonical conflict and changes no entry — this is the row that fails when the increment is missing, and asserting only the returned revision is not enough, because a projection can report a number no guard actually enforces;
+- a Start that conflicts on any of the three expectations leaves `revision` exactly where it was, so a refused attempt cannot invalidate a cohost's live editor;
+- the increment is exactly one per successful Start: a Start followed by an ordinary save advances the revision twice in total, not three times;
+- a legacy `{ start }` body does not advance the revision, matching today's behavior, and the contract test that names the branch for removal says so;
 - a legacy `{ start }` body, which carries no revision, keeps exactly today's unguarded behavior. Say so in the contract test that marks the branch for removal, so the compatibility window is not mistaken for a hole in the new guard.
 
 - [ ] **Step 2: Run and verify RED**
@@ -155,7 +162,7 @@ Expected: FAIL — `albumStartSchema` is `.strict()` on `{ start }` alone.
 
 - [ ] **Step 3: Implement the guard**
 
-Extend `albumStartSchema` to accept both shapes — a discriminated accept, not an optional-field widening, so a new client that omits one expectation is refused rather than silently taking the legacy branch. Thread all three expectations into `AlbumRepository.start`, whose signature becomes `(eventId, choice, expectations | null, now)`; `null` is the legacy branch. Add the contract test that names the legacy branch for removal after one release.
+Extend `albumStartSchema` to accept both shapes — a discriminated accept, not an optional-field widening, so a new client that omits one expectation is refused rather than silently taking the legacy branch. Thread all three expectations into `AlbumRepository.start`, whose signature becomes `(eventId, choice, expectations | null, now)`; `null` is the legacy branch. Add `revision = revision + 1` to the guarded `event_albums` update on both choices, in the same statement as `saved_at`, and only on the expectation-bearing branch. Add the contract test that names the legacy branch for removal after one release.
 
 The client is not updated here. `startAlbum` in `src/features/gallery/album-api.ts` still sends `{ start }` alone until Task 4, and the legacy branch is exactly what keeps it working across the two commits — that compatibility window is what makes the split safe, so do not add a required field to the legacy shape to close it early.
 
@@ -248,6 +255,7 @@ git commit -m "fix: count retained album slots against capacity"
 - a manual `Start from picks` and a manual `Start empty` each send all three expectations too — the guard is not auto-start-only;
 - the auto-start is issued once even under StrictMode double-mounting;
 - a conflict response from auto-start does not retry silently: it lands on the canonical conflict/reload path;
+- the editor adopts the **post-Start** revision from the start response, so the first autosave after a Start carries the advanced number and does not immediately conflict with the write the host just made;
 - an unversioned pick shows the prompt, and its copy contains no "before Albums" phrasing;
 - `over-capacity` disables `Start from picks` with a focusable `aria-disabled` control and an adjacent reason, and leaves `Start empty` enabled;
 - `over-capacity` renders even when `historicalPickCount` is `0`;
@@ -286,7 +294,7 @@ git commit -m "fix: adopt current-era album picks directly"
 
 - [ ] **Step 1: Record C-17 and C-49**
 
-C-17 is `implemented`: name the durable version/generation pair, the four projected categories, the expectation-guarded start, and the owning Worker and UI tests. C-49 is `verified-existing`: name the post-review repair already in the code and the new 501-pick boundary regression that proves it. Do not claim capacity or retention behavior under C-17 that is not covered by a named test.
+C-17 is `implemented`: name the durable version/generation pair, the four projected categories, the expectation-guarded start, the start-advances-revision ruling and the stale-`PUT` regression that proves it, and the owning Worker and UI tests. C-49 is `verified-existing`: name the post-review repair already in the code and the new 501-pick boundary regression that proves it. Do not claim capacity or retention behavior under C-17 that is not covered by a named test.
 
 - [ ] **Step 2: Run the complete checkpoint gates**
 

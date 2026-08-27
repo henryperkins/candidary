@@ -4,7 +4,7 @@
 
 **Goal:** Let an authorized host add photos through the existing canonical upload pipeline, make Pause mean *guest uploads only*, and give the Album a durable provenance and generation contract — all on the server, without a second upload implementation.
 
-**Architecture:** `0021_manager_upload_and_album_era.sql` is the one additive migration this slice may create; it carries both the server-only upload actor and the Album era columns because a migration is immutable once written and both halves must reach D1 together. `UploadService` gains a server-created `UploadAuthority` discriminant so guest schedule enforcement and Manager allowance are two branches of one pipeline rather than two pipelines. `ManagerUploadActorService` resolves a role-aware `uploader_session_id` and never mints a cookie. Four Manager routes mirror the guest reserve/content/finalize/cancel paths and drive the one `receiveMediaUpload`, the one `retireMediaObjects`, the one `MediaRepository.reserve*`, and every existing promotion fence — those gain the authority as a parameter and are not forked. Because the guest pause and schedule are encoded in the repository's own SQL, the authority also selects the intake predicate; a route-level guard alone would leave a paused Manager upload writing bytes it could never commit.
+**Architecture:** `0021_manager_upload_and_album_era.sql` is the one additive migration this slice may create; it carries both the server-only upload actor and the Album era columns because a migration is immutable once written and both halves must reach D1 together. `UploadService` gains a server-created `UploadAuthority` discriminant so guest schedule enforcement and Manager allowance are two branches of one pipeline rather than two pipelines. `ManagerUploadActorService` resolves a role-aware `uploader_session_id` and never mints a cookie. One `authorityLivenessSql`/`authorityLivenessBindings` pair is the single re-proof of that authority, `AND`-ed into reserve, idempotent refresh, ingress claim, and commit alongside the intake predicate, and the two ingress methods answer with a tagged outcome so a lost credential refuses as `RESOURCE_FORBIDDEN` rather than masquerading as a retryable conflict. Four Manager routes mirror the guest reserve/content/finalize/cancel paths and drive the one `receiveMediaUpload`, the one `retireMediaObjects`, the one `MediaRepository.reserve*`, and every existing promotion fence — those gain the authority as a parameter and are not forked. Because the guest pause and schedule are encoded in the repository's own SQL, the authority also selects the intake predicate; a route-level guard alone would leave a paused Manager upload writing bytes it could never commit.
 
 **Tech Stack:** TypeScript, Hono on Cloudflare Workers, D1, R2, Zod, Vitest with `vitest-pool-workers`.
 
@@ -19,10 +19,29 @@
 - Do not add a second upload pipeline, a Manager-only queue, a presigned URL, or a new R2 write path. `receiveMediaUpload`, `retireMediaObjects`, `assertWorkerIngressEnabled`, `MediaRepository.reserve`/`reserveBatch`/`refreshIdempotent`, and the tombstone/promotion fences are reuse boundaries. **A reuse boundary means one implementation, not a frozen signature.** `receiveMediaUpload` and the repository statements it drives take the authority as a new parameter in Task 4; what may not be duplicated is the buffering, validation, create-only write, re-read, and commit sequence itself.
 - A server-only upload actor is identity storage. It has random secret and CSRF digests whose source secrets are discarded at creation, and browser session resolution rejects it **before** any secret comparison. It can never authorize a request.
 - The client may never choose its own authority. `UploadAuthority` is constructed by the route from `requireManager`/`resolveEventSession` output only.
-- Authority is carried through reservation, idempotent refresh, post-buffer ingress claim, and final commit SQL. Do not reduce it to a route-time boolean. A request that was authorized at the route and then spent seconds buffering bytes must be re-proved against the *same* authority in the claim and the commit, so a rotation, sign-out, membership removal, or account disablement that lands mid-buffer loses the write.
+- Authority is carried through reservation, idempotent refresh, post-buffer ingress claim, and final commit SQL. Do not reduce it to a route-time boolean. A request that was authorized at the route and then spent seconds buffering bytes must be re-proved against the *same* authority in every one of those four phases, so a rotation, sign-out, membership removal, account disablement, credential-version bump, or session expiry that lands mid-request loses the write.
+- **Authority-liveness ruling.** "Carried through" means one predicate, four phases, and a refusal that names the right failure. Three separate things follow from that, and a plan that supplies only the first has not carried authority anywhere:
+
+  *One predicate, not a per-phase re-derivation.* `authorityLivenessSql(authority)` and `authorityLivenessBindings(authority, nowIso)` are the single source of the liveness fact, and every phase interpolates exactly that string with exactly those bindings. Two phases that spell the same check differently will drift, and the phase that drifts is the one nobody tests.
+
+  *Four phases, not two.* Reserve and idempotent refresh admit rows; claim and commit admit bytes. Only guarding the last two leaves the route-authorization → reserve window open: `requireManager` resolves, the account is disabled or the link rotated, and the reserve still inserts a live reservation whose bytes are then correctly refused — a row the host is told they own and can never finish. All four phases carry it.
+
+  *Exactly these facts, per kind.* Matching `uploader_session_id` proves which actor reserved the row, not that the actor is still authorized; for `manager-account` the actor row deliberately outlives the browser credential that created it, so the session match proves nothing about the account at all. Each kind's liveness is:
+
+  | Kind | Liveness facts re-proved in SQL |
+  | --- | --- |
+  | `guest` | the `event_sessions` row for `eventSessionId` — same event, `role = 'guest'`, `revoked_at IS NULL`, `expires_at >` now — and its `event_access_tokens` row unrevoked and unexpired |
+  | `manager-link` | the same, with `role = 'manager'` and `manager_upload_account_id IS NULL`, plus its access token unrevoked and unexpired |
+  | `manager-account` | the `host_sessions` row for `hostSessionId` — `account_id = accountId`, `revoked_at IS NULL`, `expires_at >` now, `auth_version` equal to the account's current `auth_version` — plus `host_accounts.disabled_at IS NULL` and an `event_hosts` row for `(eventId, accountId)` |
+
+  The `host_sessions.auth_version = host_accounts.auth_version` comparison is not decoration: a password reset or a sign-out-everywhere bumps the account version and is the *only* signal that distinguishes a still-unexpired session row from a credential the host has already invalidated. Omitting it makes "account disablement loses the write" true and "credential revocation loses the write" false.
+
+  **The guest kind is not exempt.** The governing specification requires every phase to recheck "the current guest/link session or host session, access token, account, membership, event lifecycle, media event, and exact `uploader_session_id`" — the guest session included, which is why Task 4's own test list already requires a signed-out guest to lose the claim. What stays byte-identical for guests is the **intake predicate string** and the **wire error codes**, not the absence of a liveness recheck. A guest whose event session was revoked mid-buffer loses the write exactly as a Manager does; that is a fix, and its regression belongs in `tests/worker/upload-api.test.ts`.
+- Authority liveness and the intake predicate are two independent conditions on the same statements, and neither substitutes for the other. The intake predicate answers *is this event open to this kind of actor*; liveness answers *is this actor still who it claimed to be*. Both are `AND`-ed into all eight upload-path sites.
 - **Intake-predicate ruling.** `worker/db/media.ts` interpolates the module constant `PHOTO_INTAKE_OPEN_SQL` — `uploads_enabled = 1 AND COALESCE(photos_open_from, event_start_at) <= ?` — at eight upload-path sites. At `153d05f` they are: `claimReservationIngress`, `commitReservationIngress`, `idempotentRefreshConflict`, both branches of `refreshIdempotent`, `reserve`, and two sites in `reserveBatch`. Every one of them encodes the *guest* pause and the *guest* schedule. Replacing `assertCanUpload` alone therefore does not open the Manager path: a paused or pre-start Manager reserve would still be refused by SQL, and a Manager upload paused between the route check and the commit would lose its bytes after they were already written. All eight sites must take their predicate from the authority. No other `PHOTO_INTAKE_OPEN_SQL` site exists, and no site outside this list may change.
 - Every cross-actor probe — guest touching a Manager reservation, Manager touching a guest, another account's, a revoked link's, or another event's — returns the existing generic `RESOURCE_FORBIDDEN` 403. Never disclose which condition failed.
 - Manager cancel accepts only `reserved` and `failed` media. A stored original is removed only through Intake's Slice 1 recoverable trash path.
+- **Cancel-CAS ruling.** That restriction is a property of the transition, not of the route, and it cannot be implemented as a route-level state check in front of the existing deletion path. `MediaRepository.delete` is deliberately a read-then-CAS *retry loop*: its own comment says the observed state can change between the read and the CAS — `reserved → stored` finalization is the example it names — and it re-reads and deletes the winner so a 200 never reports success while leaving an active photo behind. Handing it a media ID that the route observed as `reserved` therefore permanently deletes a stored original if the finalize lands in between, with `deleted_at` terminal and no trash row: the exact outcome this slice forbids, reached through the path that exists to be correct. `delete` also takes only `(id, deletedAt)` — it is not actor-scoped, so it cannot refuse another actor's row either. Manager cancel gets its own transition in Task 5.
 - Manager upload responses use the Slice 1 `UploadMediaView` allowlist and batch envelopes. No route may return a session ID, object key, bucket generation, access-token ID, reservation internals, or account identity.
 - The server always stores `guest_name = 'Host'` for a Manager upload. The batch body accepts no guest name, account ID, actor ID, event ID, upload URL, or object key.
 - Manager actors deliberately ignore the guest schedule and the guest pause, but still require a live event management window, Worker ingress, reservation/media/storage caps, and the full type/size/signature/dimension validation.
@@ -175,7 +194,7 @@ export interface SessionRecord {
 }
 ```
 
-- `SessionsRepository.createManagerUploadActor(input)` inserts an actor row with random discarded-source digests.
+- `SessionsRepository.createManagerUploadActor(input)` inserts an actor row with random discarded-source digests, selecting its `access_token_id` from the event's active Manager token in the same statement. It returns `null` when no active token existed, which is the rotation-race signal Task 3's ruling handles.
 - `SessionsRepository.getLiveManagerUploadActor(eventId, accountId)` returns the one live actor or null.
 - `SessionsRepository.revokeManagerUploadActors(eventId, accountId | null, revokedAt)` revokes by account or by event.
 
@@ -217,6 +236,7 @@ git commit -m "feat: store a server-only manager upload actor"
 **Files:**
 - Create: `worker/services/manager-upload-actor.ts`
 - Create: `tests/worker/manager-upload-actor.test.ts`
+- Modify: `worker/db/sessions.ts` *(the guarded token-selecting insert behind `createManagerUploadActor`)*
 
 **Interfaces:**
 - Produces:
@@ -231,6 +251,23 @@ export class ManagerUploadActorService {
 }
 ```
 
+**Rotation-race ruling.** "Carries the event's current Manager access-token FK" cannot be satisfied by reading the token and then inserting. Task 6 rotates the token and rebinds only the actors its own batch can see, so the interleaving *read active token → rotation commits → insert actor* produces a live actor bound to the token rotation just revoked. That row is not merely stale: the partial unique index from Task 1 is on `(event_id, manager_upload_account_id) WHERE manager_upload_account_id IS NOT NULL AND revoked_at IS NULL`, so the stale row occupies the only live slot and blocks the correct replacement from ever being created. The account's uploads stay broken until something revokes it, and nothing does.
+
+The insert is therefore atomic with the token selection — one statement, no read-then-write:
+
+```sql
+INSERT INTO event_sessions (
+  id, secret_digest, csrf_digest, event_id, access_token_id, role,
+  can_claim_owner, manager_upload_account_id, expires_at, created_at
+)
+SELECT ?, ?, ?, ?, t.id, 'manager', 0, ?, ?, ?
+  FROM event_access_tokens AS t
+ WHERE t.event_id = ? AND t.role = 'manager'
+   AND t.revoked_at IS NULL AND t.expires_at > ?;
+```
+
+Zero rows inserted means there was no active Manager token at that instant — a rotation is in flight, or the management window closed. Re-read and retry a bounded number of times; if the re-read finds a live actor, return it, and if it finds neither actor nor active token, raise the existing lifecycle refusal rather than inventing a new code. The `SELECT` and the uniqueness check are evaluated in the same statement, so the loser of a genuine two-caller race fails the index rather than committing a second identity, and its retry finds the winner.
+
 - [ ] **Step 1: Write the failing service suite**
 
 Cover:
@@ -239,7 +276,10 @@ Cover:
 - two concurrent `ensureForReservation` calls for the same `(eventId, accountId)` produce exactly one live row — assert with a `DB.batch`-level race or by asserting the unique index converts the loser into a re-read rather than an error;
 - `lookupForExistingUpload` returns null when no live actor exists and never inserts;
 - a revoked actor is not reused; a new `ensureForReservation` creates a fresh identity;
-- the created actor carries the event's **current** Manager access-token FK and the event's `managementAccessExpiresAt`.
+- the created actor carries the event's **current** Manager access-token FK and the event's `managementAccessExpiresAt`;
+- **ensure versus rotation.** Drive the interleaving explicitly: read the active token, run `LinkService.rotateManagementLink` to completion, then let the insert proceed. Assert that no live actor is bound to the revoked predecessor, that the actor the service finally returns is bound to the **replacement** token, and that a reservation made through it then commits. This is the row a read-then-write implementation fails, and it must exist before the service does;
+- the mirror case: rotation lands with no live actor at all, and a first `ensureForReservation` afterwards binds to the replacement on its first attempt;
+- with **no** active Manager token — the window closed — `ensureForReservation` inserts nothing and raises the existing lifecycle refusal.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -251,7 +291,7 @@ Expected: FAIL — the module does not exist.
 
 - [ ] **Step 3: Implement the service**
 
-Membership and lifecycle are already checked by `requireManager` before the service is called; the service must not re-derive authorization, only identity. On unique-index conflict, re-read and return the winner rather than throwing.
+Membership and lifecycle are already checked by `requireManager` before the service is called; the service must not re-derive authorization, only identity. Create through the guarded `INSERT … SELECT` above. On unique-index conflict, re-read and return the winner rather than throwing; on a zero-row insert, re-read and retry under the rotation-race ruling.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -262,7 +302,7 @@ npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-acto
 - [ ] **Step 5: Commit**
 
 ```bash
-git add worker/services/manager-upload-actor.ts tests/worker/manager-upload-actor.test.ts
+git add worker/services/manager-upload-actor.ts worker/db/sessions.ts tests/worker/manager-upload-actor.test.ts
 git commit -m "feat: resolve a role-aware manager upload actor"
 ```
 
@@ -302,6 +342,32 @@ export function intakePredicateSql(authority: UploadAuthority): string;
 
 Both branches bind exactly one instant, so every existing call site keeps its parameter order. The guest string stays byte-identical to today's `PHOTO_INTAKE_OPEN_SQL`; a diff of the guest SQL is a defect, not a refactor.
 
+- The authority also supplies the liveness fact required by the Authority-liveness ruling, as one string and one binding list so no phase can spell it differently:
+
+```ts
+/** The `EXISTS (…)` fragment proving this authority is still authorized, in SQL. */
+export function authorityLivenessSql(authority: UploadAuthority): string;
+/** Its bindings, in the order the fragment consumes them. */
+export function authorityLivenessBindings(authority: UploadAuthority, nowIso: string): unknown[];
+```
+
+  Both live in `worker/db/media.ts` beside `intakePredicateSql`, take `UploadAuthority` through an `import type`, and are `AND`-ed into the same eight upload-path sites the intake predicate reaches. The two are independent: a live authority on a closed event is refused, and a rotated credential on an open event is refused. Because the fragment's binding count varies by kind, every one of the eight statements builds its parameter list by concatenation rather than by a fixed positional array — a hand-counted `?` index is the defect this pair exists to prevent.
+
+- Reserve and idempotent refresh carry it too, which is what closes the route-authorization → reserve window. `ReserveMediaRecord` already carries the authority for the intake predicate; the same value drives liveness, so no further parameter is added to `reserve`, `reserveBatch`, `refreshIdempotent`, or `idempotentRefreshConflict`.
+
+- The claim and the commit stop answering in `null`/`false`, because those collapse "you are no longer allowed" into "the row moved":
+
+```ts
+export type UploadIngressOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: 'forbidden' | 'conflict' };
+
+claimReservationIngress(input): Promise<UploadIngressOutcome<ClaimedMediaIngress>>;
+commitReservationIngress(input): Promise<UploadIngressOutcome<null>>;
+```
+
+  A zero-row `UPDATE` cannot say by itself which condition failed, so on the failure path — and only there — each method runs the liveness fragment alone as a standalone `SELECT` and reports `forbidden` when it does not hold, `conflict` otherwise. That read never re-admits the write: the statement has already failed closed, and the probe only chooses which refusal to raise. Do not invert it into a pre-check that gates the write.
+
 - `receiveMediaUpload` takes the authority in place of the bare `uploaderSessionId`:
 
 ```ts
@@ -317,7 +383,9 @@ export async function receiveMediaUpload(
 ): Promise<MediaRecord>;
 ```
 
-It forwards the authority to `claimReservationIngress` and `commitReservationIngress`, which keep matching `m.uploader_session_id = authority.actorSessionId` and now also interpolate that authority's intake predicate. Nothing else in the function changes.
+It forwards the authority to `claimReservationIngress` and `commitReservationIngress`, which keep matching `m.uploader_session_id = authority.actorSessionId` and now also interpolate that authority's intake predicate and liveness fragment.
+
+  Its two refusal sites change with the tagged outcomes. A `reason: 'forbidden'` from either phase raises the generic `RESOURCE_FORBIDDEN` 403 that every cross-actor probe already answers with — never `UPLOAD_FINALIZE_CONFLICT`. At `153d05f` both sites answer 409: a revoked credential is currently reported to the browser as "This upload is already being secured. Wait a moment and try again," which invites the retry that can never succeed and is indistinguishable from a live race. A `reason: 'conflict'` keeps today's exact 409 code and message at both sites, so the existing conflict assertions stand unedited. The already-stored idempotent short-circuits — the `getById` re-reads that return a committed row before raising — run **before** the outcome is classified in both places, so a delivered upload whose credential died afterwards still answers 200.
 
 - One new `ApiErrorCode` in `shared/errors.ts`, `UPLOAD_RESERVATION_CANCELED`, answers an idempotent replay whose `(event, actor, idempotencyKey)` resolves to a terminally canceled or deleted row. Today `refreshIdempotent` collapses that case into the generic `UPLOAD_FINALIZE_CONFLICT`, which is indistinguishable from a live conflict — and the browser cannot then tell "my cancel landed and the response was lost" from "something else went wrong," which is exactly the ambiguity the Manager cleanup controller must resolve in the next checkpoint.
 
@@ -350,15 +418,28 @@ Then replace the hard-coded `PHOTO_INTAKE_OPEN_SQL` interpolation with `intakePr
 
 `intakePredicateSql` lives in `worker/db/media.ts` beside `PHOTO_INTAKE_OPEN_SQL`, which stays the guest branch's value, and takes `UploadAuthority` through an `import type` so no value-level cycle forms with `worker/services/uploads.ts`. Delete no site and add none: after this step every one of the eight interpolations reads `intakePredicateSql(...)`, and the constant is referenced only by its own definition and that function.
 
-- [ ] **Step 4: Carry authority into the claim and the commit**
+In the same pass, `AND` `authorityLivenessSql(authority)` into those same eight statements and append `authorityLivenessBindings(authority, nowIso)` to each one's parameter list. Reserve and refresh are not optional here: without them the route-authorization → reserve window stays open, and Step 4's revocation table can only ever prove the second half of the promise. Because the fragment's binding count differs by kind, build each statement's bindings by concatenating the fixed prefix, the intake instant, and the liveness list — never by editing a positional array by hand.
 
-`receiveMediaUpload` takes the authority and forwards it. `claimReservationIngress` and `commitReservationIngress` must re-prove, in the same statement that admits the write, that the authority which reserved the row is *still* the authority now committing it. Matching `uploader_session_id` alone is not sufficient for the account kind: the actor row outlives the browser credential that created it, so the claim and the commit each add an `EXISTS` over the authority's own credential — for `manager-account`, a live `host_accounts` row plus live `event_hosts` membership for that event; for `manager-link`, the actor's access token still unrevoked and unexpired; for `guest`, today's behavior unchanged.
+- [ ] **Step 3b: Close the route-authorization → reserve window**
+
+The Manager routes do not exist until Task 5, so this is proved at the service and repository seam, in `tests/worker/repositories.test.ts` and `tests/worker/photo-intake-api.test.ts`: for each of the three kinds, construct the authority, revoke that credential, and only then call `UploadService.initiate`/`initiateBatch` with it. Assert the reservation is refused with the generic `RESOURCE_FORBIDDEN` 403, that no `media` row exists, and that no event counter moved. Drive the interleaving from that seam rather than from wall-clock timing — a test that only sometimes lands in the window proves nothing on the run where it does not.
+
+Cover the same window on idempotent refresh: a replay whose credential died between the route and the refresh is refused rather than re-entering the row.
+
+- [ ] **Step 4: Carry authority into the claim and the commit, and tag their refusals**
+
+`receiveMediaUpload` takes the authority and forwards it. `claimReservationIngress` and `commitReservationIngress` re-prove, in the same statement that admits the write, that the authority which reserved the row is *still* the authority now committing it, by interpolating the same `authorityLivenessSql`/`authorityLivenessBindings` pair Step 3 wired into reserve and refresh. Matching `uploader_session_id` alone is not sufficient for any kind and is actively misleading for the account kind: the actor row deliberately outlives the browser credential that created it, so the session match says nothing at all about whether that account is still authorized.
+
+Then change what a failure *says*. Both methods return the tagged `UploadIngressOutcome` from this task's Interfaces instead of `null`/`false`, classifying a zero-row result by running the liveness fragment alone. `receiveMediaUpload` raises the generic `RESOURCE_FORBIDDEN` 403 for `forbidden` and keeps today's exact `UPLOAD_FINALIZE_CONFLICT` 409 code and message for `conflict`, at both its claim site and its commit site. Without this the whole revocation table below is unfalsifiable from the browser's side: every row would pass while the response still told the host to wait a moment and try again.
 
 Cover, in `tests/worker/repositories.test.ts` and `tests/worker/upload-api.test.ts`:
 - an idempotent replay under a *different* actor for the same `(event, idempotencyKey)` does not re-enter the other actor's row;
-- **revocation during buffer, per authority kind.** Reserve, then revoke between the reserve and the content PUT, then send the bytes: an account disabled, a membership removed, a management link rotated, and a guest event session signed out each lose the claim, leave the media row `reserved`, leave the promotion row unmoved, and return the generic refusal;
-- the same four revocations applied between a successful claim and the commit each lose the commit, so no `stored` row and no counter delta appears;
-- a Manager upload whose event's `managementAccessExpiresAt` passes mid-buffer is refused by the same predicate, and the guest equivalent — a pause landing mid-buffer — still refuses the guest;
+- **revocation during buffer, per authority kind.** Reserve, then revoke between the reserve and the content PUT, then send the bytes. Each of these loses the claim, leaves the media row `reserved`, leaves the promotion row unmoved, and returns the generic `RESOURCE_FORBIDDEN` 403 — asserted as that exact code, not merely as "not 200": an account disabled; a membership removed; the account's `auth_version` bumped by a password reset while its `host_sessions` row is still unexpired; that `host_sessions` row revoked; that `host_sessions` row expired; a management link rotated; the Manager's own event session revoked; and a guest event session signed out;
+- every one of those revocations applied instead between a successful claim and the commit likewise loses the commit with the same 403, so no `stored` row and no counter delta appears;
+- a Manager upload whose event's `managementAccessExpiresAt` passes mid-buffer is refused by the intake predicate and reports `conflict`, not `forbidden` — the two conditions are independent and must not be collapsed into one refusal;
+- the guest equivalent — a pause landing mid-buffer — still refuses the guest with today's `UPLOAD_FINALIZE_CONFLICT` code and message, asserted character for character;
+- a claim or commit that fails because the row genuinely moved — a competing finalize, an expired reservation — still reports `conflict` with today's wire answer, so the new 403 branch cannot swallow the existing conflict assertions;
+- an upload whose bytes committed successfully and whose credential is revoked immediately afterwards still answers 200 from the already-stored short-circuit, because a delivered photo is not retroactively unauthorized;
 - a Manager reserve replayed after that same reservation was canceled returns `UPLOAD_RESERVATION_CANCELED` 409, creates no row, and leaves the canceled row terminal;
 - the identical guest replay still returns `UPLOAD_FINALIZE_CONFLICT` with its existing message — assert the exact code and string, so the authority-scoped branch cannot drift into the guest path.
 
@@ -381,6 +462,8 @@ git commit -m "feat: give the upload pipeline a server-created authority"
 
 **Files:**
 - Modify: `worker/routes/manage.ts`
+- Modify: `worker/db/media.ts` *(the actor-scoped cancel transition)*
+- Modify: `tests/worker/repositories.test.ts`
 - Create: `tests/worker/manager-upload-api.test.ts`
 - Modify: `worker/http/csrf.ts` *(only if the account/link pair selection needs an explicit helper)*
 
@@ -396,11 +479,34 @@ DELETE /api/manage/events/:eventId/uploads/:mediaId
 
 Batch body: `z.object({ files: z.array(fileSchema).min(1).max(UPLOAD_BATCH_SIZE) }).strict()` — `fileSchema` reused from the guest routes, with no `guestName`. Reservation URLs point only at the Manager content path.
 
+- Also produces the actor-scoped cancel transition the cancel-CAS ruling requires:
+
+```ts
+cancelReservation(
+  mediaId: string,
+  authority: UploadAuthority,
+  canceledAt: string,
+): Promise<UploadIngressOutcome<MediaObjectDeletionClaim>>;
+```
+
+  It is a sibling of `MediaRepository.delete`, not a wrapper around it, and `delete` is not modified.
+
 - [ ] **Step 1: Write the failing authorization matrix**
 
 In `tests/worker/manager-upload-api.test.ts`, table-drive every row from the slice spec's matrix: account owner, account cohost, current management link, both cookies present (account takes precedence), missing CSRF, invalid CSRF, wrong-scope CSRF header, cross-event path, a guest's reservation, another account's actor reservation, a rotated old link's reservation, expired link, expired event, deleted event, disabled account, and removed membership. Assert the generic `RESOURCE_FORBIDDEN` 403 body for every cross-actor probe, and assert that a probe never creates an actor row.
 
 Add response-shape assertions: no `uploaderSessionId`, `objectKey`, `objectBucketGeneration`, `accessTokenId`, `accountId`, or `reservationExpiresAt`-adjacent internals in any Manager upload response; `guestName` is exactly `'Host'`.
+
+- [ ] **Step 1b: Write the failing cancel-race table**
+
+In `tests/worker/repositories.test.ts` and `tests/worker/manager-upload-api.test.ts`, prove the cancel-CAS ruling rather than assuming it:
+- **finalization lands between the route's read and the DELETE.** Reserve, let the route observe `reserved`, complete the content PUT so the row commits to `stored`, and only then run the cancel. Assert the response is the existing conflict, that the row is still `stored` with `deleted_at IS NULL`, that its object key is still present in R2, and that the event's stored counters are unchanged. Drive the interleaving from the repository seam, not from timing;
+- a `stored` row that the host had already moved to Recently deleted is likewise refused, and its `trashed_at`/`restore_until` pair is untouched — a cancel may not shortcut the recoverable window;
+- cancel of a genuinely `reserved` row and of a genuinely `failed` row each succeed exactly once, release the reserved counters by exactly that row's declared bytes, and are idempotent on replay;
+- another actor's reserved row — a guest's, another account's, a rotated link's, another event's — is refused with `RESOURCE_FORBIDDEN` 403 and stays reserved;
+- a cancel whose own credential died between route authorization and the statement is refused with the same 403 and leaves the row reserved.
+
+Assert on the persisted row in every case. A test that only reads the HTTP status cannot tell a refusal from a deletion that also happened to return 409.
 
 - [ ] **Step 2: Write the failing ingress-ordering test**
 
@@ -416,22 +522,24 @@ Expected: FAIL — the routes do not exist.
 
 - [ ] **Step 4: Implement the routes**
 
-Mirror `worker/routes/uploads.ts` exactly, substituting `requireManager({ write: true })` plus `ManagerUploadActorService` for `guestForSlug`, and matching media on `uploaderSessionId === authority.actorSessionId`. The routes call the one `receiveMediaUpload` and the one `retireMediaObjects` — the same implementations the guest routes call, now passing the authority Task 4 threaded through them rather than a bare session id. `DELETE` accepts only `reserved` and `failed` state and returns the existing conflict for a stored row.
+Mirror `worker/routes/uploads.ts` exactly, substituting `requireManager({ write: true })` plus `ManagerUploadActorService` for `guestForSlug`, and matching media on `uploaderSessionId === authority.actorSessionId`. The routes call the one `receiveMediaUpload` and the one `retireMediaObjects` — the same implementations the guest routes call, now passing the authority Task 4 threaded through them rather than a bare session id.
+
+`DELETE` does **not** call `MediaRepository.delete`. Per the cancel-CAS ruling it gets its own transition, `MediaRepository.cancelReservation(mediaId, authority, canceledAt)`, whose single guarded statement carries the whole restriction in its `WHERE` — the media ID, the event, `uploader_session_id = authority.actorSessionId`, `upload_state IN ('reserved', 'failed')`, `deleted_at IS NULL`, `trashed_at IS NULL`, and the authority's liveness fragment — with the reserved-counter release and the object-key inventory chained off it exactly as the existing terminal paths do. It has no re-read and no retry loop: a row that moved out from under it is a refusal, never a second attempt against the winner. It returns a tagged outcome on the same three-way shape Task 4 introduced, so the route answers `RESOURCE_FORBIDDEN` 403 for a lost or foreign authority and the existing conflict for a row that reached `stored`.
 
 The content route resolves its authority with `lookupForExistingUpload` **before** buffering and passes that same object to `receiveMediaUpload`; it must not re-resolve, re-`ensure`, or downgrade to `media.uploaderSessionId` after the bytes arrive. Re-resolving after the buffer would re-admit exactly the mid-buffer revocation Task 4 exists to refuse.
 
 - [ ] **Step 5: Verify GREEN and re-run the guest suite**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-api.test.ts tests/worker/upload-api.test.ts tests/worker/manage-api.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-api.test.ts tests/worker/repositories.test.ts tests/worker/upload-api.test.ts tests/worker/manage-api.test.ts
 ```
 
-Expected: PASS with no guest-route behavior change.
+Expected: PASS with no guest-route behavior change, and `MediaRepository.delete` unchanged — assert that by diff, since the cancel path must not have been implemented by loosening it.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add worker/routes/manage.ts tests/worker/manager-upload-api.test.ts
+git add worker/routes/manage.ts worker/db/media.ts tests/worker/manager-upload-api.test.ts tests/worker/repositories.test.ts
 git commit -m "feat: accept host photos through the manager routes"
 ```
 
@@ -449,11 +557,13 @@ git commit -m "feat: accept host photos through the manager routes"
 
 **Interfaces:**
 - `LinkService.rotateManagementLink(event, now)` becomes one `DB.batch([...])` that, as a unit: **revokes the prior Manager token**; creates the replacement; revokes every session derived from the prior token; rebinds live **account** upload actors to the replacement token; terminally cancels every revoked **link** actor's `reserved`/`failed` media with exact counter deltas; and inventories those rows' object keys for typed deletion.
-- The revoke is deliberately first, because `revoked_at IS NULL` is the condition that makes a concurrent double rotation resolve to one winner. It is the batch's guarded statement, and every later statement keys its own guard off the stamp it wrote — see Step 3.
+- The revoke is deliberately first, and it is the batch's guarded statement, but it revokes **one named token**, not the role — see the single-winner ruling in Step 3. Every later statement keys its own guard off the stamp it wrote.
 - Deletion claims run **after** commit through the existing tombstone cleanup. A failed R2 delete stays janitor-owned and never rolls credentials back.
 
 - [ ] **Step 1: Write the failing rotation tests**
 
+- **two concurrent rotations produce exactly one success.** Both callers read the same predecessor token, then both batches run; assert that exactly one returns a `managementLink`, that the other raises the rotation conflict without creating a token, that exactly one unrevoked Manager token exists afterwards, and that the link the winner returned is the one that resolves. Write this row first — it is the row the role-wide form passes vacuously while handing one host a dead link;
+- a rotation whose predecessor was revoked by something else between the read and the batch changes no rows and returns the conflict, leaving the other rotation's replacement live;
 - an account-owned reservation survives rotation and can still finalize afterwards;
 - a link-owned reservation does **not** transfer: it is terminally canceled, and the event's media count and byte counters fall by exactly the canceled rows;
 - the old link's sessions are revoked;
@@ -482,28 +592,43 @@ Expected: FAIL — rotation is currently two sequential statements with no sessi
 
 Guard the first statement — the rotation itself — and check `results[0].meta.changes === 1`, per the repository's D1 concurrency convention. Do not read-then-write any counter.
 
+**Single-winner ruling: `revoked_at IS NULL` alone does not produce one winner.** At `153d05f` `LinkService.rotateManagementLink` calls `TokensRepository.revokeRole(event.id, 'manager', now)` and then creates a replacement, and there is no unique-active-token constraint anywhere in the schema — `migrations/0001_core.sql` gives `event_access_tokens` only the non-unique `event_access_tokens_event_role` index. A role-wide `UPDATE … WHERE role = 'manager' AND revoked_at IS NULL` therefore does not fence a second rotation; it *consumes* the first one's replacement. Two callers serialize as: A revokes the predecessor and creates `T_A`; B revokes everything still live — which is now `T_A` — and creates `T_B`. Probed directly against SQLite at plan time, both callers observe `changes() = 1` and both report success, while the host holding `T_A` has been handed a link that was dead before they finished reading it. Nothing in the batch detects this, and the host's only symptom is a link that never worked.
+
+The rotation is a compare-and-set on the **exact predecessor token ID**, captured before the batch and bound into the guard:
+
+```sql
+-- Statement 1: the guarded rotation. `?prev` is the token ID read immediately
+-- before the batch; `?rot` is the rotation instant.
+UPDATE event_access_tokens SET revoked_at = ?rot
+ WHERE id = ?prev AND revoked_at IS NULL;
+```
+
+`results[0].meta.changes === 1` now means *this caller revoked the predecessor it actually read*. The loser changes zero rows, the whole batch's dependents are inert because each re-proves the rotation stamp, and the caller reports the existing rotation conflict rather than returning a link. Do not fall back to the role-wide form for the "no predecessor" case: an event with no active Manager token is a lifecycle refusal, not a rotation.
+
+Two consequences follow and both must be honored. The replacement's creation stays inside the same batch, so a caller that lost the CAS cannot leave an orphan token behind. And the dependents' `EXISTS` guard keys off `revoked_at = ?rot` on that same predecessor row, so it cannot be satisfied by some other caller's concurrent rotation stamp.
+
 **`changes()` is the wrong guard for this batch.** `changes()` reports the row count of the *immediately preceding* completed statement, so the convention documented in `CLAUDE.md` — first statement guarded, dependents appending `AND changes() = 1` — holds only while every dependent changes exactly one row. This batch breaks that precondition: revoking sessions, rebinding an actor, and canceling reservations are each legitimately zero-row. A SQLite probe of the chained form at plan time rotated the token, revoked zero sessions, and then left the account actor bound to the **old** token, because the zero from the empty step propagated into the next statement's `WHERE`.
 
 Every dependent therefore guards on a **stable fact of the transaction**, not on the previous statement:
 
 ```sql
--- Statement 1: the guarded rotation. `?rot` is the rotation instant.
-UPDATE event_access_tokens SET revoked_at = ?rot
- WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL;
+-- Statement 1 is the predecessor CAS from the single-winner ruling above.
 
 -- Every dependent re-proves that same rotation and is unaffected by an empty sibling.
 ... WHERE <its own condition>
   AND EXISTS (SELECT 1 FROM event_access_tokens
-              WHERE event_id = ? AND role = 'manager' AND revoked_at = ?rot);
+              WHERE id = ?prev AND revoked_at = ?rot);
 ```
 
-The instant is generated once by the caller and bound into every statement, so the predicate identifies *this* rotation rather than any rotation. Counter deltas stay in SQL — derive them from the same guarded selection that cancels the rows, never from a prior read. Verify the guard choice directly: the zero-row permutations from Step 1 are exactly the cases the chained form passes vacuously.
+The predecessor ID comes from one `TokensRepository.getActiveForRole(event.id, 'manager')` read before the batch, and the instant is generated once by the caller; both are bound into every statement, so the predicate identifies *this* rotation of *that* token rather than any rotation. Counter deltas stay in SQL — derive them from the same guarded selection that cancels the rows, never from a prior read. Verify the guard choice directly: the zero-row permutations from Step 1 are exactly the cases the chained form passes vacuously.
 
 - [ ] **Step 4: Verify GREEN**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/manage-api.test.ts tests/worker/manager-upload-api.test.ts tests/worker/auth-api.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/manage-api.test.ts tests/worker/manager-upload-api.test.ts tests/worker/manager-upload-actor.test.ts tests/worker/auth-api.test.ts
 ```
+
+The actor suite is re-run here deliberately: Task 3's ensure-versus-rotation row was written against the two-statement rotation, and this is where it is re-proved against the atomic one.
 
 - [ ] **Step 5: Commit**
 
@@ -532,7 +657,7 @@ Record this checkpoint's landed work instead as a short prose paragraph directly
 
 - [ ] **Step 2: Document the operational contract**
 
-In `docs/operations.md`, describe the server-only upload actor: what it is, that it cannot mint a cookie, that rotation rebinds account actors and cancels link-owned reservations, and how to read a stranded actor. Document `UPLOAD_RESERVATION_CANCELED` beside the other `UPLOAD_*` codes, including that it is Manager-only and that the guest path still answers `UPLOAD_FINALIZE_CONFLICT`. In `docs/deployment.md`, add `0021` to the migration-first ordering with the compatibility-target ruling from Global constraints. In `CLAUDE.md`, extend the upload-path and authorization sections with the two Manager authorities, the authority-selected intake predicate, and the `guest_name = 'Host'` rule.
+In `docs/operations.md`, describe the server-only upload actor: what it is, that it cannot mint a cookie, that rotation rebinds account actors and cancels link-owned reservations, and how to read a stranded actor. Record that rotation is a compare-and-set on one predecessor token ID, so a concurrent second rotation conflicts instead of silently killing the first host's replacement link. Document `UPLOAD_RESERVATION_CANCELED` beside the other `UPLOAD_*` codes, including that it is Manager-only and that the guest path still answers `UPLOAD_FINALIZE_CONFLICT`. Document the refusal split the tagged ingress outcomes produce — a lost credential at reserve, refresh, claim, commit, or cancel answers the generic `RESOURCE_FORBIDDEN` 403 and is not retryable, while a moved row keeps its existing `UPLOAD_*` 409 and is — because that distinction is what an operator reads to tell a revocation from a race. In `docs/deployment.md`, add `0021` to the migration-first ordering with the compatibility-target ruling from Global constraints. In `CLAUDE.md`, extend the upload-path and authorization sections with the two Manager authorities, the authority-selected intake predicate, and the `guest_name = 'Host'` rule.
 
 - [ ] **Step 3: Run the complete checkpoint gates**
 

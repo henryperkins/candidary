@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use test-driven development, preserve all existing Slice 1–4 work, and do not commit unless the user asks.
 
-**Goal:** Make registration tell the truth about when an account exists, give the events dashboard the three controls it is missing, make management-link rotation something a host can only do when they can survive it, and normalize seven destructive actions onto one three-rung ladder.
+**Goal:** Make registration tell the truth about when an account exists, give the events dashboard the three controls it is missing, make management-link rotation something a host can only do when they can survive it, and normalize seven destructive actions onto one three-rung ladder — built here, closed by the checkpoint that renames its last rung.
 
 **Architecture:** Registration gains a browser-local pending marker keyed by a digest — never the address — plus one anti-enumeration-safe status endpoint scoped to the browser's own registration cookie. The existing HttpOnly registration cookie remains the only resume credential. Rotation is account-gated and extends `LinkService`, whose transaction landed in the first Slice 5 checkpoint; this checkpoint adds the availability projection, the retire-and-pause discipline around it, and the copy-or-acknowledge gate. The safety ladder reuses the existing typed event-name confirmation and the existing focused-confirmation pattern; it introduces no new dialog framework.
 
@@ -27,7 +27,9 @@
 
 ## Checkpoint boundary
 
-This checkpoint owns C-09, C-10, C-16, C-52, and C-59. It does **not** own pause scope and verbs, first-run copy, canonical time formatting, Guestbook default tab, or Cover upload progress. Those belong to the final Slice 5 checkpoint.
+This checkpoint owns C-09, C-10, C-52, and C-59, and it **builds** the safety ladder that closes C-16 without closing it. It does **not** own pause scope and verbs, the ladder's Pause / Resume rung, C-16's matrix row, first-run copy, canonical time formatting, Guestbook default tab, or Cover upload progress. Those belong to the final Slice 5 checkpoint.
+
+**Ladder-ownership ruling.** The safety ladder is built here and closed there, and the split is not bookkeeping. The ladder's fourth reversible row is *Pause / Resume guest uploads*, whose exact verbs the specification requires and whose control still reads **Pause photo delivery** / **Reopen photo delivery** in `src/components/ManagerPhotoIntakePanel.tsx`. The rename lands in the final checkpoint, which owns pause scope; that component is not even in this checkpoint's file list. A table driven here over a row named *Pause / Resume guest uploads* would therefore have to be written against copy that does not exist yet and rewritten one checkpoint later — and the first Slice 5 checkpoint's row-completeness ruling exists precisely to stop a finding's evidence from being written twice. So Task 6 asserts the nine rungs whose surfaces exist, records that work as progress prose, and the final checkpoint adds the tenth row and writes C-16's single row naming both halves.
 
 ---
 
@@ -346,31 +348,33 @@ git commit -m "fix: make a rotated link impossible to lose"
 | Consequential | Stop Album link, rotate Manager link, recoverable original trash | focused confirmation naming audience and recovery |
 | Broad or catastrophic | disable printed entry, sign out all guest devices, delete event | typed event-name confirmation after client validation |
 
-- Pause and Resume stay an explicit reversible state change using those exact verbs.
+- Pause and Resume stay an explicit reversible state change using those exact verbs. Their rung is assigned here and asserted in the final checkpoint, per the ladder-ownership ruling — the pattern is settled, the copy is not this checkpoint's.
 - No new dialog framework. Reuse the existing typed event-name confirmation and the existing focused-confirmation component.
 
 - [ ] **Step 1: Write the failing rung-assignment table**
 
 **The rungs do not share one assertion.** "No request before confirmation" is the *consequential* and *catastrophic* contract; the reversible rung's whole definition is that it is **immediate**, with no confirmation to wait for. A single table demanding that every listed action send nothing until a confirmation resolves would fail Pick, Publish/Hide, remove-with-Undo, and Pause/Resume by design, and the only way to make it pass would be to put a dialog in front of the reversible rung — which is the opposite of what the spec asks for. Each rung therefore gets its own request-timing assertion.
 
-The ladder's ten actions are exactly these, and the table is driven over this list — no action may be added, dropped, or left unnamed. The goal statement's "seven destructive actions" is the six lower-rung rows below plus Album reset, which is asserted separately; the four reversible rows are on the ladder too and are asserted here as well:
+The ladder's ten actions are exactly these. Nine are driven here; the tenth is deferred by the ladder-ownership ruling and is the final checkpoint's to assert. No action may be added, dropped, or left unnamed. The goal statement's "seven destructive actions" is the six lower-rung rows below plus Album reset, which is asserted separately; the reversible rows are on the ladder too, and the three whose surfaces exist are asserted here as well:
 
-| Rung | Action | Surface |
-| --- | --- | --- |
-| Reversible | Pick / unpick a photo | Manager Album, Private Gallery |
-| Reversible | Publish / hide a photo | Manager Intake |
-| Reversible | Remove with real Undo | Manager Album |
-| Reversible | Pause / Resume guest uploads | Manager Intake |
-| Consequential | Stop the Album link | Manager Album sharing |
-| Consequential | Rotate the Manager link | Manager settings |
-| Consequential | Move an original to Recently deleted | Manager Intake |
-| Broad or catastrophic | Disable the printed entry | Manager settings |
-| Broad or catastrophic | Sign out all guest devices | Manager settings |
-| Broad or catastrophic | Delete the event | Manager settings |
+| Rung | Action | Surface | Asserted by |
+| --- | --- | --- | --- |
+| Reversible | Pick / unpick a photo | Manager Album, Private Gallery | this checkpoint |
+| Reversible | Publish / hide a photo | Manager Intake | this checkpoint |
+| Reversible | Remove with real Undo | Manager Album | this checkpoint |
+| Reversible | Pause / Resume guest uploads | Manager Intake | **pause-scope checkpoint** |
+| Consequential | Stop the Album link | Manager Album sharing | this checkpoint |
+| Consequential | Rotate the Manager link | Manager settings | this checkpoint |
+| Consequential | Move an original to Recently deleted | Manager Intake | this checkpoint |
+| Broad or catastrophic | Disable the printed entry | Manager settings | this checkpoint |
+| Broad or catastrophic | Sign out all guest devices | Manager settings | this checkpoint |
+| Broad or catastrophic | Delete the event | Manager settings | this checkpoint |
+
+The deferred row is a *copy* dependency, not a pattern one: the reversible pattern it must satisfy is fixed here, and the final checkpoint asserts it against the renamed control rather than re-deciding its rung.
 
 Assert, per rung:
 
-*Reversible* — activation issues **exactly one** request immediately, with no confirmation rendered and no dialog in the tree; the precise feedback names what changed; where an Undo exists, it is offered and reverses with one further request. Assert the immediacy positively: a reversible action that grew a confirmation must fail this table.
+*Reversible* — activation issues **exactly one** request immediately, with no confirmation rendered and no dialog in the tree; the precise feedback names what changed; where an Undo exists, it is offered and reverses with one further request. Assert the immediacy positively: a reversible action that grew a confirmation must fail this table. Drive it over the three reversible rows this checkpoint owns; the table itself must name the fourth as deferred rather than omitting it, so a reader cannot mistake nine rows for the whole ladder.
 
 *Consequential* — no request precedes the confirmation; initial focus is the nondestructive control; Escape and cancel issue nothing and restore focus to the invoker; explicit activation issues exactly one request.
 
@@ -419,9 +423,11 @@ Add an end-to-end trace proving Back and reload are refused between a successful
 
 In `docs/security.md`, record that rotation is account-gated, that it is not a recovery channel, that a link-only probe receives `ROLE_FORBIDDEN`, and that the browser-local pending-registration marker stores only a digest and an expiry.
 
-- [ ] **Step 4: Record C-09, C-10, C-16, C-52, and C-59**
+- [ ] **Step 4: Record C-09, C-10, C-52, and C-59**
 
 One row each, naming what changed and the owning tests. Do not fold the Task 1 endpoint's anti-enumeration regressions into a claim about findings this slice does not own.
+
+Do **not** write or edit a C-16 row here. Per the ladder-ownership ruling, the ladder is nine-tenths asserted by this checkpoint and closed by the next one, which writes C-16's single row. Record this checkpoint's ladder work the way the first Slice 5 checkpoint recorded its half-findings — as a short prose paragraph beneath the section heading, explicitly labelled as progress rather than disposition, naming the nine asserted rungs, the per-rung request-timing contracts, and their owning test files. A partial C-16 row would overstate what is proved and would have to be rewritten, which is exactly what the row-completeness ruling forbids.
 
 - [ ] **Step 5: Run the complete checkpoint gates**
 
