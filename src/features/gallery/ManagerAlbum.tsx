@@ -137,6 +137,13 @@ type AlbumDraft = {
   coverMediaId: string | null;
 };
 
+type ReorderDirection = 'earlier' | 'later';
+
+type ReorderFocusRequest = {
+  entryKey: string;
+  direction: ReorderDirection;
+};
+
 type CreateShareSnapshot = {
   photoCount: number;
   publishedCaptionCount: number;
@@ -898,7 +905,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const hasLoaded = useRef(false);
   const conflictEpoch = useRef(0);
   const dragKey = useRef<string | null>(null);
-  const refocusKey = useRef<string | null>(null);
+  const reorderFocusRequest = useRef<ReorderFocusRequest | null>(null);
   const shareConfirmRef = useRef<HTMLDivElement>(null);
   const cancelCreateShareRef = useRef<HTMLButtonElement>(null);
   const keepSharingRef = useRef<HTMLButtonElement>(null);
@@ -1641,13 +1648,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   }, [active, loading, onAnchorReady]);
 
   useEffect(() => {
-    const key = refocusKey.current;
-    if (!key) return;
-    refocusKey.current = null;
+    const request = reorderFocusRequest.current;
+    if (!request) return;
+    reorderFocusRequest.current = null;
     listRef.current
       ?.querySelector<HTMLElement>(
-        `[data-entry-key="${CSS.escape(key)}"] .album-entry__move-earlier:not(:disabled), `
-        + `[data-entry-key="${CSS.escape(key)}"] .album-entry__move-later:not(:disabled)`,
+        `[data-entry-key="${CSS.escape(request.entryKey)}"] .album-entry__move-${request.direction}`,
       )
       ?.focus();
   }, [draft.entries]);
@@ -1665,13 +1671,13 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     return () => window.cancelAnimationFrame(frame);
   }, [draft.entries]);
 
-  function move(from: number, to: number) {
+  function move(from: number, to: number, direction: ReorderDirection) {
     const entry = draftRef.current.entries[from];
     if (!entry || from === to || to < 0 || to >= draftRef.current.entries.length) return;
     const entries = moveEntryTo(draftRef.current.entries, from, to);
     const context = removedEntryContext(entries, entryKey(entry));
     if (!context) return;
-    refocusKey.current = entryKey(entry);
+    reorderFocusRequest.current = { entryKey: entryKey(entry), direction };
     applyDraft({ ...draftRef.current, entries }, false, [{
       kind: 'move-entry',
       key: entryKey(entry),
@@ -1680,7 +1686,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       nextKey: context.nextKey,
       prefer: from < to ? 'previous' : 'next',
     }]);
-    setAnnouncement(`Moved to position ${to + 1} of ${entries.length}.`);
+    setAnnouncement(`${entryName(entry)} moved to position ${to + 1} of ${entries.length}.`);
   }
 
   function addSection() {
@@ -2408,6 +2414,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                       {draft.entries.map((entry, index) => {
                         const key = entryKey(entry);
                         const name = entryName(entry);
+                        const earlierUnavailable = index === 0;
+                        const laterUnavailable = index === draft.entries.length - 1;
                         // Retained slots are not numbered: the number is the guest's
                         // reading position, and the public album omits the marker.
                         if (entry.kind === 'photo') photoPosition += 1;
@@ -2446,7 +2454,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                             const currentEntries = draftRef.current.entries;
                             const from = currentEntries.findIndex((item) => entryKey(item) === sourceKey);
                             const to = currentEntries.findIndex((item) => entryKey(item) === key);
-                            if (from >= 0 && to >= 0) move(from, to);
+                            if (from >= 0 && to >= 0) move(from, to, from < to ? 'later' : 'earlier');
                           }}
                           onDragEnd={(dragEvent) => {
                             dragKey.current = null;
@@ -2543,18 +2551,34 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                             <button
                               type="button"
                               className="icon-button album-entry__move-earlier"
-                              disabled={index === 0}
+                              aria-disabled={earlierUnavailable}
                               aria-label={`Move ${name} earlier`}
-                              onClick={() => move(index, index - 1)}
+                              onClick={() => {
+                                if (earlierUnavailable) return;
+                                move(index, index - 1, 'earlier');
+                              }}
+                              onKeyDown={(pressed) => {
+                                if (earlierUnavailable && (pressed.key === 'Enter' || pressed.key === ' ')) {
+                                  pressed.preventDefault();
+                                }
+                              }}
                             >{entry.kind === 'section'
                               ? <ChevronUp aria-hidden="true" />
                               : <ChevronLeft aria-hidden="true" />}</button>
                             <button
                               type="button"
                               className="icon-button album-entry__move-later"
-                              disabled={index === draft.entries.length - 1}
+                              aria-disabled={laterUnavailable}
                               aria-label={`Move ${name} later`}
-                              onClick={() => move(index, index + 1)}
+                              onClick={() => {
+                                if (laterUnavailable) return;
+                                move(index, index + 1, 'later');
+                              }}
+                              onKeyDown={(pressed) => {
+                                if (laterUnavailable && (pressed.key === 'Enter' || pressed.key === ' ')) {
+                                  pressed.preventDefault();
+                                }
+                              }}
                             >{entry.kind === 'section'
                               ? <ChevronDown aria-hidden="true" />
                               : <ChevronRight aria-hidden="true" />}</button>

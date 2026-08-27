@@ -2736,7 +2736,7 @@ describe('the album', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Move First dance later' }));
     expect(screen.getAllByRole('status').some((status) => (
-      status.textContent?.includes('Moved to position 2 of 3.')
+      status.textContent?.includes('First dance moved to position 2 of 3.')
     ))).toBe(true);
 
     const firstDance = document.querySelector('[data-entry-key="photo:p1"]');
@@ -2750,17 +2750,17 @@ describe('the album', () => {
     fireEvent.drop(p2Card as Element);
 
     expect(screen.getAllByRole('status').some((status) => (
-      status.textContent?.includes('Moved to position 3 of 3.')
+      status.textContent?.includes('First dance moved to position 3 of 3.')
     ))).toBe(true);
     expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
       item.getAttribute('data-entry-key')
     ))).toEqual(['section:s1', 'photo:p2', 'photo:p1']);
   });
 
-  it('keeps keyboard focus on an enabled move control at both order boundaries', async () => {
+  it('keeps the invoked reorder direction focused and announces item plus position', async () => {
     const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance', isFavorite: true });
     const p2 = photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true });
-    const { fetchMock } = harness({
+    const { state, fetchMock } = harness({
       galleryRows: [p1, p2],
       album: {
         revision: 1,
@@ -2774,14 +2774,50 @@ describe('the album', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    const moveToStart = await screen.findByRole('button', { name: 'Move p2.jpg earlier' });
-    moveToStart.focus();
+    const earlier = await screen.findByRole('button', { name: 'Move p2.jpg earlier' });
+    earlier.focus();
     await user.keyboard('{Enter}');
-    const moveFromStart = screen.getByRole('button', { name: 'Move p2.jpg later' });
-    await waitFor(() => expect(moveFromStart).toHaveFocus());
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: 'Move p2.jpg earlier' }),
+    ).toHaveFocus());
+    expect(screen.getAllByRole('status').some((status) => (
+      status.textContent === 'p2.jpg moved to position 1 of 2.'
+    ))).toBe(true);
 
+    const boundaryEarlier = screen.getByRole('button', { name: 'Move p2.jpg earlier' });
+    expect(boundaryEarlier).toHaveAttribute('aria-disabled', 'true');
+    expect(boundaryEarlier).not.toBeDisabled();
+    const galleryStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
+    expect(galleryStatus).not.toBeNull();
+    await waitFor(() => {
+      expect(state.orderWrites).toHaveLength(1);
+      expect(state.orderRevisions).toEqual([1]);
+      expect(state.album.revision).toBe(2);
+      expect(galleryStatus).toHaveTextContent('Album saved');
+    });
+    const savedEntriesBeforeSecondEnter = state.orderWrites.map((entries) => entries.map(writtenEntryId));
+    const savedRevisionsBeforeSecondEnter = [...state.orderRevisions];
+    const orderBeforeSecondEnter = Array.from(document.querySelectorAll('.album-review-grid > li'))
+      .map((entry) => entry.getAttribute('data-entry-key'));
+    const secondEnterAnnouncements: string[] = [];
+    const observer = new MutationObserver(() => {
+      const announcement = galleryStatus?.textContent?.trim() ?? '';
+      if (secondEnterAnnouncements.at(-1) !== announcement) secondEnterAnnouncements.push(announcement);
+    });
+    observer.observe(galleryStatus!, { childList: true, characterData: true, subtree: true });
+
+    boundaryEarlier.focus();
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Move p2.jpg earlier' })).toHaveFocus());
+    await act(async () => { await new Promise((resolve) => { window.setTimeout(resolve, 650); }); });
+    observer.disconnect();
+
+    expect(secondEnterAnnouncements).toEqual([]);
+    expect(state.orderWrites.map((entries) => entries.map(writtenEntryId)))
+      .toEqual(savedEntriesBeforeSecondEnter);
+    expect(state.orderRevisions).toEqual(savedRevisionsBeforeSecondEnter);
+    expect(Array.from(document.querySelectorAll('.album-review-grid > li'))
+      .map((entry) => entry.getAttribute('data-entry-key')))
+      .toEqual(orderBeforeSecondEnter);
   });
 
   it('uses the focused Album entry as the new section insertion anchor', async () => {

@@ -107,6 +107,19 @@ function photo(id: string, timelineAt: string, overrides: Partial<ManagerGallery
   };
 }
 
+function sharedMediaRows(galleryRows: readonly ManagerGalleryMediaView[]): MediaView[] {
+  return galleryRows.map((row) => ({
+    id: row.id,
+    originalFilename: row.originalFilename,
+    guestName: row.guestName,
+    caption: row.caption,
+    publicationStatus: row.publicationStatus,
+    uploadState: 'stored',
+    width: row.width,
+    height: row.height,
+  }));
+}
+
 const rows: ManagerGalleryMediaView[] = [
   photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance' }),
   photo('p2', '2026-08-15T23:18:00.000Z'),
@@ -539,6 +552,54 @@ describe('host private gallery', () => {
     expect(searchAttempts).toBe(2);
   });
 
+  it('keeps retained viewer navigation usable after a failed replacement and retries that exact search', async () => {
+    // Mutation caught: clearing rowsRef at a same-event replacement boundary leaves the retained
+    // mosaic visible after failure while its viewer silently rejects adjacent retained photo IDs.
+    const first = photo('p1', '2026-08-15T23:18:00.000Z', { caption: 'First retained photo' });
+    const second = photo('p2', '2026-08-15T22:42:00.000Z', { caption: 'Second retained photo' });
+    const replacement = photo('p3', '2026-08-16T04:48:00.000Z', {
+      caption: 'Replacement photo',
+      guestName: 'Maya',
+    });
+    const replacementRequests: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
+        if (url.searchParams.get('query') === 'Maya') {
+          replacementRequests.push(`${url.pathname}${url.search}`);
+          return replacementRequests.length === 1
+            ? failure('INTERNAL_ERROR', 'Search is temporarily unavailable.')
+            : success({ media: [replacement], nextCursor: null });
+        }
+        return success({ media: [first, second], nextCursor: null });
+      }
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await screen.findByText('First retained photo');
+    await user.type(screen.getByLabelText('Find photos'), 'Maya');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Search is temporarily unavailable.');
+    await user.click(screen.getByRole('button', { name: 'Open Second retained photo, from Jose' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Second retained photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Previous photo' }));
+    await screen.findByRole('dialog', { name: 'First retained photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Next photo' }));
+    await screen.findByRole('dialog', { name: 'Second retained photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Close viewer' }));
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Open Replacement photo, from Maya' })).toBeVisible();
+    expect(replacementRequests).toEqual([
+      '/api/manage/events/event-a/gallery?query=Maya&order=newest',
+      '/api/manage/events/event-a/gallery?query=Maya&order=newest',
+    ]);
+  });
+
   it('keeps the confirmed timeline and retries the exact continuation after a later page failure', async () => {
     let continuationAttempts = 0;
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -566,6 +627,350 @@ describe('host private gallery', () => {
     // Named through the control rather than a visible caption: only the hero tile carries one.
     expect(await screen.findByRole('button', { name: 'Open p2.jpg, from Jose' })).toBeVisible();
     expect(continuationAttempts).toBe(2);
+  });
+
+  it('loads one next page in the viewer, deduplicates it, and advances to the immediate successor', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const second = photo('p2', '2026-08-15T23:18:00.000Z', { caption: 'Second photo' });
+    const galleryRequests: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        galleryRequests.push(url.toString());
+        return success(url.searchParams.get('cursor') === 'page-2'
+          ? { media: [first, second], nextCursor: null }
+          : { media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    await user.click(screen.getByRole('button', { name: 'Load next photo' }));
+
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('Second photo'));
+    expect(document.querySelectorAll('[data-photo-id="p1"]')).toHaveLength(1);
+    expect(galleryRequests.filter((url) => url.includes('cursor=page-2'))).toHaveLength(1);
+  });
+
+  it('restores focus to the original tile after viewer continuation advances', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const second = photo('p2', '2026-08-15T23:18:00.000Z', { caption: 'Second photo' });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        return success(url.searchParams.get('cursor') === 'page-2'
+          ? { media: [first, second], nextCursor: null }
+          : { media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    const origin = await screen.findByRole('button', { name: 'Open First photo, from Jose' });
+    await user.click(origin);
+    await user.click(screen.getByRole('button', { name: 'Load next photo' }));
+    expect(await screen.findByRole('dialog', { name: 'Second photo' })).toBeVisible();
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(origin).toHaveFocus());
+    expect(screen.getByRole('button', { name: 'Open Second photo, from Jose' })).not.toHaveFocus();
+  });
+
+  it('keeps the viewer photo and focuses Try again after a continuation failure', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const second = photo('p2', '2026-08-15T23:18:00.000Z', { caption: 'Second photo' });
+    let continuationAttempts = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        if (url.searchParams.get('cursor') === 'page-2') {
+          continuationAttempts += 1;
+          return continuationAttempts === 1
+            ? failure('INTERNAL_ERROR', 'The next page is temporarily unavailable.')
+            : success({ media: [second], nextCursor: null });
+        }
+        return success({ media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    const dialog = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Load next photo' }));
+
+    const retry = await within(dialog).findByRole('button', { name: 'Try again' });
+    expect(within(dialog).getByText('First photo')).toBeVisible();
+    expect(retry).toHaveFocus();
+    expect(screen.queryByRole('alert')?.closest('[role="dialog"]')).toBe(dialog);
+
+    await user.click(retry);
+    expect(await screen.findByRole('dialog', { name: 'Second photo' })).toBeVisible();
+    expect(continuationAttempts).toBe(2);
+  });
+
+  it('marks viewer continuation exhausted without an alert when no successor remains', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const galleryRequests: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        galleryRequests.push(url.toString());
+        return success(url.searchParams.get('cursor') === 'page-2'
+          ? { media: [first], nextCursor: null }
+          : { media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    const dialog = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Load next photo' }));
+
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Next photo' })).toBeDisabled());
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    expect(galleryRequests.filter((url) => url.includes('cursor=page-2'))).toHaveLength(1);
+  });
+
+  it('offers one focused retry for a duplicate-only nonterminal page and resumes from its cursor', async () => {
+    // Mutation caught: classifying a duplicate-only page with a remaining cursor as exhausted,
+    // or automatically following that cursor, removes the explicit recovery boundary.
+    const first = photo('p1', '2026-08-15T23:18:00.000Z', { caption: 'First photo' });
+    const second = photo('p2', '2026-08-15T22:42:00.000Z', { caption: 'Second photo' });
+    const continuationCursors: Array<string | null> = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        const cursor = url.searchParams.get('cursor');
+        continuationCursors.push(cursor);
+        if (cursor === 'page-2') return success({ media: [first], nextCursor: 'page-3' });
+        if (cursor === 'page-3') return success({ media: [second], nextCursor: null });
+        return success({ media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    const dialog = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Load next photo' }));
+
+    const retry = await within(dialog).findByRole('button', { name: 'Try again' });
+    expect(retry).toHaveFocus();
+    expect(within(dialog).getByText('First photo')).toBeVisible();
+    expect(continuationCursors).toEqual([null, 'page-2']);
+
+    await user.click(retry);
+
+    expect(await screen.findByRole('dialog', { name: 'Second photo' })).toBeVisible();
+    expect(continuationCursors).toEqual([null, 'page-2', 'page-3']);
+  });
+
+  it('does not advance onto a photo removed from the Album-picks filter before continuation', async () => {
+    // Mutation caught: reducer-only filter removal leaves rowsRef pointing at the removed photo,
+    // so continuation returns it as the immediate successor and unmounts the identity viewer.
+    const first = photo('p1', '2026-08-15T23:18:00.000Z', {
+      caption: 'First photo',
+      isFavorite: true,
+    });
+    const removed = photo('p2', '2026-08-15T22:42:00.000Z', {
+      caption: 'Removed photo',
+      isFavorite: true,
+    });
+    const successor = photo('p3', '2026-08-15T21:54:00.000Z', {
+      caption: 'Remaining successor',
+      isFavorite: true,
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
+        if (url.searchParams.get('cursor') === 'favorites-page-2') {
+          return success({ media: [successor], nextCursor: null });
+        }
+        return success({
+          media: [first, removed],
+          nextCursor: url.searchParams.get('favorites') === '1' ? 'favorites-page-2' : null,
+        });
+      }
+      if (url.pathname.endsWith('/media/p2/favorite') && method === 'PUT') {
+        return success({ media: { ...removed, isFavorite: false } });
+      }
+      throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock, { galleryRows: [first, removed, successor] });
+    const user = userEvent.setup();
+
+    await screen.findByText('First photo');
+    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
+    await user.click(await screen.findByRole('button', { name: 'Remove Removed photo from Album' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Open Removed photo, from Jose' }))
+      .not.toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Open First photo, from Jose' }));
+    const dialog = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Load next photo' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Remaining successor' })).toBeVisible();
+    expect(screen.queryByText('Removed photo')).not.toBeInTheDocument();
+  });
+
+  it('aborts a pending viewer continuation when the Gallery owner unmounts', async () => {
+    // Mutation caught: owner cleanup that only aborts the replacement request leaves the
+    // continuation controller alive and lets its settlement schedule state after unmount.
+    const first = photo('p1', '2026-08-15T23:18:00.000Z', { caption: 'First photo' });
+    const continuation = deferred<Response>();
+    let continuationSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        if (url.searchParams.get('cursor') === 'page-2') {
+          continuationSignal = init?.signal ?? undefined;
+          return continuation.promise;
+        }
+        return success({ media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    const rendered = renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    await user.click(screen.getByRole('button', { name: 'Load next photo' }));
+    await waitFor(() => expect(continuationSignal).toBeDefined());
+
+    rendered.setWorkspaceMounted(false);
+
+    expect(continuationSignal?.aborted).toBe(true);
+    continuation.resolve(await success({ media: [first], nextCursor: null }));
+    await act(async () => { await continuation.promise; });
+    expect(screen.queryByRole('heading', { name: 'Gallery' })).not.toBeInTheDocument();
+  });
+
+  it('coalesces click and ArrowRight while viewer continuation is pending', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const second = photo('p2', '2026-08-15T23:18:00.000Z', { caption: 'Second photo' });
+    const continuation = deferred<Response>();
+    const galleryRequests: string[] = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        galleryRequests.push(url.toString());
+        return url.searchParams.get('cursor') === 'page-2'
+          ? continuation.promise
+          : success({ media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    const dialog = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Load next photo' }));
+    await user.keyboard('{ArrowRight}');
+
+    expect(within(dialog).getByText('First photo')).toBeVisible();
+    expect(galleryRequests.filter((url) => url.includes('cursor=page-2'))).toHaveLength(1);
+
+    continuation.resolve(await success({ media: [first, second], nextCursor: null }));
+    expect(await screen.findByRole('dialog', { name: 'Second photo' })).toBeVisible();
+  });
+
+  it('retains an appended page without reopening a viewer closed during continuation', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const second = photo('p2', '2026-08-15T23:18:00.000Z', { caption: 'Second photo' });
+    const continuation = deferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        return url.searchParams.get('cursor') === 'page-2'
+          ? continuation.promise
+          : success({ media: [first], nextCursor: 'page-2' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    const origin = await screen.findByRole('button', { name: 'Open First photo, from Jose' });
+    await user.click(origin);
+    const dialog = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(dialog).getByRole('button', { name: 'Load next photo' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Close viewer' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(origin).toHaveFocus();
+    continuation.resolve(await success({ media: [first, second], nextCursor: null }));
+    expect(await screen.findByRole('button', { name: 'Open Second photo, from Jose' })).toBeVisible();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('retires a stale viewer continuation before a replacement uses its own cursor', async () => {
+    const first = photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First photo' });
+    const stale = photo('p2', '2026-08-15T23:18:00.000Z', { caption: 'Stale photo' });
+    const replacement = photo('p3', '2026-08-16T04:48:00.000Z', {
+      caption: 'Replacement first',
+      guestName: 'Maya',
+    });
+    const replacementNext = photo('p4', '2026-08-16T05:24:00.000Z', {
+      caption: 'Replacement second',
+      guestName: 'Maya',
+    });
+    const staleContinuation = deferred<Response>();
+    const galleryRequests: string[] = [];
+    let staleSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      if (url.pathname === '/api/manage/events/event-a/gallery' && (init?.method ?? 'GET') === 'GET') {
+        galleryRequests.push(url.toString());
+        if (url.searchParams.get('cursor') === 'old-page') {
+          staleSignal = init?.signal ?? undefined;
+          return staleContinuation.promise;
+        }
+        if (url.searchParams.get('query') === 'Maya') {
+          return url.searchParams.get('cursor') === 'replacement-page'
+            ? success({ media: [replacement, replacementNext], nextCursor: null })
+            : success({ media: [replacement], nextCursor: 'replacement-page' });
+        }
+        return success({ media: [first], nextCursor: 'old-page' });
+      }
+      throw new Error(`Unexpected request ${(init?.method ?? 'GET')} ${url.pathname}${url.search}`);
+    });
+    renderGalleryWithFetch(fetchMock);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Open First photo, from Jose' }));
+    const initialViewer = await screen.findByRole('dialog', { name: 'First photo' });
+    await user.click(within(initialViewer).getByRole('button', { name: 'Load next photo' }));
+    await waitFor(() => expect(staleSignal).toBeDefined());
+    await user.click(within(initialViewer).getByRole('button', { name: 'Close viewer' }));
+    await user.type(screen.getByLabelText('Find photos'), 'Maya');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByRole('button', { name: 'Open Replacement first, from Maya' })).toBeVisible();
+    expect(staleSignal?.aborted).toBe(true);
+
+    staleContinuation.resolve(await success({ media: [first, stale], nextCursor: 'stale-page' }));
+    await act(async () => { await staleContinuation.promise; });
+    expect(screen.queryByRole('button', { name: 'Open Stale photo, from Jose' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Open Replacement first, from Maya' }));
+    const replacementViewer = await screen.findByRole('dialog', { name: 'Replacement first' });
+    await user.click(within(replacementViewer).getByRole('button', { name: 'Load next photo' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Replacement second' })).toBeVisible();
+    expect(galleryRequests.filter((url) => url.includes('cursor=old-page'))).toHaveLength(1);
+    expect(galleryRequests.filter((url) => url.includes('cursor=replacement-page'))).toHaveLength(1);
+    expect(galleryRequests.some((url) => url.includes('cursor=stale-page'))).toBe(false);
   });
 
   it('announces the exact In Album result and patches a picked tile without a refetch', async () => {
@@ -1012,7 +1417,7 @@ describe('host private gallery', () => {
     expect(within(dialog).getAllByText(/p2\.jpg/).length).toBeGreaterThan(0);
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /open p2/i })).toHaveFocus();
+    expect(origin).toHaveFocus();
   });
 
   it('names the viewer position as loaded while chronological pages remain', async () => {
@@ -1110,7 +1515,14 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Gallery' });
 
-    expect(screen.getByText(/Every delivered photo, the photo manifest, and the printable and private guestbook files/)).toBeVisible();
+    const exportScope = screen.getByText(/Every delivered photo, the photo manifest, and the printable and private guestbook files/);
+    expect(exportScope).not.toBeVisible();
+    expect(screen.getByText(/Search and Album picks do not change this/)).not.toBeVisible();
+    await user.click(screen.getByText('What the complete download includes', {
+      exact: true,
+      selector: 'summary',
+    }));
+    expect(exportScope).toBeVisible();
     expect(screen.getByText(/Search and Album picks do not change this/)).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(onPrepare).toHaveBeenCalledTimes(1);
@@ -1418,7 +1830,13 @@ describe('host private gallery', () => {
       .toHaveClass('button--secondary');
     expect(screen.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
-    expect(screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.')).toBeVisible();
+    const modeNote = screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.');
+    expect(modeNote).not.toBeVisible();
+    await user.click(screen.getByText('About this Gallery view', {
+      exact: true,
+      selector: 'summary',
+    }));
+    expect(modeNote).toBeVisible();
     await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
     const selected = screen.getByRole('checkbox', { name: 'Select toast.jpg' });
     await user.click(selected);
@@ -1446,7 +1864,7 @@ describe('host private gallery', () => {
         audience={audienceAuthority(rows, false)}
         onAnnouncement={vi.fn()}
         shared={{
-          media: rows,
+          media: sharedMediaRows(rows),
           status: 'hidden',
           selected: [],
           selectionAtLimit: false,
@@ -1498,7 +1916,7 @@ describe('host private gallery', () => {
         audience={audienceAuthority(rows, false)}
         onAnnouncement={vi.fn()}
         shared={{
-          media: rows,
+          media: sharedMediaRows(rows),
           status: 'unpublished',
           selected: [],
           selectionAtLimit: false,

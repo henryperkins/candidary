@@ -10,6 +10,17 @@ const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
 const galleryUrl = `${managerUrl}?section=gallery`;
 const AXE_OPTIONS = { rules: { 'target-size': { enabled: true } } };
 
+test.beforeEach(async ({ page }) => {
+  // The focused dev-server path can evaluate transformed React modules without Vite's
+  // refresh preamble. These globals are inert because these traces do not exercise HMR.
+  await page.addInitScript(() => {
+    Object.assign(window, {
+      $RefreshReg$: () => undefined,
+      $RefreshSig$: () => (type: unknown) => type,
+    });
+  });
+});
+
 function albumRows() {
   return makeMedia(12, 'unpublished').map((row, index) => ({
     ...row,
@@ -274,11 +285,11 @@ test('album mode is keyboard-operable and respects reduced motion', async ({ pag
   const movedEntry = page.locator('.album-review-grid > li').nth(1);
   await expect(movedEntry.locator('.album-review-grid__meta strong')).toHaveText(firstEntryName);
   const galleryAnnouncement = page.locator('[data-gallery-live-host="true"] [role="status"]');
-  await expect(galleryAnnouncement).toHaveText('Moved to position 2 of 10.');
+  await expect(galleryAnnouncement).toHaveText(`${firstEntryName} moved to position 2 of 10.`);
   await expect(galleryAnnouncement).toHaveAttribute('role', 'status');
   await expect(galleryAnnouncement).toHaveAttribute('aria-live', 'polite');
   await expect(galleryAnnouncement).toHaveAttribute('aria-atomic', 'true');
-  await expect(movedEntry.getByRole('button', { name: `Move ${firstEntryName} earlier` })).toBeFocused();
+  await expect(movedEntry.getByRole('button', { name: `Move ${firstEntryName} later` })).toBeFocused();
 
   const preview = page.getByRole('button', { name: 'Preview album' });
   await preview.focus();

@@ -769,6 +769,9 @@ ManagerGalleryWorkspaceProps
   return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">Gallery</h2>
+      <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>
+    </div>
+    <div className="gallery-control-row">
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
         {(['library', 'album', 'guest-gallery'] as const).map((value) => (
           <button
@@ -781,7 +784,6 @@ ManagerGalleryWorkspaceProps
           >{MODE_LABELS[value]}{value === 'album' && pickCount > 0 ? ` (${pickCount})` : ''}</button>
         ))}
       </div>
-      <p className="gallery-mode-note">{MODE_NOTES[mode]}</p>
       {audienceSummary && <p className="gallery-audience-summary">
         Album: {audienceSummary.albumPhotoCount} {audienceSummary.albumPhotoCount === 1 ? 'photo' : 'photos'}
         {' · '}Link: {audienceSummary.albumLink.active ? 'Live' : 'Off'}
@@ -790,19 +792,22 @@ ManagerGalleryWorkspaceProps
       {!audienceSummary && !audience.failure && (
         <p className="gallery-audience-summary">Loading audience status…</p>
       )}
-      {audience.failure && <ErrorState
-        message={audience.failure.message}
-        recoveryHint={audience.failure.recoveryHint}
-        onRetry={() => void audience.reload()}
-      />}
+    </div>
+    {audience.failure && <ErrorState
+      message={audience.failure.message}
+      recoveryHint={audience.failure.recoveryHint}
+      onRetry={() => void audience.reload()}
+    />}
+    <details className="gallery-context-disclosure">
+      <summary>About this Gallery view</summary>
+      <p className="gallery-mode-note">{MODE_NOTES[mode]}</p>
       {audienceSummary?.albumLink.active && (mode === 'library' || mode === 'album') && (
         <p>Album link live—later saved membership, metadata, sections, and order changes affect what people with the Album link see when they request it.</p>
       )}
-    </div>
+    </details>
 
     <div className="gallery-private-mode" hidden={mode !== 'library'}>
       <div className="gallery-header">
-        <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>
         {exports.failure && <ErrorState
           message={exports.failure.message}
           recoveryHint={exports.failure.recoveryHint}
