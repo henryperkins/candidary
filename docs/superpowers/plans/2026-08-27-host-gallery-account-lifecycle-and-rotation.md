@@ -20,7 +20,7 @@
 - The management-link secret remains unrecoverable by design. Rotation produces a replacement the host must save; it is not a recovery channel. The broader ownerless-management-link recovery product stays out of scope, and a link-only caller receives the existing `403 ROLE_FORBIDDEN` on a direct probe.
 - Rotation never navigates through the credential URL and never mints a second event session or cookie. The signed-in account session remains the Manager authority throughout.
 - On a network or transport outcome where commit cannot be known, the UI must not claim either link state. Its exact copy is **Couldn't confirm whether the link changed. Rotate again to create a link you can save.**
-- Validation happens before every request on every rung of the ladder. No destructive request may be sent before its confirmation succeeds.
+- Client-side validation happens before every request on every rung of the ladder. **No request that has a confirmation may be sent before that confirmation succeeds** — which is the two lower rungs. The reversible rung has no confirmation and is deliberately immediate; do not read this constraint as an instruction to add one.
 - Preserve the existing host registration, verification, ownership, and management-link services as authoritative. Host Events receives bounded controls, not a new organizer product. Archive is explicitly not introduced.
 - Every behavior change follows RED → GREEN → REFACTOR.
 - Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-account-lifecycle-and-rotation/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
@@ -91,23 +91,43 @@ npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts -
 
 Expected: both FAIL.
 
-- [ ] **Step 4: Implement the marker, the endpoint, and the copy**
+- [ ] **Step 4: Write the failing page suite**
 
-Registration copy states that the account is created only after code confirmation. On sign-in submit, a non-expired local digest match calls the status endpoint and, when `pending` is true, routes to `/host/register?pending=1` **before** any password request. A false or expired status clears the marker and proceeds with ordinary sign-in. Completion, **Start over**, an explicit restart, and expiry all clear it.
+The two suites above cover the marker module and the endpoint. Neither can prove anything about the pages that use them, and the three obligations that matter most live only there. Create `tests/ui/host-auth.test.tsx` covering:
 
-- [ ] **Step 5: Verify GREEN**
+*The five forbidden stored secrets.* The global constraint requires each of the five absences to be asserted explicitly, and the marker unit test can only speak for one of them — the raw email. Drive the register and sign-in pages through a full submit, then assert on the **whole** `localStorage` payload that none of the raw email, the password, the confirmation code, the browser secret, and the challenge ID appears anywhere, by substring, using values distinctive enough that a partial or encoded leak still matches.
+
+*Password interception.* The routing decision is the security-relevant behavior: submitting sign-in with a non-expired matching local digest calls the status endpoint and, when `pending` is true, routes to `/host/register?pending=1` **without ever issuing the password request** — assert on the request log, not on the resulting screen. A `pending: false` or expired status clears the marker and issues exactly one ordinary sign-in.
+
+*Cross-tab and reload.* A marker written in one tab is honored by a second mount reading the same storage; a reload mid-registration resumes from the marker; and completion, **Start over**, an explicit restart, and expiry each clear it so a later sign-in is not intercepted.
+
+Registration copy states that the account is created only after code confirmation.
 
 ```bash
-npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts
+npx vitest run --config vitest.config.ts tests/ui/host-auth.test.tsx
+```
+
+Expected: FAIL — the page behavior does not exist.
+
+- [ ] **Step 5: Implement the marker, the endpoint, the pages, and the copy**
+
+- [ ] **Step 6: Verify GREEN**
+
+Every suite this task creates is run here. A test file that is written but never executed and never staged is worse than no test: it reads in review as coverage that does not exist.
+
+```bash
+npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx
 npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add worker/routes/host-auth.ts worker/services/host-auth.ts src/app/pending-registration.ts src/pages/HostRegisterPage.tsx src/pages/HostLoginPage.tsx tests/unit/pending-registration.test.ts tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts
+git add worker/routes/host-auth.ts worker/services/host-auth.ts src/app/pending-registration.ts src/pages/HostRegisterPage.tsx src/pages/HostLoginPage.tsx tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts
 git commit -m "fix: say when a host account is created"
 ```
+
+Confirm the file is staged before committing — `git status --short tests/ui/host-auth.test.tsx` must show it as added, not untracked.
 
 ---
 
@@ -322,16 +342,41 @@ git commit -m "fix: make a rotated link impossible to lose"
 
 | Rung | Actions | Pattern |
 | --- | --- | --- |
-| Reversible | pick, publish/hide, remove with real Undo | immediate, with precise feedback |
+| Reversible | pick, publish/hide, remove with real Undo, Pause/Resume | immediate, with precise feedback — **no confirmation** |
 | Consequential | Stop Album link, rotate Manager link, recoverable original trash | focused confirmation naming audience and recovery |
 | Broad or catastrophic | disable printed entry, sign out all guest devices, delete event | typed event-name confirmation after client validation |
 
 - Pause and Resume stay an explicit reversible state change using those exact verbs.
 - No new dialog framework. Reuse the existing typed event-name confirmation and the existing focused-confirmation component.
 
-- [ ] **Step 1: Write the failing request-before-confirmation table**
+- [ ] **Step 1: Write the failing rung-assignment table**
 
-For each of the seven actions plus Album reset, assert in one table that: no network request is issued before the confirmation resolves; cancel and Escape issue nothing and restore focus to the invoker; the typed rung refuses a mismatched name **client-side** before any request; and the rung assignment matches the table above. Add the Album reset pre-action and Undo contract as its own row.
+**The rungs do not share one assertion.** "No request before confirmation" is the *consequential* and *catastrophic* contract; the reversible rung's whole definition is that it is **immediate**, with no confirmation to wait for. A single table demanding that every listed action send nothing until a confirmation resolves would fail Pick, Publish/Hide, remove-with-Undo, and Pause/Resume by design, and the only way to make it pass would be to put a dialog in front of the reversible rung — which is the opposite of what the spec asks for. Each rung therefore gets its own request-timing assertion.
+
+The ladder's ten actions are exactly these, and the table is driven over this list — no action may be added, dropped, or left unnamed. The goal statement's "seven destructive actions" is the six lower-rung rows below plus Album reset, which is asserted separately; the four reversible rows are on the ladder too and are asserted here as well:
+
+| Rung | Action | Surface |
+| --- | --- | --- |
+| Reversible | Pick / unpick a photo | Manager Album, Private Gallery |
+| Reversible | Publish / hide a photo | Manager Intake |
+| Reversible | Remove with real Undo | Manager Album |
+| Reversible | Pause / Resume guest uploads | Manager Intake |
+| Consequential | Stop the Album link | Manager Album sharing |
+| Consequential | Rotate the Manager link | Manager settings |
+| Consequential | Move an original to Recently deleted | Manager Intake |
+| Broad or catastrophic | Disable the printed entry | Manager settings |
+| Broad or catastrophic | Sign out all guest devices | Manager settings |
+| Broad or catastrophic | Delete the event | Manager settings |
+
+Assert, per rung:
+
+*Reversible* — activation issues **exactly one** request immediately, with no confirmation rendered and no dialog in the tree; the precise feedback names what changed; where an Undo exists, it is offered and reverses with one further request. Assert the immediacy positively: a reversible action that grew a confirmation must fail this table.
+
+*Consequential* — no request precedes the confirmation; initial focus is the nondestructive control; Escape and cancel issue nothing and restore focus to the invoker; explicit activation issues exactly one request.
+
+*Broad or catastrophic* — everything in the consequential row, plus a mismatched event name refused **client-side** with no request issued at all, and the exact name accepted.
+
+Two rows sit outside the ladder table and are asserted separately: Album reset carries its own pre-action and Undo contract, and the two lowest-rung Slice 1 rows — trash a photo and Stop the Album link — already have named expansions in the verification matrix, so assert them here against the same expectations rather than restating a different contract.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -385,7 +430,7 @@ npm run typecheck
 npm run typecheck:e2e
 npm run lint
 npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts tests/worker/manage-api.test.ts
-npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/ui/app.test.tsx tests/ui/host-events.test.tsx tests/ui/manager-recovery.test.tsx
+npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx tests/ui/app.test.tsx tests/ui/host-events.test.tsx tests/ui/manager-recovery.test.tsx
 npm test
 npm run build
 npm run test:e2e

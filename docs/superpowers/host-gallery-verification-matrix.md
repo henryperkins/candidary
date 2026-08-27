@@ -13,6 +13,12 @@ appears here exactly once, with one of four dispositions:
 A row is complete only when its owning test file names a real test that fails without the change.
 Slices 2–6 fill their own sections as they land; this file is the program's single record.
 
+There is no partial disposition, and none may be added. A finding whose work spans several checkpoints
+gets **one row, written by the checkpoint that closes it**, naming every checkpoint's evidence
+together. An earlier checkpoint that proved only part of a finding records that as prose above its
+section's table — plainly labelled as progress — and writes no row. A row that exists is a claim that
+the finding is settled, and every one of the four dispositions says so.
+
 ## Final commands
 
 ```bash

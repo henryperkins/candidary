@@ -116,13 +116,18 @@ git commit -m "feat: project album pick provenance"
 // New clients
 { start: 'from-picks' | 'empty',
   expectedReconciliation: 'initialize' | 'historical' | 'over-capacity',
-  expectedPickGeneration: number }
+  expectedPickGeneration: number,
+  expectedRevision: number }
 
 // Legacy, one compatibility release only
 { start: 'from-picks' | 'empty' }
 ```
 
-The guarded D1 transaction matches `expectedPickGeneration`, then the expected category, count, and cap, then rechecks provenance, saved state, and the complete retained picked cohort — all inside the same batch, per the repository's `changes() = 1` convention.
+`expectedRevision` is a third new field, not an existing one. At `153d05f` the start path carries **no** revision: `albumStartSchema` is `z.object({ start }).strict()`, the route passes only `(eventId, choice, now)`, and `AlbumRepository.start` has no revision parameter. Only `PUT /album` guards a revision, through `albumSaveSchema.revision` and `AlbumRepository.replace`. Start must therefore acquire the guard rather than inherit it, and `AlbumView.revision` — which the editor already holds — is what the client sends.
+
+The three expectations answer three different questions and none substitutes for another: `expectedPickGeneration` catches a changed *pick cohort*, `expectedReconciliation` catches a changed *category*, and `expectedRevision` catches a concurrent *album write* — a cohost saving entries, metadata, or order between the read and the start. All three mismatches produce the same canonical conflict.
+
+The guarded D1 transaction matches `expectedRevision` and `expectedPickGeneration`, then the expected category, count, and cap, then rechecks provenance, saved state, and the complete retained picked cohort — all inside the same batch. Guard the first statement and check `results[0].meta.changes === 1`; `changes() = 1` chaining is only valid here for dependents that always change exactly one row, which the `Start empty` pick-clearing statement is not.
 
 - [ ] **Step 1: Write the failing conflict table**
 
@@ -137,7 +142,8 @@ The guarded D1 transaction matches `expectedPickGeneration`, then the expected c
 - `start: 'from-picks'` at 501 picks is refused;
 - `start: 'from-picks'` materializes both active and retained-trash picked IDs in timeline order, so a retained slot keeps its position;
 - a legacy `{ start }` body still works with the existing manual semantics and never auto-starts;
-- the revision guard still rejects a stale revision on both paths.
+- a stale `expectedRevision` — a concurrent `PUT /album` landed between the read and the start — returns the canonical conflict and writes nothing, on both `from-picks` and `empty`;
+- a legacy `{ start }` body, which carries no revision, keeps exactly today's unguarded behavior. Say so in the contract test that marks the branch for removal, so the compatibility window is not mistaken for a hole in the new guard.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -149,7 +155,9 @@ Expected: FAIL — `albumStartSchema` is `.strict()` on `{ start }` alone.
 
 - [ ] **Step 3: Implement the guard**
 
-Extend `albumStartSchema` to accept both shapes. Thread the expectation pair into `AlbumRepository.start`. Add the contract test that names the legacy branch for removal after one release.
+Extend `albumStartSchema` to accept both shapes — a discriminated accept, not an optional-field widening, so a new client that omits one expectation is refused rather than silently taking the legacy branch. Thread all three expectations into `AlbumRepository.start`, whose signature becomes `(eventId, choice, expectations | null, now)`; `null` is the legacy branch. Add the contract test that names the legacy branch for removal after one release.
+
+The client is not updated here. `startAlbum` in `src/features/gallery/album-api.ts` still sends `{ start }` alone until Task 4, and the legacy branch is exactly what keeps it working across the two commits — that compatibility window is what makes the split safe, so do not add a required field to the legacy shape to close it early.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -230,13 +238,14 @@ git commit -m "fix: count retained album slots against capacity"
 **Interfaces:**
 - The client renders one of four states from `reconciliation`, and never decides the category itself:
   - `null` → the ordinary Album, with no prompt;
-  - `initialize` → a bounded initializing state that automatically issues the CSRF-protected `POST /album/start` with `from-picks` and both expectation fields;
+  - `initialize` → a bounded initializing state that automatically issues the CSRF-protected `POST /album/start` with `from-picks` and all three expectation fields, taking `expectedRevision` from the same `AlbumView` it read `pickGeneration` and `reconciliation` from, so the three describe one observation;
   - `historical` → the one-time prompt, whose copy says **existing picks from before this update** and whose choice applies to the complete current picked set;
   - `over-capacity` → `Start empty` available, `Start from picks` truthfully unavailable with its reason.
 
 - [ ] **Step 1: Write the failing editor tests**
 
-- a fresh Album whose picks are all current shows the bounded initializing state, issues exactly one auto-start carrying the server's `pickGeneration`, and never shows the prompt;
+- a fresh Album whose picks are all current shows the bounded initializing state, issues exactly one auto-start carrying the server's `pickGeneration`, `reconciliation`, and `revision` from one observation, and never shows the prompt;
+- a manual `Start from picks` and a manual `Start empty` each send all three expectations too — the guard is not auto-start-only;
 - the auto-start is issued once even under StrictMode double-mounting;
 - a conflict response from auto-start does not retry silently: it lands on the canonical conflict/reload path;
 - an unversioned pick shows the prompt, and its copy contains no "before Albums" phrasing;
